@@ -217,6 +217,10 @@ mod tests {
             Ok(0)
         }
 
+        fn capability_header(&self, _bdf: u64, _id: u8) -> Result<u32, DriverError> {
+            Err(DriverError::NotFound)
+        }
+
         fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
             Err(DriverError::NotImplemented)
         }

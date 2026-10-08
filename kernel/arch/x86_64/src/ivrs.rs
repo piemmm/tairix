@@ -9,6 +9,7 @@
 //! Reference: AMD I/O Virtualization Technology (IOMMU) Specification,
 //! rev. 3.08, chapter 5.
 
+use crate::acpi::unit_dma;
 use tairix_abi::{
     HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuReservedWindow, ReservedAccess,
     HW_NODE_ROOT_ID,
@@ -621,6 +622,7 @@ pub fn emit_unit_nodes<'w>(
             .and_then(|()| {
                 node.push_resource(HwResource::mmio(unit.register_base(), UNIT_REGISTER_LEN))
             })
+            .and_then(|()| node.push_resource(unit_dma()))
             .map_err(|_| DiscoveryError::MalformedSource)?;
         match walk(unit.segment()) {
             Some(walk) => keep_windows(ivrs, (index, &unit), walk, &mut node, &mut placed),

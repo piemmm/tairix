@@ -40,34 +40,21 @@
 compile_error!(
     "tairix-test-fiq-selfsample-qemu-aarch64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
-     See AGENTS.md §1 (no hacks) and §5.4 (fail closed)."
+     See AGENTS.md §2.1 (no hacks) and §5.4 (fail closed)."
 );
 
 #[cfg(all(itest_aarch64, feature = "test-hooks"))]
 mod kernel;
 
-// --- Stub when the test-hooks feature is off ----------------------
-#[cfg(all(itest_aarch64, not(feature = "test-hooks")))]
-#[no_mangle]
-pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-    loop {
-        // SAFETY: `wfe` is a well-defined parked-CPU hint on aarch64.
-        unsafe {
-            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
-        }
-    }
+/// The default `virt` board's tree: a GICv2.
+#[cfg(all(itest_aarch64, feature = "test-hooks"))]
+mod tree {
+    include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 }
 
 #[cfg(all(itest_aarch64, not(feature = "test-hooks")))]
-#[panic_handler]
-fn panic_stub(_info: &core::panic::PanicInfo<'_>) -> ! {
-    loop {
-        // SAFETY: same as above.
-        unsafe {
-            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
-        }
-    }
-}
+#[path = "stub.rs"]
+mod stub;
 
 // --- Host stub -----------------------------------------------------
 #[cfg(not(itest_aarch64))]

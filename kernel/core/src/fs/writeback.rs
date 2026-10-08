@@ -107,11 +107,6 @@ impl WritebackDue {
     }
 }
 
-/// The `through_ns` that makes every published deadline due at once, for the
-/// flusher's own teardown: it is disarming deferral, so nothing may be left
-/// deferred behind it.
-pub const EVERYTHING_DUE: u64 = NO_DEADLINE - 1;
-
 /// Publish every registered volume whose write-back deadline is at or before
 /// `through_ns`, returning the soonest deadline still pending — the instant
 /// the flusher parks until, or `None` for "nothing is dirty, arm nothing".

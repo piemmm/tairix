@@ -57,11 +57,9 @@
 //! # Layering
 //!
 //! The crate is `no_std` and pulls only the audited
-//! `tairix-abi`, `tairix-caps`, `tairix-crypto`, `tairix-devmatch`,
-//! `tairix-log`, and `tairix-virtio` crates — all under `lib/*`, so the
-//! host never links a
-//! kernel or driver crate. The `VirtioHostFactory`
-//! seam consumed by [`HostConfig`] lives in `tairix_virtio`.
+//! `tairix-abi`, `tairix-caps`, `tairix-crypto`, `tairix-devmatch` and
+//! `tairix-log` crates — all under `lib/*`, so the host never links a
+//! kernel or driver crate.
 //! It exposes no `unsafe` across its crate boundary — the one in-tree
 //! `unsafe` block lives in [`zeroize::secure_clear`] and is covered by a
 //! unit test.

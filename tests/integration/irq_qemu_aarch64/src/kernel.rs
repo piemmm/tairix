@@ -7,7 +7,7 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use tairix_abi::IrqHandle;
-use tairix_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
+use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID};
 use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
@@ -56,8 +56,8 @@ const RTCICR: usize = 0x01C;
 /// `MIN_SPI_INTID + 2`.
 const RTC_INTID: u32 = gic::MIN_SPI_INTID + 2;
 
-/// CPU-interface target bitmask routing the SPI to the boot CPU (CPU 0).
-const CPU0_TARGET: u8 = 0b0000_0001;
+/// The CPU the RTC's SPI is routed to: the boot CPU.
+const IRQ_CPU: tairix_arch_api::CpuId = 0;
 
 /// Synthesised owner for the IRQ binding. No real task runs in this
 /// test; the bind only needs an opaque attribution id.
@@ -92,14 +92,14 @@ static TABLE_PTR: AtomicUsize = AtomicUsize::new(0);
 /// `SeqCst` mask-before-wake fence); the only error the GIC controller
 /// produces is "INTID out of range", mapped to [`MaskError::OutOfRange`].
 struct GicBridge {
-    ctrl: GicController<VolatileGicMmio>,
+    ctrl: GicController<ActiveGic>,
 }
 
 /// The bridge instance. Const-constructible (the GIC controller holds
 /// only a zero-sized MMIO handle and the max-INTID bound), so it lives in
 /// a `static` the interrupt-context dispatcher can reference.
 static BRIDGE: GicBridge = GicBridge {
-    ctrl: GicController::new(Gicv2::new(VolatileGicMmio), MAX_INTID),
+    ctrl: GicController::new(ActiveGic, MAX_INTID),
 };
 
 impl IrqController for GicBridge {
@@ -229,7 +229,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // before any source is armed; the dispatcher is installed.
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
 
     // 4. Route the RTC SPI to CPU 0 (the new `GICD_ITARGETSR` write — the
@@ -238,7 +238,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // SAFETY: the distributor is enabled (step 3); these program the
     //    fixed `virt`-board GICv2 windows for the RTC SPI.
     unsafe {
-        gic::route_spi(RTC_INTID, CPU0_TARGET);
+        gic::route_spi(RTC_INTID, IRQ_CPU).expect("the boot CPU's interface is up");
         gic::enable_ppi(RTC_INTID);
     }
     rtc_arm();

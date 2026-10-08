@@ -175,6 +175,11 @@ fn translation_topology() -> Vec<u8> {
     );
     b.prop("iommu-map", &cells(&[0, 4, 0, 0, 0, 4, 0x1000, 0x1_0000]));
     b.prop_u32("iommu-map-mask", 0xFFF8);
+    b.begin_node("virtio_iommu@2,0");
+    b.prop_str("compatible", "virtio,pci-iommu");
+    b.prop("reg", &cells(&[0x1000, 0, 0, 0, 0]));
+    b.prop_u32("#iommu-cells", 1);
+    b.end_node();
     b.end_node();
     b.end_node();
     b.build()
@@ -239,6 +244,9 @@ fn exercise_never_panics(bytes: &[u8]) {
     each_pci_host(&fdt, |host| {
         let _ = host.windows().count();
         let _ = host.external_facing(&fdt, 0x0800);
+        host.units(&fdt, &mut |requester, node| {
+            let _ = (requester, iommu_cells(node));
+        });
         if let Ok(Some(map)) = host.iommu_map() {
             let _ = map.map(0x10);
         }

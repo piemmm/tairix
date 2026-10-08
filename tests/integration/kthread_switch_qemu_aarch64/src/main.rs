@@ -201,7 +201,7 @@ mod kernel {
         // SAFETY: called once on the boot core with a stack established.
         unsafe {
             exceptions::init_vectors();
-            gic::init();
+            tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
         }
 
         // Build the live scheduler over the arch port.

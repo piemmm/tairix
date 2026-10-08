@@ -14,6 +14,8 @@
 //! `VIRTIO_F_RING_PACKED` feature bit (carve-out for
 //! parallel implementations of the same contract).
 
+use alloc::vec::Vec;
+
 use crate::dma::DmaSlab;
 use crate::host::VirtioHost;
 use crate::queue::negotiate_size;
@@ -159,13 +161,18 @@ impl PackedQueue {
         let size = negotiate_size(transport, queue_index, requested_size, needed)?;
         let desc = host
             .alloc_dma_zeroed(Self::desc_ring_size(size))
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let driver_event = host
             .alloc_dma_zeroed(Self::event_suppress_size())
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let device_event = host
             .alloc_dma_zeroed(Self::event_suppress_size())
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
+        let mut chain_len = Vec::new();
+        chain_len
+            .try_reserve_exact(usize::from(size))
+            .map_err(|_| VirtioError::OutOfMemory)?;
+        chain_len.resize(usize::from(size), 0);
         transport.queue_set(
             size,
             desc.device_addr(),
@@ -183,7 +190,7 @@ impl PackedQueue {
             used_idx: 0,
             used_wrap: true,
             free_count: size,
-            chain_len: alloc::vec![0u16; size as usize],
+            chain_len,
         })
     }
 
@@ -381,14 +388,16 @@ impl PackedQueue {
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod packed_ring_view {
     use super::{
-        desc_is_available, read_packed_desc, write_packed_desc, PackedDescriptor,
+        desc_is_available, read_packed_desc, write_packed_desc, PackedDescriptor, PackedQueue,
         PACKED_DESC_BYTES, VRING_PACKED_DESC_F_NEXT, VRING_PACKED_DESC_F_USED,
         VRING_PACKED_DESC_F_WRITE,
     };
+    use crate::host::MockMemory;
     use crate::transport::{ChainView, VirtioError};
     use alloc::vec::Vec;
 
-    pub(crate) struct PackedRingView {
+    pub(crate) struct PackedRingView<'m> {
+        memory: &'m MockMemory,
         queue_size: u16,
         desc: *mut u8,
     }
@@ -402,14 +411,15 @@ pub(crate) mod packed_ring_view {
         pub(crate) buffer_id: u16,
     }
 
-    impl PackedRingView {
+    impl<'m> PackedRingView<'m> {
         /// Construct from the descriptor-ring device address the driver
-        /// programmed into the transport.
+        /// programmed into the transport, the ring found in `memory` at its
+        /// full length.
         ///
         /// # Errors
         ///
-        /// [`VirtioError::DeviceFault`] for an address the mock never
-        /// handed out.
+        /// [`VirtioError::DeviceFault`] for a ring no slab the mock handed
+        /// out holds whole.
         ///
         /// # Safety-invariant
         ///
@@ -419,10 +429,17 @@ pub(crate) mod packed_ring_view {
         /// in driver-owned storage that outlives every view derived
         /// from it; the view is only touched inside `MockTransport`
         /// methods that hold the driver exclusively.
-        pub(crate) fn from_device(queue_size: u16, desc: u64) -> Result<Self, VirtioError> {
+        pub(crate) fn from_device(
+            memory: &'m MockMemory,
+            queue_size: u16,
+            desc: u64,
+        ) -> Result<Self, VirtioError> {
             Ok(Self {
+                memory,
                 queue_size,
-                desc: crate::host::device_view(desc).ok_or(VirtioError::DeviceFault)?,
+                desc: memory
+                    .view(desc, PackedQueue::desc_ring_size(queue_size))
+                    .ok_or(VirtioError::DeviceFault)?,
             })
         }
 
@@ -469,9 +486,12 @@ pub(crate) mod packed_ring_view {
                     return Err(VirtioError::DescriptorTableOverflow);
                 }
                 let d = self.read_desc(pos);
-                let at = crate::host::device_view(d.addr).ok_or(VirtioError::DeviceFault)?;
-                // SAFETY: `d.addr`/`d.len` were programmed by the
-                // driver from a `DmaSlab` it still owns; the mock peer
+                let at = self
+                    .memory
+                    .view(d.addr, d.len as usize)
+                    .ok_or(VirtioError::DeviceFault)?;
+                // SAFETY: `view` found all `d.len` bytes inside one
+                // `DmaSlab` the driver still owns; the mock peer
                 // reconstructs a slice of length `d.len` for the
                 // duration of one `drain_packed_queue` call.
                 if (d.flags & VRING_PACKED_DESC_F_WRITE) != 0 {

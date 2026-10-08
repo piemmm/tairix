@@ -11,7 +11,10 @@
 use alloc::vec::Vec;
 
 use tairix_arch_api::PAGE_TABLE_ENTRIES;
+use tairix_collections::HashMap;
+use tairix_hash::BuildFastHash;
 
+use crate::domain::FrameRun;
 use crate::memory::{Block, Table, TableMemory};
 use crate::{Access, IommuError, Reach, IO_PAGE_SHIFT, IO_PAGE_SIZE};
 
@@ -62,20 +65,28 @@ pub trait PteFormat: Send + Sync {
 /// stage 2 walk's sixteen concatenated tables, 64 KiB.
 pub const MAX_ROOT_ORDER: u32 = 4;
 
+/// One leaf of a tree: a translation of a naturally aligned span.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Leaf {
+    /// The IOVA it starts at.
+    pub iova: u64,
+    /// The bytes it spans.
+    pub len: u64,
+    /// The physical address it starts at.
+    pub phys: u64,
+    /// What it lets a device do.
+    pub access: Access,
+}
+
 /// Bits of IOVA a tree of `levels` levels translates.
 #[must_use]
 pub const fn reach_bits(levels: u32) -> u32 {
     IO_PAGE_SHIFT + LEVEL_BITS * levels
 }
 
-/// The exclusive physical address `reach`'s tables can name up to.
-#[must_use]
-pub(crate) const fn output_limit(reach: Reach) -> u64 {
-    if reach.output_bits >= 64 {
-        u64::MAX
-    } else {
-        1 << reach.output_bits
-    }
+/// Whether the inclusive spans `[first, end]` and `[iova, last]` meet.
+const fn touches(first: u64, end: u64, iova: u64, last: u64) -> bool {
+    first <= last && iova <= end
 }
 
 /// Bytes one entry at `level` spans.
@@ -124,8 +135,20 @@ pub struct IoPageTable<'f, F: PteFormat> {
     /// past which a format's entry would silently name another page.
     output_limit: u64,
     memory: TableMemory<'f>,
-    /// Tables an unmap emptied, freed at the next [`Self::release_retired`].
-    retired: Vec<u64>,
+    /// Live entries in each table below the root, so an unmap knows a table
+    /// it emptied without reading it back. Keyed by the table's own address.
+    occupancy: HashMap<u64, u16, BuildFastHash>,
+    /// Tables an unmap emptied, freed once a sync covers them.
+    retired: Vec<Retired>,
+}
+
+/// A table an unmap emptied: its frame, the first and last IOVA its entry
+/// spanned, and the batch handed to the unit to confirm it gone.
+struct Retired {
+    phys: u64,
+    first: u64,
+    last: u64,
+    confirmed_by: Option<u64>,
 }
 
 impl<'f, F: PteFormat> IoPageTable<'f, F> {
@@ -163,8 +186,9 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
             root,
             root_order: order,
             input_bits: reach.input_bits,
-            output_limit: output_limit(reach),
+            output_limit: reach.output_limit(),
             memory,
+            occupancy: HashMap::with_hasher(BuildFastHash::new()),
             retired: Vec::new(),
         })
     }
@@ -226,10 +250,46 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         Ok(())
     }
 
+    /// [`Self::map`] each of `runs` back to back from `iova`, answering the
+    /// bytes they span; a refusal takes back every run installed before it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::map`], or [`IommuError::Unconfirmed`] where what was
+    /// installed could not be taken back.
+    pub fn map_runs(
+        &mut self,
+        iova: u64,
+        runs: &[FrameRun],
+        access: Access,
+    ) -> Result<u64, IommuError> {
+        let mut mapped = 0;
+        for run in runs {
+            if let Err(err) = self.map(iova + mapped, run.phys, run.bytes(), access) {
+                return Err(self.take_back(iova, mapped, err));
+            }
+            mapped += run.bytes();
+        }
+        Ok(mapped)
+    }
+
+    /// Take back the `mapped` bytes from `iova` a refused operation had
+    /// installed and answer `err`, or [`IommuError::Unconfirmed`] where they
+    /// could not all be removed.
+    pub fn take_back(&mut self, iova: u64, mapped: u64, err: IommuError) -> IommuError {
+        if mapped == 0 || self.unmap(iova, mapped).is_ok() {
+            err
+        } else {
+            IommuError::Unconfirmed
+        }
+    }
+
     /// Remove `[iova, iova + len)`, which must be exactly leaves earlier maps
     /// installed. A table left empty is unlinked and retired: the walker may
-    /// still hold it cached, so it is freed only by
-    /// [`Self::release_retired`] after the unit confirms a sync.
+    /// still hold it cached, so it is freed only once the unit confirms a
+    /// sync reaching it, tagged with the batch confirming it
+    /// ([`Self::tag_retired`]) and freed once that batch is done
+    /// ([`Self::release_tagged`]).
     ///
     /// # Errors
     ///
@@ -244,11 +304,47 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         result
     }
 
-    /// Free every table an unmap retired. Call only once the unit has
-    /// confirmed that no cached walk of them survives.
+    /// Free every table an unmap retired, for tables no unit walks or one
+    /// whose domain the unit confirmed gone whole.
     pub fn release_retired(&mut self) {
-        for phys in self.retired.drain(..) {
-            self.memory.free_at(phys);
+        for retired in self.retired.drain(..) {
+            self.memory.free_at(retired.phys);
+        }
+    }
+
+    /// Tag every retired table no batch confirms yet — or, with a `range`,
+    /// only those whose entry spanned any of `[iova, iova + len)`, which an
+    /// invalidation of that range, walk caches included, reaches — as
+    /// confirmed by `batch`. An unmap retires only tables its own range
+    /// emptied, so its range's sync covers them.
+    pub fn tag_retired(&mut self, range: Option<(u64, u64)>, batch: u64) {
+        for retired in &mut self.retired {
+            let reached = range.is_none_or(|(iova, len)| retired.touches(iova, len));
+            if reached && retired.confirmed_by.is_none() {
+                retired.confirmed_by = Some(batch);
+            }
+        }
+    }
+
+    /// Free the tables `batch` confirmed gone, which the unit has done.
+    pub fn release_tagged(&mut self, batch: u64) {
+        let memory = &self.memory;
+        self.retired.retain(|retired| {
+            let confirmed = retired.confirmed_by == Some(batch);
+            if confirmed {
+                memory.free_at(retired.phys);
+            }
+            !confirmed
+        });
+    }
+
+    /// Hand the tables `batch` was to confirm, which failed, back to the next
+    /// sync.
+    pub fn untag(&mut self, batch: u64) {
+        for retired in &mut self.retired {
+            if retired.confirmed_by == Some(batch) {
+                retired.confirmed_by = None;
+            }
         }
     }
 
@@ -258,10 +354,27 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         !self.retired.is_empty()
     }
 
+    /// Whether a table awaiting release had its entry span any of
+    /// `[iova, iova + len)`: an unmap of it changed an entry above a leaf.
+    #[must_use]
+    pub fn has_retired_touching(&self, iova: u64, len: u64) -> bool {
+        self.retired
+            .iter()
+            .any(|retired| retired.touches(iova, len))
+    }
+
     /// The physical address `iova` translates to and the access its leaf
     /// grants, or [`None`] where nothing is mapped.
     #[must_use]
     pub fn translate(&self, iova: u64) -> Option<(u64, Access)> {
+        self.leaf_at(iova)
+            .map(|leaf| (leaf.phys + (iova - leaf.iova), leaf.access))
+    }
+
+    /// The leaf `iova` falls in: its IOVA, the bytes it spans, the physical
+    /// address it starts at and its access; [`None`] where nothing is mapped.
+    #[must_use]
+    pub fn leaf_at(&self, iova: u64) -> Option<Leaf> {
         if iova.checked_shr(self.input_bits()).unwrap_or(0) != 0 {
             return None;
         }
@@ -273,7 +386,13 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                 .decode(self.read(table, self.index(iova, level)).ok()?, level)
             {
                 Pte::Leaf(phys, access) => {
-                    return Some((phys + (iova & (span(level) - 1)), access))
+                    let len = span(level);
+                    return Some(Leaf {
+                        iova: iova & !(len - 1),
+                        len,
+                        phys,
+                        access,
+                    });
                 }
                 Pte::Table(child) if level > 0 => {
                     table = child;
@@ -285,12 +404,15 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     }
 
     fn check_range(&self, iova: u64, len: u64) -> Result<(), IommuError> {
-        let reach = 1u64 << self.input_bits().min(63);
         let end = iova.checked_add(len).ok_or(IommuError::OutOfRange)?;
+        // A 64-bit reach is bounded by the address space itself.
+        let past_reach = 1u64
+            .checked_shl(self.input_bits())
+            .is_some_and(|reach| end > reach);
         if len == 0
             || !iova.is_multiple_of(IO_PAGE_SIZE)
             || !len.is_multiple_of(IO_PAGE_SIZE)
-            || end > reach
+            || past_reach
         {
             return Err(IommuError::OutOfRange);
         }
@@ -307,8 +429,22 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                     && iova.is_multiple_of(size)
                     && phys.is_multiple_of(size)
                     && left >= size
+                    // A walk cache may still reach a retired table through
+                    // this entry, so it takes no leaf until that is released.
+                    && self.retired_at(iova, level).is_none()
             })
             .unwrap_or(0)
+    }
+
+    /// Where in the retired list the table an unmap took from the entry at
+    /// `level` holding `iova` is.
+    fn retired_at(&self, iova: u64, level: u32) -> Option<usize> {
+        let size = span(level);
+        let first = iova & !(size - 1);
+        let last = first + (size - 1);
+        self.retired
+            .iter()
+            .position(|retired| retired.first == first && retired.last == last)
     }
 
     fn install(
@@ -327,15 +463,33 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                 if self.format.decode(entry, level) != Pte::Absent {
                     return Err(IommuError::AlreadyMapped);
                 }
-                self.write(table, index, self.format.leaf(phys, level, access))?;
-                return Ok(());
+                return self.fill(table, index, self.format.leaf(phys, level, access));
             }
             table = match self.format.decode(entry, level) {
                 Pte::Table(child) => child,
                 Pte::Leaf(..) => return Err(IommuError::AlreadyMapped),
                 Pte::Absent => {
-                    let child = self.memory.alloc()?.phys();
-                    self.write(table, index, self.format.table(child, level))?;
+                    self.occupancy
+                        .try_reserve(1)
+                        .map_err(|_| IommuError::Exhausted)?;
+                    // The table an unmap retired from this entry is relinked, so
+                    // a walk cache still holding the entry reaches the leaf
+                    // this map lays rather than a table that maps nothing.
+                    let child = if let Some(at) = self.retired_at(iova, level) {
+                        let child = self.retired[at].phys;
+                        self.fill(table, index, self.format.table(child, level))?;
+                        self.retired.swap_remove(at);
+                        child
+                    } else {
+                        let child = self.memory.alloc()?.phys();
+                        if let Err(err) = self.fill(table, index, self.format.table(child, level)) {
+                            self.memory.free_at(child);
+                            return Err(err);
+                        }
+                        child
+                    };
+                    // Room was reserved above.
+                    let _ = self.occupancy.try_insert(child, 0);
                     child
                 }
             };
@@ -356,14 +510,17 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         let last = self.index(end - 1, level);
         for index in first..=last {
             let entry_base = base + (index as u64) * size;
+            // Inclusive, so an entry ending at the top of the address space
+            // is spelled.
+            let entry_last = entry_base + (size - 1);
             let entry = self.read(table, index)?;
             match self.format.decode(entry, level) {
                 Pte::Absent => return Err(IommuError::NotMapped),
                 Pte::Leaf(..) => {
-                    if entry_base < start || entry_base + size > end {
+                    if entry_base < start || entry_last >= end {
                         return Err(IommuError::Split);
                     }
-                    self.write(table, index, 0)?;
+                    self.clear(table, index)?;
                 }
                 Pte::Table(child) => {
                     if level == 0 {
@@ -374,13 +531,24 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                         level - 1,
                         entry_base,
                         start.max(entry_base),
-                        end.min(entry_base + size),
+                        if entry_last < end {
+                            entry_last + 1
+                        } else {
+                            end
+                        },
                     );
                     // An empty table that cannot be recorded for release stays
                     // linked: it maps nothing.
-                    if self.is_empty(child) && self.retired.try_reserve(1).is_ok() {
-                        self.write(table, index, 0)?;
-                        self.retired.push(child);
+                    if self.occupancy.get(&child) == Some(&0) && self.retired.try_reserve(1).is_ok()
+                    {
+                        self.clear(table, index)?;
+                        self.occupancy.remove(&child);
+                        self.retired.push(Retired {
+                            phys: child,
+                            first: entry_base,
+                            last: entry_last,
+                            confirmed_by: None,
+                        });
                     }
                     result?;
                 }
@@ -389,8 +557,22 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         Ok(())
     }
 
-    fn is_empty(&self, table: u64) -> bool {
-        (0..PAGE_TABLE_ENTRIES).all(|index| self.read(table, index) == Ok(0))
+    /// Make an absent entry `entry`.
+    fn fill(&mut self, table: u64, index: usize, entry: u64) -> Result<(), IommuError> {
+        self.write(table, index, entry)?;
+        if let Some(live) = self.occupancy.get_mut(&table) {
+            *live += 1;
+        }
+        Ok(())
+    }
+
+    /// Make a present entry absent.
+    fn clear(&mut self, table: u64, index: usize) -> Result<(), IommuError> {
+        self.write(table, index, 0)?;
+        if let Some(live) = self.occupancy.get_mut(&table) {
+            *live = live.saturating_sub(1);
+        }
+        Ok(())
     }
 
     /// The entry `iova` falls in of a table at `level`: the root's if the
@@ -451,6 +633,17 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                 self.memory.free_at(child);
             }
         }
+    }
+}
+
+impl Retired {
+    fn touches(&self, iova: u64, len: u64) -> bool {
+        touches(
+            self.first,
+            self.last,
+            iova,
+            iova.saturating_add(len.max(1) - 1),
+        )
     }
 }
 

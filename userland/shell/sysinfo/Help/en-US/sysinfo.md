@@ -82,6 +82,16 @@ The queries:
   unaffiliated candidate), its slot, its disposition
   (candidate/held/in-sync/resyncing/faulted), its size, and the
   metadata generation it carries (needs `CAP_SYSINFO_HW`).
+- `dma`, `iommu` — the DMA translation units: one row per unit — its
+  hardware-tree node, its family, whether it translates or why not, how it
+  raises its faults, where its translations live, the owners and firmware
+  streams it holds, and its faults recorded and dropped, and the streams a
+  storm silenced, since boot — then one row per isolation group an owner
+  holds — its unit, the holder's node and generation, and where that owner
+  stands — then one row per node a unit translates for an owner — its unit
+  and group, its owner's generation and state, how many streams it masters
+  through, and its domain's mappings and the bytes they map (needs
+  `CAP_SYSINFO_HW`).
 - `show <resource-ref>` — read one `info:`/`state:`/`stats:` resource
   reference and print its value. Those namespaces are typed values served
   through this API, never byte streams, so this is how one is read — `cat`

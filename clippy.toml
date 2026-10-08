@@ -28,6 +28,8 @@ doc-valid-idents = [
     "APIC",
     "GIC",
     "GICv2",
+    "GICv3",
+    "GICv4",
     "PCIe",
     "INTx",
     "SerDes",

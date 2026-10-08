@@ -29,7 +29,9 @@ use std::time::Duration;
 use tairix_desktop_session::SizedRecord;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
-use tairix_qemu::{DmaTranslation, NamedKey, Outcome, ReservedSocket, Runner, Spec};
+use tairix_qemu::{
+    DmaTranslation, InterruptControllers, NamedKey, Outcome, ReservedSocket, Runner, Spec,
+};
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
@@ -95,9 +97,9 @@ struct QemuTest {
     /// of RAM: a bigger guest costs the host every byte the kernel touches,
     /// so it is never headroom for its own sake.
     ram_mib: Option<u32>,
-    /// When `Some(n)`, attach an `n`-sector raw virtio-blk backing
-    /// image whose sector 0 carries the deterministic pattern
-    /// `byte[i] = i mod 256` (which the kernel-side test verifies).
+    /// When `Some(n)`, attach an `n`-sector raw virtio-blk backing image
+    /// whose sector 0 is `tairix_itest_witness::sector0_byte`'s, which the
+    /// kernel-side test verifies.
     disk_sectors: Option<u64>,
     /// How (if at all) to attach a virtio-net interface over a QEMU
     /// `dgram` unix-socket netdev with the harness-side `netpeer` link
@@ -1394,6 +1396,78 @@ const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
     expect: Expect::Pass,
 };
 
+/// The aarch64 vertical [`TESTS`] runs on a GICv2 and on a GICv3 board.
+const IPI_SMP_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-ipi-smp-qemu-aarch64",
+    binary: "tairix-test-ipi-smp-qemu-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 4,
+    timeout: Duration::from_secs(60),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: false,
+    crypto: false,
+    fs_disk: FsDisk::None,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+/// The aarch64 vertical [`TESTS`] runs on a GICv2 and on a GICv3 board.
+const FIQ_SELFSAMPLE_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-fiq-selfsample-qemu-aarch64",
+    binary: "tairix-test-fiq-selfsample-qemu-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 1,
+    timeout: Duration::from_secs(60),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: false,
+    crypto: false,
+    fs_disk: FsDisk::None,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+/// The aarch64 vertical [`TESTS`] runs on a GICv2 and on a GICv3 board.
+const KERNEL_ARCH_BOOT_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-kernel-arch-boot-aarch64",
+    binary: "tairix-test-kernel-arch-boot-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 4,
+    timeout: Duration::from_secs(60),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: true,
+    crypto: false,
+    fs_disk: FsDisk::None,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
 /// The `SMMUv3` translation vertical, which [`TESTS`] runs once per stage.
 const DMA_TRANSLATION_AARCH64: QemuTest = QemuTest {
     package: "tairix-test-dma-translation-qemu-aarch64",
@@ -1409,6 +1483,30 @@ const DMA_TRANSLATION_AARCH64: QemuTest = QemuTest {
     fs_disk: FsDisk::AutoloadRootDisk,
     rtc_base: None,
     keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+/// The riscv64 production boot to `BootCompleted`, single-hart.
+const KERNEL_ARCH_BOOT_RISCV64: QemuTest = QemuTest {
+    package: "tairix-test-kernel-arch-boot-riscv64",
+    binary: "tairix-test-kernel-arch-boot-riscv64",
+    target: "riscv64gc-unknown-none-elf",
+    cpus: 1,
+    timeout: Duration::from_secs(60),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: false,
+    crypto: false,
+    fs_disk: FsDisk::None,
+    rtc_base: None,
+    keyboard: None,
     typed_keys: &[],
     screendumps: &[],
     pointer_script: None,
@@ -3130,28 +3228,7 @@ static TESTS: &[QemuTest] = &[
     // PASS finisher on observing it. Single CPU suffices (the slice
     // brings up one hart) and a 60-second budget matches the x86_64
     // `kernel_arch_boot` bring-up test.
-    QemuTest {
-        package: "tairix-test-kernel-arch-boot-riscv64",
-        binary: "tairix-test-kernel-arch-boot-riscv64",
-        target: "riscv64gc-unknown-none-elf",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        crypto: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        x86_64_cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
-    },
+    KERNEL_ARCH_BOOT_RISCV64,
     // `plans/NEW-SUPERVISOR.md` §9 Stage E:
     // `tairix-test-supervisor-memtest-takeover-qemu-riscv64` boots the
     // production riscv64 `virt` pipeline and, on `AuditEvent::BootCompleted`
@@ -3407,27 +3484,29 @@ static TESTS: &[QemuTest] = &[
     // A regression that fails to start a core or
     // deliver the IPI never reaches the PASS finisher, so the run times
     // out. Four CPUs mirror the Raspberry Pi 4 and use a 60-second budget.
+    IPI_SMP_AARCH64,
+    // `plans/IOMMU.md` IOM18.1: the same run on a GICv3, its SGIs raised
+    // through `ICC_SGI1R_EL1` to each secondary's redistributor.
     QemuTest {
-        package: "tairix-test-ipi-smp-qemu-aarch64",
-        binary: "tairix-test-ipi-smp-qemu-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 4,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        crypto: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        x86_64_cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
+        binary: "tairix-test-ipi-smp-gicv3-qemu-aarch64",
+        ..IPI_SMP_AARCH64
+    },
+    // `plans/IOMMU.md` IOM18.2: on a GICv3 with its ITS, one `edu` function
+    // writes an event only the other was given, and the ITS drops it while
+    // that event's own LPI stays live.
+    QemuTest {
+        package: "tairix-test-msi-isolation-qemu-aarch64",
+        binary: "tairix-test-msi-isolation-qemu-aarch64",
+        cpus: 1,
+        ..IPI_SMP_AARCH64
+    },
+    // `plans/IOMMU.md` IOM18.4: on an AIA board behind the RISC-V IOMMU, one
+    // `edu` function writes the identity of the other's notice, which lands in
+    // its own interrupt file and raises nothing, while that notice stays live.
+    QemuTest {
+        package: "tairix-test-msi-isolation-qemu-riscv64",
+        binary: "tairix-test-msi-isolation-qemu-riscv64",
+        ..KERNEL_ARCH_BOOT_RISCV64
     },
     // Stage 3c: `tairix-test-sched-drive-qemu-riscv64` is the riscv64
     // "arch primitives drive the live scheduler" deliverable — the wiring
@@ -3715,6 +3794,32 @@ static TESTS: &[QemuTest] = &[
         pointer_script: None,
         bounded_pointer_script: false,
         x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/OPEN-DEFECTS.md` D679: the same steps with the AP cold-plugged at
+    // APIC id 256 (`x86_64_topology_gates`), past the eight bits xAPIC names,
+    // on a CPU model with x2APIC; the boot CPU enters x2APIC mode to start it,
+    // and the run fails unless the AP really is past xAPIC.
+    QemuTest {
+        package: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        binary: "tairix-test-cross-cpu-tlb-shootdown-x2apic-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 2,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: Some("max"),
         serial: &[],
         expect: Expect::Pass,
     },
@@ -4065,27 +4170,12 @@ static TESTS: &[QemuTest] = &[
     // the end-to-end multi-core boot proof; a `SecondaryCpuStartFailed`
     // (`EventId(4071)`) is an immediate FAIL. A 60-second budget matches the
     // other boot-then-do-fixed-work tests.
+    KERNEL_ARCH_BOOT_AARCH64,
+    // `plans/IOMMU.md` IOM18.1: the same boot on a GICv3, every secondary
+    // finding its redistributor.
     QemuTest {
-        package: "tairix-test-kernel-arch-boot-aarch64",
-        binary: "tairix-test-kernel-arch-boot-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 4,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: true,
-        crypto: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        x86_64_cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
+        binary: "tairix-test-kernel-arch-boot-gicv3-aarch64",
+        ..KERNEL_ARCH_BOOT_AARCH64
     },
     // PI Stage P6c-3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-aarch64`
     // boots the *production* aarch64 `tairix-kernel` pipeline
@@ -4565,27 +4655,12 @@ static TESTS: &[QemuTest] = &[
     // (`sampled=live`, not the stale `pre_silence` a buddy would see). Any
     // shortfall writes a distinct failure finisher or times out (fail-loud).
     // Single CPU; a 60-second budget covers the short cadence under QEMU TCG.
+    FIQ_SELFSAMPLE_AARCH64,
+    // `plans/IOMMU.md` IOM18.1: the same run on a GICv3, the cadence a Group 0
+    // interrupt of the boot CPU's redistributor.
     QemuTest {
-        package: "tairix-test-fiq-selfsample-qemu-aarch64",
-        binary: "tairix-test-fiq-selfsample-qemu-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        crypto: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        x86_64_cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
+        binary: "tairix-test-fiq-selfsample-gicv3-qemu-aarch64",
+        ..FIQ_SELFSAMPLE_AARCH64
     },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
     // proving slice of the kernel-side production driver spawner. The build
@@ -9585,6 +9660,16 @@ static TESTS: &[QemuTest] = &[
         binary: "tairix-test-autoload-input-pci-qemu-riscv64",
         ..AUTOLOAD_INPUT_RISCV64
     },
+    // `plans/IOMMU.md` IOM18.3: both again on a board whose interrupts are an
+    // APLIC delivering by MSI to the hart's IMSIC file.
+    QemuTest {
+        binary: "tairix-test-autoload-input-aia-qemu-riscv64",
+        ..AUTOLOAD_INPUT_RISCV64
+    },
+    QemuTest {
+        binary: "tairix-test-autoload-input-pci-aia-qemu-riscv64",
+        ..AUTOLOAD_INPUT_RISCV64
+    },
     // `plans/ARCHSUPPORT.md` A4: the x86_64 driver-loading-by-discovery
     // autoload vertical — the virtio-**PCI** analogue of the aarch64 /
     // riscv64 `autoload_input` verticals, reduced to the input-autoload path
@@ -9670,11 +9755,12 @@ static TESTS: &[QemuTest] = &[
     // (`dma_translation_gates`), with one scratch-backed virtio-blk-pci function
     // (`disk_sectors`) `iommu_platform=on`. A bin-local PID 1 seam admits a
     // misbehaving in-kernel virtio-blk driver that carves through its node's
-    // domain, confirms a mapped read, then points a device write at an unmapped
-    // address; the VT-d unit refuses it and raises its fault-event MSI, which the
-    // per-unit fault service drains into `DmaTranslationFault`. PASS once, after
-    // the unit audited `translating`, a node-attributed write fault arrives and
-    // the driver reports its canary page untouched. No planted root is needed —
+    // domain, reads the planted sector back through it, then points a device
+    // write at an unmapped address; the VT-d unit refuses it and raises its
+    // fault-event MSI, which the per-unit fault service drains into
+    // `DmaTranslationFault`. PASS once, after the unit audited `translating`, a
+    // node-attributed write fault arrives, the driver reports its canary page
+    // untouched and its function stops mastering. No planted root is needed —
     // root-unlock is not wired on this seam.
     QemuTest {
         package: "tairix-test-dma-fault-qemu-x86-64",
@@ -9707,6 +9793,32 @@ static TESTS: &[QemuTest] = &[
     QemuTest {
         package: "tairix-test-dma-translation-qemu-x86-64",
         binary: "tairix-test-dma-translation-amd-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/IOMMU.md` IOM17 / MI3: the translation vertical's virtio binary,
+    // the same boot behind a `virtio-iommu-pci` the ACPI VIOT describes, its
+    // faults unrouted until ACPI routes its INTx, and every interrupt
+    // unremapped.
+    QemuTest {
+        package: "tairix-test-dma-translation-qemu-x86-64",
+        binary: "tairix-test-dma-translation-virtio-qemu-x86-64",
         target: X86_64_TARGET,
         cpus: 1,
         timeout: Duration::from_secs(60),
@@ -9769,6 +9881,19 @@ static TESTS: &[QemuTest] = &[
         binary: "tairix-test-dma-translation-stage1-qemu-aarch64",
         ..DMA_TRANSLATION_AARCH64
     },
+    // `plans/IOMMU.md` IOM17: the same run behind a `virtio-iommu-pci` on the
+    // host, its faults raised on its own INTx line.
+    QemuTest {
+        binary: "tairix-test-dma-translation-virtio-qemu-aarch64",
+        ..DMA_TRANSLATION_AARCH64
+    },
+    // `plans/IOMMU.md` IOM18.1: the stage 2 run on a GICv3, the unit's fault
+    // line an SPI the distributor routes by affinity and the keyboard's MSI-X
+    // an LPI through the ITS.
+    QemuTest {
+        binary: "tairix-test-dma-translation-gicv3-qemu-aarch64",
+        ..DMA_TRANSLATION_AARCH64
+    },
     // `plans/IOMMU.md` IOM16: the production riscv64 boot behind the `virt`
     // board's RISC-V IOMMU (`iommu-sys`) at the second stage, the keyboard and
     // mouse virtio-pci functions `iommu_platform=on` on the ECAM host it
@@ -9779,6 +9904,18 @@ static TESTS: &[QemuTest] = &[
     // The same run with the unit's first stage alone, tagged by PSCID.
     QemuTest {
         binary: "tairix-test-dma-translation-stage1-qemu-riscv64",
+        ..DMA_TRANSLATION_RISCV64
+    },
+    // `plans/IOMMU.md` IOM17: the same run behind a `virtio-iommu-pci` on the
+    // host, its faults raised on its own INTx line through the PLIC.
+    QemuTest {
+        binary: "tairix-test-dma-translation-virtio-qemu-riscv64",
+        ..DMA_TRANSLATION_RISCV64
+    },
+    // `plans/IOMMU.md` IOM18.4: the stage-2 run on an AIA board, the
+    // keyboard's MSI-X confined to an interrupt file of its own.
+    QemuTest {
+        binary: "tairix-test-dma-translation-aia-qemu-riscv64",
         ..DMA_TRANSLATION_RISCV64
     },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
@@ -9843,10 +9980,11 @@ static TESTS: &[QemuTest] = &[
     // (`plans/OPEN-DEFECTS.md` D129): about half of all four-CPU boots stopped
     // dead at the passphrase prompt with no driver loaded.
     //
-    // It reuses the very same production bin as the vertical above — the guest
-    // is byte-identical, only `-smp` differs — so there is no duplicated bin,
-    // and the runner disambiguates the two enrolments' planted backing images
-    // by their `TESTS` index (`sidecar_path`). This chain rather than the
+    // Its bin is the vertical above's boot over a tree describing four CPUs:
+    // the aarch64 boot starts only the cores its tree names, so the one-CPU
+    // tree under `-smp 4` would run on one. The runner disambiguates the two
+    // enrolments' planted backing images by their `TESTS` index
+    // (`sidecar_path`). This chain rather than the
     // graphical `autoload_input` one because it reaches the same store scan and
     // user-space driver spawn without the desktop and pty stages, so a failure
     // here cannot be confused with D15's single-CPU freeze at the Ctrl-C stage.
@@ -9856,7 +9994,7 @@ static TESTS: &[QemuTest] = &[
     // same 240 s applies.
     QemuTest {
         package: "tairix-test-netstack-autoload-qemu-aarch64",
-        binary: "tairix-test-netstack-autoload-qemu-aarch64",
+        binary: "tairix-test-netstack-autoload-smp-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 4,
         timeout: Duration::from_secs(240),
@@ -11237,15 +11375,13 @@ fn run_one(
         spec = spec.with_rtc_base(secs);
     }
 
-    // Attach a planted raw backing image for storage tests. Sector 0
-    // carries the deterministic `byte[i] = i mod 256` pattern the
-    // kernel-side test reads back and verifies; every other sector
-    // reads as zero, so the test's write+read-back of sector 1 cannot
-    // pass on stale data.
+    // Attach a planted raw backing image for storage tests: sector 0 is the
+    // one the guest checks, and every other sector reads as zero, so a write
+    // and read-back of sector 1 cannot pass on stale data.
     if let Some(sectors) = t.disk_sectors {
         let image = sidecar_path(&kernel, t, replica, "blk.img");
         let sector0: Vec<u8> = (0..tairix_qemu::disk::SECTOR_BYTES)
-            .map(|i| u8::try_from(i % 256).unwrap_or(0))
+            .map(tairix_itest_witness::sector0_byte)
             .collect();
         tairix_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
             .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.package))?;
@@ -16291,9 +16427,9 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
 ];
 
 /// The verticals that run behind a DMA translation unit, and which
-/// (`plans/IOMMU.md` MI0, MI2). [`finish_run`] puts it in front of every PCI
-/// device, so a run passes only on DMA that crossed the unit.
-const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 8] = [
+/// (`plans/IOMMU.md` MI0, MI2, MI3). [`finish_run`] puts it in front of every
+/// PCI device, so a run passes only on DMA that crossed the unit.
+const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 14] = [
     (
         "tairix-test-dma-translation-qemu-x86-64",
         DmaTranslation::Vtd,
@@ -16316,34 +16452,155 @@ const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 8] = [
         DmaTranslation::Smmuv3Stage1,
     ),
     (
+        "tairix-test-dma-translation-gicv3-qemu-aarch64",
+        DmaTranslation::Smmuv3Stage2,
+    ),
+    (
         "tairix-test-dma-translation-qemu-riscv64",
+        DmaTranslation::RiscvStage2,
+    ),
+    (
+        "tairix-test-dma-translation-aia-qemu-riscv64",
+        DmaTranslation::RiscvStage2,
+    ),
+    (
+        "tairix-test-msi-isolation-qemu-riscv64",
         DmaTranslation::RiscvStage2,
     ),
     (
         "tairix-test-dma-translation-stage1-qemu-riscv64",
         DmaTranslation::RiscvStage1,
     ),
+    (
+        "tairix-test-dma-translation-virtio-qemu-x86-64",
+        DmaTranslation::VirtioIommu,
+    ),
+    (
+        "tairix-test-dma-translation-virtio-qemu-aarch64",
+        DmaTranslation::VirtioIommu,
+    ),
+    (
+        "tairix-test-dma-translation-virtio-qemu-riscv64",
+        DmaTranslation::VirtioIommu,
+    ),
 ];
 
 /// The translated verticals whose input devices sit behind a PCIe-to-PCI
 /// bridge, so their keyboard's DMA reaches the unit only under the bridge's
 /// alias (`plans/IOMMU.md` IOM8).
-const ALIASED_INPUT_BINARIES: [&str; 2] = [
+const ALIASED_INPUT_BINARIES: [&str; 3] = [
     "tairix-test-dma-translation-qemu-x86-64",
     "tairix-test-dma-translation-amd-qemu-x86-64",
+    "tairix-test-dma-translation-virtio-qemu-x86-64",
 ];
 
 /// The verticals whose input devices are PCI functions on an FDT board's
 /// host bridge, sharing one INTx line (`plans/IOMMU.md` IOM13), the FDT
 /// translation verticals among them: their units front only that host.
-const SHARED_LINE_INPUT_BINARIES: [&str; 6] = [
+const SHARED_LINE_INPUT_BINARIES: [&str; 11] = [
     "tairix-test-autoload-input-pci-qemu-aarch64",
     "tairix-test-autoload-input-pci-qemu-riscv64",
     "tairix-test-dma-translation-qemu-aarch64",
+    "tairix-test-dma-translation-gicv3-qemu-aarch64",
     "tairix-test-dma-translation-stage1-qemu-aarch64",
+    "tairix-test-dma-translation-virtio-qemu-aarch64",
     "tairix-test-dma-translation-qemu-riscv64",
     "tairix-test-dma-translation-stage1-qemu-riscv64",
+    "tairix-test-dma-translation-virtio-qemu-riscv64",
+    "tairix-test-autoload-input-pci-aia-qemu-riscv64",
+    "tairix-test-dma-translation-aia-qemu-riscv64",
 ];
+
+/// The binaries [`TESTS`] runs on a board built with interrupt controllers
+/// other than its default, and which.
+const INTERRUPT_CONTROLLER_BINARIES: [(&str, InterruptControllers); 9] = [
+    (
+        "tairix-test-ipi-smp-gicv3-qemu-aarch64",
+        InterruptControllers::Gicv3,
+    ),
+    (
+        "tairix-test-fiq-selfsample-gicv3-qemu-aarch64",
+        InterruptControllers::Gicv3,
+    ),
+    (
+        "tairix-test-kernel-arch-boot-gicv3-aarch64",
+        InterruptControllers::Gicv3,
+    ),
+    (
+        "tairix-test-dma-translation-gicv3-qemu-aarch64",
+        InterruptControllers::Gicv3,
+    ),
+    (
+        "tairix-test-msi-isolation-qemu-aarch64",
+        InterruptControllers::Gicv3,
+    ),
+    (
+        "tairix-test-autoload-input-aia-qemu-riscv64",
+        InterruptControllers::Aia,
+    ),
+    (
+        "tairix-test-autoload-input-pci-aia-qemu-riscv64",
+        InterruptControllers::Aia,
+    ),
+    (
+        "tairix-test-dma-translation-aia-qemu-riscv64",
+        InterruptControllers::Aia,
+    ),
+    (
+        "tairix-test-msi-isolation-qemu-riscv64",
+        InterruptControllers::Aia,
+    ),
+];
+
+/// The binaries [`TESTS`] runs with `edu` functions raising MSIs on demand,
+/// and how many.
+const MESSAGE_SOURCE_BINARIES: [(&str, u8); 2] = [
+    ("tairix-test-msi-isolation-qemu-aarch64", 2),
+    ("tairix-test-msi-isolation-qemu-riscv64", 2),
+];
+
+/// Attach the message sources [`MESSAGE_SOURCE_BINARIES`] gives `binary`,
+/// and none on any other run.
+fn message_source_gates(spec: Spec, binary: &str) -> Spec {
+    match MESSAGE_SOURCE_BINARIES
+        .iter()
+        .find(|(built, _)| *built == binary)
+    {
+        Some(&(_, count)) => spec.with_message_sources(count),
+        None => spec,
+    }
+}
+
+/// The binaries [`TESTS`] runs on an x86_64 board whose CPUs are laid out
+/// other than densely from APIC id 0, and how.
+const X86_64_TOPOLOGY_BINARIES: [(&str, tairix_qemu::x86_64::Topology); 1] = [(
+    "tairix-test-cross-cpu-tlb-shootdown-x2apic-qemu-x86-64",
+    tairix_qemu::x86_64::Topology::ApPastXapic,
+)];
+
+/// The CPU layout [`X86_64_TOPOLOGY_BINARIES`] gives `binary` on `spec`, and
+/// the dense default on any other run.
+fn x86_64_topology_gates(spec: Spec, binary: &str) -> Spec {
+    match X86_64_TOPOLOGY_BINARIES
+        .iter()
+        .find(|(laid_out, _)| *laid_out == binary)
+    {
+        Some(&(_, topology)) => spec.with_x86_64_topology(topology),
+        None => spec,
+    }
+}
+
+/// The interrupt controllers [`INTERRUPT_CONTROLLER_BINARIES`] gives
+/// `binary` on `spec`, and the board's default on any other run.
+fn interrupt_controller_gates(spec: Spec, binary: &str) -> Spec {
+    match INTERRUPT_CONTROLLER_BINARIES
+        .iter()
+        .find(|(built, _)| *built == binary)
+    {
+        Some(&(_, interrupts)) => spec.with_interrupts(interrupts),
+        None => spec,
+    }
+}
 
 /// Put `binary`'s input devices on the PCI host if it is one of
 /// [`SHARED_LINE_INPUT_BINARIES`]. A mouse beside the keyboard gives the line
@@ -16357,8 +16614,6 @@ fn shared_line_input_gates(spec: Spec, binary: &str) -> Spec {
     spec.with_keyboard_ready_occurrences(armed)
 }
 
-/// The translation unit [`DMA_TRANSLATION_BINARIES`] gives `binary` on
-/// `spec`, and nothing on any other run.
 /// The QEMU spec `target`'s enrolments boot `kernel` with: the riscv64 `virt`
 /// board through OpenSBI, the aarch64 `virt` board, else the x86_64
 /// `isa-debug-exit` convention.
@@ -16372,6 +16627,8 @@ fn base_spec(target: &str, kernel: &Path) -> Spec {
     }
 }
 
+/// The translation unit [`DMA_TRANSLATION_BINARIES`] gives `binary` on
+/// `spec`, and nothing on any other run.
 fn dma_translation_gates(spec: Spec, binary: &str) -> Spec {
     let Some(&(_, unit)) = DMA_TRANSLATION_BINARIES
         .iter()
@@ -16614,6 +16871,9 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
 
     spec = memtest_takeover_gates(spec, t.binary);
     spec = dma_translation_gates(spec, t.binary);
+    spec = interrupt_controller_gates(spec, t.binary);
+    spec = x86_64_topology_gates(spec, t.binary);
+    spec = message_source_gates(spec, t.binary);
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     if t.ramfb {
@@ -17687,10 +17947,13 @@ mod tests {
                 .find(|t| t.binary == binary)
                 .unwrap_or_else(|| panic!("translated binary {binary} must be enrolled"));
             let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
-            assert_eq!(
-                unit.arch(),
-                Some(spec.arch),
+            assert!(
+                unit.arch().is_none_or(|arch| arch == spec.arch),
                 "{binary}: a unit its own board can attach"
+            );
+            assert!(
+                unit.arch().is_some() || unit == DmaTranslation::VirtioIommu,
+                "{binary}: only the virtio-iommu attaches to every board"
             );
             let gated = dma_translation_gates(spec, binary);
             assert_eq!(gated.dma_translation, unit, "{binary}");
@@ -17701,6 +17964,102 @@ mod tests {
             "tairix-test-autoload-input-qemu-x86-64",
         );
         assert_eq!(plain.dma_translation, DmaTranslation::Absent);
+    }
+
+    /// Every binary `finish_run` builds with other interrupt controllers is
+    /// enrolled on the board that has them, and only those runs are.
+    #[test]
+    fn interrupt_controller_binaries_are_enrolled_and_alone_built_so() {
+        use super::{base_spec, interrupt_controller_gates, INTERRUPT_CONTROLLER_BINARIES};
+        use tairix_qemu::{InterruptControllers, Spec};
+
+        for (binary, interrupts) in INTERRUPT_CONTROLLER_BINARIES {
+            let test = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .unwrap_or_else(|| panic!("{binary} must be enrolled"));
+            let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
+            assert_eq!(
+                interrupts.arch(),
+                Some(spec.arch),
+                "{binary}: its own board's"
+            );
+            let gated = interrupt_controller_gates(spec, binary);
+            assert_eq!(gated.interrupts, interrupts, "{binary}");
+        }
+        let plain = interrupt_controller_gates(
+            Spec::for_aarch64_kernel("/tmp/k"),
+            "tairix-test-ipi-smp-qemu-aarch64",
+        );
+        assert_eq!(plain.interrupts, InterruptControllers::Default);
+    }
+
+    /// Every binary laid out other than densely is enrolled on an x86_64
+    /// board, on a CPU model that has x2APIC, and only those runs are.
+    #[test]
+    fn x86_64_topology_binaries_are_enrolled_on_x2apic_cpus_and_alone_laid_out_so() {
+        use super::{base_spec, x86_64_topology_gates, X86_64_TOPOLOGY_BINARIES};
+        use tairix_qemu::x86_64::Topology;
+        use tairix_qemu::Spec;
+
+        for (binary, topology) in X86_64_TOPOLOGY_BINARIES {
+            let test = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .unwrap_or_else(|| panic!("{binary} must be enrolled"));
+            assert_eq!(test.target, super::X86_64_TARGET, "{binary}");
+            assert_eq!(
+                test.x86_64_cpu,
+                Some("max"),
+                "{binary}: a model with x2APIC"
+            );
+            let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
+            assert_eq!(
+                x86_64_topology_gates(spec, binary).x86_64_topology,
+                topology
+            );
+        }
+        let plain = x86_64_topology_gates(
+            Spec::for_x86_64_kernel("/tmp/k"),
+            "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",
+        );
+        assert_eq!(plain.x86_64_topology, Topology::Dense);
+    }
+
+    /// Every binary given message sources is enrolled where a unit confines
+    /// messages — an aarch64 board with a GICv3 or a riscv64 one with an AIA —
+    /// and only those runs get any.
+    #[test]
+    fn message_source_binaries_are_enrolled_where_messages_are_confined_and_alone_given_them() {
+        use super::{
+            base_spec, message_source_gates, INTERRUPT_CONTROLLER_BINARIES, MESSAGE_SOURCE_BINARIES,
+        };
+        use tairix_qemu::{InterruptControllers, Spec};
+
+        for (binary, count) in MESSAGE_SOURCE_BINARIES {
+            let test = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .unwrap_or_else(|| panic!("{binary} must be enrolled"));
+            let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
+            let translating = match spec.arch {
+                tairix_qemu::Arch::Aarch64 => InterruptControllers::Gicv3,
+                _ => InterruptControllers::Aia,
+            };
+            assert!(
+                INTERRUPT_CONTROLLER_BINARIES.contains(&(binary, translating)),
+                "{binary}: only a GICv3's ITS or an AIA behind a unit confines the messages"
+            );
+            assert_eq!(
+                message_source_gates(spec, binary).devices.message_sources,
+                count
+            );
+        }
+        let plain = message_source_gates(
+            Spec::for_aarch64_kernel("/tmp/k"),
+            "tairix-test-ipi-smp-qemu-aarch64",
+        );
+        assert_eq!(plain.devices.message_sources, 0);
     }
 
     /// Every binary `finish_run` puts on a shared input line is enrolled with

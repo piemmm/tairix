@@ -1046,6 +1046,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-conout",
+ "tairix-fuzzseed",
  "tairix-kernel-mem",
  "tairix-log",
  "tairix-memguard",
@@ -1640,6 +1641,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fdt",
+ "tairix-virtio",
 ]
 
 [[package]]
@@ -2029,7 +2031,6 @@ dependencies = [
  "tairix-devmatch",
  "tairix-devmgr",
  "tairix-log",
- "tairix-virtio",
 ]
 
 [[package]]
@@ -2467,6 +2468,16 @@ name = "tairix-itest-finisher"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-itest-gic"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-fdt",
+ "tairix-itest-harness",
+ "tairix-sync",
+]
+
+[[package]]
 name = "tairix-itest-harness"
 version = "0.0.0"
 dependencies = [
@@ -2551,6 +2562,7 @@ dependencies = [
  "tairix-kernel-iommu-api",
  "tairix-kernel-iommu-riscv",
  "tairix-kernel-iommu-smmuv3",
+ "tairix-kernel-iommu-virtio",
  "tairix-kernel-iommu-vtd",
  "tairix-kernel-ipc",
  "tairix-kernel-irq",
@@ -2602,6 +2614,7 @@ dependencies = [
  "tairix-kernel-iommu-api",
  "tairix-kernel-iommu-riscv",
  "tairix-kernel-iommu-smmuv3",
+ "tairix-kernel-iommu-virtio",
  "tairix-kernel-iommu-vtd",
  "tairix-kernel-ipc",
  "tairix-kernel-irq",
@@ -2627,6 +2640,7 @@ dependencies = [
  "tairix-tty",
  "tairix-users",
  "tairix-util",
+ "tairix-virtio",
  "tairix-vt",
  "zeroize",
 ]
@@ -2680,6 +2694,20 @@ dependencies = [
  "tairix-inline",
  "tairix-kernel-iommu-api",
  "tairix-sync",
+]
+
+[[package]]
+name = "tairix-kernel-iommu-virtio"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-collections",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-inline",
+ "tairix-kernel-iommu-api",
+ "tairix-sync",
+ "tairix-virtio",
 ]
 
 [[package]]
@@ -3632,6 +3660,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
+ "tairix-hash",
  "tairix-inline",
  "tairix-log",
  "tairix-rt",
@@ -3979,6 +4009,7 @@ dependencies = [
  "tairix-caps",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4253,12 +4284,9 @@ dependencies = [
  "tairix-itest-witness",
  "tairix-kernel",
  "tairix-kernel-core",
- "tairix-kernel-irq",
  "tairix-kernel-mem",
  "tairix-kernel-sec",
- "tairix-kernel-virtio",
  "tairix-log",
- "tairix-pci",
  "tairix-virtio",
 ]
 
@@ -4281,6 +4309,7 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-itest-translation-witness",
  "tairix-kernel",
+ "tairix-kernel-core",
  "tairix-log",
 ]
 
@@ -4316,6 +4345,7 @@ dependencies = [
  "tairix-drvhost",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4343,6 +4373,7 @@ dependencies = [
  "tairix-drvhost",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4550,6 +4581,7 @@ dependencies = [
  "tairix-caps",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -4610,6 +4642,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-log",
 ]
@@ -4623,6 +4656,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -4812,6 +4846,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -4851,6 +4886,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-log",
 ]
@@ -4875,6 +4911,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -4892,6 +4929,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-arch-api",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-irq",
@@ -5006,6 +5044,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -5055,6 +5094,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -5240,6 +5280,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -5249,6 +5290,39 @@ dependencies = [
  "tairix-log",
  "tairix-sync",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-test-msi-isolation-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-fdt",
+ "tairix-itest-finisher",
+ "tairix-itest-gic",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-log",
+ "tairix-pci",
+]
+
+[[package]]
+name = "tairix-test-msi-isolation-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-riscv64",
+ "tairix-fdt",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel-iommu-api",
+ "tairix-kernel-iommu-riscv",
+ "tairix-log",
+ "tairix-pci",
 ]
 
 [[package]]
@@ -5589,6 +5663,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -5639,6 +5714,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -5655,6 +5731,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -5854,6 +5931,7 @@ dependencies = [
  "tairix-caps",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -5877,6 +5955,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-sched-mlfq",
@@ -5931,6 +6010,7 @@ dependencies = [
  "tairix-caps",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -6009,6 +6089,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -6062,6 +6143,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -6258,6 +6340,7 @@ dependencies = [
  "tairix-caps",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -6327,6 +6410,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -6531,6 +6615,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -6589,6 +6674,7 @@ dependencies = [
  "tairix-caps",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
@@ -6685,6 +6771,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-arch-api",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-log",
 ]
@@ -6890,7 +6977,9 @@ dependencies = [
  "tairix-drvhost",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
@@ -6927,6 +7016,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-fdt",
  "tairix-itest-finisher",
+ "tairix-itest-gic",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -7617,6 +7707,7 @@ dependencies = [
  "tairix-image",
  "tairix-input",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kernel-ipc",
  "tairix-kernel-syscall",
  "tairix-log",

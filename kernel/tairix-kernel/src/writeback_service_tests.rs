@@ -23,7 +23,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::driver::filesystem::{
     FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity, WritebackHost,
@@ -72,18 +72,18 @@ impl EntropySource for FixtureEntropy {
 /// reads it inside `LateFilesystem::now_ns` (proven in
 /// `tairix_kernel_core::fs::writeback`), which a host build cannot exercise
 /// because it installs no scheduler clock for that gate to guard. Keeping the
-/// same shape here is what makes the *driver's* answer to a withdrawn timer
-/// observable end to end.
+/// same shape here is what makes the *driver's* answer to a timer not yet
+/// armed observable end to end.
 struct Fixture {
     mounts: LateFilesystem<Box<dyn KernelFs>>,
     now_ns: AtomicU64,
-    armed: AtomicBool,
+    armed: bool,
     reports: AtomicU64,
 }
 
 impl WritebackHost for Fixture {
     fn now_ns(&self) -> Option<u64> {
-        if !self.armed.load(Ordering::Acquire) {
+        if !self.armed {
             return None;
         }
         Some(self.now_ns.load(Ordering::Acquire))
@@ -106,17 +106,25 @@ impl Fixture {
     /// A leaked fixture with its timer installed and armed, holding no
     /// volumes yet.
     fn empty() -> &'static Self {
+        Self::installed(true)
+    }
+
+    /// A leaked fixture with its timer installed, armed as the flusher arms
+    /// it once it can park when `armed`.
+    fn installed(armed: bool) -> &'static Self {
         let fixture: &'static Self = Box::leak(Box::new(Self {
             mounts: LateFilesystem::new(),
             now_ns: AtomicU64::new(0),
-            armed: AtomicBool::new(true),
+            armed,
             reports: AtomicU64::new(0),
         }));
         fixture
             .mounts
             .install_writeback_host(fixture)
             .expect("the timer installs");
-        fixture.mounts.set_writeback_armed(true);
+        if armed {
+            fixture.mounts.arm_writeback();
+        }
         fixture
     }
 
@@ -149,12 +157,6 @@ impl Fixture {
 
     fn set_now(&self, now_ns: u64) {
         self.now_ns.store(now_ns, Ordering::Release);
-    }
-
-    /// Withdraw (or restore) the timer, as the flusher does when it stops.
-    fn set_armed(&self, armed: bool) {
-        self.armed.store(armed, Ordering::Release);
-        self.mounts.set_writeback_armed(armed);
     }
 
     /// Create `name` on `volume` through the registered driver, as an
@@ -236,7 +238,7 @@ fn an_idle_volume_arms_nothing_at_all() {
          an idle machine takes no wakeup"
     );
     assert_eq!(
-        writeback::publish_due(&fixture.mounts, sink(), writeback::EVERYTHING_DUE),
+        writeback::publish_due(&fixture.mounts, sink(), u64::MAX),
         None,
         "and a pass over it spends no device barrier on a clean volume"
     );
@@ -343,13 +345,13 @@ fn several_volumes_dirty_at_once_are_each_published_at_their_own_window() {
 }
 
 #[test]
-fn a_disarmed_timer_makes_every_operation_publish_again() {
-    let (fixture, volume) = Fixture::with_volume();
-    fixture.set_armed(false);
+fn a_timer_not_yet_armed_makes_every_operation_publish() {
+    let fixture = Fixture::installed(false);
+    let volume = fixture.attach(VOLUME, 1);
     fixture.create(&volume, b"eager");
     assert!(
         volume.published(b"eager"),
-        "with nothing left to fire a window, durability is never deferred"
+        "with nothing yet to fire a window, durability is never deferred"
     );
     assert_eq!(fixture.mounts.earliest_writeback_due(), None);
 }

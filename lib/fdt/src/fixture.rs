@@ -301,6 +301,135 @@ pub fn virt_like_with_virtio(
     b.build()
 }
 
+/// The phandle [`virt_like_aia`] gives the supervisor-level APLIC, which its
+/// devices name as their interrupt parent.
+pub const VIRT_APLIC_PHANDLE: u32 = 6;
+
+/// The phandle [`virt_like_aia`] gives the supervisor-level IMSIC.
+pub const VIRT_IMSIC_PHANDLE: u32 = 4;
+
+/// The supervisor-level IMSIC's first interrupt file in [`virt_like_aia`].
+pub const VIRT_IMSIC_S_BASE: u64 = 0x2800_0000;
+
+/// The supervisor-level APLIC's registers in [`virt_like_aia`].
+pub const VIRT_APLIC_S_BASE: u64 = 0x0d00_0000;
+
+/// A QEMU `virt,aia=aplic-imsic`-shaped riscv64 tree: `harts` harts, each
+/// with its local interrupt controller, a machine- and a supervisor-level
+/// IMSIC (255 identities, a file per hart) and APLIC (96 sources, the
+/// machine domain delegating every source to the supervisor one), and one
+/// `virtio_mmio` slot per `(base, source, sense)` raised through the
+/// supervisor APLIC with a two-cell `<source sense>` specifier.
+#[must_use]
+pub fn virt_like_aia(harts: u32, slots: &[(u64, u32, u32)]) -> Vec<u8> {
+    aia_tree(harts, slots, 0)
+}
+
+/// [`virt_like_aia`] with no virtio-MMIO slots, its IMSICs giving each hart
+/// `2^guest_index_bits - 1` guest files beside its own, as
+/// `riscv,guest-index-bits` says.
+#[must_use]
+pub fn virt_like_aia_with_guest_bits(harts: u32, guest_index_bits: u32) -> Vec<u8> {
+    aia_tree(harts, &[], guest_index_bits)
+}
+
+fn aia_tree(harts: u32, slots: &[(u64, u32, u32)], guest_index_bits: u32) -> Vec<u8> {
+    const INTC_PHANDLE: u32 = 0x10;
+    const M_IMSIC: u32 = 3;
+    const M_APLIC: u32 = 5;
+    let cells = |values: &[u32]| {
+        values
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect::<Vec<u8>>()
+    };
+    let reg = |base: u64, len: u64| {
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&base.to_be_bytes());
+        reg.extend_from_slice(&len.to_be_bytes());
+        reg
+    };
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.begin_node("cpus");
+    b.prop_u32("#address-cells", 1);
+    b.prop_u32("#size-cells", 0);
+    b.prop_u32("timebase-frequency", 10_000_000);
+    for hart in 0..harts {
+        b.begin_node(&alloc::format!("cpu@{hart}"));
+        b.prop("device_type", b"cpu\0");
+        b.prop_u32("reg", hart);
+        b.begin_node("interrupt-controller");
+        b.prop_str("compatible", "riscv,cpu-intc");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", INTC_PHANDLE + hart);
+        b.end_node();
+        b.end_node();
+    }
+    b.end_node();
+    b.begin_node("memory@80000000");
+    b.prop("device_type", b"memory\0");
+    b.prop("reg", &reg(0x8000_0000, 0x1000_0000));
+    b.end_node();
+    for (name, base, phandle, cause) in [
+        ("imsics@24000000", 0x2400_0000u64, M_IMSIC, 11),
+        ("imsics@28000000", VIRT_IMSIC_S_BASE, VIRT_IMSIC_PHANDLE, 9),
+    ] {
+        b.begin_node(name);
+        b.prop_str("compatible", "riscv,imsics");
+        b.prop("interrupt-controller", &[]);
+        b.prop("msi-controller", &[]);
+        b.prop_u32("#interrupt-cells", 0);
+        b.prop_u32("riscv,num-ids", 255);
+        if guest_index_bits != 0 {
+            b.prop_u32("riscv,guest-index-bits", guest_index_bits);
+        }
+        let per_hart = 0x1000u64
+            .checked_shl(guest_index_bits.min(6))
+            .unwrap_or(0x1000);
+        b.prop("reg", &reg(base, per_hart * u64::from(harts)));
+        let extended: Vec<u32> = (0..harts)
+            .flat_map(|hart| [INTC_PHANDLE + hart, cause])
+            .collect();
+        b.prop("interrupts-extended", &cells(&extended));
+        b.prop_u32("phandle", phandle);
+        b.end_node();
+    }
+    b.begin_node("aplic@c000000");
+    b.prop_str("compatible", "riscv,aplic");
+    b.prop("interrupt-controller", &[]);
+    b.prop_u32("#interrupt-cells", 2);
+    b.prop_u32("riscv,num-sources", 96);
+    b.prop("reg", &reg(0x0c00_0000, 0x8000));
+    b.prop_u32("msi-parent", M_IMSIC);
+    b.prop_u32("riscv,children", VIRT_APLIC_PHANDLE);
+    b.prop("riscv,delegation", &cells(&[VIRT_APLIC_PHANDLE, 1, 96]));
+    b.prop_u32("phandle", M_APLIC);
+    b.end_node();
+    b.begin_node("aplic@d000000");
+    b.prop_str("compatible", "riscv,aplic");
+    b.prop("interrupt-controller", &[]);
+    b.prop_u32("#interrupt-cells", 2);
+    b.prop_u32("riscv,num-sources", 96);
+    b.prop("reg", &reg(VIRT_APLIC_S_BASE, 0x8000));
+    b.prop_u32("msi-parent", VIRT_IMSIC_PHANDLE);
+    b.prop_u32("phandle", VIRT_APLIC_PHANDLE);
+    b.end_node();
+    for &(base, source, sense) in slots {
+        b.begin_node(&alloc::format!("virtio_mmio@{base:x}"));
+        b.prop_str("compatible", "virtio,mmio");
+        b.prop("reg", &reg(base, 0x1000));
+        b.prop("interrupts", &cells(&[source, sense]));
+        b.prop_u32("interrupt-parent", VIRT_APLIC_PHANDLE);
+        b.end_node();
+    }
+    b.end_node();
+    b.build()
+}
+
 /// An aarch64 tree carrying a `/cpus` node whose `cpu@*` children declare
 /// per-core `reg` (the `MPIDR_EL1` affinity) and an optional
 /// `capacity-dmips-mhz` rating, plus the usual `/memory` node.

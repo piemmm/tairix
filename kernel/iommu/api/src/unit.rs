@@ -3,8 +3,9 @@
 
 use core::ops::Range;
 
+use crate::domain::FrameRun;
 use crate::fault::Fault;
-use crate::interrupt::InterruptRemapping;
+use crate::interrupt::{InterruptRemapping, MessageFiles};
 
 /// How a device may use a mapping.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -54,6 +55,9 @@ pub enum IommuError {
     /// The unit reported an error of its own: a rejected command, a hardware
     /// fault, or a state it should not be in.
     Hardware,
+    /// The unit has no endpoint by the stream named, so no DMA arrives as it:
+    /// a requester id the fabric delivers under another.
+    NoEndpoint,
 }
 
 /// A unit-local domain handle.
@@ -94,6 +98,28 @@ impl Stage {
     }
 }
 
+/// Where a unit keeps its domains' translations.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Tables {
+    /// In I/O page tables of the kernel's, which the unit walks at this
+    /// stage.
+    Walked(Stage),
+    /// In the unit itself, each installed by a request: a virtio-iommu's,
+    /// which its hypervisor applies.
+    Kept,
+}
+
+impl Tables {
+    /// As the audit trail spells it: the stage walked, or `kept`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Walked(stage) => stage.name(),
+            Self::Kept => "kept",
+        }
+    }
+}
+
 /// What a unit's domains translate between.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Reach {
@@ -103,16 +129,31 @@ pub struct Reach {
     pub output_bits: u32,
 }
 
+impl Reach {
+    /// The exclusive physical address its tables can name up to.
+    #[must_use]
+    pub const fn output_limit(self) -> u64 {
+        if self.output_bits >= 64 {
+            u64::MAX
+        } else {
+            1 << self.output_bits
+        }
+    }
+}
+
 /// What a unit reports it can do.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct UnitProfile {
-    /// The stage its domains are walked at.
-    pub stage: Stage,
+    /// Where its domains' translations live.
+    pub tables: Tables,
     /// The addresses its domains translate between.
     pub reach: Reach,
     /// IOVA windows no domain may map, because the fabric claims them before
     /// translation (the x86 interrupt window).
     pub reserved: &'static [Range<u64>],
+    /// Whether its tables can let a device write what it may not read: where
+    /// they cannot, [`IommuUnit::map`] refuses [`Access::WRITE`] alone.
+    pub write_only: bool,
 }
 
 /// One translation unit, as its family drives it.
@@ -157,7 +198,8 @@ pub trait IommuUnit: Sync {
     ///
     /// [`IommuError::StreamBusy`] when the stream is attached elsewhere,
     /// [`IommuError::OutOfRange`] for a stream the unit does not cover or an
-    /// unknown domain.
+    /// unknown domain, and [`IommuError::NoEndpoint`] for one it covers but
+    /// has no endpoint by, which stays unattached.
     fn attach(&self, stream: u32, domain: DomainId) -> Result<(), IommuError>;
 
     /// Block `stream`'s DMA and confirm no cached translation of it survives.
@@ -201,9 +243,39 @@ pub trait IommuUnit: Sync {
         access: Access,
     ) -> Result<(), IommuError>;
 
-    /// Remove `[iova, iova + len)` of `domain`, exactly as one earlier map
-    /// installed it. The device may still hold a cached translation until the
-    /// next [`Self::sync`].
+    /// [`Self::map`] each of `runs`, back to back from `iova`, publishing
+    /// them as one: a unit that must flush what it cached of absent entries
+    /// does so once, not once a run. All or nothing: a refusal takes back
+    /// every run installed before it, or answers
+    /// [`IommuError::Unconfirmed`] where they could not all be taken back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::map`].
+    fn map_runs(
+        &self,
+        domain: DomainId,
+        iova: u64,
+        runs: &[FrameRun],
+        access: Access,
+    ) -> Result<(), IommuError> {
+        let mut mapped = 0;
+        for run in runs {
+            match self.map(domain, iova + mapped, run.phys, run.bytes(), access) {
+                Ok(()) => mapped += run.bytes(),
+                Err(IommuError::Unconfirmed) => return Err(IommuError::Unconfirmed),
+                Err(err) if mapped == 0 || self.unmap(domain, iova, mapped).is_ok() => {
+                    return Err(err)
+                }
+                Err(_) => return Err(IommuError::Unconfirmed),
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove `[iova, iova + len)` of `domain`, exactly as earlier maps
+    /// installed it: whole mappings, back to back. The device may still hold
+    /// a cached translation until the next [`Self::sync`].
     ///
     /// # Errors
     ///
@@ -220,6 +292,19 @@ pub trait IommuUnit: Sync {
     /// reused.
     fn sync(&self, domain: DomainId) -> Result<(), IommuError>;
 
+    /// [`Self::sync`] for the unmaps within `[iova, iova + len)` alone,
+    /// freeing the tables they emptied: what a unit can invalidate by
+    /// address keeps the domain's other cached translations. The default
+    /// confirms the whole domain.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::sync`].
+    fn sync_range(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
+        let _ = (iova, len);
+        self.sync(domain)
+    }
+
     /// Raise the unit's fault interrupt by `route`, and unmask it.
     ///
     /// # Errors
@@ -228,6 +313,15 @@ pub trait IommuUnit: Sync {
     /// by, or the unit's refusal.
     fn route_faults(&self, route: FaultRoute) -> Result<(), IommuError>;
 
+    /// Stop raising the fault interrupt: once this returns, the unit raises
+    /// none until [`Self::route_faults`] routes it again. Its records stay
+    /// queued.
+    ///
+    /// # Errors
+    ///
+    /// The unit's refusal, after which it may still raise the interrupt.
+    fn unroute_faults(&self) -> Result<(), IommuError>;
+
     /// Hand the fault records the unit holds to `sink`, oldest first, clearing
     /// each, and answer whether any remain. A call may stop short, so a
     /// storming device cannot hold the caller; while it answers `true` the
@@ -235,10 +329,44 @@ pub trait IommuUnit: Sync {
     /// unit need not raise for records it already holds.
     fn drain_faults(&self, sink: &mut dyn FnMut(Fault)) -> bool;
 
+    /// Hand `sink` each page-aligned IOVA range no domain translating
+    /// `stream` may map: what the unit claims for the stream itself (a
+    /// virtio-iommu's probed reserved regions, the input range it
+    /// translates). [`UnitProfile::reserved`] holds what every stream shares.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::OutOfRange`] for a stream the unit does not cover, or
+    /// the unit's refusal or timeout: a domain is then not made for it.
+    fn reserved_iova(
+        &self,
+        stream: u32,
+        sink: &mut dyn FnMut(Range<u64>),
+    ) -> Result<(), IommuError> {
+        let _ = (stream, sink);
+        Ok(())
+    }
+
     /// The unit's interrupt remapping, where it has it.
     fn interrupt_remapping(&self) -> Option<&dyn InterruptRemapping> {
         None
     }
+
+    /// The unit's confinement of messages to interrupt files, where it can
+    /// confine them.
+    fn message_files(&self) -> Option<&dyn MessageFiles> {
+        None
+    }
+}
+
+/// How a unit signals its interrupts, for a family that must be told as the
+/// unit is taken over: before its queues run, after which it may not change.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Signalling {
+    /// On its wires.
+    Wired,
+    /// As messages.
+    Message,
 }
 
 /// How a unit raises its fault interrupt.
@@ -268,17 +396,83 @@ pub trait TableCoherence: Sync {
     fn write_back(&self, phys: u64, len: usize);
 }
 
-/// The PCI function a unit is, for a family whose fault interrupt is that
-/// function's MSI (an AMD-Vi unit's).
+/// The PCI function a unit is, which the kernel owns the configuration
+/// space of: an AMD-Vi unit, whose fault interrupt is its function's MSI, or
+/// a virtio-iommu, whose queues are its function's DMA. Every method names
+/// the function by its node address, `(segment << 16) | requester id`.
 pub trait UnitFunction: Sync {
-    /// Raise the MSI of the function at node address `address` — `(segment
-    /// << 16) | requester id` — as `message_address`/`data`. A unit's own
-    /// interrupt needs no bus mastering, so none is granted.
+    /// Raise the MSI of the function at `address` as
+    /// `message_address`/`data`. A unit's own interrupt needs no bus
+    /// mastering, so none is granted.
     ///
     /// # Errors
     ///
     /// [`IommuError::Hardware`] where the function cannot be programmed.
     fn route_msi(&self, address: u32, message_address: u64, data: u32) -> Result<(), IommuError>;
+
+    /// Raise MSI-X table entry `entry` of the function at `address` as
+    /// `message_address`/`data`, unmasked, with MSI-X on.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where the function cannot be programmed.
+    fn route_msix(
+        &self,
+        address: u32,
+        entry: u16,
+        message_address: u64,
+        data: u32,
+    ) -> Result<(), IommuError>;
+
+    /// How many MSI-X entries the function at `address` has: none for one
+    /// that can raise no MSI-X message.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where its capabilities cannot be read.
+    fn msix_entries(&self, address: u32) -> Result<u16, IommuError>;
+
+    /// Set or clear the MSI-X function mask of the function at `address`:
+    /// masked, it raises no MSI-X message until routed again.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where the function cannot be programmed or
+    /// does not read back as asked.
+    fn mask_msix(&self, address: u32, masked: bool) -> Result<(), IommuError>;
+
+    /// The first dword of capability `id` of the function at `address`, or
+    /// [`None`] where it lists none.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where its capabilities cannot be read.
+    fn capability_header(&self, address: u32, id: u8) -> Result<Option<u32>, IommuError>;
+
+    /// Turn the bus mastering of the function at `address` on or off: a
+    /// unit's own, for one whose queues are its function's DMA.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where the function cannot be programmed or
+    /// does not read back as asked.
+    fn set_master(&self, address: u32, master: bool) -> Result<(), IommuError>;
+
+    /// Let the function at `address` raise its INTx pin, or stop it.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where the function cannot be programmed.
+    fn set_intx(&self, address: u32, raise: bool) -> Result<(), IommuError>;
+
+    /// Where the register blocks of the virtio function at `address` lie,
+    /// read from its virtio capabilities, with no MSI-X entry chosen.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::OutOfRange`] for a function that is no modern virtio
+    /// device, and [`IommuError::Hardware`] where it cannot be read.
+    fn virtio_windows(&self, address: u32) -> Result<crate::VirtioPciWindows, IommuError>;
 }
 
 /// A monotonic clock a family bounds its waits against.

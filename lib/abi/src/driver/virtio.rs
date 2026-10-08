@@ -1,10 +1,9 @@
 //! Virtio host-↔-driver ABI seam (`abi-v1`).
 //!
 //! [`VirtioHost`] is the trait every virtio class driver consumes to
-//! allocate DMA-able memory and to wait for queue notifications. It
-//! lives in `lib/abi` so the host trait surface
-//! ([`super::DriverHost::virtio_host`]) can name it without inverting the
-//! dependency direction.
+//! allocate DMA-able memory and to wait for queue notifications. It lives in
+//! `lib/abi` so the hosts that implement it and the drivers that consume it
+//! share one definition without either depending on the other.
 //!
 //! Its implementations are `tairix_kernel_virtio::KernelVirtioHost`, the
 //! capability-checked in-kernel host backed by a per-driver `DmaPool`; the

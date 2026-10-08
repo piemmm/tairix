@@ -9,15 +9,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use tairix_abi::driver::VirtioHost;
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverHandle, DriverHost, DriverKind, HwMatchKey, MmioMapper,
+    CapabilityId, DriverBindKey, DriverHandle, DriverHost, DriverKind, HwMatchKey,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
 };
 use tairix_caps::CapabilitySet;
 use tairix_crypto::{Ed25519PublicKey, Ed25519Signature};
 use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
-use tairix_virtio::VirtioHostFactory;
 
 use crate::events;
 use crate::image::ParsedImage;
@@ -68,34 +66,6 @@ pub struct HostConfig<'h> {
     /// Sink that receives every structured-log [`Event`] the host
     /// emits.
     pub sink: &'h dyn Sink,
-    /// Optional factory minting a per-driver [`VirtioHost`].
-    ///
-    /// `None` for hosts that do not (yet) ship virtio-class plumbing
-    /// — the [`DriverHost::virtio_host`] accessor on the driver
-    /// view then reports `None` and the driver `register()` impl
-    /// must fall back to a no-virtio path or refuse to load. The
-    /// kernel binary wires a real implementation here that mints a
-    /// `KernelVirtioHost` per driver (per-process
-    /// heaps).
-    pub virtio_host_factory: Option<&'h dyn VirtioHostFactory>,
-    /// Optional MMIO mapper the driver reaches through
-    /// [`DriverHost::mmio_mapper`].
-    ///
-    /// `None` for hosts that do not (yet) ship the MMIO-map facility
-    /// — the [`DriverHost::mmio_mapper`] accessor on the driver view
-    /// then reports `None` and a bus driver's `register()` impl must
-    /// refuse to load. The kernel binary wires a
-    /// `KernelMmioMapper` here so an in-kernel bus driver
-    /// (`drivers/bus/pcie_brcm`, `drivers/bus/usb`) can map a
-    /// device's register window through the capability-gated
-    /// `tairix_kernel_sec::map_mmio` path (no
-    /// pointer the driver synthesises). The mapper enforces
-    /// [`CapabilityId::MMIO_MAP`] at every
-    /// [`map_window`](MmioMapper::map_window) call; the host borrows
-    /// it for the host's lifetime and lends it unchanged to every
-    /// driver load (the mapper's own window bitmap is the per-load
-    /// state, not the host's).
-    pub mmio_mapper: Option<&'h dyn MmioMapper>,
 }
 
 /// One row in the host's loaded-driver table.
@@ -271,20 +241,9 @@ impl<'h> Host<'h> {
         // 8. Hand the verified image to the spawner for registration.
         // Construct the host view *before* the hand-off so the driver
         // sees the bitmap that is about to be installed.
-        // The virtio host (if the deployment ships one) lives for
-        // exactly the duration of the registration: drvhost owns the
-        // box, the view borrows a `&dyn VirtioHost` from it, and the
-        // box is dropped on fall-through (free path) or on the early
-        // returns below.
-        let virtio_host_owned = self
-            .cfg
-            .virtio_host_factory
-            .and_then(|f| f.mint(&requested));
         let view = LoadedHostView {
             granted: requested,
             kind: parsed.manifest.kind,
-            virtio_host: virtio_host_owned.as_deref(),
-            mmio_mapper: self.cfg.mmio_mapper,
         };
         let spawn_ctx = SpawnContext {
             manifest: &parsed.manifest,
@@ -309,24 +268,12 @@ impl<'h> Host<'h> {
                     path,
                     "driver register",
                 );
-                // The view borrows from `virtio_host_owned`; the
-                // borrow ends at the function return below, after
-                // which the boxed virtio host (if any) is dropped
-                // and any per-driver `DmaPool` slots are reclaimed.
                 return Err(HostError::DriverRegisterFailed(e));
             }
         }
         // 9. Issue the handle only after a successful registration, so a
         // refused load never consumes an identifier.
         let handle = self.next_handle();
-        // Falling through, the view and the boxed virtio host are
-        // both dropped at the end of this function: the view borrow
-        // ends first (lexical order, view declared after the box),
-        // then the box releases any per-driver DMA bookkeeping.
-        // Explicit `drop()` calls would be redundant and clippy's
-        // `drop_non_drop` lint flags them.
-        let _ = view;
-        let _ = &virtio_host_owned;
         let mut record_image = Vec::with_capacity(image.len());
         record_image.extend_from_slice(image);
         let record = LoadedRecord {
@@ -538,38 +485,20 @@ impl<'h> Host<'h> {
     }
 }
 
-/// Driver-visible view of a host. Only what the driver may legitimately
-/// observe — the granted capability bitmap, the kind, and the
-/// per-driver virtio host if one was minted — is exposed.
-struct LoadedHostView<'v> {
+/// Driver-visible view of a host: only what the driver may legitimately
+/// observe, its granted capability bitmap and its kind.
+struct LoadedHostView {
     granted: CapabilitySet,
     kind: DriverKind,
-    /// Borrowed [`VirtioHost`] minted by
-    /// [`HostConfig::virtio_host_factory`] for this driver load.
-    /// `None` whenever the host config has no factory or the factory
-    /// declined to expose one to this driver (for example because
-    /// `CAP_MEM_DMA` was not granted).
-    virtio_host: Option<&'v dyn VirtioHost>,
-    /// Borrowed MMIO mapper from [`HostConfig::mmio_mapper`], or
-    /// `None` when the host config ships no MMIO-map facility.
-    mmio_mapper: Option<&'v dyn MmioMapper>,
 }
 
-impl DriverHost for LoadedHostView<'_> {
+impl DriverHost for LoadedHostView {
     fn has_capability(&self, cap: CapabilityId) -> bool {
         self.granted.contains(cap)
     }
 
     fn kind(&self) -> DriverKind {
         self.kind
-    }
-
-    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
-        self.virtio_host
-    }
-
-    fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
-        self.mmio_mapper
     }
 }
 

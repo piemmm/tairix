@@ -25,10 +25,9 @@
 //!
 //! # P3: board-discovered interrupt controller + RAM window
 //!
-//! [`boot`] also points the GICv2 driver at the distributor / CPU-
-//! interface bases the firmware tree describes
-//! ([`tairix_arch_aarch64::gic::configure_from_fdt`]) — the QEMU `virt`
-//! GICv2 or the Pi 4's GIC-400 — and reads the `/memory` window
+//! [`boot`] also points the GIC driver at the controller the firmware tree
+//! describes ([`tairix_arch_aarch64::gic::configure_from_fdt`]) — the QEMU
+//! `virt` GICv2 or GICv3, or the Pi 4's GIC-400 — and reads the `/memory` window
 //! (`first_memory_region`), so neither the interrupt-controller base nor
 //! the RAM base is the `virt` assumption any longer. The byte-wise FDT
 //! reader makes both walks MMU-off-safe (`plans/PI.md` W17); a missing or
@@ -53,14 +52,13 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicU8};
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_kernel_device_gigapages, configure_kernel_gigapages,
-    gigapage_mask_from_extents, identity_device_mask, install_boot_physmap, AddressSpace,
-    PageTablePool, GIGAPAGE_MASK_WORDS,
+    configure_device_gigapages, configure_kernel_gigapages, gigapage_mask_from_extents,
+    identity_device_mask, install_boot_physmap, AddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
 };
 
 use tairix_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, firmware, gic, halt_current_cpu, paging, platform,
-    serial, smp, syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
+    console, enable_fp_el1, exceptions, fdt, firmware, gic, gicv3, halt_current_cpu, paging,
+    platform, serial, smp, syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
 };
 use tairix_arch_api::{PlatformDiscovery, SchedulerArch, BOOT_CPU};
 use tairix_fdt::Fdt;
@@ -247,12 +245,29 @@ pub static BOOT_AUDIT_RING: BootAuditRing<BOOT_AUDIT_RING_CAPACITY, DaifIrqContr
 /// never disturbs a test's audit interception.
 pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_AUDIT_RING]);
 
+/// Record the full rate firmware was asked to run the cores at for boot.
+fn log_cpu_clock_raised(log_sink: &dyn Sink, rate_hz: u64) {
+    let mut rate_buf = [0u8; 20];
+    log(
+        log_sink,
+        &Event {
+            level: Level::Info,
+            id: KERNEL_CPU_CLOCK_RAISED,
+            message: "aarch64: firmware asked to run the ARM cores at full rate for boot",
+            fields: &[Field {
+                key: "rate_hz",
+                value: tairix_log::FieldValue::Str(format_u64(rate_hz, &mut rate_buf)),
+            }],
+        },
+    );
+}
+
 /// Boot the aarch64 kernel on the boot CPU and hand off to
 /// [`tairix_kernel_core::kernel_main`].
 ///
 /// `dtb` is the device-tree pointer the firmware/loader handed the boot
 /// CPU (preserved verbatim by `boot.s`); it is parsed for the console
-/// base, the GICv2/GIC-400 bases, the `/memory` window, the generic-timer
+/// base, the GIC, the `/memory` window, the generic-timer
 /// rate, and the PSCI conduit.
 ///
 /// `log_sink` / `audit_sink` are the `&'static` sinks installed in the
@@ -361,22 +376,7 @@ pub fn boot(
     }
 
     if early.cpu_clock_hz != 0 {
-        let mut rate_buf = [0u8; 20];
-        log(
-            log_sink,
-            &Event {
-                level: Level::Info,
-                id: KERNEL_CPU_CLOCK_RAISED,
-                message: "aarch64: firmware asked to run the ARM cores at full rate for boot",
-                fields: &[Field {
-                    key: "rate_hz",
-                    value: tairix_log::FieldValue::Str(format_u64(
-                        early.cpu_clock_hz,
-                        &mut rate_buf,
-                    )),
-                }],
-            },
-        );
+        log_cpu_clock_raised(log_sink, early.cpu_clock_hz);
     }
 
     // Discover the rest of the board from the firmware device tree: the
@@ -457,9 +457,20 @@ pub fn boot(
             // Record the discovered tree and the root block binding before
             // entering the core. The early-discovered video facts ride along
             // so the boot display joins the same tree (`plans/DISPLAY.md` D7d).
-            audit_root_storage_binding(dtb, early.video, log_sink);
+            audit_root_storage_binding(
+                dtb,
+                early.video,
+                &discovered.gic_redistributors,
+                discovered.gic_redistributor_stride,
+                log_sink,
+            );
+            let gic_redistributors: &'static [gicv3::RedistributorRegion] =
+                Box::leak(discovered.gic_redistributors.into_boxed_slice());
             enter_kernel_core(
-                arch,
+                Aarch64BinArch::new(arch).with_gic_redistributors(
+                    gic_redistributors,
+                    discovered.gic_redistributor_stride,
+                ),
                 BootMemory {
                     map,
                     installed_bytes: installed_memory_bytes,
@@ -478,7 +489,7 @@ pub fn boot(
     halt_current_cpu()
 }
 
-/// Point the console and the GICv2 driver at the bases the firmware tree
+/// Point the console and the GIC driver at what the firmware tree
 /// describes, then install the identity window's Device and kernel-extent
 /// gigapage typing derived from them; returns the discovery and the Device
 /// mask.
@@ -517,7 +528,12 @@ fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_
         pcie_outbound,
     ]
     .map(|base| (base, 1));
-    let identity_mask = identity_device_mask(&extents, kernel_start_addr(), kernel_end_addr());
+    let identity_mask = identity_device_mask(
+        &extents,
+        early.gic_windows,
+        kernel_start_addr(),
+        kernel_end_addr(),
+    );
     configure_device_gigapages(identity_mask);
     let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
     // Exactly what the kernel addresses *physically* — its own image and
@@ -539,7 +555,7 @@ fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_
     for (word, normal) in config_mask.iter_mut().zip(normal) {
         *word &= !normal;
     }
-    configure_kernel_device_gigapages(config_mask);
+    tairix_arch_aarch64::paging::KERNEL_DEVICES.name(config_mask);
     // RAM stays off every gigapage registers occupy, in either regime.
     let mut device_mask = identity_mask;
     for (word, config) in device_mask.iter_mut().zip(config_mask) {
@@ -838,7 +854,7 @@ struct BootStatus {
     direct_map: &'static str,
     /// A console UART was found in the tree.
     console_discovered: &'static str,
-    /// A GICv2-class interrupt controller was found in the tree.
+    /// A GIC this port drives was found in the tree.
     gic_discovered: &'static str,
     /// The framebuffer boot console came up.
     video_console: &'static str,
@@ -1154,7 +1170,7 @@ fn install_debug_component_bases(fdt: &Fdt<'_>, cpu_mpidrs: &[u64]) {
 /// 2. Adopt the boot identity map — the very first memory-system act,
 ///    while this core has performed no atomic read-modify-write (LDXR/
 ///    STXR exclusives are unreliable on MMU-off Device-typed DRAM).
-/// 3. EL1 vectors + GICv2 CPU interface + per-CPU preemption/IPI arming
+/// 3. EL1 vectors + GIC CPU interface + per-CPU preemption/IPI arming
 ///    — each banked or per-core state that must be programmed on the
 ///    core that uses it.
 /// 4. [`tairix_kernel_core::run_secondary`], which audits the arrival
@@ -1178,12 +1194,26 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
         halt_current_cpu()
     }
     // SAFETY: per-CPU installs on this core, exactly once each, before
-    // any interrupt source is armed here: the EL1 vector base and the
-    // GICv2 CPU interface are banked per core (the distributor write in
-    // `gic::init` idempotently re-enables what the boot CPU enabled).
+    // any interrupt source is armed here; the boot CPU's `gic::init` ran
+    // before any `CPU_ON`.
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+    }
+    // SAFETY: as above.
+    if let Err(err) = unsafe { gic::init_secondary() } {
+        log(
+            &SERIAL_SINK,
+            &Event {
+                level: Level::Warn,
+                id: KERNEL_SECONDARY_PARKED,
+                message: "aarch64: secondary cpu's GIC interface did not come up; parking",
+                fields: &[Field {
+                    key: "cause",
+                    value: tairix_log::FieldValue::Str(err.as_str()),
+                }],
+            },
+        );
+        halt_current_cpu()
     }
     // Per-CPU tickless preemption + IPI arming (the callbacks and the
     // per-CPU backing were installed by the boot CPU before `CPU_ON`).
@@ -1220,10 +1250,14 @@ extern "C" fn production_secondary_entry(cpu: u32) -> ! {
 /// facts when one came up; the surface is published into the same
 /// buffered tree as the boot display node (`plans/DISPLAY.md` D7d), so
 /// the user-space display service autoloads against it. `None` (a
-/// UART-only boot) publishes no display node.
+/// UART-only boot) publishes no display node. A GICv3's redistributor
+/// regions, `gic_redistributor_stride` apart, say whether the boot CPU can
+/// take the LPIs a PCI function's messages would raise.
 fn audit_root_storage_binding(
     dtb: u64,
     video: Option<video::DiscoveredVideo>,
+    gic_redistributors: &[gicv3::RedistributorRegion],
+    gic_redistributor_stride: Option<u64>,
     log_sink: &'static (dyn Sink + Sync),
 ) {
     if dtb == 0 {
@@ -1268,80 +1302,28 @@ fn audit_root_storage_binding(
     // the caller enabled it, so this whole-tree walk is safe, `plans/PI.md`).
     let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
     let probe = unsafe { tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) };
-    if let Ok(bus) = probe {
+    if let (Ok(bus), Ok(slots)) = (probe, Fdt::new(dtb_bytes)) {
+        // Read before the probes add nodes of their own.
+        let dma = crate::iommu_fdt::SlotDma::read(
+            &slots,
+            sink.nodes(),
+            <tairix_arch_aarch64::platform::Aarch64Fdt as tairix_arch_api::fdtwalk::FdtPlatform>::DEFAULT_DMA_COHERENCE,
+        );
         // A bus enumeration error (an over-full or malformed bus) leaves the
         // root unbound rather than aborting the boot.
-        let _ = crate::hwdiscovery::observe_virtio_mmio_block_devices(&bus, &mut sink);
-        // Bootstrap-floor virtio-MMIO input discovery: probe each slot's `DeviceID` for a virtio-input device and
-        // emit a user-space-autoloadable `Input` node carrying its register
-        // window as a grant request into the same buffered tree, so the
-        // unlock kthread's `devmgr` autoload spawns the matching user-space
-        // input driver with exactly that window (`plans/PI.md` P10 5d-2-ii).
-        // The two reads of `bus` are sequential, so the immutable borrows do
-        // not overlap. A no-op on the Pi tree (no `virtio,mmio` node), so it
-        // is metal-neutral and additive. An enumeration
-        // error leaves the input nodes undiscovered, never aborting the boot.
-        // Resolve each virtio-input slot's GICv2 INTID from the firmware tree
-        // (`device_spi` decodes the node's `interrupts` specifier — a
-        // discovered value, never a board constant) so the emitted node carries the IRQ line its interrupt-driven
-        // user-space driver parks on.
+        let _ = crate::hwdiscovery::observe_virtio_mmio_block_devices(&bus, &dma, &mut sink);
+        // Each interrupt-driven device is emitted with its slot's line, as its
+        // node's `interrupts` decodes; a slot whose line cannot be resolved
+        // is left undiscovered.
+        let slot_irq = |slot_base| crate::aarch64::root_unlock::device_spi(&slots, slot_base);
         let _ = crate::hwdiscovery::observe_virtio_mmio_input_devices(
-            &bus,
-            &|slot_base| {
-                // Re-parse the validated blob per slot: the first `fdt` was
-                // consumed by the discovery walk above, and there are only a
-                // handful of virtio-input slots, so re-reading the FDT header
-                // is negligible boot-time cost. A bogus
-                // pointer fails the magic check and yields `None`, skipping
-                // the slot fail-closed.
-                // SAFETY: `dtb`/`total` bound the firmware blob `Fdt::from_ptr`
-                // validated above; it is identity-mapped and immutable for the
-                // kernel's life, and the MMU is on (the caller enabled it).
-                let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
-                crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
-            },
-            &mut sink,
-            log_sink,
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
-        // Bootstrap-floor virtio-MMIO network discovery (`plans/NETWORK.md`
-        // N4e-β): the exact sibling of the input probe above — probe each
-        // slot's `DeviceID` for a virtio-net device and emit a
-        // user-space-autoloadable `Network` node carrying its register
-        // window, DMA constraint, and discovered GICv2 interrupt line, so
-        // the autoload path spawns the matching user-space virtio-net driver
-        // process (which then serves the `netchan` channel to `netstack`).
-        // The IRQ line is resolved by the same per-slot `device_spi` decode
-        // (a discovered value, never a board constant); a sequential
-        // immutable read of `bus`, a no-op on the Pi tree, and fail-closed on
-        // any enumeration error, exactly like the input probe.
         let _ = crate::hwdiscovery::observe_virtio_mmio_network_devices(
-            &bus,
-            &|slot_base| {
-                // SAFETY: as the input probe's closure above — `dtb` bounds
-                // the firmware blob validated at boot, identity-mapped and
-                // immutable for the kernel's life, MMU on.
-                let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
-                crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
-            },
-            &mut sink,
-            log_sink,
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
-
-        // A sound card is discovered by the same walk as a NIC: one slot's
-        // register window, its coherent DMA constraint and its decoded
-        // interrupt line, so the autoloaded user-space driver can park on the
-        // device's own period interrupt.
         let _ = crate::hwdiscovery::observe_virtio_mmio_audio_devices(
-            &bus,
-            &|slot_base| {
-                // SAFETY: as the probes above — `dtb` bounds the firmware
-                // blob validated at boot, identity-mapped and immutable for
-                // the kernel's life, MMU on.
-                let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
-                crate::aarch64::root_unlock::device_spi(&fdt, slot_base)
-            },
-            &mut sink,
-            log_sink,
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
     }
 
@@ -1366,12 +1348,17 @@ fn audit_root_storage_binding(
         );
     }
 
-    // Every generic ECAM host the tree describes becomes the kernel's own.
+    // Every generic ECAM host the tree describes becomes the kernel's own,
+    // its functions raising LPIs where an ITS can take their messages.
     // SAFETY: as the probes' closures above — `dtb` bounds the firmware blob
     // validated at boot, identity-mapped and immutable for the kernel's life,
     // MMU on.
     if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
-        crate::pci_fdt::seed(&fdt, &PciPort, &mut sink, log_sink);
+        let mut lpis =
+            crate::aarch64_messages::discover(&fdt, gic_redistributors, gic_redistributor_stride);
+        let intx = IntxOnGic(gic::find_gic(&fdt).and_then(|gic| gic.phandle));
+        crate::pci_fdt::seed(&fdt, &PciPort, &intx, &mut lpis, &mut sink, log_sink);
+        crate::aarch64_messages::publish(lpis.into_routes());
     }
 
     // The MMU is on here (the caller enabled it), as the boot record's
@@ -1385,9 +1372,9 @@ fn audit_root_storage_binding(
 /// physical one. Anything else fails closed: no other mapping of a register
 /// window is uncached.
 pub(crate) fn device_registers(base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
-    use tairix_arch_aarch64::paging::{identity_device_covers, kernel_device_covers, physmap_virt};
+    use tairix_arch_aarch64::paging::{identity_device_covers, physmap_virt, KERNEL_DEVICES};
     let span = u64::try_from(len).ok()?;
-    let virt = if kernel_device_covers(base, span) {
+    let virt = if KERNEL_DEVICES.covers(base, span) {
         physmap_virt(base)
     } else if identity_device_covers(base, span) {
         base
@@ -1404,17 +1391,25 @@ pub(crate) fn device_registers(base: u64, len: usize) -> Option<core::ptr::NonNu
 struct PciPort;
 
 impl crate::pci_fdt::FdtPort for PciPort {
+    fn dma_convention(&self) -> tairix_abi::DmaCoherence {
+        <tairix_arch_aarch64::platform::Aarch64Fdt as tairix_arch_api::fdtwalk::FdtPlatform>::DEFAULT_DMA_COHERENCE
+    }
+
     fn registers(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
         device_registers(base, len)
     }
 
     fn reach(&self) -> u64 {
-        tairix_arch_aarch64::paging::KERNEL_DEVICE_REACH
+        tairix_arch_aarch64::paging::KERNEL_DEVICES.reach()
     }
+}
 
-    fn interrupt(&self, fdt: &Fdt<'_>, spec: &tairix_fdt::pci::InterruptSpec) -> Option<u32> {
-        let gic = gic::find_gic(fdt)?;
-        if gic.phandle != Some(spec.parent) {
+/// A function's INTx on the GIC, by its phandle read once from the tree.
+struct IntxOnGic(Option<u32>);
+
+impl crate::pci_fdt::IntxLines for IntxOnGic {
+    fn line(&self, spec: &tairix_fdt::pci::InterruptSpec) -> Option<u32> {
+        if self.0 != Some(spec.parent) {
             return None;
         }
         match spec.cells() {
@@ -1446,7 +1441,7 @@ struct BootMemory {
 /// A hand-off that `BootInfo::validate` rejects parks fail-closed rather
 /// than entering the core.
 fn enter_kernel_core(
-    arch: Aarch64Arch,
+    arch: Aarch64BinArch,
     memory: BootMemory,
     heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
@@ -1489,17 +1484,17 @@ fn enter_kernel_core(
 
     // The discovered dense CPU count sizes the scheduler's run queues
     // and names how many cores `kernel_main`'s SMP phase brings online.
-    let cpu_count = arch.cpu_count();
+    let cpu_count = arch.arch().cpu_count();
     // Recover the firmware power-control conduit the boot path discovered
     // from the `/psci` node (the same method the secondary-core bring-up
     // uses) so the Supervisor's `reboot`/`poweroff` can drive PSCI
     // `SYSTEM_RESET` / `SYSTEM_OFF` through it. A tree with no `/psci` node
     // (spin-table bring-up) leaves it `None`, so both fail safe (unsupported).
-    let psci_method = match arch.secondary_start() {
+    let psci_method = match arch.arch().secondary_start() {
         Some(SecondaryStart::Psci(method)) => Some(method),
         _ => None,
     };
-    let arch = Arc::new(Aarch64BinArch::new(arch).with_psci_method(psci_method));
+    let arch = Arc::new(arch.with_psci_method(psci_method));
     // Publish the arch handle for the panic-handler bridge before it is
     // moved into `BootInfo` (a panic after this point carries registers +
     // a backtrace; before it, the pre-init serial path runs).
@@ -1618,9 +1613,12 @@ fn enter_kernel_core(
 struct EarlyDiscovered {
     /// A recognised console UART was found and the console base/model set.
     console: bool,
-    /// A GICv2-class interrupt controller was found and its GICD/GICC
-    /// bases set.
+    /// A GIC was found and the driver pointed at it.
     gic: bool,
+    /// The gigapages every GIC register window lies in: its distributor,
+    /// GICv2 CPU interface or GICv3 redistributors, and any interrupt
+    /// translation service.
+    gic_windows: [u64; GIGAPAGE_MASK_WORDS],
     /// The framebuffer boot console came up: a firmware mailbox was
     /// found, a display is attached, and the scan-out surface was
     /// allocated — console output now defaults to the screen, with the
@@ -1646,9 +1644,8 @@ struct EarlyDiscovered {
     cpu_clock_hz: u64,
 }
 
-/// Point the console and the GICv2 driver at the bases the firmware tree
-/// describes and bring up the framebuffer boot console, before the MMU
-/// is enabled.
+/// Point the console and the GIC driver at what the firmware tree describes
+/// and bring up the framebuffer boot console, before the MMU is enabled.
 ///
 /// All three discoveries are early-returning, `ranges`-aware walks
 /// ([`console::configure_from_fdt`] / [`gic::configure_from_fdt`] /
@@ -1664,6 +1661,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     let mut out = EarlyDiscovered {
         console: false,
         gic: false,
+        gic_windows: [0; GIGAPAGE_MASK_WORDS],
         video: None,
         dtb_len: 0,
         pcie: None,
@@ -1690,6 +1688,15 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     // powered-up PL011 masks the omission (`uart_init`).
     uart_init::init_from_fdt(&fdt);
     out.gic = gic::configure_from_fdt(&fdt).is_some();
+    gic::for_each_window(&fdt, |base, len| {
+        for (word, window) in out
+            .gic_windows
+            .iter_mut()
+            .zip(gigapage_mask_from_extents(&[(base, len)]))
+        {
+            *word |= window;
+        }
+    });
     // Ask the firmware for full speed before anything else runs. On a Pi the
     // ARM clock is the firmware's, and it leaves it at `arm_freq_min` — 600
     // MHz on a board rated at 1.5 GHz — until an OS driver asks otherwise, so
@@ -1767,6 +1774,10 @@ struct Discovered {
     /// bring-up only when the tree declares no PSCI node. Empty when
     /// none are declared or the walk fails (fail closed).
     cpu_spin_releases: Vec<(u64, u64)>,
+    /// A GICv3's redistributor regions, in tree order; empty on a GICv2.
+    gic_redistributors: Vec<gicv3::RedistributorRegion>,
+    /// The stride between a GICv3's redistributors, where the tree names one.
+    gic_redistributor_stride: Option<u64>,
 }
 
 /// Discover the board's post-MMU facts from the device tree at `dtb`:
@@ -1787,6 +1798,8 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
         psci_method: None,
         cpu_mpidrs: Vec::new(),
         cpu_spin_releases: Vec::new(),
+        gic_redistributors: Vec::new(),
+        gic_redistributor_stride: None,
     };
     if dtb == 0 {
         return out;
@@ -1851,6 +1864,11 @@ fn configure_from_dtb(dtb: u64) -> Discovered {
     }
     out.cpu_mpidrs = cpus;
     out.cpu_spin_releases = spin_releases;
+    let mut regions = Vec::new();
+    if let Some(stride) = gic::redistributor_regions(&fdt, |region| regions.push(region)) {
+        out.gic_redistributors = regions;
+        out.gic_redistributor_stride = stride;
+    }
     // Record the console UART's receive-interrupt line so the root-unlock
     // console handoff can switch `login`'s input from polled to
     // interrupt-driven (`crate::aarch64::gic_irq::enable_uart_console_irq`).

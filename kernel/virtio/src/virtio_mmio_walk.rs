@@ -40,7 +40,8 @@ pub enum VirtioMmioWalkError {
     /// More than [`MAX_SLOTS`] slots responded, so the walk cannot
     /// guarantee it inspected the whole bus.
     SlotTableOverflow,
-    /// No populated slot matched the requested virtio device ID.
+    /// No populated slot matched the requested virtio device ID, or the
+    /// slot named holds another device.
     NoVirtioSlot,
     /// Mapping the device's register window failed (propagated
     /// verbatim; e.g. the caller lacks `CAP_MMIO_MAP`).
@@ -63,9 +64,10 @@ pub struct VirtioMmioProvision<T> {
     pub base: u64,
 }
 
-/// Enumerate `bus`, locate the first populated slot whose virtio device
-/// ID equals `device_id`, map its register window through `mapper`, and
-/// hand the window to `build` to construct the caller's transport.
+/// Enumerate `bus`, take the populated slot at position `slot` of the
+/// enumeration, which must hold virtio device `device_id`, map its register
+/// window through `mapper`, and hand the window to `build` to construct the
+/// caller's transport.
 ///
 /// `device_id` is the virtio device type reported in the slot's
 /// `DeviceID` register (e.g. `2` for block, `1` for network) — over
@@ -93,13 +95,19 @@ pub struct VirtioMmioProvision<T> {
 pub fn provision_virtio_mmio<T, B>(
     bus: &dyn VirtioMmioBus,
     device_id: u32,
+    slot: usize,
     mapper: &dyn MmioMapper,
     build: B,
 ) -> Result<VirtioMmioProvision<T>, VirtioMmioWalkError>
 where
     B: FnOnce(RegisterWindow) -> Result<T, VirtioError>,
 {
-    let base = find_virtio_slot(bus, device_id)?;
+    let base = slots(bus, |devices| {
+        devices
+            .get(slot)
+            .filter(|device| device.device == device_id)
+            .map(|device| device.address)
+    })?;
     let window = bus
         .map_slot_window(base, mapper)
         .map_err(VirtioMmioWalkError::MapWindow)?;
@@ -107,9 +115,27 @@ where
     Ok(VirtioMmioProvision { transport, base })
 }
 
-/// Enumerate the bus into a bounded buffer and return the register-block
-/// base of the first slot matching `device_id`.
-fn find_virtio_slot(bus: &dyn VirtioMmioBus, device_id: u32) -> Result<u64, VirtioMmioWalkError> {
+/// The position in `bus`'s enumeration of its first slot holding virtio
+/// device `device_id`, for [`provision_virtio_mmio`].
+///
+/// # Errors
+///
+/// As [`provision_virtio_mmio`]'s enumeration.
+pub fn first_virtio_slot(
+    bus: &dyn VirtioMmioBus,
+    device_id: u32,
+) -> Result<usize, VirtioMmioWalkError> {
+    slots(bus, |devices| {
+        devices.iter().position(|device| device.device == device_id)
+    })
+}
+
+/// Enumerate the bus into a bounded buffer and answer what `pick` finds in
+/// it.
+fn slots<R>(
+    bus: &dyn VirtioMmioBus,
+    pick: impl FnOnce(&[BusDevice]) -> Option<R>,
+) -> Result<R, VirtioMmioWalkError> {
     let blank = BusDevice {
         vendor: 0,
         device: 0,
@@ -123,11 +149,7 @@ fn find_virtio_slot(bus: &dyn VirtioMmioBus, device_id: u32) -> Result<u64, Virt
         Err(DriverError::BufferTooSmall) => return Err(VirtioMmioWalkError::SlotTableOverflow),
         Err(e) => return Err(VirtioMmioWalkError::Enumerate(e)),
     };
-    table[..count]
-        .iter()
-        .find(|d| d.device == device_id)
-        .map(|d| d.address)
-        .ok_or(VirtioMmioWalkError::NoVirtioSlot)
+    pick(table.get(..count).unwrap_or(&[])).ok_or(VirtioMmioWalkError::NoVirtioSlot)
 }
 
 #[cfg(test)]
@@ -239,8 +261,11 @@ mod tests {
             slots: alloc::vec![slot(1, 0x1000_3000), slot(VIRTIO_BLK_DEVICE_ID, SLOT_BASE)],
         };
         let mapper = RecordingMapper::new(true);
-        let provision = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
-            .expect("provisioned");
+        let slot = first_virtio_slot(&bus, VIRTIO_BLK_DEVICE_ID).expect("a block slot");
+        assert_eq!(slot, 1);
+        let provision =
+            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, slot, &mapper, keep_window())
+                .expect("provisioned");
         assert_eq!(provision.base, SLOT_BASE);
         assert_eq!(provision.transport.len(), SLOT_LEN);
         assert_eq!(
@@ -256,10 +281,16 @@ mod tests {
         };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
-                .expect_err("no slot"),
-            VirtioMmioWalkError::NoVirtioSlot
+            first_virtio_slot(&bus, VIRTIO_BLK_DEVICE_ID),
+            Err(VirtioMmioWalkError::NoVirtioSlot)
         );
+        for slot in [0, 1] {
+            assert_eq!(
+                provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, slot, &mapper, keep_window())
+                    .expect_err("another device, or none"),
+                VirtioMmioWalkError::NoVirtioSlot
+            );
+        }
         assert!(mapper.requests.borrow().is_empty());
     }
 
@@ -270,7 +301,7 @@ mod tests {
         };
         let mapper = RecordingMapper::new(false);
         assert_eq!(
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
+            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, 0, &mapper, keep_window())
                 .expect_err("map refused"),
             VirtioMmioWalkError::MapWindow(DriverError::PermissionDenied)
         );
@@ -285,7 +316,7 @@ mod tests {
         let bus = FakeBus { slots };
         let mapper = RecordingMapper::new(true);
         assert_eq!(
-            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, keep_window())
+            provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, 0, &mapper, keep_window())
                 .expect_err("overflow"),
             VirtioMmioWalkError::SlotTableOverflow
         );

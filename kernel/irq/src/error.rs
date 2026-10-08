@@ -68,3 +68,27 @@ pub enum MaskError {
     /// The line is outside the controller's addressable range.
     OutOfRange,
 }
+
+/// Failure modes of [`crate::IrqController::activate`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ActivationError {
+    /// The line is outside the controller's addressable range.
+    OutOfRange,
+    /// The controller has no vector left to give the line.
+    Exhausted,
+    /// Nothing the line raises could reach a CPU: no remapping entry could
+    /// be made for it, or the CPU it would reach cannot be named.
+    Unroutable,
+}
+
+impl ActivationError {
+    /// Translate to the ABI errno the syscall handler returns: an exhausted
+    /// vector space reads as it does to `msi_alloc`.
+    #[must_use]
+    pub const fn to_errno(self) -> Errno {
+        match self {
+            Self::OutOfRange | Self::Exhausted => Errno::OutOfRange,
+            Self::Unroutable => Errno::NotSupported,
+        }
+    }
+}

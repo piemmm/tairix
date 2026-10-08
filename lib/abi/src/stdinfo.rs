@@ -426,7 +426,9 @@ mod tests {
             let word = String::from(char::from(byte));
             assert_eq!(
                 format!("{}", Suggestion::new(&[word.as_str()])),
-                format!("{{\"argv\":[\"{expected}\"],\"safe_to_autorun\":false,\"requires_confirmation\":true}}"),
+                format!(
+                    "{{\"argv\":[\"{expected}\"],\"safe_to_autorun\":false,\"requires_confirmation\":true}}"
+                ),
                 "byte {byte:#04x}"
             );
         }

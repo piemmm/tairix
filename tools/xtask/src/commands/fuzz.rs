@@ -55,6 +55,11 @@ pub const TARGETS: &[Target] = &[
         description: "Arch HAL frame-pointer stack unwinder (panic backtrace)",
     },
     Target {
+        package: "tairix-arch-x86_64",
+        test: "fuzz_acpi",
+        description: "x86_64 DMA-remapping tables firmware hands the port (DMAR, IVRS, VIOT)",
+    },
+    Target {
         package: "tairix-abi",
         test: "fuzz_decode",
         description: "lib/abi wire decoders (IPC, manifest headers, the spawn attach block)",
@@ -1025,6 +1030,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-vt");
+    }
+
+    #[test]
+    fn firmware_dma_table_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_acpi"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-arch-x86_64");
     }
 
     #[test]

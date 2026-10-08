@@ -34,7 +34,7 @@ pub const QUERY_SERVED: EventId = EventId(8_001);
 /// security-relevant decision in its own right.
 pub const QUERY_DENIED: EventId = EventId(8_002);
 /// A request was rejected before dispatch: the header failed to decode, or
-/// its declared payload was truncated.
+/// the frame was shorter or longer than the payload it declares.
 pub const REQUEST_MALFORMED: EventId = EventId(8_003);
 /// A request named a query identifier that is reserved but unassigned in
 /// `sysinfo-v1`.

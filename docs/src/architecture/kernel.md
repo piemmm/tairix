@@ -899,11 +899,22 @@ completion so a stale edge cannot mis-pair back-to-back reads, and the
 service's mount / install / give-up decisions route onto the audit channel
 (`InitSpawnCtx::static_audit`, §19.4).
 
-The kthread dispatches on which floor block driver bound: **virtio-blk**
-over the production device-IRQ path (the QEMU `virt` / x86_64 root), or the
-Raspberry Pi 4 **EMMC2** SD host. The mount, the
-pre-unlock `/System` autoload, and the interactive unlock are shared between
-the two (`finish_unlock`, `AGENTS.md` §2.2); only the bring-up differs. EMMC2
+The kthread dispatches on which floor block driver bound: **virtio-blk**, or
+the Raspberry Pi 4 **EMMC2** SD host. A virtio-MMIO disk is brought up by the
+one sequence both device-tree ports share (`floor_mmio::bring_up_virtio_mmio`):
+it claims the node for the kernel, carves its DMA through the kernel's own
+domain where a unit translates it, refuses a slot that does not snoop before
+its line is bound, then binds and arms the slot's interrupt. A port supplies
+only what its silicon decides (`MmioFloorPort`): its bookkeeping page tables,
+the maps registers and frames are reached through, and where its devices take
+their interrupts. The x86_64 virtio-PCI disk is brought up by `x86_64::floor`
+instead. Every floor device's interrupt, EMMC2's included, is bound through
+`floor_irq::LineHost`, which configures a wired line's trigger while it is
+still masked and unbinds a line it cannot arm. Every virtio disk is then
+admitted at the signed load gate and opened by `finish_virtio_unlock`; it and
+EMMC2 share the mount, the pre-unlock `/System` autoload, and the interactive
+unlock (`finish_unlock`).
+EMMC2
 is interrupt-driven and uses ADMA2 DMA: it
 maps the matched node's sole SDHCI register window under `CAP_MMIO_MAP`
 through a minimal in-kernel MMIO-only DriverHost, carves a staging slab

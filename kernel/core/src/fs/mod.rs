@@ -272,9 +272,8 @@ pub enum VfsError {
     /// or key it must receive. Never truncated: the caller retries with a
     /// larger buffer.
     BufferTooSmall,
-    /// The driver cannot store the attribute: the per-inode attribute
-    /// count, total byte, or metadata-block bound would be exceeded, or
-    /// the volume is out of space.
+    /// The volume is out of space, or the driver cannot store an attribute
+    /// within its per-inode count, total byte, or metadata-block bound.
     NoSpace,
     /// The covering mount's on-disk format has nowhere to store extended
     /// attributes (its driver carries no attribute facet). Retrying can
@@ -359,7 +358,7 @@ impl fmt::Display for VfsError {
             Self::InvalidKey => "invalid attribute key",
             Self::NoData => "no such attribute",
             Self::BufferTooSmall => "buffer too small",
-            Self::NoSpace => "no space for attribute",
+            Self::NoSpace => "no space left on device",
             Self::NotSupported => "attributes not supported by the mounted format",
             Self::OutOfMemory => "out of memory",
         };

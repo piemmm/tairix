@@ -157,12 +157,14 @@ pub mod fdt;
 /// and the boot-time requests made over it.
 pub mod firmware;
 pub mod gic;
+pub mod gicv3;
 /// Heterogeneous (`big.LITTLE`) core classification: the pure
 /// `capacity-dmips-mhz` → [`tairix_arch_api::CoreClass`] classifier
 /// [`crate::kernel_arch::Aarch64Arch`] feeds from the device tree
 /// (`plans/WIRING.md` Stage W10).
 pub mod hetcore;
 pub mod irqmask;
+pub mod its;
 pub mod kernel_arch;
 /// aarch64 implementation of the Arch HAL memory-tagging surface
 /// ([`tairix_arch_api::MemoryTagging`]) — Arm MTE
@@ -193,6 +195,8 @@ pub mod sidechannel;
 /// `CPU_ON` launcher (`plans/WIRING.md` Stage W6).
 pub mod smp;
 pub mod syscall_entry;
+#[cfg(test)]
+mod test_frames;
 /// aarch64 implementation of the Arch HAL timer-programming surface
 /// ([`tairix_arch_api::Timer`]): the architecture-
 /// neutral scheduler-tick callback install + dispatch over the EL1

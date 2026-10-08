@@ -551,6 +551,24 @@ fn window_map_cacheable_chunks_maps_blocks_into_one_contiguous_window() {
     assert_eq!(space.mapped_pages(), 0);
 }
 
+/// The room a window reports is exactly what a map could then claim, and
+/// asking claims nothing.
+#[test]
+fn window_room_is_what_a_map_could_claim() {
+    let mut space = borrowed_space();
+    let mut win = window(16);
+    assert!(win.has_room(14), "a full window less its guards");
+    assert!(!win.has_room(15));
+    assert!(!win.has_room(usize::MAX));
+    win.map_chunks_into(&mut space, &[(0x1000_0000, 6)], SharedMemory::Cacheable)
+        .expect("chunk maps");
+    assert!(win.has_room(6));
+    assert!(!win.has_room(7), "eight slots are held");
+    assert_eq!(win.live(), 1);
+    win.map_chunks_into(&mut space, &[(0x2000_0000, 6)], SharedMemory::Cacheable)
+        .expect("the room it reported");
+}
+
 #[test]
 fn window_map_chunks_maps_a_dma_region_coherent_on_every_page() {
     let mut space = borrowed_space();

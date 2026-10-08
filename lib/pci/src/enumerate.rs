@@ -9,6 +9,7 @@
 //! external timeouts.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{
@@ -24,9 +25,9 @@ use tairix_abi::{
 
 use crate::aperture::Apertures;
 use crate::config::{
-    BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, BUS_NUMBERS, CAP_ID_VENDOR,
-    COMMAND_STATUS, DEVICE_BAR_SLOTS, EXTENDED_REGISTER, FIRST_BAR, HEADER_BRIDGE, HEADER_CARDBUS,
-    HEADER_DEVICE, HEADER_TYPE, MULTIFUNCTION,
+    BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, BRIDGE_BAR_SLOTS, BUS_NUMBERS,
+    CAP_ID_VENDOR, COMMAND_STATUS, DEVICE_BAR_SLOTS, EXTENDED_REGISTER, FIRST_BAR, HEADER_BRIDGE,
+    HEADER_CARDBUS, HEADER_DEVICE, HEADER_TYPE, MULTIFUNCTION,
 };
 use crate::topology::{
     Acs, Ats, Confinement, Function, Header, Pasid, PciTopology, PortType, Pri, SrIov, Topology,
@@ -37,9 +38,17 @@ use crate::topology::{
 const CAP_ID_EXPRESS: u8 = 0x10;
 
 /// Byte offsets within the PCI Express capability (PCI Express Base 5.0
-/// §7.5.3): the Slot Capabilities register and the Device Control 2 register.
+/// §7.5.3): the Device Control, Slot Capabilities and Device Control 2
+/// registers.
+const EXPRESS_DEVICE_CONTROL: u8 = 0x08;
 const EXPRESS_SLOT_CAPABILITIES: u8 = 0x14;
 const EXPRESS_DEVICE_CONTROL_2: u8 = 0x28;
+/// Device Control's Enable No Snoop: a function may then ask for requests
+/// the caches do not see.
+const DEVICE_CONTROL_ENABLE_NO_SNOOP: u32 = 1 << 11;
+/// Device Control, the low half of its dword; the high half is Device
+/// Status, whose bits clear when written as ones.
+const DEVICE_CONTROL_BITS: u32 = 0xFFFF;
 /// The PCI Express Capabilities register's Slot Implemented bit, in the
 /// capability's header dword.
 const EXPRESS_SLOT_IMPLEMENTED: u32 = 1 << 24;
@@ -316,8 +325,11 @@ impl<C: ConfigSpace> Pci<C> {
                     .read32(addr_with_reg(addr, BUS_NUMBERS))
                     .to_le_bytes();
                 let ari = self.express(addr).is_some_and(|(offset, _)| {
-                    let control = addr_with_byte_offset(addr, offset + EXPRESS_DEVICE_CONTROL_2);
-                    self.config.read32(control) & DEVICE_CONTROL_2_ARI_FORWARDING != 0
+                    capability_field(addr, offset, EXPRESS_DEVICE_CONTROL_2).is_some_and(
+                        |control| {
+                            self.config.read32(control) & DEVICE_CONTROL_2_ARI_FORWARDING != 0
+                        },
+                    )
                 });
                 Header::Bridge {
                     secondary,
@@ -383,13 +395,12 @@ impl<C: ConfigSpace> Pci<C> {
     ) -> Function {
         let header = self.header(addr);
         let express = self.express(addr);
+        // A slot whose capabilities cannot be read is taken as one hardware
+        // can arrive in.
         let hot_plug = express.is_some_and(|(offset, header)| {
             header & EXPRESS_SLOT_IMPLEMENTED != 0
-                && self.config.read32(addr_with_byte_offset(
-                    addr,
-                    offset + EXPRESS_SLOT_CAPABILITIES,
-                )) & SLOT_HOT_PLUG_CAPABLE
-                    != 0
+                && capability_field(addr, offset, EXPRESS_SLOT_CAPABILITIES)
+                    .is_none_or(|slot| self.config.read32(slot) & SLOT_HOT_PLUG_CAPABLE != 0)
         });
         let mut function = Function {
             address,
@@ -551,12 +562,16 @@ impl<C: ConfigSpace> Pci<C> {
             let msg_ctrl = low_u16(header >> 16);
             let entry = match low_u8(header) {
                 0x05 => decode_msi(self, addr, cap_offset, msg_ctrl),
-                0x11 => decode_msix(self, addr, cap_offset, msg_ctrl),
-                CAP_ID_VENDOR => decode_virtio(self, addr, cap_offset, msg_ctrl),
-                id => Capability::Other {
+                id => match id {
+                    0x11 => decode_msix(self, addr, cap_offset, msg_ctrl),
+                    CAP_ID_VENDOR => decode_virtio(self, addr, cap_offset, msg_ctrl),
+                    _ => None,
+                }
+                // One running past the space is no structure of its kind.
+                .unwrap_or(Capability::Other {
                     offset: cap_offset,
                     id,
-                },
+                }),
             };
             if let Some(slot) = out.get_mut(count) {
                 *slot = entry;
@@ -628,6 +643,27 @@ impl<C: ConfigSpace> Pci<C> {
             self.config.write32(command_addr, command);
         }
         result
+    }
+
+    /// Whether a memory BAR among the first `slots` of the function at `addr`
+    /// holds a base, read without sizing it.
+    fn memory_bar_placed(&self, addr: ConfigAddress, slots: u8) -> bool {
+        let read = |slot: u8| self.config.read32(addr_with_reg(addr, FIRST_BAR + slot));
+        let mut slot = 0;
+        while slot < slots {
+            let low = read(slot);
+            let wide = low & 0x1 == 0 && (low >> 1) & 0x3 == 0x2;
+            let high = if wide && slot + 1 < slots {
+                read(slot + 1)
+            } else {
+                0
+            };
+            if low & 0x1 == 0 && (low & 0xFFFF_FFF0 != 0 || high != 0) {
+                return true;
+            }
+            slot += if wide { 2 } else { 1 };
+        }
+        false
     }
 
     /// The BAR at slot `slot` of the function at `addr`, whose header carries
@@ -757,8 +793,37 @@ impl<C: ConfigSpace> Pci<C> {
     /// Let function `bdf` master upstream memory requests, or stop it,
     /// leaving every other command bit as it was. Infallible for the same
     /// reason as [`enable_memory_space`](Self::enable_memory_space).
+    ///
+    /// A function masters only once it may not ask for No Snoop requests,
+    /// which reach memory past the caches a DMA buffer is scrubbed and kept
+    /// coherent through; one whose Enable No Snoop will not clear is left
+    /// stopped.
     pub fn set_bus_master(&self, bdf: u64, master: bool) {
+        if master && !self.forbid_no_snoop(bdf) {
+            return;
+        }
         self.update_command(bdf, BUS_MASTER_ENABLE, master);
+    }
+
+    /// Clear function `bdf`'s Enable No Snoop, answering whether it is clear.
+    /// A function with no PCI Express capability has no such request to ask.
+    fn forbid_no_snoop(&self, bdf: u64) -> bool {
+        let addr = unpack_bdf(bdf, 0);
+        let Some((offset, _)) = self.express(addr) else {
+            return true;
+        };
+        let Some(control) = capability_field(addr, offset, EXPRESS_DEVICE_CONTROL) else {
+            return false;
+        };
+        let dword = self.config.read32(control);
+        if dword & DEVICE_CONTROL_ENABLE_NO_SNOOP == 0 {
+            return true;
+        }
+        self.config.write32(
+            control,
+            dword & DEVICE_CONTROL_BITS & !DEVICE_CONTROL_ENABLE_NO_SNOOP,
+        );
+        self.config.read32(control) & DEVICE_CONTROL_ENABLE_NO_SNOOP == 0
     }
 
     /// Let function `bdf` assert its INTx pin, or stop it, leaving every
@@ -1061,6 +1126,31 @@ impl<C: ConfigSpace> Pci<C> {
         Ok(())
     }
 
+    /// Set or clear function `bdf`'s MSI-X function mask, read back.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for a function with no MSI-X capability,
+    /// [`DriverError::DeviceFault`] where the mask does not read back as
+    /// written, and the capability walk's errors.
+    pub fn mask_msix(&self, bdf: u64, masked: bool) -> Result<(), DriverError> {
+        let (cap_offset, ..) = self.find_msix(bdf)?;
+        let header_addr = addr_with_byte_offset(unpack_bdf(bdf, 0), cap_offset);
+        let header = self.config.read32(header_addr);
+        let updated = if masked {
+            header | MSIX_CTRL_FUNCTION_MASK
+        } else {
+            header & !MSIX_CTRL_FUNCTION_MASK
+        };
+        self.config.write32(header_addr, updated);
+        let read = self.config.read32(header_addr) & MSIX_CTRL_FUNCTION_MASK;
+        if (read != 0) == masked {
+            Ok(())
+        } else {
+            Err(DriverError::DeviceFault)
+        }
+    }
+
     /// Program function `bdf`'s **MSI** (not MSI-X) capability with
     /// `message`, force a single vector, and enable it.
     ///
@@ -1086,61 +1176,43 @@ impl<C: ConfigSpace> Pci<C> {
     ///   capability (or no capability list at all).
     /// * [`DriverError::OutOfRange`] — `message.address` needs 64-bit
     ///   addressing but the capability is 32-bit only (writing the low
-    ///   half alone would deliver to the wrong address — fail closed).
+    ///   half alone would deliver to the wrong address — fail closed), or
+    ///   the capability's registers run past configuration space.
     pub fn route_msi(&self, bdf: u64, message: MsiMessage) -> Result<(), DriverError> {
         let (cap_offset, addr64, per_vector_masking) = self.find_msi(bdf)?;
+        // A doorbell a 32-bit capability cannot name is refused, never
+        // truncated.
+        if !addr64 && message.address >> 32 != 0 {
+            return Err(DriverError::OutOfRange);
+        }
         let base = unpack_bdf(bdf, 0);
-        if addr64 || message.address >> 32 == 0 {
-            // Off while the message changes: a function raising it between
-            // the address and the data writes would send half of each.
-            let header_addr = addr_with_byte_offset(base, cap_offset);
-            let header = self.config.read32(header_addr);
-            self.config.write32(header_addr, header & !MSI_CTRL_ENABLE);
-        }
-        // Message Address (low). Bits 1:0 are reserved and must be written
-        // zero (the doorbell is at least dword-aligned, §6.8.1.1).
-        self.config.write32(
-            addr_with_byte_offset(base, cap_offset + 4),
-            (message.address & 0xFFFF_FFFC) as u32,
-        );
-        if addr64 {
-            // 64-bit capable: upper address dword at +0x08, Message Data
-            // at +0x0C (§6.8.1). The data is a 16-bit field; the upper
-            // half is reserved for a function without per-vector masking,
-            // so writing it zero is correct.
-            self.config.write32(
-                addr_with_byte_offset(base, cap_offset + 8),
-                (message.address >> 32) as u32,
-            );
-            self.config.write32(
-                addr_with_byte_offset(base, cap_offset + 0x0C),
-                message.data & 0xFFFF,
-            );
-            if per_vector_masking {
-                self.config
-                    .write32(addr_with_byte_offset(base, cap_offset + 0x10), 0);
-            }
+        let field = |at: u8| capability_field(base, cap_offset, at).ok_or(DriverError::OutOfRange);
+        // Past the low address, a 64-bit capability holds the high address,
+        // then the data, then the mask bits (PCI 3.0 §6.8.1).
+        let (high, data, mask) = if addr64 {
+            (Some(field(8)?), field(0x0C)?, 0x10)
         } else {
-            // 32-bit capable only: a doorbell above 4 GiB cannot be
-            // expressed, so fail closed rather than truncate it.
-            if message.address >> 32 != 0 {
-                return Err(DriverError::OutOfRange);
-            }
-            self.config.write32(
-                addr_with_byte_offset(base, cap_offset + 8),
-                message.data & 0xFFFF,
-            );
-            if per_vector_masking {
-                self.config
-                    .write32(addr_with_byte_offset(base, cap_offset + 0x0C), 0);
-            }
-        }
-        // Enable MSI and force Multiple Message Enable to 0 (one vector),
-        // so the function delivers only the single doorbell the kernel
-        // allocated. The Message Control register is the high 16 bits of
-        // the capability header dword; cap_id / next-pointer in the low
-        // 16 bits are read-only and ignore writes.
+            (None, field(8)?, 0x0C)
+        };
+        let mask = per_vector_masking.then(|| field(mask)).transpose()?;
+        let low = field(4)?;
         let header_addr = addr_with_byte_offset(base, cap_offset);
+        // Off while the message changes: a function raising it between the
+        // address and the data writes would send half of each.
+        let header = self.config.read32(header_addr);
+        self.config.write32(header_addr, header & !MSI_CTRL_ENABLE);
+        // Bits 1:0 of the address are reserved.
+        self.config
+            .write32(low, (message.address & 0xFFFF_FFFC) as u32);
+        if let Some(high) = high {
+            self.config.write32(high, (message.address >> 32) as u32);
+        }
+        self.config.write32(data, message.data & 0xFFFF);
+        if let Some(mask) = mask {
+            self.config.write32(mask, 0);
+        }
+        // One vector, so the function sends only the doorbell the kernel
+        // allocated.
         let header = self.config.read32(header_addr);
         let updated = (header & !MSI_CTRL_MME_MASK) | MSI_CTRL_ENABLE;
         self.config.write32(header_addr, updated);
@@ -1166,9 +1238,28 @@ impl<C: ConfigSpace> Pci<C> {
             .ok_or(DriverError::NotFound)
     }
 
+    /// The first dword of function `bdf`'s capability `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for none, [`DriverError::DeviceFault`] for a
+    /// list that never ends.
+    pub fn capability_header(&self, bdf: u64, id: u8) -> Result<u32, DriverError> {
+        let mut list = self
+            .legacy_capabilities(unpack_bdf(bdf, 0))
+            .ok_or(DriverError::NotFound)?;
+        if let Some((_, header)) = list.by_ref().find(|&(_, header)| low_u8(header) == id) {
+            return Ok(header);
+        }
+        if list.malformed() {
+            return Err(DriverError::DeviceFault);
+        }
+        Err(DriverError::NotFound)
+    }
+
     /// Locate the function's MSI-X capability, returning its
     /// `(cap_offset, table_size, table_bar, table_offset)`.
-    fn find_msix(&self, bdf: u64) -> Result<(u8, u16, u8, u32), DriverError> {
+    pub(crate) fn find_msix(&self, bdf: u64) -> Result<(u8, u16, u8, u32), DriverError> {
         let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
         let n = self.capabilities(bdf, &mut caps)?;
         caps[..n]
@@ -1380,6 +1471,43 @@ impl<C: ConfigSpace> PciTopology for Pci<C> {
         });
         quiesced
     }
+
+    fn decoded_windows(&self, topology: &Topology) -> Result<Vec<Range<u64>>, DriverError> {
+        let mut windows = Vec::new();
+        for function in topology.root_functions() {
+            if function.is_host_bridge() {
+                continue;
+            }
+            let addr = unpack_bdf(function.address, 0);
+            let slots = if function.is_bridge() {
+                for window in crate::assign::bridge_memory_windows(&self.config, addr)
+                    .into_iter()
+                    .flatten()
+                {
+                    windows.try_reserve(1).map_err(|_| DriverError::NoSpace)?;
+                    windows.push(window);
+                }
+                // Sizing turns the bridge's decoding off, and what it
+                // forwards with it: only a BAR firmware placed is sized.
+                if !self.memory_bar_placed(addr, BRIDGE_BAR_SLOTS) {
+                    continue;
+                }
+                BRIDGE_BAR_SLOTS
+            } else {
+                DEVICE_BAR_SLOTS
+            };
+            let bars = self.bars_of(addr, slots)?;
+            windows
+                .try_reserve(bars.len())
+                .map_err(|_| DriverError::NoSpace)?;
+            windows.extend(
+                bars.iter()
+                    .filter(|bar| !matches!(bar.kind, BarKind::Io) && bar.size != 0)
+                    .map(|bar| bar.base..bar.base.saturating_add(bar.size)),
+            );
+        }
+        Ok(windows)
+    }
 }
 
 #[inline]
@@ -1448,6 +1576,15 @@ fn addr_with_reg(addr: ConfigAddress, register: u8) -> ConfigAddress {
 #[inline]
 fn addr_with_byte_offset(addr: ConfigAddress, byte_offset: u8) -> ConfigAddress {
     addr_with_reg(addr, byte_offset >> 2)
+}
+
+/// The register `field` bytes into the legacy capability at `offset`, or
+/// [`None`] past the 256 bytes it lives in: a device can place one where its
+/// fields would run off the end.
+fn capability_field(addr: ConfigAddress, offset: u8, field: u8) -> Option<ConfigAddress> {
+    offset
+        .checked_add(field)
+        .map(|at| addr_with_byte_offset(addr, at))
 }
 
 /// A function's legacy capability list: each entry's offset and header dword.
@@ -1551,12 +1688,11 @@ fn decode_msix<C: ConfigSpace>(
     base: ConfigAddress,
     offset: u8,
     msg_ctrl: u16,
-) -> Capability {
+) -> Option<Capability> {
     let table_size = (msg_ctrl & 0x7FF) + 1;
-    // Table offset/BIR lives at cap_offset + 4 (dword 1 of cap).
-    let table_dword = this.config.read32(addr_with_byte_offset(base, offset + 4));
-    let pba_dword = this.config.read32(addr_with_byte_offset(base, offset + 8));
-    Capability::MsiX {
+    let table_dword = this.config.read32(capability_field(base, offset, 4)?);
+    let pba_dword = this.config.read32(capability_field(base, offset, 8)?);
+    Some(Capability::MsiX {
         offset,
         table_size,
         // Mask + cast: `table_dword & 0x7` is a 3-bit field, lossless.
@@ -1564,7 +1700,7 @@ fn decode_msix<C: ConfigSpace>(
         table_offset: table_dword & 0xFFFF_FFF8,
         pba_bar: (pba_dword & 0x7) as u8,
         pba_offset: pba_dword & 0xFFFF_FFF8,
-    }
+    })
 }
 
 /// A function's virtio configuration-access capability: its `bar`, `offset`
@@ -1575,27 +1711,27 @@ fn decode_virtio<C: ConfigSpace>(
     base: ConfigAddress,
     offset: u8,
     msg_ctrl: u16,
-) -> Capability {
+) -> Option<Capability> {
     // The virtio cap header reuses the vendor-specific layout: the
     // upper half of the header dword (`msg_ctrl`) carries `cap_len`
     // in its low byte and `cfg_type` in its high byte (virtio 1.x
     // §4.1.4). Mask + cast of an 8-bit field is lossless.
     let cfg_type = (msg_ctrl >> 8) as u8;
+    let read = |at: u8| capability_field(base, offset, at).map(|field| this.config.read32(field));
     // `bar` is byte 4 of the capability (dword 1, low byte).
-    let bar = (this.config.read32(addr_with_byte_offset(base, offset + 4)) & 0x7) as u8;
+    let bar = (read(4)? & 0x7) as u8;
     // `offset`/`length` are dwords 2 and 3 of the capability.
-    let bar_offset = this.config.read32(addr_with_byte_offset(base, offset + 8));
-    let length = this.config.read32(addr_with_byte_offset(base, offset + 12));
-    if cfg_type == VIRTIO_PCI_CFG_NOTIFY {
+    let bar_offset = read(8)?;
+    let length = read(12)?;
+    Some(if cfg_type == VIRTIO_PCI_CFG_NOTIFY {
         // The notification structure appends `notify_off_multiplier`
         // as dword 4 of the capability (virtio 1.x §4.1.4.4).
-        let notify_off_multiplier = this.config.read32(addr_with_byte_offset(base, offset + 16));
         Capability::VirtioNotify {
             offset,
             bar,
             bar_offset,
             length,
-            notify_off_multiplier,
+            notify_off_multiplier: read(16)?,
         }
     } else {
         Capability::Virtio {
@@ -1605,5 +1741,5 @@ fn decode_virtio<C: ConfigSpace>(
             bar_offset,
             length,
         }
-    }
+    })
 }

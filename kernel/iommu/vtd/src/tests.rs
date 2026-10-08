@@ -12,6 +12,7 @@ use tairix_kernel_iommu_api::{
 
 use super::*;
 use crate::model::{self, Model, Quirks};
+use tairix_kernel_iommu_api::FrameRun;
 
 /// A clock that moves a millisecond every time it is read, so a wait that
 /// never completes runs out of budget in a thousand spins.
@@ -71,6 +72,81 @@ fn a_caching_mode_unit_invalidates_every_new_entry_and_passes() {
     );
 }
 
+/// A carve of many runs on a caching-mode unit is published as one: one
+/// invalidation for all of them, every run reachable after it.
+#[test]
+fn a_caching_mode_unit_publishes_a_carve_of_many_runs_once() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, model::cap(2, 1 << 7), model::ecap(true));
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
+    domain.attach(STREAMS[0]).unwrap();
+    let runs = [
+        FrameRun {
+            phys: 0x8000_4000,
+            order: 2,
+        },
+        FrameRun {
+            phys: 0x8000_2000,
+            order: 1,
+        },
+        FrameRun {
+            phys: 0x8000_0000,
+            order: 0,
+        },
+    ];
+    let before = model.processed(0x2);
+    let iova = domain.map(&runs, 0).unwrap();
+    assert_eq!(model.processed(0x2), before + 1, "one IOTLB invalidation");
+    assert_eq!(model.access(STREAMS[0], iova, true), Some(0x8000_4000));
+    assert_eq!(
+        model.access(STREAMS[0], iova + 0x6000, true),
+        Some(0x8000_0000)
+    );
+}
+
+/// A caching-mode unit that names pages flushes only what a map installed, so
+/// the translations it caches for the domain's other carves survive.
+#[test]
+fn a_caching_mode_map_flushes_only_its_own_pages() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let page_selective = (1 << 7) | (1 << 39) | (9 << 48);
+    let model = Model::new(&frames, model::cap(2, page_selective), model::ecap(true));
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    unit.map(domain, IOVA, PAGES[0], IO_PAGE_SIZE, Access::READ_WRITE)
+        .unwrap();
+    assert_eq!(model.access(STREAMS[0], IOVA, true), Some(PAGES[0]));
+    let id = u16::try_from(domain.0).unwrap();
+    assert!(model.caches(id, IOVA));
+    assert_eq!(
+        model.access(STREAMS[0], IOVA + 0x10_0000, true),
+        None,
+        "a miss caching mode keeps"
+    );
+    unit.map(
+        domain,
+        IOVA + 0x10_0000,
+        PAGES[1],
+        IO_PAGE_SIZE,
+        Access::READ_WRITE,
+    )
+    .unwrap();
+    assert!(
+        model.caches(id, IOVA),
+        "another carve's translation survives"
+    );
+    assert_eq!(
+        model.access(STREAMS[0], IOVA + 0x10_0000, true),
+        Some(PAGES[1])
+    );
+}
+
 #[test]
 fn bring_up_blocks_every_stream_once_translation_is_enabled() {
     let frames = HostFrames::new(0x1_0000_0000);
@@ -112,9 +188,17 @@ fn a_unit_firmware_left_running_is_taken_over() {
         0,
         "protected memory is retired once translation is on"
     );
-    let mut domain = Domain::new(&unit, &[]).unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
     domain.attach(STREAMS[0]).unwrap();
-    let iova = domain.map(PAGES[0], 0, 0).unwrap();
+    let iova = domain
+        .map(
+            &[FrameRun {
+                phys: PAGES[0],
+                order: 0,
+            }],
+            0,
+        )
+        .unwrap();
     assert_eq!(model.access(STREAMS[0], iova, true), Some(PAGES[0]));
 }
 
@@ -177,14 +261,22 @@ fn a_non_snooping_walker_gets_every_table_written_back() {
     let recorder = Recorder(SpinLock::new(Vec::new()));
     let unit = VtdUnit::new(&model, &frames, Some(&recorder), &clock).unwrap();
     unit.enable().unwrap();
-    let mut domain = Domain::new(&unit, &[]).unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
     domain.attach(STREAMS[0]).unwrap();
     let before = core::mem::take(&mut *recorder.0.lock()).len();
     assert!(
         before >= 4,
         "the root, the context table, its entry and the domain root"
     );
-    let iova = domain.map(PAGES[0], 0, 0).unwrap();
+    let iova = domain
+        .map(
+            &[FrameRun {
+                phys: PAGES[0],
+                order: 0,
+            }],
+            0,
+        )
+        .unwrap();
     assert!(
         !core::mem::take(&mut *recorder.0.lock()).is_empty(),
         "the new tables and leaf"
@@ -204,7 +296,11 @@ fn a_rejected_descriptor_is_reported_and_the_queue_runs_on() {
         reject_next_iotlb: true,
         ..Quirks::default()
     });
-    assert_eq!(unit.sync(domain), Err(IommuError::Hardware));
+    assert_eq!(
+        unit.sync(domain),
+        Err(IommuError::Unconfirmed),
+        "a sync whose invalidation was rejected confirms nothing"
+    );
     assert_eq!(
         regs::low32(model.register(regs::FSTS)) & regs::FSTS_IQE,
         0,
@@ -221,9 +317,17 @@ fn a_unit_that_never_confirms_leaves_the_removal_unconfirmed() {
     let clock = clock();
     let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
     unit.enable().unwrap();
-    let mut domain = Domain::new(&unit, &[]).unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
     domain.attach(STREAMS[0]).unwrap();
-    let iova = domain.map(PAGES[0], 0, 0).unwrap();
+    let iova = domain
+        .map(
+            &[FrameRun {
+                phys: PAGES[0],
+                order: 0,
+            }],
+            0,
+        )
+        .unwrap();
     model.quirk(Quirks {
         ignore_waits: true,
         ..Quirks::default()
@@ -367,7 +471,7 @@ fn records_firmware_left_are_drained_beside_new_ones() {
 }
 
 #[test]
-fn the_fault_event_is_routed_and_unmasked() {
+fn the_fault_event_is_routed_unmasked_and_masked_again() {
     let frames = HostFrames::new(0x1_0000_0000);
     let model = coherent_model(&frames);
     let clock = clock();
@@ -385,6 +489,13 @@ fn the_fault_event_is_routed_and_unmasked() {
     assert_eq!(model.register(regs::FEADDR), 0xFEE0_1000);
     assert_eq!(model.register(regs::FEUADDR), 0);
     assert_eq!(model.register(regs::FECTL), 0);
+    unit.unroute_faults().unwrap();
+    assert_eq!(
+        regs::low32(model.register(regs::FECTL)),
+        regs::FECTL_IM,
+        "masked"
+    );
+    assert_eq!(model.register(regs::FEDATA), 0x41, "the route is kept");
 }
 
 #[test]
@@ -458,6 +569,122 @@ fn fault_records_decode_their_stream_address_access_and_reason() {
     }
     assert_eq!(decode_fault(0, 0x30 << 32).reason, FaultReason::Other(0x30));
     assert!(!decode_fault(0, FAULT_T2).write);
+}
+
+/// A range is flushed by page where the unit selects pages and one mask
+/// covers it, so a translation the domain still holds stays cached; else
+/// the domain goes whole.
+#[test]
+fn a_range_sync_keeps_the_domain_s_other_translations_where_the_unit_selects_pages() {
+    const PAGE_SELECTIVE: u64 = 1 << 39;
+    let frames = HostFrames::new(0x1_0000_0000);
+    let clock = clock();
+    for (extra, kept) in [(PAGE_SELECTIVE | (9 << 48), true), (0, false)] {
+        let model = Model::new(&frames, model::cap(2, extra), model::ecap(true));
+        let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+        unit.enable().unwrap();
+        let domain = unit.create_domain().unwrap();
+        unit.attach(STREAMS[0], domain).unwrap();
+        let tag = domain.sixteen_bits().unwrap();
+        for (iova, phys) in [(IOVA, PAGES[0]), (IOVA + 0x10_0000, PAGES[1])] {
+            unit.map(domain, iova, phys, 0x1000, Access::READ_WRITE)
+                .unwrap();
+            assert_eq!(model.access(STREAMS[0], iova, false), Some(phys));
+        }
+        unit.unmap(domain, IOVA, 0x1000).unwrap();
+        unit.sync_range(domain, IOVA, 0x1000).unwrap();
+        assert!(!model.caches(tag, IOVA));
+        assert_eq!(model.access(STREAMS[0], IOVA, false), None);
+        assert_eq!(model.caches(tag, IOVA + 0x10_0000), kept);
+        unit.block(STREAMS[0]).unwrap();
+        unit.destroy_domain(domain).unwrap();
+    }
+}
+
+/// A range straddling an alignment boundary is flushed by the one aligned
+/// block covering it, which hardware reads from the address and mask alone;
+/// where that block is wider than the unit's mask allows, the domain goes
+/// whole instead.
+#[test]
+fn a_straddling_range_is_flushed_by_the_block_that_covers_it() {
+    const PAGE_SELECTIVE: u64 = 1 << 39;
+    const BOUNDARY: u64 = IOVA + 0x40_0000;
+    let frames = HostFrames::new(0x1_0000_0000);
+    let clock = clock();
+    for (mamv, kept) in [(20, true), (9, false)] {
+        let model = Model::new(
+            &frames,
+            model::cap(2, PAGE_SELECTIVE | (mamv << 48)),
+            model::ecap(true),
+        );
+        let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+        unit.enable().unwrap();
+        let domain = unit.create_domain().unwrap();
+        unit.attach(STREAMS[0], domain).unwrap();
+        let tag = domain.sixteen_bits().unwrap();
+        let far = BOUNDARY + 0x80_0000;
+        for (iova, phys) in [
+            (BOUNDARY - 0x1000, PAGES[0]),
+            (BOUNDARY, PAGES[1]),
+            (far, 0x8000_2000),
+        ] {
+            unit.map(domain, iova, phys, 0x1000, Access::READ_WRITE)
+                .unwrap();
+            assert_eq!(model.access(STREAMS[0], iova, false), Some(phys));
+        }
+        unit.unmap(domain, BOUNDARY - 0x1000, 0x2000).unwrap();
+        unit.sync_range(domain, BOUNDARY - 0x1000, 0x2000)
+            .expect("no mask past what the unit takes");
+        for page in [BOUNDARY - 0x1000, BOUNDARY] {
+            assert!(!model.caches(tag, page), "{page:#x} {mamv}");
+            assert_eq!(model.access(STREAMS[0], page, false), None);
+        }
+        assert_eq!(model.caches(tag, far), kept, "{mamv}");
+        unit.block(STREAMS[0]).unwrap();
+        unit.destroy_domain(domain).unwrap();
+    }
+}
+
+/// The descriptor names an IOVA's bits 63:12, past the 52 an entry holds, so
+/// a five-level unit's sync reaches the top of its space.
+#[test]
+fn a_range_sync_names_every_iova_bit_on_a_five_level_unit() {
+    const PAGE_SELECTIVE: u64 = 1 << 39;
+    const HIGH: u64 = 0x01F0_0000_0000_0000;
+    let frames = HostFrames::new(0x1_0000_0000);
+    let clock = clock();
+    let four_levels_48_bits = (0b0100 << 8) | (47 << 16);
+    let five_levels_57_bits = (0b1000 << 8) | (56 << 16);
+    let cap = model::cap(2, PAGE_SELECTIVE | (9 << 48)) & !four_levels_48_bits;
+    let model = Model::new(&frames, cap | five_levels_57_bits, model::ecap(true));
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    assert_eq!(unit.profile().reach.input_bits, 57);
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    let tag = domain.sixteen_bits().unwrap();
+    unit.map(domain, HIGH, PAGES[0], 0x1000, Access::READ_WRITE)
+        .unwrap();
+    assert_eq!(model.access(STREAMS[0], HIGH, false), Some(PAGES[0]));
+    unit.unmap(domain, HIGH, 0x1000).unwrap();
+    unit.sync_range(domain, HIGH, 0x1000).unwrap();
+    assert!(!model.caches(tag, HIGH));
+    assert_eq!(model.access(STREAMS[0], HIGH, false), None);
+    unit.block(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// Page-selective invalidation keeps the walk caches' hint clear, so the
+/// paging-structure entries above a freed table go with its leaves.
+#[test]
+fn a_page_selective_descriptor_reaches_the_walk_caches() {
+    const HIGH: u64 = 0x01F0_0000_0040_0000;
+    let [low, high] = format::iotlb_pages(7, HIGH, 10, false, false);
+    assert_eq!(low & (0b11 << 4), 0b11 << 4, "page-selective granularity");
+    assert_eq!((low >> 16) & 0xFFFF, 7);
+    assert_eq!(high & !0xFFF, HIGH);
+    assert_eq!(high & 0x3F, 10);
+    assert_eq!(high & (1 << 6), 0, "no invalidation hint");
 }
 
 fn caching_model(frames: &HostFrames) -> Model<'_> {

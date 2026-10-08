@@ -15,7 +15,7 @@ leaves it.
 | A2 | Region access: the bus driver reaches an operation region only through a kernel-checked map — system memory that is not usable RAM and not the kernel's own, system I/O outside the ports the kernel keeps, the configuration space of PCI functions in the tree — a refused region failing the method that touched it, logged | planned |
 | A3 | The AML interpreter (`drivers/bus/acpi`, host-testable `lib` target): the term parser, the namespace (scopes, devices, methods, names, fields, regions, mutexes, events, aliases, externals, processors, power resources, thermal zones), method evaluation with the full expression opcode set, field access with every access type and update rule, `_OSI`/`_OS`/`_REV`, and bounds on loops, recursion, objects and time | planned |
 | A4 | Device publication: every present device (`_STA`) with a `_HID` or `_CID` emitted with ACPI match keys and the resources its `_CRS` declares — memory and I/O, interrupts as GSIs, GPIO interrupts and I2C connections as supplier links, `_DSM`-derived properties | planned |
-| A5 | PCI interrupt routing from `_PRT`, for a function without MSI | planned |
+| A5 | PCI interrupt routing from `_PRT`, for a function without MSI — the x86_64 virtio-iommu's fault line among them, which the kernel binds once the interpreter publishes it (`plans/IOMMU.md` §8) | planned |
 | A6 | Power-off: `\_S5` through the FADT's PM1 control registers (`plans/ARCHSUPPORT.md` A7) | planned |
 | A7 | Events: the SCI, GPE blocks, the `_Lxx`/`_Exx` methods and `Notify`, so the power button reaches the session | planned |
 | A8 | The QEMU vertical: the interpreter on QEMU q35's own tables — power-off, the PS/2 controller (`PNP0303`), the power button | planned |

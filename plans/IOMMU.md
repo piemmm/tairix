@@ -40,11 +40,18 @@ layering), §18 (discovery and the floor), §19 (threat model), §24 and §26
 | IOM14 | FDT translation topology: `#iommu-cells`, `iommus`, `iommu-map` and `iommu-map-mask`, and the `memory-region` firmware windows, in `lib/fdt` and the shared walk, naming one group for platform masters that share a stream id; only usable nodes walked | done |
 | IOM15 | `kernel/iommu/smmuv3`: Arm SMMUv3 — the stream table, stage 2 (stage 1 where stage 2 is absent), the command queue with `CMD_SYNC`, the event queue, `GERROR`, `GBPA` abort | done |
 | IOM16 | `kernel/iommu/riscv`: the RISC-V IOMMU — the device directory, second-stage (first-stage where absent) tables, the command queue with `IOFENCE.C`, the fault queue | done |
-| IOM17 | `kernel/iommu/virtio`: virtio-iommu — attach, map, unmap and probe over the request queue, faults on the event queue, bypass off; ACPI VIOT and FDT topology, a probed virtio-MMIO slot's node carrying its slot's streams | planned |
-| IOM18 | MSI isolation off x86: the GICv3 ITS with its doorbell mapped per domain; the RISC-V IMSIC through the IOMMU's MSI page tables | planned |
-| IOM19 | Scatter-gather carves: IOVA-contiguous over scattered frames on translated nodes, lifting the 32 MiB carve bound; DMA into shared-memory objects | planned |
-| IOM20 | Throughput: invalidation batching with range-versus-domain selection, a deferred-free flush queue for streaming mappings, and per-descriptor wait status so a unit's queue lock is not held across its waits; no flush after an AMD-Vi map where the unit caches no not-present entry (`NpCache` clear), as VT-d skips one outside caching mode, an AMD-Vi attach that flushes the device rather than its whole new domain, and a per-table occupancy count in place of the 512-entry emptiness scan on unmap — measured | planned |
-| IOM21 | System Information: units, groups, per-node translation state and fault counters behind `CAP_SYSINFO_HW` | planned |
+| IOM17 | `kernel/iommu/virtio`: virtio-iommu — attach, map, unmap and probe over the request queue, faults on the event queue, bypass off; ACPI VIOT and FDT topology, a probed virtio-MMIO slot's node carrying its slot's streams. On x86_64 its faults are delivered once `plans/ACPI.md` A5 routes the function's INTx (§8) | done |
+| IOM18 | MSI isolation off x86: the GICv3 ITS with its doorbell mapped per domain; the RISC-V IMSIC through the IOMMU's MSI page tables | done |
+| IOM18.1 | GICv3 on aarch64: affinity-routed distributor, redistributors, the system-register CPU interface and its IPIs, chosen by discovery beside the GICv2 the Pi 4's GIC-400 keeps, the lockup watchdog's Group 0 sample included | done |
+| IOM18.2 | LPIs and the ITS: property and pending tables, the command queue, device and collection tables, one ITT per device; `msi-map` and `msi-parent` giving each function its DeviceID; MSI-X vectors on aarch64 granted as LPIs; the ITS doorbell reserved and mapped in each SMMUv3 domain; a vertical whose device's MSI for an event it was not given is dropped | done |
+| IOM18.3 | AIA on riscv64: the APLIC in MSI delivery mode and each hart's S-level IMSIC interrupt file, chosen by discovery beside the PLIC | done |
+| IOM18.4 | The RISC-V IOMMU's MSI page tables confining each device's MSIs to what it was granted: a memory-resident interrupt file per device, raised by its notice MSI, and a vertical; a unit without MRIF support gives its devices wired lines alone | done |
+| IOM19 | Scatter-gather carves: IOVA-contiguous over scattered frames on translated nodes, lifting the 32 MiB carve bound; DMA into shared-memory objects; a driver-stated device reach narrowing every carve | done |
+| IOM20 | Throughput: invalidation batching with range-versus-domain selection, a deferred-free flush queue for streaming mappings, and per-descriptor wait status so a unit's queue lock is not held across its waits; no flush after an AMD-Vi map where the unit caches no not-present entry (`NpCache` clear), as VT-d skips one outside caching mode, an AMD-Vi attach that flushes the device rather than its whole new domain, a per-table occupancy count in place of the 512-entry emptiness scan on unmap, and IOVA free lists whose updates are logarithmic — measured | done |
+| IOM20.1 | A deferred-free flush queue: frees across carves confirmed by one invalidation, each carve's frames held until it lands, triggered by a count bound and a one-shot timer | done |
+| IOM20.2 | Per-descriptor waits: a sync waits on its own completion holding no lock, with each family's single state lock split into the queue's, each domain's tables' and the unit's lifecycle state; a retired table tagged with the queue position that confirms it; a rejected command charged to the batch holding it; a host litmus test of the wait | done |
+| IOM20.3 | IOVA free lists whose updates are logarithmic and still fallible: each order's free blocks in a sparse `u64` index that reserves its nodes before it changes, `plans/COLLECTIONS.md` C7's `RadixTree` | done |
+| IOM21 | System Information: units, groups, per-node translation state and fault counters behind `CAP_SYSINFO_HW` | done |
 
 Items are built in ledger order within a milestone. An item is complete —
 tests, docs, and a green whole-project gate — before the milestone that needs
@@ -181,13 +188,13 @@ These are settled. A change that contradicts one stops and asks (§15.7).
 | A dead driver's device keeps writing into freed memory | held off by quarantine | closed: revoked before free | closed |
 | DMA before the unit is enabled | open | closed (IOM7): no function TAIRiX takes from firmware masters before its owner's domain is attached | closed |
 | Two functions behind one non-ACS switch reach each other peer-to-peer | open | open | closed (IOM8) |
-| A device forges an MSI | open | open | closed on x86_64 (IOM11); IOM18 elsewhere |
+| A device forges an MSI | open | open | closed on x86_64 behind VT-d or AMD-Vi (IOM11, IOM12), on aarch64 through a GICv3 ITS, which raises only the LPIs mapped for the DeviceID the fabric attaches (IOM18.2), and on riscv64 behind a RISC-V IOMMU, whose MSI page tables land each device's messages in an interrupt file of its own (IOM18.4), a unit that cannot gives its devices wired lines alone; open behind an x86_64 virtio-iommu, which remaps none |
 | A device presents a pre-translated address (ATS) | n/a | refused: ATS never enabled | closed (IOM10) |
 
 Residual, and named: a bug in a unit's family code (the TCB grew by it); a
-unit erratum a family must work around; a platform with no unit, and one
-whose DMAR is malformed, which is refused whole and treated as having none
-(`plans/OPEN-DEFECTS.md` D655); the moments
+unit erratum a family must work around; a platform with no unit; one whose
+DMAR, IVRS or VIOT is malformed, booted with `iommu.malformed=unconfined`
+(without it no PCI function is published, IOM1); the moments
 between firmware's hand-off and the boot probe, which only firmware's own
 protected memory regions cover; a device below a port without ACS source
 validation presenting another's requester id, which grouping cannot stop;
@@ -229,7 +236,13 @@ numbers; an `INCLUDE_PCI_ALL` unit covers every function of its segment no
 other unit claims. Each RMRR becomes an `IommuReserved` per scoped endpoint on
 the unit that covers it. Each kernel-probed PCI function gains the
 `IommuStream` of the unit covering its source id. A malformed table is refused
-whole, never half-applied.
+whole, never half-applied. Its units may cover any segment, so every segment
+is stranded: each mastering function and bridge is stopped and none is
+published, audited (`4104`, `withheld`) and listed by `sysinfo dma` under the
+tree's root. `iommu.malformed=unconfined` on the kernel command line publishes
+them untranslated instead (`unconfined`), the administrator's choice to boot
+such a machine from PCI storage; `bootinfo::command_line_value` reads it, the
+last word naming the key winning.
 
 **FDT (IOM14).** The walk every FDT port shares visits only usable nodes: a
 disabled, reserved or failed node and its subtree are spliced out, so a unit
@@ -272,10 +285,12 @@ decode, or names no describable unit, leaves its segment undescribed.
   line back through the shared DMA-visibility primitive.
 - **The IOVA space.** A buddy allocator over naturally aligned power-of-two
   blocks, top-down below the device's reach, with the page at IOVA 0, the x86
-  interrupt window, and every reserved window carved out before first use.
-  Each order's free blocks are one sorted list: a search is logarithmic, and a
-  change reserves its room first, so running out of memory is a value that
-  leaves the space as it was.
+  interrupt window, every reserved window, and every PCI address a segment
+  decodes (its root-bus BARs and what its root-bus bridges forward, read by the
+  probe) carved out before first use.
+  Each order's free blocks are one `RadixTree` keyed by block address: a
+  search costs the tree's height, and a change reserves its room first, so
+  running out of memory is a value that leaves the space as it was.
 - **Domains.** A domain owns its IOVA space, its engine (or its family's
   equivalent) and the ledger of what it mapped, so its destruction unmaps
   everything it holds with one confirmed sync.
@@ -340,6 +355,32 @@ Scalable mode (for units that lack legacy mode, and for PASID) is IOM10's.
 - **Reach and viewports.** A translated driver's carve takes no physical
   ceiling; the grant's limit bounds the IOVA. A translated driver granted a
   translating `Dma` window is refused (`NotSupported`).
+- **Scatter-gather (IOM19).** On a translated node a `dma_alloc` carve and a
+  `shm_create_dma` region are exactly their pages, drawn by
+  `FrameAllocator::alloc_chunks_user` — admitted against the kernel reserve
+  and every commitment, each block drawing the admission down — as the
+  largest free blocks first, no block
+  larger than the one before it, every one below the exclusive physical
+  address the node's units can name (`DmaPath::Translated`'s `output_limit`,
+  the least `Reach::output_limit` among them), so a carve is never refused
+  for a frame its unit cannot name while one it can is free; a translated
+  pool carve is drawn below it too. They are mapped end to end into one IOVA block of
+  the total's rounded-up order (`Domain::map` over `FrameRun`s). The order
+  keeps every block at a multiple of its own size, so its leaves are as large
+  as an aligned buddy carve's; a run that is not naturally aligned, out of
+  order, or past the unit's output range refuses the map whole, and a map
+  failing part way unmaps what it placed. A carve is bounded by RAM and the
+  DMA window, never by `MAX_ORDER`. An untranslated carve and every kernel
+  floor pool stay one contiguous block. The record keeps the blocks inline for
+  the one-block case, and an unmap names the IOVA alone.
+- **The device's own reach.** Both carve syscalls take the address bits
+  the driver states its device drives (`DmaReach`, one to 64); the kernel
+  bounds the carve by the narrower of that and the grant, never wider, on the
+  bus side of a translating viewport (`devres::carve_limit`). The runtime host
+  keeps the narrowest a driver declared (`DmaHost::narrow_dma_reach`, whose
+  default refuses anything short of all 64 bits for a host that cannot bound
+  its regions), and `lib/usb` declares 32 bits for a controller without
+  `HCCPARAMS1.AC64` before its first chunk.
 
 ## 5. IOM6 — faults
 
@@ -349,7 +390,11 @@ Scalable mode (for units that lack legacy mode, and for PASID) is IOM10's.
   to `FAULT_OWNER`, an identity below the task-id draw, so no process is given
   it and no exit releases the binding. The family routes and unmasks it
   (`IommuUnit::route_faults`); a unit whose faults cannot be served still
-  translates, and says why (`DmaTranslationUnit`, `faults_unrouted`).
+  translates, and says why (`DmaTranslationUnit`, `faults_unrouted`). A
+  service that cannot start, or can no longer wait, has its unit told to stop
+  raising the interrupt (`IommuUnit::unroute_faults`) before the vector goes
+  back to the producer (`KernelMsiFacility::release`); a unit that will not
+  stop keeps it.
 - **The task.** One kernel task per unit parks on that interrupt and drains.
   A drain takes at most one ring's worth and says whether records remain; the
   task drains again while they do, because a unit raises no interrupt for
@@ -364,8 +409,8 @@ Scalable mode (for units that lack legacy mode, and for PASID) is IOM10's.
 - **The budget.** Per one-second window each stream may have four records and
   the unit thirty-two; the rest are counted and reported with the next record,
   so neither one device nor a requester-ID sprayer floods the log. A stream
-  raising 512 in a window — above the most records any VT-d unit holds, so an
-  earlier owner's leftovers cannot storm it — is silenced, its node's fault
+  raising 1024 in a window — twice the most records any family lets a unit
+  hold, so an earlier owner's leftovers cannot storm it — is silenced, its node's fault
   health set `Offline`, and the storm recorded once; it stays counted until
   the window ends. A unit is drained at most 1024 times a window; past that
   the task waits the window out, so a storm can hold neither a CPU nor the
@@ -580,7 +625,12 @@ holds a group at a time.
   controller maps for the unit. A stage 2 walk starts at level 1 over up to
   sixteen concatenated tables where the output is narrower than 44 bits,
   which a level-0 start needs. A unit whose table and queue accesses do not
-  snoop the CPU's caches is refused. On QEMU, `virt-9.1,iommu=smmuv3` offers
+  snoop the CPU's caches is refused, by its `IDR0.COHACC` here and, for every
+  family, by its node: `take_over` drives no unit whose node does not state
+  that its own DMA snoops (`Refusal::Unsnooped`, listed `unsnooped`), the
+  walk stating it from `dma-coherent` / `dma-noncoherent` and each
+  architecture's convention, and x86's ACPI discovery for every unit it
+  emits. On QEMU, `virt-9.1,iommu=smmuv3` offers
   stage 1 alone, and `virt` from 9.2 builds the unit nested, the family taking
   stage 2.
 - **RISC-V IOMMU.** Second-stage (`iohgatp`, Sv39x4/Sv48x4/Sv57x4 with the
@@ -602,19 +652,105 @@ holds a group at a time.
   the device's domain. On QEMU, `virt,iommu-sys=on`
   is the second stage and `-global riscv-iommu-device.g-stage=false` the
   first.
-- **virtio-iommu.** `bypass` is cleared so an unattached endpoint is
-  blocked; `PROBE` reserved regions become reserved windows; the event queue
-  carries faults.
+- **virtio-iommu.** The device keeps the translations: attach, detach, map
+  and unmap are requests on the request queue, one in flight, each answered
+  only once applied, so an answered unmap is the sync. The family shadows each
+  domain in the shared radix engine, walked by no unit: QEMU destroys a domain
+  whose last endpoint detaches, so a domain attached again has its mappings
+  replayed, one request per mapping as it was made, and an unmap names whole
+  mappings, which the family checks before the device is asked. `bypass` is
+  cleared where `VIRTIO_IOMMU_F_BYPASS_CONFIG` lets it be written and
+  `VIRTIO_IOMMU_F_BYPASS` is never accepted, so an unattached endpoint is
+  blocked; a device whose configuration window cannot hold the whole
+  configuration is refused, so the write turning bypass off cannot be dropped
+  unseen. A function is reset before it may master. A device that cannot be
+  probed (`VIRTIO_IOMMU_F_PROBE`, a non-zero probe size) is refused, since its
+  probe is what names the message window. An endpoint is probed
+  once, a reserved-memory property cut short or running backwards refusing
+  the probe; its reserved regions, and whatever the input range leaves out,
+  are holes in each domain holding it. A requester id the device has no endpoint for — one the fabric
+  delivers under an alias — is attached and probed as nothing, since no DMA
+  arrives as it. A 64-bit input range takes a shadow six levels deep, its
+  IOVAs handed out from just below the top of the address space. The event queue carries fault reports; a silenced endpoint's are
+  dropped by the family, the device having no way to stop them. A request left
+  unanswered stops the unit. Discovery: an FDT `virtio,pci-iommu` node on a
+  host's root bus is the function the host's bring-up resolves (its four
+  configuration windows its registers, its INTx its fault line); a
+  `virtio,mmio` slot with `#iommu-cells` is one too (its one line); x86_64
+  reads the ACPI VIOT, the hardware's own tables first. A device probed in a
+  `virtio,mmio` slot carries the streams the slot's `iommus` names, joins the
+  slot's group, and is not published at all for a slot the walk could not
+  describe. A virtio-iommu remaps no interrupt. A function raises its event
+  queue on the INTx line its host resolves, else through MSI-X; one with
+  neither translates with its faults unrouted (`faults_unrouted`,
+  `reason=no_line`). QEMU's `virtio-iommu-pci` has no MSI-X, and x86_64
+  routes INTx only through ACPI's `_PRT`, so there its faults wait on
+  `plans/ACPI.md` A5, which must hand the kernel the line after boot: the
+  AML interpreter runs in user space, after the units are taken over. On
+  QEMU, a `virtio-iommu-pci,addr=0x2`, ahead of every device it translates,
+  on a slot whose INTx no other function shares.
 - **MSI isolation off x86.** GICv3 with the ITS (the ITS validates each MSI's
   DeviceID) and its doorbell mapped into each domain; AIA with the IMSIC
-  reached through the RISC-V IOMMU's MSI page tables.
+  reached through the RISC-V IOMMU's MSI page tables, each device given a
+  memory-resident interrupt file of its own rather than a flat entry, which
+  would let it raise any identity in its hart's file.
+- **LPIs and the ITS (IOM18.2).** Each interrupt-driven PCI function the boot
+  probe takes is offered a route through the ITS its host's `msi-map` (else
+  `msi-parent`) names: its DeviceID that map's image of the requester id its
+  messages carry, the next EventID of that DeviceID, the next LPI; functions
+  sharing a DeviceID behind a bridge take its events in turn. Its MSI-X entry
+  is written with `GITS_TRANSLATER` and the EventID before it can master, and
+  a function no service is named for, or whose MSI-X refuses the write, keeps
+  its INTx. Once the GIC is up and frames exist, `route_interrupts` gives the
+  device CPU's redistributor LPI tables covering every route and each service
+  its queue, device and collection tables and an ITT per device, mapping every
+  route at once (`InterruptRemapping` `remapped`, else `unrouted` or
+  `refused` with the reason logged). Each function's node carries the
+  doorbell page (`HwResourceKind::MsiDoorbell`), which its domain maps at its
+  own address, write-only where the unit's tables can grant a write alone
+  (`UnitProfile::write_only`). An LPI line is an edge with nothing to mask.
+- **GICv3 (IOM18.1).** An `arm,gic-v3` node is driven beside the GICv2-class
+  ones: affinity-routed SPIs, each CPU's redistributor matched by its
+  `GICR_TYPER` affinity, the system-register CPU interface opened at EL2, and
+  the watchdog's FIQ sample through Group 0 where a boot probe proves Group 0
+  the kernel's. Interrupt controllers and translation services are
+  `HwProperty::KernelDriven`: never a load target, never a grant.
+- **AIA (IOM18.3).** An APLIC domain whose `msi-parent` is an IMSIC of
+  supervisor-level files is preferred to a PLIC, by discovery: its
+  specifiers are two cells, a source and its sense (a high level or a rising
+  edge; a low or falling one names no line rather than an inverted one). The
+  domain is taken over in MSI delivery mode with every source inactive, and
+  the boot hart's file with every identity cleared and open, so no later
+  change needs that hart. Lines `1..=sources` are the APLIC's; a source is
+  given an identity of the hart's file the first time it is armed, and runs
+  out as `Unsupported` rather than sharing one. A level source is pended again
+  on each re-arm, since the domain sends one message per assertion. The trap
+  claims every identity pending through `stopei`, one pass at most.
+- **Interrupt files (IOM18.4).** The boot probe offers a route to each PCI
+  function whose host sends its messages to the boot hart's IMSIC and whose
+  `iommu-map` names a unit with MSI page tables, file-mode entries and a
+  second stage, never more routes than leave every APLIC source an identity.
+  Its MSI-X entry 0 writes identity 1 to the hart's file page; its line is
+  the `k`th from 1024. `route_interrupts` draws a 512-byte file per route,
+  the AIA controller gives each a notice identity of the hart's file, and
+  `MessageFiles::confine_messages` writes the stream's one-entry MSI page
+  table, which the family puts in every second-stage context the stream
+  takes: a write to the doorbell sets the identity it names in the stream's
+  own file, and the unit then raises the file's notice. The doorbell page is
+  kept clear of carves and mapped in no domain. A vector is enabled in its
+  file while its line is armed, and a re-arm finding it pending rings its
+  notice; a notice for a vector its file has disabled raises nothing. A unit
+  that sets file bits without atomics, as QEMU's does, can bring back a bit
+  the kernel cleared: a repeated interrupt, never a lost one.
 
 ## 9. Performance
 
 Mapping happens at carve time, so a driver's steady-state rings cost nothing
 per I/O. Discovery walks the hierarchy once and every observer reads that
-walk; grouping is one pass, a union over each function's path to its root. Leaves are the largest the alignments allow, because a buddy carve is
-naturally aligned and its IOVA is allocated at its own alignment. Teardown is
+walk; grouping is one pass, a union over each function's path to its root.
+Leaves are the largest the alignments allow, because each block of a carve is
+naturally aligned and lands at a multiple of its own size in an IOVA block
+allocated at the carve's own alignment. Teardown is
 one confirmed sync per domain, not one per carve, in every death path: a
 space's teardown ends its owner before it releases a block. Bus mastering costs
 one configuration read-modify-write and a read-back at an owner's attach and
@@ -629,10 +765,90 @@ same node wait for it; a group's next owner waits for its holder's end under
 that holder's state alone; firmware domains are taken out of their table
 before they are destroyed. A unit serialises its own queue, and every wait on it is
 bounded by the family's command budget. Domain ids are handed out fresh first,
-then in the order they were freed, at constant cost. IOM20 adds
-measurement-backed batching for streaming mappings, per-descriptor wait status
-so a unit's queue lock is not held across its waits, and an IOVA free list
-whose updates are logarithmic rather than a sorted vector's linear moves.
+then in the order they were freed, at constant cost.
+
+An unmap's sync names its range (`IommuUnit::sync_range`): VT-d invalidates
+it page-selectively where the unit has PSI and one address mask covers it,
+AMD-Vi with one span command, an SMMUv3 and a RISC-V IOMMU a page at a time
+up to `PAGE_INVALIDATIONS` (half a command ring), past which, or where no
+selective form reaches a removed table, the domain is invalidated whole. A
+range sync frees only the retired tables whose span touches the range, the
+ones its own unmap emptied and any another unmap there retired, since its
+invalidation drops every cached walk through them, so the domain's other
+cached translations survive a carve's free. Every invalidation that may free a table reaches the
+walk caches above the range, so a freed table is never walked from a cache;
+a RISC-V page invalidation reaches its leaf alone, so a range whose tables
+were retired is invalidated domain-wide there. An unmap finds an
+emptied table from a live-entry count kept per table, never by reading its
+512 entries back. A map needing a table where an unmap retired one relinks
+that table, and lays no large leaf over its entry, so a walk cache still
+holding the entry reaches what the map installed. An AMD-Vi map is flushed only where the unit's capability
+header leaves `NpCache` set or cannot be read, and an AMD-Vi attach flushes
+the device's entry alone: the unit's cache for a domain is of that domain's
+own tables. Each order's IOVA free blocks are a `RadixTree` keyed by block
+index, beside the order's highest free block, and the nodes a change needs are
+reserved before it, so a search or an update costs the tree's height and
+exhaustion leaves the space as it was. An allocation reaching the whole
+aperture walks no tree to choose its block, and the search over orders stops
+once no larger order can offer a higher one. A block goes back as the owned
+`IovaBlock` its allocation handed out, so freeing one twice, at another order,
+or in part does not compile.
+
+A carve its live owner frees waits in one machine-wide batch
+(`iommu::deferred`): it leaves its domain's tables at once and keeps its IOVA,
+and its frames wait with the carves freed near it until one invalidation of
+each domain holding them (`Domain::confirm_removed`) confirms them gone; only
+then are they scrubbed and freed. The batch is confirmed once it holds
+`BATCH_CARVES` (64) carves or its first carve has waited `BATCH_WINDOW_NS`
+(10 ms), and holds back at most 1/256 of memory. A carve is given room before
+it leaves its tables, so one that left them always waits in the batch: the
+caller never unmaps an IOVA another carve may hold by then. A carve with no
+room, or freed before the flusher has parked, is confirmed alone. One
+kernel service confirms batches, parked on `DEFERRED_FREE_WAITQ` with the
+batch's deadline and woken early only when a batch fills or opens; it proves its
+park once (`waitq::Parker`) and never ends, so nothing waits behind a flusher
+that is gone. An owner's end confirms its waiting carves with its domain; an end
+or a batch the unit could not confirm keeps their frames for good, audited.
+
+A family's state is split four ways, always taken in one order — the
+lifecycle lock, then the domain map and a domain, then the command queue's
+ring, then the register window — so a domain's maps and syncs wait on neither
+another domain nor a stream's attach. The lifecycle lock holds what attaching,
+silencing and remapping change: the context, device or stream tables, the
+bindings, the domain ids, the remapping tables. Each domain's tables sit in a
+`DomainMap`, reached under the map's shared hold and edited under the domain's
+own lock; only adding or removing a domain holds the map exclusively. The
+register window is held for one access or one handshake, so a
+read-modify-write a queue's recovery, a fault drain and the lifecycle all make
+(AMD-Vi's `CONTROL`, an `SMMUv3`'s `GERRORN` and producer index) is never
+interleaved; a fault drain reads its records outside it, and classes a fault
+by its domain holding neither.
+
+A batch is handed over under the ring's lock (`CommandQueue::submit`) and
+waited on holding none (`CommandQueue::wait`), each on its own completion: a
+unit completes batches in order and stores each one's token, so a waiter is
+done once the stored token reaches its own, or, for a unit confirming by
+consumption, once the head it was last seen at passes its batch's completion.
+A unit that stopped on a command it rejected is put back to running by
+whichever waiter finds the ring free, the rejection charged first to the batch
+owning the rejected slot, so that batch alone answers `Hardware` and no waiter
+can see it complete uncharged. A sync tags the retired tables its batch
+reaches with the batch's token and frees them once that batch is done, or hands
+them to the next sync where it failed (`DomainMap::confirm`), and any failed
+batch answers `Unconfirmed`, as the unit contract promises. The virtio-iommu's
+queue is its request channel, one request in flight at a time as the device
+answers them, while a domain the device does not hold maps, and a sync
+answers, with no request at all.
+
+The administrator's view (IOM21) is three `CAP_SYSINFO_HW`-gated, audited
+queries over three introspection domains: `DMA_UNITS` (each discovered
+unit, translating or stranded with why, with its fault signal, table kind,
+owners, firmware streams and its recorded, dropped and silenced fault
+counts), `DMA_GROUPS` (each held isolation group and its holder) and
+`DMA_NODES` (each translated node's owner standing and what its domain
+maps), rendered by `sysinfo dma`. The counters are relaxed atomics on each
+unit, written by its fault task; the kernel snapshots the owners and reads
+each one's state with no other lock held.
 
 ## 10. Refused by name
 
@@ -681,10 +897,11 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
   passes only on a key the autoloaded virtio-input driver delivered after the
   unit reported `translating` — the floor disk and the driver both reached
   memory through their domains, and the per-unit fault service is live
-  throughout. `tairix-test-dma-fault-qemu-x86-64` closes the live-fault gap: on
+  throughout. `tairix-test-dma-fault-qemu-x86-64` proves a live fault: on
   the same machine a bin-local PID 1 seam admits a misbehaving in-kernel
-  virtio-blk driver that carves through its node's domain, confirms a mapped
-  read, then points a device write at an unmapped address; the unit refuses it
+  virtio-blk driver that carves through its node's domain, reads the sector
+  the runner planted back through it, then points a device write at an
+  unmapped address; the unit refuses it
   and raises its fault-event MSI, which the per-unit fault service drains into a
   `DmaTranslationFault` attributed to the device's node, with a canary page the
   write never reached — the MSI delivery the host model cannot exercise.
@@ -723,8 +940,9 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
     canary and passes only once the function reads back not mastering.
   - **The untranslated grant** is exercised by every untranslated x86_64
     vertical whose driver is autoloaded (`autoload_input`,
-    `netstack_autoload`): without it the device can neither DMA nor
-    interrupt. The harness verticals set the bit themselves (D579).
+    `netstack_autoload`) and by the five virtio-PCI harness verticals,
+    which hand their function over through the same audited grant:
+    without it the device can neither DMA nor interrupt.
 - **IOM8:**
   - **lib/pci topology tests:** aliasing through bridges to and from
     conventional PCI and nested ones; ACS on root and downstream ports; a
@@ -812,11 +1030,88 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
     binary boot the production kernel behind `iommu-sys` and pass only on
     the key the translation witness the x86_64 and aarch64 verticals share
     accepts.
-- **The storm stays host-proven, not live.** QEMU's virtio device calls
-  `virtio_error` and breaks on the first refused DMA, and the storm threshold
-  is twice the deepest fault queue a family lets a unit hold, so a live storm
-  would need ~1024 device resets
-  per one-second window — a load-dependent, flaky mechanism the charter forbids.
+- **IOM17:**
+  - **Family:** a model device — its queues, its domains forgotten on the
+    last detach or kept, its endpoints, reserved regions and fault reports,
+    and the devices refused or held back: one never answering, one naming
+    chains it was not given, one whose bypass will not clear, one offering
+    only the older bypass, one whose configuration window is short — runs the
+    shared conformance suite; a domain replayed per mapping, an unmap naming
+    whole mappings checked before the device is asked, an input range
+    holding no whole page refused, and the probe and report bytes swept with
+    random input; enrolled in miri.
+  - **VIOT:** QEMU's table and malformed ones refused whole (headers, node
+    lists, an endpoint naming no unit or a truncated one, ranges running
+    backwards or overflowing, doubled names, a wrapping window found before
+    any node is emitted); `fuzz_acpi` drives the VIOT, DMAR and IVRS parsers
+    and every query on a table that parses.
+  - **Live:** `tairix-test-dma-translation-virtio-qemu-{x86-64,aarch64,riscv64}`
+    boot the production kernel behind a `virtio-iommu-pci`, x86_64 reading
+    its topology from the VIOT.
+- **IOM18:**
+  - **Host:** the APLIC domain taken over in MSI mode, a source refused that
+    was not delegated, and a target naming the hart's index and identity;
+    the IMSIC file cleared and opened, claimed lowest first; the AIA tree
+    discovered as the supervisor domain and the hart's own file; an APLIC
+    specifier's sense, a low level refused; identities given on first arm and
+    run out rather than shared, a level source re-pended on re-arm; a device's
+    file raising its vector only while enabled and a disabled one rung on
+    re-arm; the family's MSI page-table entry and context words, a confined
+    stream raising only its own file's identities, one confined while
+    translating rewritten at once, and a unit without a second stage or
+    file-mode entries confining nothing; the facility keeping an intercepted
+    doorbell clear and confining a node's streams; the route planner giving
+    only confined functions a file, within the identities left.
+  - **Live:** `tairix-test-autoload-input-{aia,pci-aia}-qemu-riscv64` boot the
+    production kernel on `aia=aplic-imsic` and pass on the key their wired
+    lines deliver; `tairix-test-dma-translation-aia-qemu-riscv64` behind the
+    RISC-V IOMMU passes only once routing reports `remapped`, the keyboard's
+    MSI-X reaching its driver through its own file;
+    `tairix-test-msi-isolation-qemu-riscv64` has one `edu` function write the
+    identity of the other's notice, which lands in its own file and raises
+    nothing, while the other's notice arrives once.
+- **IOM19:** a translated carve past the largest buddy block, served from
+  scattered blocks largest first and mapped end to end; an untranslated one
+  still one block; a refused translation returning every block; a DMA shared
+  region over scattered frames; the reach narrowing a grant and never
+  widening it, refused at 0 and past 64 bits; a translated carve and a
+  scattered region drawn below their unit's output reach though frames above
+  are free, and one whose unit names no frame of RAM refused.
+- **IOM20 (done parts):** a range sync keeping the domain's other cached
+  translations on every family, reaching the page an unaligned range ends in
+  and refusing an empty one; a five-level VT-d unit's descriptor naming every
+  IOVA bit; the walk-cache bits pinned in the VT-d, AMD-Vi and SMMUv3
+  encodings, a RISC-V range whose tables were retired forgetting the domain; the
+  `NpCache` skip and device-only attach flush; a carve of several blocks
+  published once on a caching-mode unit; random IOVA traffic under two
+  reaches taking the highest slot any free block holds, with each order's
+  highest block kept in step with its tree, and a block freed twice refused at
+  compile time. A freed carve out of the tables at once, its IOVA kept until
+  its batch is confirmed, its frames released only by that one invalidation; a
+  full batch due at once and a carve past it, past the budget, or before the
+  flusher parks left mapped for its caller; the room of a carve the batch
+  could not take returned; an unconfirmed end or batch keeping its frames; the
+  flusher's own park loop sleeping out the window and confirming the batch
+  then, and a flusher refused or unable to park audited.
+- **IOM20.2:** batches on four threads sharing one queue with a unit running
+  on another each answered only once their own completion was stored, never
+  early, a rejected command failing its own batch alone however the waits
+  interleave, and batches longer than the ring handed over meanwhile; a
+  waiting batch holding no lock another submitter needs, and a waiting
+  confirmation holding neither its domain nor the map; a retired table freed
+  only by the batch confirming it, a failed batch's tables confirmed by the
+  next; a rejected sync answering `Unconfirmed` on every family.
+- **IOM21:** units listed translating then stranded with the family
+  discovery matched, faults reported as heard only while a task drains them,
+  their counters, held groups and translated nodes, each page built from its
+  own records alone; the decoders in `fuzz_decode`; `sysinfo dma` rendered
+  over a fixture service.
+- **The storm stays host-proven, not live.** QEMU bounces a mapping its unit
+  refuses and completes the request, so each refusal costs a full request
+  round trip, and the storm threshold is twice the deepest fault queue a
+  family lets a unit hold: a live storm would need ~1024 round trips inside
+  one second of the guest's clock, a rate only an unloaded host delivers — a
+  load-dependent, flaky mechanism the charter forbids.
   The storm/silence/`Offline` path is proven against the register-level model
   (IOM4–IOM6 above); the live vertical proves the single MSI-delivered fault,
   which is MI0's exit criterion.

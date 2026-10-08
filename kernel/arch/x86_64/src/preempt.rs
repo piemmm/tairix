@@ -219,64 +219,16 @@ pub const fn cs_is_ring3(cs: u64) -> bool {
 
 // --- Per-CPU ID hook ------------------------------------------------
 
-/// Per-CPU mapping from LAPIC ID to dense `tairix_arch_api::CpuId`.
-///
-/// The scheduler addresses CPUs with a dense `0..config.cpus` range;
-/// the LAPIC ID on QEMU is sparse (`0`, `1`, `2`, …) but on real
-/// hardware can be any 8-bit value. The binary populates this table
-/// at AP bring-up time via [`set_cpu_id_for_lapic`]; the ISR consults
-/// it with one MMIO read of the LAPIC ID register plus one indexed
-/// load.
-///
-/// `u32::MAX` is the sentinel for "no mapping installed yet"; the ISR
-/// silently EOI's and returns in that case so a stray timer that
-/// fires before the mapping table is populated is *not* a panic.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static LAPIC_TO_CPU_ID: [core::sync::atomic::AtomicU32; 256] = {
-    // SAFETY-INVARIANT: the `const` here is used **only** as the
-    // initializer for a static array of atomics — the
-    // `declare_interior_mutable_const` lint flags this idiom even
-    // though there is no way to observe the interior mutability
-    // through the const itself (it is consumed at array-literal
-    // expansion time and never named again). This is the canonical
-    // pattern for building a static `[Atomic_; N]` in `no_std` Rust;
-    // see Rust RFC 1440 and the `core` source for `AtomicUsize`'s
-    // own array constructors. Allow with rationale.
-    #[allow(clippy::declare_interior_mutable_const)]
-    const ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
-    [ZERO; 256]
-};
-
-/// Record the dense `tairix_arch_api::CpuId` this `lapic_id` maps to.
-///
-/// Called from each CPU's bring-up path *before* it enables interrupts.
-/// `u32::MAX` is reserved as the "unmapped" sentinel; passing it is
-/// equivalent to clearing the slot.
-pub fn set_cpu_id_for_lapic(lapic_id: u32, cpu_id: u32) {
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    if let Some(slot) = usize::try_from(lapic_id)
-        .ok()
-        .and_then(|id| LAPIC_TO_CPU_ID.get(id))
-    {
-        slot.store(cpu_id, Ordering::Relaxed);
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    {
-        let _ = (lapic_id, cpu_id);
-    }
-}
-
 /// The dense id of the CPU whose APIC id is `lapic_id`, or [`u32::MAX`] for
-/// one unmapped, as is every id past the eight bits xAPIC names: no such CPU
-/// is brought up.
+/// one the published [`crate::cpumap::ApicMap`] does not hold: no CPU, or
+/// any before the arch handle publishes the map.
 #[must_use]
 pub fn cpu_id_for_lapic(lapic_id: u32) -> u32 {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        usize::try_from(lapic_id)
-            .ok()
-            .and_then(|id| LAPIC_TO_CPU_ID.get(id))
-            .map_or(u32::MAX, |slot| slot.load(Ordering::Relaxed))
+        crate::cpumap::published()
+            .and_then(|map| map.cpu_of(lapic_id))
+            .unwrap_or(u32::MAX)
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
@@ -394,9 +346,9 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     }
 }
 
-/// The running CPU's dense id, read from its LAPIC ID register through the
-/// `LAPIC_TO_CPU_ID` map, or [`u32::MAX`] when the id is unmapped. Shared
-/// by every ISR that needs the CPU id (the timer and external-IRQ paths).
+/// The running CPU's dense id, read from its LAPIC ID register through
+/// [`cpu_id_for_lapic`]. Shared by every ISR that needs the CPU id (the
+/// timer and external-IRQ paths).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn current_cpu_id_from_lapic() -> u32 {
@@ -708,11 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn set_cpu_id_for_lapic_on_host_is_inert() {
-        // Same gating as above. The host build cannot observe a real
-        // mapping; we cross-check that the getter returns the
-        // documented sentinel.
-        set_cpu_id_for_lapic(0, 7);
+    fn a_host_build_maps_no_apic_id() {
         assert_eq!(cpu_id_for_lapic(0), u32::MAX);
     }
 

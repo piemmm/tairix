@@ -31,7 +31,7 @@
 //! through the reader, not as a tree node.
 
 use crate::fdt::{gic_intid_from_cells, Fdt};
-use tairix_abi::{HwNode, HwResource};
+use tairix_abi::{DmaCoherence, HwNode, HwResource};
 use tairix_arch_api::fdtwalk::push_dma_windows;
 use tairix_arch_api::fdtwalk::FdtPlatform;
 use tairix_fdt::{
@@ -110,7 +110,9 @@ pub struct Aarch64Fdt {
 impl FdtPlatform for Aarch64Fdt {
     /// The three-cell `<type, number, flags>` GIC binding both supported
     /// boards describe interrupts with.
-    const INTERRUPT_CELLS: usize = 3;
+    fn interrupt_cells(&self) -> usize {
+        3
+    }
 
     /// The GIC mapping is a pure function of the specifier's own cells; only
     /// the GIC's identity is read, to know which nodes it serves.
@@ -122,6 +124,14 @@ impl FdtPlatform for Aarch64Fdt {
 
     fn root_interrupt_controller(&self) -> Option<u32> {
         self.gic
+    }
+
+    fn kernel_driven(&self, node: &Node<'_>) -> bool {
+        node.property("compatible").is_some_and(|names| {
+            names.iter_strings().any(|name| {
+                crate::gic::is_gic_compatible(name) || name == crate::gic::ITS_COMPATIBLE
+            })
+        })
     }
 
     /// The Broadcom binding's mask converted to the generic, node-relative
@@ -170,7 +180,17 @@ impl FdtPlatform for Aarch64Fdt {
         read_cells(specifier, 8, 1).is_some_and(|flags| flags & 0b11 != 0)
     }
 
-    fn augment(&self, node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+    // An Arm tree states `dma-coherent` on every master that snoops.
+    const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Unsnooped;
+
+    fn augment(
+        &self,
+        node: &Node<'_>,
+        depth: usize,
+        levels: &[BusLevel<'_>],
+        coherence: DmaCoherence,
+        hw: &mut HwNode,
+    ) {
         let Some(compatible) = node.property("compatible") else {
             return;
         };
@@ -181,7 +201,7 @@ impl FdtPlatform for Aarch64Fdt {
         // P7) — a capability-grant request the driver host satisfies, declared here because only the platform
         // knows the firmware's aperture.
         if names_compatible(MAILBOX_COMPATIBLE) {
-            let dma = HwResource::dma(APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN);
+            let dma = HwResource::dma(APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN, coherence);
             // A node with no room left simply carries no carve request; the
             // capacity bound is the ABI's, never a panic.
             let _ = hw.push_resource(dma);
@@ -196,11 +216,11 @@ impl FdtPlatform for Aarch64Fdt {
             if let Some((aperture_top, aperture_len)) = parent_dma_aperture(depth, levels) {
                 // No room left simply carries no carve request; the capacity
                 // bound is the ABI's, never a panic.
-                let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
+                let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len, coherence));
             }
         }
         if names_compatible(EMMC2_COMPATIBLE) {
-            push_dma_windows(depth, levels, hw);
+            push_dma_windows(depth, levels, coherence, hw);
         }
         // The BCM2711 PCIe host bridge additionally *requests* the
         // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
@@ -228,6 +248,7 @@ impl FdtPlatform for Aarch64Fdt {
                     aperture_top,
                     aperture_len,
                     inbound_pcie_base,
+                    coherence,
                 ));
             }
             // …and the outbound memory window from its `ranges`: the
@@ -442,6 +463,9 @@ mod tests {
             mmio_windows(gic),
             [(0x0800_0000, 0x1_0000), (0x0801_0000, 0x1_0000)]
         );
+        // The kernel drives the GIC, so no driver may be loaded for it.
+        assert!(gic.is_kernel_driven());
+        assert!(nodes.iter().filter(|n| n.is_kernel_driven()).eq([gic]));
 
         // The generic timer carries its PPI from `interrupts` and its
         // own `compatible` as the bind key.
@@ -465,6 +489,65 @@ mod tests {
 
         // Every device sits directly under the root.
         assert!(nodes[1..].iter().all(|n| n.parent() == 0));
+    }
+
+    #[test]
+    fn a_gicv3_and_its_translation_service_are_the_kernel_s_and_a_gpio_controller_is_not() {
+        let cells =
+            |values: &[u64]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("intc@8000000");
+        b.prop_str("compatible", "arm,gic-v3");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 3);
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.prop("ranges", &[]);
+        b.prop(
+            "reg",
+            &cells(&[0x0800_0000, 0x1_0000, 0x080A_0000, 0xF6_0000]),
+        );
+        b.begin_node("its@8080000");
+        b.prop_str("compatible", "arm,gic-v3-its");
+        b.prop("msi-controller", &[]);
+        b.prop("reg", &cells(&[0x0808_0000, 0x2_0000]));
+        b.end_node();
+        b.end_node();
+        b.begin_node("gpio@fe200000");
+        b.prop_str("compatible", "brcm,bcm2711-gpio");
+        b.prop("interrupt-controller", &[]);
+        b.prop("reg", &cells(&[0xFE20_0000, 0x1000]));
+        b.end_node();
+        b.end_node();
+        let nodes = discover_all(&b.build());
+        assert!(by_key(&nodes, b"arm,gic-v3").is_kernel_driven());
+        assert!(by_key(&nodes, b"arm,gic-v3-its").is_kernel_driven());
+        let gpio = by_key(&nodes, b"brcm,bcm2711-gpio");
+        assert_eq!(gpio.class(), Some(HwDeviceClass::InterruptController));
+        assert!(!gpio.is_kernel_driven());
+    }
+
+    /// The generic ECAM host is the kernel's, which owns every function's
+    /// configuration space below it, so its window is never a driver's.
+    #[test]
+    fn a_generic_ecam_host_is_the_kernel_s() {
+        let cells =
+            |values: &[u64]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("pcie@4010000000");
+        b.prop_str("compatible", "pci-host-ecam-generic");
+        b.prop_str("device_type", "pci");
+        b.prop("reg", &cells(&[0x40_1000_0000, 0x1000_0000]));
+        b.end_node();
+        b.end_node();
+        let nodes = discover_all(&b.build());
+        assert!(by_key(&nodes, b"pci-host-ecam-generic").is_kernel_driven());
     }
 
     #[test]

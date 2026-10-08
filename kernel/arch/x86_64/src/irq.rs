@@ -180,12 +180,10 @@ pub(crate) fn clear_external_irq_dispatch_for_tests() {
 /// Sentinel meaning "no GSI bound to this vector".
 const GSI_UNMAPPED: u32 = u32::MAX;
 
-/// Boot-time-populated, read-only-after-init routing table.
+/// The line each external vector raises while one owns it.
 ///
 /// Backed by an array of [`AtomicU32`]; one slot per reserved
 /// external vector. `u32::MAX` is the unmapped sentinel.
-/// Once the kernel binary's `Phase::Irq` step completes, the table
-/// is read-only (one-shot publish).
 static GLOBAL_ROUTING: [AtomicU32; EXTERNAL_VECTOR_COUNT] = {
     // The array initialiser needs a `const`, and copying it per slot is the
     // point: each element must be its own independent cell.
@@ -194,7 +192,7 @@ static GLOBAL_ROUTING: [AtomicU32; EXTERNAL_VECTOR_COUNT] = {
     [Z; EXTERNAL_VECTOR_COUNT]
 };
 
-/// Borrow the boot-time-published [`Routing`] table.
+/// Borrow the [`Routing`] table every external vector dispatches through.
 #[must_use]
 pub fn global_routing() -> &'static Routing {
     // SAFETY: `Routing` is `#[repr(transparent)]` over the atomic

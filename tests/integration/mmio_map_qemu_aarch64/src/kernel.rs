@@ -16,7 +16,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::{
-    i32_from_register, CapabilityId, CapabilityQuery, Errno, SyscallNumber, SYSCALL_MAX_ARGS,
+    i32_from_register, CapabilityId, CapabilityQuery, DmaCoherence, Errno, SyscallNumber,
+    SYSCALL_MAX_ARGS,
 };
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
@@ -420,12 +421,8 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
         let Ok(Some(custody)) = DMA_CUSTODY.get() else {
             return encode(Err(Errno::NotImplemented));
         };
-        let custodian = DmaCustodian {
-            node: DMA_NODE,
-            generation: DMA_GENERATION,
-            custody,
-            translation: None,
-        };
+        let custodian =
+            DmaCustodian::untranslated(DMA_NODE, DMA_GENERATION, custody, DmaCoherence::Unsnooped);
         let len = args[1] as usize;
         let result =
             match with_current_live_space(BOOT_CPU, |space| space.alloc_dma(len, 0, custodian)) {
@@ -653,7 +650,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // enabled (the address-space build switched it on).
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
     syscall_entry::set_dispatch_callback(dispatch);
     if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {

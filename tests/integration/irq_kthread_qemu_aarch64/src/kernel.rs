@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use tairix_abi::IrqHandle;
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
 use tairix_arch_aarch64::fdt::gic_device_intid;
-use tairix_arch_aarch64::gic::{self, GicController, Gicv2, VolatileGicMmio, MAX_INTID};
+use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID};
 use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
@@ -65,8 +65,8 @@ const RTCIMSC: usize = 0x010;
 /// `RTCICR` — interrupt clear (bit 0), offset 0x01C.
 const RTCICR: usize = 0x01C;
 
-/// CPU-interface target bitmask routing the SPI to the boot CPU (CPU 0).
-const CPU0_TARGET: u8 = 0b0000_0001;
+/// The CPU the RTC's SPI is routed to: the boot CPU.
+const IRQ_CPU: tairix_arch_api::CpuId = 0;
 
 /// Synthesised owner for the IRQ binding — the kthread's attribution id.
 const OWNER: TaskId = TaskId(1);
@@ -119,14 +119,14 @@ const MAX_STEPS: u64 = 200_000_000;
 /// [`tairix_arch_api::IrqController`] `mask` (which clears the distributor
 /// enable bit and emits the `SeqCst` mask-before-wake fence).
 struct GicBridge {
-    ctrl: GicController<VolatileGicMmio>,
+    ctrl: GicController<ActiveGic>,
 }
 
 /// The bridge instance. Const-constructible (the GIC controller holds only
 /// a zero-sized MMIO handle and the max-INTID bound), so it lives in a
 /// `static` the interrupt-context dispatcher can reference.
 static BRIDGE: GicBridge = GicBridge {
-    ctrl: GicController::new(Gicv2::new(VolatileGicMmio), MAX_INTID),
+    ctrl: GicController::new(ActiveGic, MAX_INTID),
 };
 
 impl IrqController for GicBridge {
@@ -283,7 +283,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // before any source is armed; the dispatcher is installed.
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
 
     // 5. Build the live eevdf scheduler over the arch port, cloning the
@@ -340,7 +340,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     //    `virt`-board GICv2 windows for the RTC SPI, and the vector table +
     //    dispatcher are installed so an incoming SPI dispatches correctly.
     unsafe {
-        gic::route_spi(rtc_intid, CPU0_TARGET);
+        gic::route_spi(rtc_intid, IRQ_CPU).expect("the boot CPU's interface is up");
         gic::enable_ppi(rtc_intid);
         rtc_arm();
         exceptions::enable_irq();

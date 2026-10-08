@@ -64,6 +64,17 @@ Les requêtes :
   appartient (un tiret pour un candidat non affilié), son emplacement,
   son rôle (candidate/held/in-sync/resyncing/faulted), sa taille et la
   génération de métadonnées qu'il porte (nécessite `CAP_SYSINFO_HW`).
+- `dma`, `iommu` — les unités de traduction DMA : une ligne par unité — son
+  nœud dans l'arbre matériel, sa famille, si elle traduit ou pourquoi non,
+  comment elle signale ses fautes, où vivent ses traductions, les
+  propriétaires et les flux du micrologiciel qu'elle détient, et ses fautes
+  enregistrées et écartées, et les flux qu'une tempête a réduits au silence,
+  depuis le démarrage — puis une ligne par groupe d'isolation qu'un
+  propriétaire détient — son unité, le nœud et la génération du détenteur et
+  où en est ce propriétaire — puis une ligne par nœud qu'une unité traduit
+  pour un propriétaire — son unité et son groupe, la génération et l'état de
+  son propriétaire, ses flux, et les mappages de son domaine et les octets
+  qu'ils couvrent (requiert `CAP_SYSINFO_HW`).
 - `show <resource-ref>` — lit une référence de ressource
   `info:`/`state:`/`stats:` et affiche sa valeur. Ces espaces de noms
   fournissent des valeurs typées via cette API, jamais des flux d'octets :

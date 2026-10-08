@@ -13,8 +13,8 @@ use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, IF_NAME_LEN};
 use tairix_abi::switchboard_ipc::{MachineReport, SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
-    MountAvailability, MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord,
-    ProcessState, SysinfoQueryId, SysinfoRequestHeader, MOUNT_VOLUME_ID_LEN,
+    MountAvailability, MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState,
+    SysinfoQueryId, SysinfoRequestHeader, MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{
@@ -272,7 +272,7 @@ impl Transport for ProcessListTransport {
         }
         let payload = &request[SysinfoRequestHeader::WIRE_LEN
             ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-        let req = ProcessListRequest::from_bytes(payload)?;
+        let req = PageRequest::from_bytes(payload)?;
         let offset = req.offset as usize;
         if offset >= self.records.len() {
             return Ok(Vec::new());

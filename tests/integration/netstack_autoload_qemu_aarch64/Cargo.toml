@@ -15,6 +15,10 @@ workspace = true
 name = "tairix-test-netstack-autoload-qemu-aarch64"
 path = "src/main.rs"
 
+[[bin]]
+name = "tairix-test-netstack-autoload-smp-qemu-aarch64"
+path = "src/smp.rs"
+
 # Freestanding "boot the production aarch64 kernel pipeline against the shared
 # autoload-root disk carrying the signed virtio-net driver bundle, and prove
 # the two-process live-boot network path end to end" integration test. It

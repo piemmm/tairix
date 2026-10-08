@@ -10,11 +10,10 @@
 //! (`plans/NETWORK.md` §5).
 
 use tairix_abi::net_ipc::NetSocketRecord;
-use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId};
+use tairix_abi::sysinfo::SysinfoQueryId;
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError, WalkStep};
-use crate::request::CallError;
+use crate::list::{walk_records, ListError, WalkStep};
 use crate::transport::Transport;
 
 /// Number of [`NetSocketRecord`]s requested per socket-listing page.
@@ -31,7 +30,8 @@ pub const NET_SOCKET_PAGE: u16 = 32;
 /// only to a `CAP_SYSINFO_GLOBAL` holder and audits: the records name
 /// every principal's sockets and every connection's peer address. A
 /// caller without the capability receives [`ListError::Call`] carrying
-/// [`CallError::PermissionDenied`] — never a fabricated empty table.
+/// [`CallError::PermissionDenied`](crate::CallError::PermissionDenied) —
+/// never a fabricated empty table.
 ///
 /// `sink` answers [`WalkStep::Continue`] to be given the next record or
 /// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
@@ -50,27 +50,15 @@ pub const NET_SOCKET_PAGE: u16 = 32;
 ///   walk stops at that record.
 pub fn for_each_net_socket(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&NetSocketRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&NetSocketRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::NET_SOCKETS,
         NetSocketRecord::WIRE_LEN,
         NET_SOCKET_PAGE,
-        |offset, limit| {
-            NetInterfaceListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = NetSocketRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        NetSocketRecord::from_bytes,
+        sink,
     )
 }
 
@@ -81,7 +69,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::net_ipc::{NetAddrFamily, NetSockProto, NetSockState};
-    use tairix_abi::sysinfo::SysinfoRequestHeader;
+    use tairix_abi::sysinfo::{PageRequest, SysinfoRequestHeader};
 
     /// An in-memory `sysinfod` stand-in answering socket-list queries from a
     /// fixed record set, decoding the request exactly as the real service
@@ -111,7 +99,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = NetInterfaceListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

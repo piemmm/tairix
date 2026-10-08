@@ -82,6 +82,9 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `VOLUME_IO_STATS`        | none                 | no      | packed `VolumeIoStatsRecord`s       |
 | `VOLUME_IO_QUEUE`        | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoQueueRecord`s       |
 | `GPU_DEVICE_STATS`       | `CAP_SYSINFO_HW`     | yes     | packed `DisplayStats` records       |
+| `DMA_UNITS`              | `CAP_SYSINFO_HW`     | yes     | packed `DmaUnitRecord`s             |
+| `DMA_GROUPS`             | `CAP_SYSINFO_HW`     | yes     | packed `DmaGroupRecord`s            |
+| `DMA_NODES`              | `CAP_SYSINFO_HW`     | yes     | packed `DmaNodeRecord`s             |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the
@@ -113,7 +116,7 @@ answers one `RaidArrayRecord` per composed array — identity, level,
 health, member tallies, geometry, endpoint, published node, scrub/resync
 cursors, generation — and `RAID_MEMBERS` one `RaidMemberRecord` per
 device the composer holds, including the unaffiliated candidates a new
-array can be built from. Both page with a `RaidListRequest`.
+array can be built from.
 
 `GPU_DEVICE_STATS` is gated the same way and for the same reason: it
 details a graphics node `HARDWARE_TREE` already names. The broker forwards
@@ -127,7 +130,7 @@ be a claim about the hardware, and the hardware tree is what answers that.
 The reply carries the occupancy the service measured around its own
 present calls, the memory its driver reports the device owns, the
 compositor capabilities that driver publishes, and the mode being scanned
-out; the record pages with a `DeviceStatsRequest`.
+out.
 
 ## Reported cache ledgers
 
@@ -215,10 +218,42 @@ There is no response envelope: the typed payload *is* the response.
   own task), so it needs no capability (`AGENTS.md` §24.3, §16.6).
 - The scalar queries return the little-endian wire image of their
   response struct.
-- The hardware-tree query passes the source's encoded bytes through
-  verbatim: the hardware-tree wire format is owned by `lib/abi`
-  (`AGENTS.md` §18.1), not by this service, so `sysinfod` frames the
-  bytes without interpreting them.
+- The hardware-tree query checks the source's snapshot against its own
+  header (a node count the body does not hold, or a partial node, is
+  refused) and answers that header followed by the requested page of whole
+  nodes, so a walk detects a snapshot that changed under it.
+
+## Walks
+
+Every page of one walk names the same `PageRequest::walk`, and the
+dispatcher answers each from one reading of the list: the walk's first page
+reads it from the source and the `Walks` store holds it, encoded, until the
+walk's short page, so the source is read once a walk however many pages it
+takes, and a list changing under the walk can neither skip nor repeat a
+record. A list shorter than one page ends its walk at once and is never
+held. A page naming `FRESH` reads the list afresh. The hardware tree is the
+exception: its generation guards a walk, so it is read per page.
+
+What the store holds is bounded by one figure, `list_budget`: a byte of
+list per 256 of RAM, at least 256 KiB. The kernel spends more than 256
+times a process record's size on the process it names (its kernel stack
+alone is 32 KiB), so a machine full of processes still holds a walk of all
+of them. Each walk is charged its
+list and a fixed share for its bookkeeping, so a flood of empty walks is
+bounded as one large walk is. A caller has at most four walks part way
+through, its own least recently used let go for a fifth; past the budget,
+the least recently active caller's oldest walk is let go. A page of a walk
+let go is answered `Interrupted`, and its caller starts the walk again. A
+kernel list larger than the whole budget is read afresh for each page
+rather than held.
+
+The source reads each list whole. A kernel list is read from its start into
+a buffer that doubles until one holds it, so it comes from one kernel
+reading, never joined from two; a read ending part way through a record is
+refused. A peer service's list (`netstack`, the array composer) is paged to
+its short page; one longer than `list_budget`, a page claiming more records
+than were asked for, and an offset past the protocol's are refused, so a
+peer that never ends its list cannot exhaust the service.
 
 ## The data seam
 
@@ -243,12 +278,12 @@ query carries.
 `sysinfod` owns the reserved `EventId` range `8000..9000`
 (`AGENTS.md` §2.5, §19.4):
 
-| Id   | Constant            | Level | Meaning                                   |
-|------|---------------------|-------|-------------------------------------------|
-| 8001 | `QUERY_SERVED`      | Debug | an audited query was invoked              |
-| 8002 | `QUERY_DENIED`      | Warn  | capability check failed                   |
-| 8003 | `REQUEST_MALFORMED` | Warn  | header or payload decode failed           |
-| 8004 | `QUERY_UNAVAILABLE` | Warn  | reserved-but-unassigned query identifier  |
+| Id   | Constant            | Level | Meaning                                         |
+|------|---------------------|-------|-------------------------------------------------|
+| 8001 | `QUERY_SERVED`      | Debug | an audited query was invoked                    |
+| 8002 | `QUERY_DENIED`      | Warn  | capability check failed                         |
+| 8003 | `REQUEST_MALFORMED` | Warn  | header refused, or frame not its payload's size |
+| 8004 | `QUERY_UNAVAILABLE` | Warn  | reserved-but-unassigned query identifier        |
 
 `QUERY_SERVED` is recorded at `Debug` because a polling monitor emits it
 continuously: at `Info` it would flood the default console filter.
@@ -262,7 +297,10 @@ drowning the log; the cross-principal, kernel, and hardware queries are.
 
 `cargo test -p tairix-sysinfod` drives `serve` against an in-memory
 `SysinfoSource` fixture and a recording log sink, covering every query,
-paging (`offset`/`limit` and the empty page past the end), the capability
+paging (`offset`/`limit` and the empty page past the end), walks (one
+source read per walk, a list changing under a walk, a walk let go
+answered `Interrupted`, the store's share and budget), reading a list whole
+from the kernel or a peer and refusing what is not a whole list, the capability
 gates and their denial records, the audited-served record, the
 hardware-tree pass-through, the ungated mount-table and resource-limit
 listings, and the malformed-header / truncated-payload

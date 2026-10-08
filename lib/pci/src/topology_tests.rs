@@ -1036,6 +1036,30 @@ fn a_hot_plug_slot_or_the_platform_marks_its_port_external_facing() {
     assert_eq!(inside.untrusted(index(&inside, 1, 0, 0)), None);
 }
 
+/// A port whose PCI Express capability sits where its slot and ARI registers
+/// would run past configuration space is walked, its slot taken as one
+/// hardware can arrive in and its bus scanned without ARI.
+#[test]
+fn a_port_capability_running_past_the_space_reads_as_untrusted() {
+    let space = Space::new();
+    space.bridge((0, 1, 0), 1, 1);
+    space.put(
+        (0, 1, 0),
+        &[
+            (1, 0x0010_0000),
+            (13, 0xFC),
+            (0xFC >> 2, 0x10 | (0x4 << 4 | 2) << 16 | 1 << 24),
+        ],
+    );
+    space.function((1, 0, 0), 0x00);
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Leave, &trusted)
+        .unwrap();
+    let port = topology.functions()[index(&topology, 0, 1, 0)];
+    assert!(port.external_facing);
+    assert!(matches!(port.header, Header::Bridge { ari: false, .. }));
+}
+
 /// A root port over a switch whose downstream port leads to an endpoint at
 /// `03:00.0`, the root port and the downstream port external-facing with the
 /// ACS each is given.

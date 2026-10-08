@@ -7,18 +7,19 @@
 use alloc::vec::Vec;
 
 use tairix_abi::{
-    HwNode, HwProperty, HwResource, HwResourceKind, IommuGroup, IommuReservedWindow, IommuStreams,
-    ReservedAccess, HW_NODE_MAX_RESOURCES,
+    DmaCoherence, HwNode, HwProperty, HwResource, HwResourceKind, IommuGroup, IommuReservedWindow,
+    IommuStreams, ReservedAccess, HW_NODE_MAX_RESOURCES,
 };
 use tairix_arch_api::fdtwalk::{emitted, provider, Provider};
 use tairix_arch_api::HwNodeSink;
 use tairix_fdt::iommu::{each_iommu_address, iommu_cells};
 use tairix_fdt::pci::each_pci_host;
-use tairix_fdt::{Fdt, IdMap, IdMapEntry};
+use tairix_fdt::{Fdt, IdMap, IdMapEntry, Node};
 use tairix_log::{Event, Field, FieldValue, Level, Sink};
 use tairix_pci::topology::Topology;
 
 use crate::boot_hwtree::CollectingHwNodeSink;
+use crate::hwdiscovery::virtio_mmio_slot_base;
 use crate::pci_probe::{log_discovery, Unconfined, UnitTopology};
 
 /// How one host's requester ids reach units.
@@ -111,7 +112,8 @@ impl FdtUnits {
     /// held, every master stays ungrouped and every segment a host maps is
     /// left undescribed.
     pub fn read(fdt: &Fdt<'_>, sink: &mut CollectingHwNodeSink, log: &dyn Sink) -> Self {
-        record_fault_interrupts(fdt, sink.nodes_mut());
+        record_fault_interrupts(fdt, sink.nodes_mut(), log);
+        place_function_units(fdt, sink.nodes_mut(), log);
         log_undescribed_masters(fdt, sink.nodes(), log);
         Self::record(fdt, sink, log).unwrap_or_else(|| {
             log_discovery(
@@ -476,7 +478,7 @@ impl Groups {
                 .map(|(at, &index)| (sink.nodes()[index].id(), at)),
         );
         by_id.sort_unstable();
-        for (id, node) in emitted(fdt) {
+        for (id, node, _) in emitted(fdt) {
             let Ok(found) = by_id.binary_search_by_key(&id, |&(id, _)| id) else {
                 continue;
             };
@@ -593,8 +595,8 @@ fn walked(nodes: &[HwNode], id: u32) -> Option<usize> {
 /// State on each unit the place of the wired line it raises its faults on:
 /// as an `SMMUv3`'s binding names it in `interrupt-names`, and a RISC-V
 /// IOMMU's family chooses it.
-fn record_fault_interrupts(fdt: &Fdt<'_>, nodes: &mut [HwNode]) {
-    for (id, node) in emitted(fdt) {
+fn record_fault_interrupts(fdt: &Fdt<'_>, nodes: &mut [HwNode], log: &dyn Sink) {
+    for (id, node, _) in emitted(fdt) {
         if node.property("#iommu-cells").is_none() {
             continue;
         }
@@ -604,6 +606,8 @@ fn record_fault_interrupts(fdt: &Fdt<'_>, nodes: &mut [HwNode]) {
             })
         } else if node.is_compatible(tairix_kernel_iommu_riscv::COMPATIBLE) {
             Some(tairix_kernel_iommu_riscv::FAULT_INTERRUPT)
+        } else if node.is_compatible(tairix_virtio::transport_mmio::COMPATIBLE) {
+            Some(tairix_kernel_iommu_virtio::FAULT_INTERRUPT)
         } else {
             None
         };
@@ -611,33 +615,222 @@ fn record_fault_interrupts(fdt: &Fdt<'_>, nodes: &mut [HwNode]) {
             continue;
         };
         if let Some(at) = walked(nodes, id) {
-            let fact = HwResource::property(HwProperty::FaultInterrupt, u64::from(place));
-            let _ = nodes[at].push_resource(fact);
+            record_fault_place(&mut nodes[at], place, log);
         }
     }
+}
+
+/// State on a unit's node the place of its fault line, saying so where the
+/// node has no room: the unit's faults then raise nothing.
+fn record_fault_place(node: &mut HwNode, place: u32, log: &dyn Sink) {
+    let fact = HwResource::property(HwProperty::FaultInterrupt, u64::from(place));
+    if node.push_resource(fact).is_err() {
+        log_discovery(
+            log,
+            Level::Error,
+            "a translation unit's fault line unrecorded; its faults raise nothing",
+        );
+    }
+}
+
+/// Give each unit that is a function on a host's root bus — a virtio-iommu —
+/// its node address, `(segment << 16) | requester id`, by which the kernel
+/// reaches the function, and its faults' place: the first of its
+/// interrupts, its INTx pin, which the host's bring-up resolves.
+fn place_function_units(fdt: &Fdt<'_>, nodes: &mut [HwNode], log: &dyn Sink) {
+    each_pci_host(fdt, |host| {
+        host.units(fdt, &mut |requester, unit| {
+            let Some(at) = emitted(fdt)
+                .find(|(_, node, _)| node.offset() == unit.offset())
+                .and_then(|(id, _, _)| walked(nodes, id))
+            else {
+                return;
+            };
+            nodes[at].set_address(u32::from(host.segment) << 16 | u32::from(requester));
+            record_fault_place(
+                &mut nodes[at],
+                tairix_kernel_iommu_virtio::FAULT_INTERRUPT,
+                log,
+            );
+        });
+    });
 }
 
 /// Audit every master whose `iommus` the walk could not describe: it was
 /// given no DMA authority at all.
 fn log_undescribed_masters(fdt: &Fdt<'_>, nodes: &[HwNode], log: &dyn Sink) {
-    for (id, node) in emitted(fdt) {
-        if node
-            .property("iommus")
-            .is_none_or(|iommus| iommus.value().is_empty())
-        {
+    for (id, node, _) in emitted(fdt) {
+        if !names_units(&node) {
             continue;
         }
         let Some(entry) = walked(nodes, id).map(|at| &nodes[at]) else {
             continue;
         };
-        let described = entry.resources().iter().any(|r| {
-            matches!(
-                r.kind(),
-                Some(HwResourceKind::IommuStream | HwResourceKind::Dma)
-            )
-        });
-        if !described {
+        if !described(entry) {
             log_refused(log, id, u32::MAX, "undescribed");
+        }
+    }
+}
+
+fn names_units(node: &Node<'_>) -> bool {
+    node.property("iommus")
+        .is_some_and(|iommus| !iommus.value().is_empty())
+}
+
+/// Whether the walk described the DMA of the master `entry` names, through
+/// units or around them.
+fn described(entry: &HwNode) -> bool {
+    entry.resources().iter().any(|r| {
+        matches!(
+            r.kind(),
+            Some(HwResourceKind::IommuStream | HwResourceKind::Dma)
+        )
+    })
+}
+
+/// How the DMA of the device in the operational slot at `base` meets the
+/// CPU's caches, on an architecture whose masters are `convention` where no
+/// node says; [`None`] for no such slot.
+#[must_use]
+pub fn slot_coherence(fdt: &Fdt<'_>, base: u64, convention: DmaCoherence) -> Option<DmaCoherence> {
+    emitted(fdt)
+        .find(|(_, node, _)| virtio_mmio_slot_base(node) == Some(base))
+        .map(|(_, _, stated)| stated.unwrap_or(convention))
+}
+
+/// What the device the virtio-mmio probe finds in each slot masters DMA as:
+/// what the walk read from the slot's own node, so the device is confined
+/// exactly as its slot is described.
+pub struct SlotDma {
+    /// Each translated slot's streams, by its register base.
+    streams: Vec<(u64, IommuStreams)>,
+    /// The slots naming units whose DMA the walk could not describe; [`None`]
+    /// when the slots could not be recorded, which leaves every slot so.
+    undescribed: Option<Vec<u64>>,
+    coherence: SlotCoherence,
+}
+
+/// How the slots' DMA meets the CPU's caches.
+enum SlotCoherence {
+    /// Each operational slot's, by its register base.
+    Listed(Vec<(u64, DmaCoherence)>),
+    /// Every slot's alike.
+    #[cfg(test)]
+    Every(DmaCoherence),
+}
+
+/// A slot whose DMA the tree cannot describe: its device masters none.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Undescribed;
+
+impl SlotDma {
+    /// Read every operational slot of `fdt`, as the walk described it among
+    /// `nodes`, on an architecture whose masters are `convention` where no
+    /// node says.
+    #[must_use]
+    pub fn read(fdt: &Fdt<'_>, nodes: &[HwNode], convention: DmaCoherence) -> Self {
+        Self::record(fdt, nodes, convention).unwrap_or(Self {
+            streams: Vec::new(),
+            undescribed: None,
+            coherence: SlotCoherence::Listed(Vec::new()),
+        })
+    }
+
+    fn record(fdt: &Fdt<'_>, nodes: &[HwNode], convention: DmaCoherence) -> Option<Self> {
+        let mut streams = Vec::new();
+        let mut undescribed = Vec::new();
+        let mut coherence = Vec::new();
+        for (id, node, stated) in emitted(fdt) {
+            let Some(base) = virtio_mmio_slot_base(&node) else {
+                continue;
+            };
+            coherence.try_reserve(1).ok()?;
+            coherence.push((base, stated.unwrap_or(convention)));
+            if !names_units(&node) {
+                continue;
+            }
+            let entry = walked(nodes, id).map(|at| &nodes[at]);
+            let translated = streams.len();
+            for range in entry.into_iter().flat_map(streams_of) {
+                streams.try_reserve(1).ok()?;
+                streams.push((base, range));
+            }
+            if streams.len() == translated && !entry.is_some_and(described) {
+                undescribed.try_reserve(1).ok()?;
+                undescribed.push(base);
+            }
+        }
+        Some(Self {
+            streams,
+            undescribed: Some(undescribed),
+            coherence: SlotCoherence::Listed(coherence),
+        })
+    }
+
+    /// How the DMA of the device in the slot at `base` meets the CPU's
+    /// caches, or [`None`] for a slot the tree does not list.
+    #[must_use]
+    pub fn coherence(&self, base: u64) -> Option<DmaCoherence> {
+        match &self.coherence {
+            SlotCoherence::Listed(slots) => slots
+                .iter()
+                .find(|&&(at, _)| at == base)
+                .map(|&(_, coherence)| coherence),
+            #[cfg(test)]
+            SlotCoherence::Every(coherence) => Some(*coherence),
+        }
+    }
+
+    /// The streams the device in the slot at `base` masters DMA as: none for
+    /// one reaching memory around every unit.
+    ///
+    /// # Errors
+    ///
+    /// [`Undescribed`] for a slot whose DMA the tree cannot describe.
+    pub fn streams(
+        &self,
+        base: u64,
+    ) -> Result<impl Iterator<Item = IommuStreams> + '_, Undescribed> {
+        if self
+            .undescribed
+            .as_ref()
+            .is_none_or(|slots| slots.contains(&base))
+        {
+            return Err(Undescribed);
+        }
+        Ok(self
+            .streams
+            .iter()
+            .filter(move |&&(at, _)| at == base)
+            .map(|&(_, range)| range))
+    }
+}
+
+#[cfg(test)]
+impl SlotDma {
+    /// A tree none of whose slots names a unit, every slot snooping.
+    pub(crate) const UNTRANSLATED: Self = Self {
+        streams: Vec::new(),
+        undescribed: Some(Vec::new()),
+        coherence: SlotCoherence::Every(DmaCoherence::Snooped),
+    };
+
+    /// A tree whose slots at `streams`' bases master DMA as those streams,
+    /// whose slots at `undescribed` cannot be described, and every slot of
+    /// which snoops.
+    pub(crate) fn of(streams: Vec<(u64, IommuStreams)>, undescribed: Vec<u64>) -> Self {
+        Self {
+            streams,
+            undescribed: Some(undescribed),
+            coherence: SlotCoherence::Every(DmaCoherence::Snooped),
+        }
+    }
+
+    /// [`Self::UNTRANSLATED`] with every slot `coherence`.
+    pub(crate) fn every(coherence: DmaCoherence) -> Self {
+        Self {
+            coherence: SlotCoherence::Every(coherence),
+            ..Self::UNTRANSLATED
         }
     }
 }

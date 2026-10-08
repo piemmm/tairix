@@ -1,10 +1,9 @@
-//! Lock-free vector↔GSI routing table for x86_64 external IRQs.
+//! Lock-free vector↔line routing table for x86_64 external IRQs.
 //!
 //! The table holds one [`AtomicU32`] per reserved external vector
-//! (`0x30..=0xFE`). The kernel binary's `Phase::Irq` step calls
-//! [`Routing::install`] once per IO-APIC pin during boot; after
-//! `Phase::Irq` completes the table is read-only by contract
-//! (one-shot publish, no mutable static).
+//! (`0x30..=0xFE`), naming the line a vector raises while one owns it: a
+//! vector is installed as it is handed to a line and removed as it is handed
+//! back.
 //!
 //! `u32::MAX` is the unmapped sentinel; reads through
 //! [`Routing::gsi_for_vector`] return `None` for unmapped slots.
@@ -34,8 +33,7 @@ pub enum RoutingError {
     /// install time so subsequent
     /// [`Routing::gsi_for_vector`] reads remain unambiguous.
     GsiUsesSentinel,
-    /// A different GSI is already bound to `vector`. Routing is
-    /// set-once per vector per boot.
+    /// A different line is bound to `vector`.
     VectorAlreadyBound,
 }
 
@@ -76,6 +74,19 @@ impl Routing {
             Err(existing) if existing == gsi => Ok(()),
             Err(_) => Err(RoutingError::VectorAlreadyBound),
         }
+    }
+
+    /// Forget `vector → gsi`, leaving `vector` unmapped, and answer whether
+    /// it named `gsi`; a vector bound to another line, or none, is left as it
+    /// is.
+    pub fn remove(&self, gsi: u32, vector: u8) -> bool {
+        vector
+            .checked_sub(EXTERNAL_VECTOR_FIRST)
+            .and_then(|idx| self.slots.get(usize::from(idx)))
+            .is_some_and(|slot| {
+                slot.compare_exchange(gsi, GSI_UNMAPPED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            })
     }
 
     /// Look up the GSI bound to `vector`.
@@ -177,6 +188,28 @@ mod tests {
         r.install(2, 0x30).expect("first");
         r.install(2, 0x30).expect("idempotent re-publish");
         assert_eq!(r.gsi_for_vector(0x30), Some(2));
+    }
+
+    /// A vector handed back can be given to another line, and removing a
+    /// binding that names another line leaves it.
+    #[test]
+    fn a_removed_vector_routes_its_next_line() {
+        let r = Routing::new();
+        r.install(2, 0x30).expect("install");
+        assert!(!r.remove(3, 0x30));
+        assert_eq!(r.gsi_for_vector(0x30), Some(2), "another line's");
+        assert!(r.remove(2, 0x30));
+        assert_eq!(r.gsi_for_vector(0x30), None);
+        assert!(!r.remove(2, 0x30), "nothing left to remove");
+        r.install(4096, 0x30).expect("reinstalled for another line");
+        assert_eq!(r.gsi_for_vector(0x30), Some(4096));
+        assert!(!r.remove(4096, 0x20));
+        assert!(!r.remove(4096, 0xFF));
+        assert_eq!(
+            r.gsi_for_vector(0x30),
+            Some(4096),
+            "out of range is nothing"
+        );
     }
 
     #[test]

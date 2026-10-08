@@ -258,7 +258,7 @@ mod tests {
     use core::cell::RefCell;
 
     use tairix_abi::sysinfo::{
-        SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+        PageRequest, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
@@ -304,7 +304,7 @@ mod tests {
             assert_eq!(header.query, SysinfoQueryId::USER_DIRECTORY);
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = UserDirectoryRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

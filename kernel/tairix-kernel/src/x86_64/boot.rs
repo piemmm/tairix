@@ -27,9 +27,9 @@
 //!   `init_local_syscalls`, satisfying the trampoline's "callback
 //!   installed before `syscall` is enabled" requirement (see
 //!   `tairix_arch_x86_64::syscall_entry` rustdoc and).
-//! * `init_local_preempt`, `init_local_syscalls` and
-//!   `set_cpu_id_for_lapic` run with `cpu_index = 0` on the BSP after
-//!   `percpu::init(0)`, satisfying their per-call SAFETY contracts.
+//! * `init_local_preempt` and `init_local_syscalls` run with
+//!   `cpu_index = 0` on the BSP after `percpu::init(0)`, satisfying their
+//!   per-call SAFETY contracts.
 //! * The boot-info pointer is dereferenced only through the audited
 //!   `bootinfo::BootData::load` validator, which bounds every slice
 //!   before parsing (the multiboot2 `total_size`, the PVH stated
@@ -45,9 +45,11 @@
 //! `kernel_main` does not return — `boot.s` SAFETY-INVARIANT 7).
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::sysinfo::{DmaUnitFamily, DmaUnitState};
 use tairix_abi::SYSCALL_MAX_ARGS;
 use tairix_arch_api::fault;
 use tairix_arch_x86_64::acpi::{self, MadtEntry};
@@ -214,24 +216,14 @@ pub enum BootError {
     /// supports publishes at least one; the absence is a fatal
     /// discovery defect.
     NoIoApic,
-    /// The IO-APICs together carry more pins than the external-IRQ vector
-    /// range (`0x30..=0xFE`, 207 vectors) holds: every pin claims its vector
-    /// at boot (`plans/OPEN-DEFECTS.md` D718).
-    IrqVectorExhausted,
     /// `percpu::install_vector` rejected the external-IRQ IDT install.
     /// Surfaces a defect in the per-CPU bootstrap latch or an
     /// out-of-range vector.
     IrqIdtInstall,
-    /// The arch-crate routing publisher refused the `(gsi, vector)`
-    /// pair. The only documented failure is `VectorAlreadyBound`,
-    /// which means the boot pipeline tried to publish the same
-    /// vector twice.
-    IrqRoutingPublish,
-    /// `IoApicController::program_pin` rejected the binding.
-    IrqProgramPin,
-    /// The boot CPU's APIC id is past the eight bits xAPIC names, which
-    /// every per-CPU map and every compatibility-format interrupt keys a CPU
-    /// by.
+    /// The IO-APICs' bookkeeping could not be had.
+    IoApicUnrecorded,
+    /// The boot CPU's APIC id is one its APIC's mode cannot name as a
+    /// CPU's: past the eight bits xAPIC names, or x2APIC's broadcast id.
     BspApicIdUnsupported,
     /// [`fault::set_user_fault_resolver`] refused the production user-fault
     /// resolver (a resolver was already installed). The single-entry
@@ -263,6 +255,9 @@ pub enum BootError {
     /// then fail closed while the allocator kept handing out frames, so
     /// the boot refuses rather than running on RAM it cannot reach.
     DirectMapInstall,
+    /// The kernel heap could not hold a copy of the command line, which the
+    /// loader left in memory the frame allocator reuses.
+    CommandLineCopy,
 }
 
 impl BootError {
@@ -285,15 +280,14 @@ impl BootError {
             Self::ArchInit => "arch_init_failed",
             Self::BootInfoInvalid => "bootinfo_invalid",
             Self::NoIoApic => "no_io_apic",
-            Self::IrqVectorExhausted => "irq_vector_exhausted",
             Self::IrqIdtInstall => "irq_idt_install_failed",
-            Self::IrqRoutingPublish => "irq_routing_publish_failed",
-            Self::IrqProgramPin => "irq_program_pin_failed",
+            Self::IoApicUnrecorded => "io_apic_unrecorded",
             Self::BspApicIdUnsupported => "bsp_apic_id_unsupported",
             Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
             Self::UserFaultTerminatorInstall => "user_fault_terminator_install_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
             Self::DirectMapInstall => "direct_map_install_failed",
+            Self::CommandLineCopy => "command_line_copy_failed",
         }
     }
 }
@@ -499,6 +493,9 @@ pub struct BspBringUp {
     /// LAPIC-timer/TSC calibration measured against the PIT; the unit input
     /// to [`BinArch`]'s `monotonic_ns`.
     pub calibration: Calibration,
+    /// The kernel command line the loader passed; empty where it passed none
+    /// that could be read.
+    pub command_line: &'static str,
     /// The firmware memory map with the running kernel image reserved and
     /// the kthread-stack guard arena carved out.
     pub memory_map: BootMemoryMap,
@@ -514,6 +511,10 @@ pub struct BspBringUp {
     /// [`crate::hwtree_store::HW_TREE`]; a QEMU chassis that composes its own
     /// boot ignores it.
     pub tree: Vec<tairix_abi::HwNode>,
+    /// The translation units firmware described in a malformed table, where
+    /// it did, and whether the administrator chose to publish the functions
+    /// they would have confined untranslated.
+    pub malformed_units: Option<tairix_kernel_core::iommu::MalformedUnits>,
 }
 
 /// Bring the BSP and its board up: per-CPU tables, the dedicated `#PF`
@@ -597,6 +598,9 @@ pub fn bring_up_bsp(
     // points at sit in the identity-mapped 0..4 GiB window (`boot.s`
     // SAFETY-INVARIANT 4).
     let boot_data = unsafe { BootData::load(boot_info) }.map_err(|_| BootError::BootInfoParse)?;
+    // SAFETY: same contract — the loader's command line lies in the window
+    // its record does.
+    let command_line = kept(unsafe { boot_data.command_line() }.unwrap_or(""))?;
     let (mut memory_map, installed_memory_bytes) = build_memory_map(&boot_data)?;
     let direct_map_gib = crate::mem_map::direct_map_gib(
         &memory_map,
@@ -621,12 +625,10 @@ pub fn bring_up_bsp(
     }
     let mut lapic = Lapic::new(LocalApic);
     lapic.software_enable(0xFF);
-    // Every per-CPU map and every compatibility-format interrupt keys a CPU
-    // by the eight bits xAPIC names, 0xFF being the broadcast id.
-    let bsp_lapic_id = u8::try_from(lapic.id())
-        .ok()
-        .filter(|&id| id != u8::MAX)
-        .ok_or(BootError::BspApicIdUnsupported)?;
+    let bsp_lapic_id = lapic.id();
+    if !tairix_arch_x86_64::apic::names_cpu(bsp_lapic_id, tairix_arch_x86_64::apic::x2apic()) {
+        return Err(BootError::BspApicIdUnsupported);
+    }
 
     // 3. Calibrate the LAPIC timer against the PIT. The same window
     //    samples RDTSC so the resulting `Calibration::tsc_per_second`
@@ -666,7 +668,7 @@ pub fn bring_up_bsp(
     //    machine the caller actually drives, no global `MAX_CPUS`
     //    ceiling baked into the arch crate). The per-CPU kernel-stack
     //    pool keeps its own `MAX_CPUS` secondary-bring-up bound.
-    let cpu_to_lapic: [Option<u32>; 1] = [Some(u32::from(bsp_lapic_id))];
+    let cpu_to_lapic: [Option<u32>; 1] = [Some(bsp_lapic_id)];
 
     // 6a. Validate the TSC before trusting `RDTSC` as the cross-CPU
     //     monotonic clock source. The contract is recorded on every
@@ -746,10 +748,6 @@ pub fn bring_up_bsp(
             .map_err(|_| BootError::PreemptInit)?;
     }
 
-    // 9. Populate the LAPIC→CpuId mapping so the timer ISR can
-    //    translate the LAPIC ID register reading to a dense CpuId.
-    preempt::set_cpu_id_for_lapic(u32::from(bsp_lapic_id), 0);
-
     // 10. Enable `syscall`/`sysret` on the BSP, with both ring-3 entry
     //     stacks — `syscall`'s and `TSS.RSP0`, which a ring-3 exception or
     //     interrupt loads — on the per-CPU kernel stack. The callback is
@@ -788,8 +786,8 @@ pub fn bring_up_bsp(
     // interrupt-driven virtio-PCI function (a NIC, a keyboard) is a
     // message-signalled-interrupt device, and the probe routes each one's
     // MSI-X into a kernel-allocated vector (`crate::x86_64::msi::allocate` +
-    // the function's MSI-X table), which requires the MSI vector pool that
-    // `discover_and_program_io_apics` installs (`install_msi_lines`). The
+    // the function's MSI-X table), which requires the vectors
+    // `discover_and_program_io_apics` installs (`vectors::install`). The
     // enumerator programs the device and grants the driver the routed MSI
     // line, exactly as the `MsiAllocation` contract describes a bus driver
     // wiring a function — so a user-space driver only `irq_bind`s the line
@@ -800,16 +798,19 @@ pub fn bring_up_bsp(
     // (and the MCFG the ECAM branch reads) sit in the identity-mapped
     // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4), and the ECAM window is
     // re-validated against that window before it is mapped.
-    let tree = unsafe { seed_hardware_tree(madt_bytes, &rsdp, &boot_data, log_sink) };
+    let (tree, malformed_units) =
+        unsafe { seed_hardware_tree(madt_bytes, &rsdp, &boot_data, command_line, log_sink) };
 
     Ok(BspBringUp {
-        bsp_lapic_id: u32::from(bsp_lapic_id),
+        bsp_lapic_id,
         cpu_to_lapic,
         calibration,
+        command_line,
         memory_map,
         installed_memory_bytes,
         irq_routing,
         tree,
+        malformed_units,
     })
 }
 
@@ -854,9 +855,11 @@ fn try_boot(
         .map_err(|_| BootError::ArchInit)?;
     let BspBringUp {
         calibration,
+        command_line,
         memory_map,
         installed_memory_bytes,
         irq_routing,
+        malformed_units,
         ..
     } = board;
 
@@ -886,7 +889,7 @@ fn try_boot(
     let boot_info: BootInfo<'static, BinArch> = BootInfo::new(
         /* boot_cpu       = */ 0,
         /* cpu_count      = */ 1,
-        /* command_line   = */ "",
+        command_line,
         memory_map,
         scheduler_config,
         arch_arc,
@@ -965,6 +968,10 @@ fn try_boot(
     // production service; it fails closed `NotImplemented` until the mount
     // task wires its audit sink and pressure gauge.
     .with_volume_service(&crate::volume_service::VOLUME_SERVICE);
+    let boot_info = match malformed_units {
+        Some(units) => boot_info.with_malformed_units(units),
+        None => boot_info,
+    };
     boot_info
         .validate()
         .map_err(|_| BootError::BootInfoInvalid)?;
@@ -1010,7 +1017,9 @@ fn try_boot(
 /// outside the identity map, or an enumeration error each leave the
 /// affected devices undiscovered and seed whatever *was* collected rather
 /// than failing the boot. The collected tree is returned by value for the
-/// boot record to move into the live inventory.
+/// boot record to move into the live inventory, beside the units of a
+/// malformed DMAR, IVRS or VIOT: their PCI functions are withheld unless
+/// `command_line` sets `iommu.malformed=unconfined`.
 ///
 /// # Safety
 ///
@@ -1022,8 +1031,12 @@ unsafe fn seed_hardware_tree(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
     firmware: &BootData<'_>,
+    command_line: &str,
     log: &'static (dyn Sink + Sync),
-) -> Vec<tairix_abi::HwNode> {
+) -> (
+    Vec<tairix_abi::HwNode>,
+    Option<tairix_kernel_core::iommu::MalformedUnits>,
+) {
     use tairix_arch_api::PlatformDiscovery;
     use tairix_arch_x86_64::platform::AcpiDiscovery;
 
@@ -1033,20 +1046,30 @@ unsafe fn seed_hardware_tree(
     // SAFETY: forwarded — the caller pins the firmware tables into the
     // identity-mapped window.
     let table = unsafe { unit_table(rsdp, log) };
+    let malformed = match table {
+        UnitTable::Malformed(family) => Some(tairix_kernel_core::iommu::MalformedUnits {
+            family,
+            unconfined: tairix_kernel_core::bootinfo::command_line_value(
+                command_line,
+                MALFORMED_UNITS,
+            ) == Some(DmaUnitState::Unconfined.name()),
+        }),
+        _ => None,
+    };
     // SAFETY: forwarded — the caller pins the firmware tables (and the MCFG
     // they reference) into the identity-mapped window.
     let platform = unsafe { platform_registers(madt_bytes, rsdp, &table, sink.nodes()) };
     match platform.and_then(|platform| bar_apertures(firmware, platform)) {
         // SAFETY: forwarded — the caller pins the firmware tables (and the
         // MCFG the ECAM branch reads) into the identity-mapped window.
-        Some(apertures) => unsafe { seed_pci(rsdp, &table, &apertures, &mut sink, log) },
+        Some(apertures) => unsafe { seed_pci(rsdp, &table, malformed, &apertures, &mut sink, log) },
         None => crate::pci_probe::log_discovery(
             log,
             Level::Error,
             "pci apertures unrecorded; none probed",
         ),
     }
-    sink.into_vec()
+    (sink.into_vec(), malformed)
 }
 
 /// Where a firmware-assigned BAR may decode: anywhere the physical address
@@ -1132,7 +1155,17 @@ unsafe fn platform_registers(
                 base..base.saturating_add(tairix_arch_x86_64::ivrs::UNIT_REGISTER_LEN)
             })
             .for_each(&mut keep),
-        UnitTable::None => {}
+        // A unit that is a PCI function is reached through its own BARs.
+        UnitTable::Viot(viot) => viot
+            .units()
+            .filter_map(|unit| match unit {
+                tairix_arch_x86_64::viot::ViotUnit::Mmio { base } => {
+                    Some(base..base.saturating_add(tairix_kernel_iommu_virtio::MMIO_WINDOW))
+                }
+                tairix_arch_x86_64::viot::ViotUnit::Pci { .. } => None,
+            })
+            .for_each(&mut keep),
+        UnitTable::Malformed(_) | UnitTable::None => {}
     }
     // SAFETY: forwarded — the caller pins the MCFG into the identity window.
     if let Some(mcfg) =
@@ -1147,41 +1180,60 @@ unsafe fn platform_registers(
 }
 
 /// The translation units firmware describes, in the table it describes them
-/// in: a platform is Intel's or AMD's, so a DMAR wins over an IVRS.
+/// in: a platform describes its units in one, the hardware's own before a
+/// hypervisor's paravirtual one.
 enum UnitTable<'a> {
     Dmar(tairix_arch_x86_64::dmar::Dmar<'a>),
     Ivrs(tairix_arch_x86_64::ivrs::Ivrs<'a>),
+    Viot(tairix_arch_x86_64::viot::Viot<'a>),
+    /// A table of units of this family is present but malformed: there are
+    /// units, and none can be read.
+    Malformed(DmaUnitFamily),
     None,
 }
 
-/// The table describing the platform's translation units, if one parses; a
-/// malformed one is refused whole and logged, leaving every device's DMA
-/// unconfined.
+/// The command-line key whose value `unconfined` publishes the functions a
+/// malformed table's units would have confined untranslated, rather than
+/// withholding them.
+const MALFORMED_UNITS: &str = "iommu.malformed";
+
+/// The table describing the platform's translation units, if one is present;
+/// a malformed one is refused whole and logged.
 ///
 /// # Safety
 ///
 /// `rsdp` and every table it references must lie in the identity-mapped
 /// 0..4 GiB window, unmodified for the kernel's lifetime.
 unsafe fn unit_table(rsdp: &acpi::Rsdp, log: &dyn Sink) -> UnitTable<'static> {
+    let parsed = |table: Result<UnitTable<'static>, acpi::AcpiError>, family, malformed| {
+        table.unwrap_or_else(|_| {
+            crate::pci_probe::log_discovery(log, Level::Error, malformed);
+            UnitTable::Malformed(family)
+        })
+    };
     // SAFETY: forwarded.
     if let Some(bytes) = unsafe { acpi::locate_dmar(rsdp) } {
-        if let Ok(dmar) = tairix_arch_x86_64::dmar::Dmar::parse(bytes) {
-            return UnitTable::Dmar(dmar);
-        }
-        crate::pci_probe::log_discovery(log, Level::Error, "dmar table malformed; dma unconfined");
-        return UnitTable::None;
+        return parsed(
+            tairix_arch_x86_64::dmar::Dmar::parse(bytes).map(UnitTable::Dmar),
+            DmaUnitFamily::Vtd,
+            "dmar table malformed",
+        );
     }
     // SAFETY: forwarded.
-    match unsafe { acpi::locate_ivrs(rsdp) }.map(tairix_arch_x86_64::ivrs::Ivrs::parse) {
-        Some(Ok(ivrs)) => UnitTable::Ivrs(ivrs),
-        Some(Err(_)) => {
-            crate::pci_probe::log_discovery(
-                log,
-                Level::Error,
-                "ivrs table malformed; dma unconfined",
-            );
-            UnitTable::None
-        }
+    if let Some(bytes) = unsafe { acpi::locate_ivrs(rsdp) } {
+        return parsed(
+            tairix_arch_x86_64::ivrs::Ivrs::parse(bytes).map(UnitTable::Ivrs),
+            DmaUnitFamily::AmdVi,
+            "ivrs table malformed",
+        );
+    }
+    // SAFETY: forwarded.
+    match unsafe { acpi::locate_viot(rsdp) } {
+        Some(bytes) => parsed(
+            tairix_arch_x86_64::viot::Viot::parse(bytes).map(UnitTable::Viot),
+            DmaUnitFamily::VirtioPci,
+            "viot table malformed",
+        ),
         None => UnitTable::None,
     }
 }
@@ -1208,6 +1260,7 @@ unsafe fn unit_table(rsdp: &acpi::Rsdp, log: &dyn Sink) -> UnitTable<'static> {
 unsafe fn seed_pci(
     rsdp: &acpi::Rsdp,
     table: &UnitTable<'_>,
+    malformed: Option<tairix_kernel_core::iommu::MalformedUnits>,
     apertures: &tairix_pci::Apertures,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
@@ -1230,6 +1283,7 @@ unsafe fn seed_pci(
                     bus,
                     registers: &crate::x86_64::registers::KernelRegisters,
                     dma,
+                    coherence: tairix_arch_x86_64::DMA_COHERENCE,
                 };
                 // The virtio-blk node is match-key-only: the in-kernel floor
                 // bring-up re-resolves its transport from configuration space and
@@ -1237,6 +1291,13 @@ unsafe fn seed_pci(
                 // regardless.
                 let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(&walk, sink, log);
                 observe_interrupt_driven(bus, &walk, &routes, sink, log);
+                // A virtio-iommu function raises its faults by message.
+                crate::hwdiscovery::describe_virtio_units(
+                    segment.number,
+                    bus,
+                    &|_| None,
+                    sink.nodes_mut(),
+                );
             };
         // The x86_64 port names no external-facing port of its own: ACPI
         // describes them in AML, which the kernel does not run, so only a
@@ -1277,7 +1338,24 @@ unsafe fn seed_pci(
             let owned = probe(&mut units);
             (owned, units.ioapics, true, false)
         }
-        UnitTable::None => {
+        // A virtio-iommu remaps no interrupt.
+        UnitTable::Viot(viot) => {
+            let mut units = ViotUnits {
+                viot,
+                nodes: tairix_arch_x86_64::acpi::UnitNodes::default(),
+            };
+            (probe(&mut units), Vec::new(), false, false)
+        }
+        // Units no table can be read for may sit on any segment, so none of
+        // its functions is published, unless the administrator chose
+        // otherwise.
+        UnitTable::Malformed(_) if malformed.is_none_or(|units| !units.unconfined) => (
+            probe(&mut crate::pci_probe::Undescribed),
+            Vec::new(),
+            false,
+            false,
+        ),
+        UnitTable::Malformed(_) | UnitTable::None => {
             let mut units = DmarUnits {
                 dmar: None,
                 nodes: tairix_arch_x86_64::acpi::UnitNodes::default(),
@@ -1292,7 +1370,11 @@ unsafe fn seed_pci(
         remapping,
         x2apic_opt_out,
     });
-    crate::pci_host::publish(owned, log);
+    crate::pci_host::publish(
+        owned,
+        alloc::boxed::Box::new(crate::x86_64::registers::KernelRegisters),
+        log,
+    );
 }
 
 /// Every segment the firmware's `MCFG` describes, each reached through its
@@ -1579,6 +1661,73 @@ impl crate::pci_probe::UnitTopology for IvrsUnits<'_, '_> {
     }
 }
 
+/// The units a VIOT describes, as the shared probe reads them.
+struct ViotUnits<'v, 'a> {
+    viot: &'v tairix_arch_x86_64::viot::Viot<'a>,
+    /// What [`crate::pci_probe::UnitTopology::emit`] placed.
+    nodes: tairix_arch_x86_64::acpi::UnitNodes,
+}
+
+impl crate::pci_probe::UnitTopology for ViotUnits<'_, '_> {
+    fn covers(&self, segment: u16) -> bool {
+        self.viot.covers(segment)
+    }
+
+    /// A virtio-iommu reports its reserved regions when probed, so firmware
+    /// keeps no window through one.
+    fn emit(
+        &mut self,
+        _walks: &[(u16, &tairix_pci::topology::Topology)],
+        sink: &mut dyn tairix_arch_api::HwNodeSink,
+        _log: &dyn Sink,
+    ) -> Result<(), crate::pci_probe::Unconfined> {
+        self.nodes = tairix_arch_x86_64::viot::emit_unit_nodes(
+            self.viot,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            tairix_kernel_iommu_virtio::COMPATIBLE,
+            tairix_virtio::transport_mmio::COMPATIBLE.as_bytes(),
+            tairix_kernel_iommu_virtio::MMIO_WINDOW,
+            sink,
+        )
+        .map_err(|_| crate::pci_probe::Unconfined)?;
+        Ok(())
+    }
+
+    fn strands(&self, segment: u16) -> bool {
+        self.viot.strands(self.nodes, segment)
+    }
+
+    fn stream(
+        &self,
+        segment: u16,
+        _walk: &tairix_pci::topology::Topology,
+        requester: u16,
+    ) -> Option<(u32, u32)> {
+        tairix_arch_x86_64::viot::endpoint(
+            self.viot,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            self.nodes,
+            segment,
+            requester,
+        )
+    }
+
+    /// A VIOT names each function's endpoint by its requester id alone.
+    fn firmware_alias(&self, _segment: u16, _requester: u16) -> Option<u16> {
+        None
+    }
+
+    fn contested(&self, segment: u16, unit: u32, stream: u32) -> bool {
+        tairix_arch_x86_64::viot::contested(
+            self.viot,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            segment,
+            unit,
+            stream,
+        )
+    }
+}
+
 /// The units a DMAR describes, as the shared probe reads them.
 struct DmarUnits<'d, 'a> {
     dmar: Option<&'d tairix_arch_x86_64::dmar::Dmar<'a>>,
@@ -1704,23 +1853,34 @@ fn observe_interrupt_driven(
     // A function that cannot be given a vector, a record or a programmed
     // MSI-X entry is left undiscovered (fail closed): a granted line that
     // never delivers would strand its driver parked forever.
-    let route_irq = |bdf: u64| -> Option<tairix_abi::HwResource> {
+    let route_irq = |bdf: u64| -> Option<crate::hwdiscovery::DeviceInterrupt> {
         let node = walk.segment.node_id(bdf)?;
         let mut routes = routes.try_borrow_mut().ok()?;
         routes.try_reserve(1).ok()?;
         let vector = crate::x86_64::msi::allocate().ok()?;
-        let message = crate::x86_64::msi::compatibility_message(vector)?;
-        bus.route_msix(
-            bdf,
-            crate::x86_64::msi::MSIX_ENTRY,
-            message,
-            &crate::x86_64::registers::KernelRegisters,
-        )
-        .ok()?;
+        let programmed = crate::x86_64::msi::compatibility_message(vector).is_some_and(|message| {
+            bus.route_msix(
+                bdf,
+                crate::pci_host::MSIX_ENTRY,
+                message,
+                &crate::x86_64::registers::KernelRegisters,
+            )
+            .is_ok()
+        });
+        // A function left unpublished never masters, so it cannot raise the
+        // vector even if its entry was written.
+        if !programmed {
+            crate::x86_64::msi::release(vector.line);
+            return None;
+        }
         routes.push(crate::x86_64::remapping::PendingRoute { node, vector });
-        Some(tairix_abi::HwResource::message_irq(
-            u64::from(vector.line),
-            crate::x86_64::msi::MSIX_ENTRY,
+        // The interrupt window is claimed before translation, so no domain
+        // maps a doorbell.
+        Some(crate::hwdiscovery::DeviceInterrupt::line(
+            tairix_abi::HwResource::message_irq(
+                u64::from(vector.line),
+                crate::pci_host::MSIX_ENTRY,
+            ),
         ))
     };
     // An enumeration error leaves that class undiscovered; whatever was
@@ -1760,12 +1920,8 @@ fn install_direct_physical_map(map: &mut BootMemoryMap, gib: usize) -> Result<()
     }
     let tables = match paging::physmap_table_frames(gib) {
         0 => 0,
-        pages => crate::mem_map::carve_frames_from_map(
-            map,
-            pages,
-            (paging::BOOT_IDENTITY_GIB as u64) << 30,
-        )
-        .ok_or(BootError::DirectMapInstall)?,
+        pages => crate::mem_map::carve_frames_from_map(map, pages, paging::BOOT_IDENTITY_END)
+            .ok_or(BootError::DirectMapInstall)?,
     };
     // SAFETY: this runs on the BSP before any secondary is brought up and
     // before the frame allocator exists, so no other CPU walks the live
@@ -1785,6 +1941,15 @@ fn install_direct_physical_map(map: &mut BootMemoryMap, gib: usize) -> Result<()
 /// **before** the kernel-image reservation below drops that range from the
 /// map (firmware `Reserved` regions span ACPI/MMIO, not RAM, so the usable
 /// sum is the honest installed figure a PC firmware map can state).
+/// `line`, copied out of the loader memory the frame allocator reuses.
+fn kept(line: &str) -> Result<&'static str, BootError> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(line.len())
+        .map_err(|_| BootError::CommandLineCopy)?;
+    copy.push_str(line);
+    Ok(copy.leak())
+}
+
 fn build_memory_map(data: &BootData<'_>) -> Result<(BootMemoryMap, u64), BootError> {
     let mut map = BootMemoryMap::new();
     firmware_regions(data, &mut |region| {
@@ -1907,7 +2072,7 @@ fn discover_io_apics(
         if let MadtEntry::InterruptSourceOverride { gsi, flags, .. } = entry {
             overrides
                 .try_reserve(1)
-                .map_err(|_| BootError::IrqProgramPin)?;
+                .map_err(|_| BootError::IoApicUnrecorded)?;
             overrides.push((gsi, flags));
         }
     }
@@ -1945,24 +2110,35 @@ fn discover_io_apics(
         let pin_count = (u32::from(ioapic.max_redirection_entry()) + 1)
             .min(tairix_arch_x86_64::apic::IOAPIC_ADDRESSABLE_PINS);
         // Two blocks claiming one GSI would leave it reaching either: refuse
-        // the later block, as Linux does.
+        // the later block, as Linux does, masking every pin so none firmware
+        // left armed raises a vector the pool hands another line.
         if !gsis_free(
             &blocks,
             gsi_base,
             pin_count,
             crate::x86_64::msi::MSI_LINE_BASE,
         ) {
+            for pin in (0..pin_count).filter_map(|pin| u8::try_from(pin).ok()) {
+                let low = ioapic.read_redirection_entry_low(pin);
+                ioapic.write_redirection_low(
+                    pin,
+                    low | tairix_arch_x86_64::msr::halves(
+                        tairix_arch_x86_64::apic::REDIRECTION_MASKED,
+                    )
+                    .0,
+                );
+            }
             crate::pci_probe::log_discovery(
                 log,
                 Level::Error,
-                "io-apic global system interrupts conflict; block unused",
+                "io-apic global system interrupts conflict; block unused, masked",
             );
             continue;
         }
         let mut pins = Vec::new();
         pins.try_reserve_exact(pin_count as usize)
             .and_then(|()| blocks.try_reserve(1))
-            .map_err(|_| BootError::IrqProgramPin)?;
+            .map_err(|_| BootError::IoApicUnrecorded)?;
         pins.extend((gsi_base..gsi_base + pin_count).map(wiring));
         blocks.push(IoApicBlock {
             id,
@@ -1977,147 +2153,60 @@ fn discover_io_apics(
     Ok(blocks)
 }
 
-/// Discover every IO-APIC the MADT advertises, build a production
-/// [`IoApicController`], install one per-pin IDT vector + routing
-/// entry, and program every redirection entry masked.
+/// Discover every IO-APIC the MADT advertises, mask every pin of the
+/// production [`IoApicController`] over them, install every external vector
+/// pins and messages draw from, and claim COM1's pin for the console.
+///
+/// No other pin takes a vector until its line is bound, so the IO-APICs may
+/// carry any number of pins.
 ///
 /// Returns the [`IrqRouting`] the caller stores in [`BinArch`].
 ///
 /// # Failure modes
 ///
 /// * [`BootError::NoIoApic`] if MADT advertises none.
-/// * [`BootError::IrqVectorExhausted`] if the total pin count exceeds
-///   the reserved vector range (`0x30..=0xFE`, 207 vectors).
-/// * [`BootError::IrqIdtInstall`] if a per-pin
-///   [`percpu::install_vector`] call fails — pathological, the BSP
-///   has finished `percpu::init` by this point.
-/// * [`BootError::IrqRoutingPublish`] if the arch-crate routing
-///   table refused a `(gsi, vector)` pair. The only documented
-///   failure is `VectorAlreadyBound`, which would mean the boot
-///   pipeline tried to publish the same vector twice.
-/// * [`BootError::IrqProgramPin`] if the controller's
-///   [`IoApicController::program_pin`] refused a binding.
+/// * [`BootError::IoApicUnrecorded`] if the IO-APICs' bookkeeping cannot be
+///   had.
+/// * [`BootError::IrqIdtInstall`] if an external vector's IDT entry cannot be
+///   installed — pathological, the BSP has finished `percpu::init` by this
+///   point.
 fn discover_and_program_io_apics(
     madt: &acpi::Madt<'_>,
-    bsp_lapic_id: u8,
+    bsp_lapic_id: u32,
     log: &dyn Sink,
 ) -> Result<IrqRouting, BootError> {
     let blocks = discover_io_apics(madt, log)?;
+    let controller = IoApicController::<_>::new(blocks).ok_or(BootError::IoApicUnrecorded)?;
+    let controller: &'static IoApicController<VolatileIoApicMmio> = Box::leak(Box::new(controller));
+    controller.quiesce();
+    // The `irq_qemu_x86_64` and `ps2_input_qemu_x86_64` verticals reach the
+    // typed controller through this slot.
+    crate::x86_64::ioapic_controller::publish_typed(controller);
+    let max_gsi = controller.last_gsi().ok_or(BootError::NoIoApic)?;
 
-    // Pre-validate the total pin count against the reserved vector range so
-    // we fail closed before any IDT mutation.
-    let mut ranges: Vec<(u32, u32)> = Vec::new();
-    ranges
-        .try_reserve_exact(blocks.len())
-        .map_err(|_| BootError::IrqProgramPin)?;
-    ranges.extend(blocks.iter().map(|block| (block.gsi_base, block.pins())));
-    let total_pins: usize = blocks.iter().map(|block| block.wiring.len()).sum();
-    if total_pins > arch_irq::EXTERNAL_VECTOR_COUNT {
-        return Err(BootError::IrqVectorExhausted);
-    }
-
-    let controller = IoApicController::<_>::new(blocks).ok_or(BootError::IrqProgramPin)?;
-    let controller_static: &'static IoApicController<VolatileIoApicMmio> =
-        Box::leak(Box::new(controller));
-    // Publish the typed controller into the bin-crate's `PUBLISHED_TYPED`
-    // slot so in-kernel observers (e.g. the
-    // `tests/integration/irq_qemu_x86_64` QEMU integration test) can
-    // reach [`IoApicController::program_pin`] and
-    // [`IoApicController::read_pin_low`] without re-borrowing the
-    // `pub(crate)` `KernelState`. It is published once, with the same pointer
-    // the `IrqRouting` carries.
-    crate::x86_64::ioapic_controller::publish_typed(controller_static);
-
-    // Every pin gets a vector of its own and is left masked: no line fires
-    // until a driver binds it.
-    let routing = arch_irq::global_routing();
-    let mut next_vector: u8 = arch_irq::EXTERNAL_VECTOR_FIRST;
-    let mut max_gsi: u32 = 0;
-    for &(gsi_base, pin_count) in &ranges {
-        for gsi in gsi_base..gsi_base + pin_count {
-            if next_vector > arch_irq::EXTERNAL_VECTOR_LAST {
-                return Err(BootError::IrqVectorExhausted);
-            }
-            let vector = next_vector;
-            // Saturating-add is sufficient: once `next_vector` lands
-            // on `0xFF` the loop's bound check above fails on the
-            // following iteration.
-            next_vector = next_vector.saturating_add(1);
-
-            // SAFETY: `vector` is in `EXTERNAL_VECTOR_FIRST..=LAST`
-            // by the bound check; `external_isr_addr` returns `Some`
-            // for every value in that range (the per-vector stub
-            // table in `external_irq.s` is dense).
-            let isr_addr = arch_irq::external_isr_addr(vector).ok_or(BootError::IrqIdtInstall)?;
-            // SAFETY: BSP after `percpu::init(0)` (run earlier in
-            // `try_boot`); interrupts disabled; `vector` is in the
-            // reserved external-IRQ range, which never overlaps
-            // `#NMI` (2) or `#DF` (8).
-            unsafe {
-                percpu::install_vector(0, vector, isr_addr)
-                    .map_err(|_| BootError::IrqIdtInstall)?;
-            }
-
-            routing
-                .install(gsi, vector)
-                .map_err(|_| BootError::IrqRoutingPublish)?;
-
-            controller_static
-                .program_pin(gsi, vector, bsp_lapic_id, /* masked = */ true)
-                .map_err(|_| BootError::IrqProgramPin)?;
-
-            if gsi > max_gsi {
-                max_gsi = gsi;
-            }
-        }
-    }
-
-    // Publish the GSI COM1's interrupt is routed to so the console receive
-    // path (`crate::x86_64::com1_rx`) can recognise and unmask it. COM1 is
-    // the legacy ISA IRQ 4; the MADT may remap it through an
-    // Interrupt-Source-Override, so honour any override for source 4 and
-    // fall back to identity (GSI 4). Only publish when a pin actually owns
-    // the resolved GSI (it was programmed above), so an override pointing at
-    // a non-existent line leaves the console on the poll-backed path (fail
-    // closed).
-    let com1_gsi = resolve_com1_gsi(madt);
-    if com1_gsi <= max_gsi {
-        crate::x86_64::com1_rx::set_com1_console_gsi(com1_gsi);
-    }
-
-    // Pre-install every free external vector above the IO-APIC pins
-    // as a dedicated MSI vector (IDT entry + `vector → MSI line` routing, no
-    // IO-APIC redirection entry — an MSI is an edge message straight to the
-    // local APIC, never a pin). A device that delivers MSI/MSI-X (the
-    // virtio-blk-PCI root, every user-space PCI driver) then allocates a
-    // dedicated `(vector, line)` from this pool rather than reusing an
-    // IO-APIC pin's vector — the fix for the D7 root-disk hang, and the
-    // x86_64 analogue of the aarch64 `MSI_LINE_BASE` range. The MSI virtual
-    // lines sit far above every real GSI, so the two line spaces cannot
-    // alias; refuse to proceed if a platform's IO-APIC GSI ceiling ever
-    // reaches that base (fail closed rather than let an MSI line collide).
-    if max_gsi >= crate::x86_64::msi::MSI_LINE_BASE {
-        return Err(BootError::IrqVectorExhausted);
-    }
-    let msi_top = crate::x86_64::msi::install_msi_lines(next_vector, u32::from(bsp_lapic_id))
-        .map_err(|_| BootError::IrqRoutingPublish)?;
-
-    // The composite controller is the single line→controller fan-out the
-    // kernel core and the device-IRQ dispatch drive: a real GSI masks the
-    // IO-APIC redirection entry; an MSI line is an edge source with no line
-    // to mask (a no-op). It wraps the same leaked IO-APIC controller the
-    // typed slot exposes, so there is one controller instance.
+    let vectors =
+        crate::x86_64::vectors::install(bsp_lapic_id).map_err(|_| BootError::IrqIdtInstall)?;
     let composite: &'static crate::x86_64::msi::CompositeIrqController<VolatileIoApicMmio> =
         Box::leak(Box::new(crate::x86_64::msi::CompositeIrqController::new(
-            controller_static,
+            controller,
+            vectors,
+            arch_irq::global_routing(),
+            &crate::x86_64::remapping::LIVE_PIN_REMAPPING,
         )));
     crate::x86_64::msi::publish_composite(composite);
 
-    // The bind ceiling covers both the real GSIs and the MSI line space;
-    // `msi_top` is `MSI_LINE_BASE - 1` (below `max_gsi`) when no MSI vector
-    // was free, so the `max` leaves the ceiling unchanged on such a boot.
+    // COM1 is the legacy ISA IRQ 4, which the MADT may override onto another
+    // GSI. Its pin is claimed before remapping is planned, so the plan
+    // rewrites it with the rest; a GSI no pin owns leaves the console on its
+    // poll-backed path (fail closed).
+    let com1_gsi = resolve_com1_gsi(madt);
+    if composite.activate(com1_gsi).is_ok() {
+        crate::x86_64::com1_rx::set_com1_console_gsi(com1_gsi);
+    }
+
+    // The bind ceiling covers both the real GSIs and the MSI lines.
     Ok(IrqRouting {
-        max_line: max_gsi.max(msi_top),
+        max_line: max_gsi.max(crate::x86_64::msi::LAST_MSI_LINE),
         controller: composite as &'static (dyn IrqController + Send + Sync),
     })
 }
@@ -2140,18 +2229,8 @@ fn resolve_com1_gsi(madt: &acpi::Madt<'_>) -> u32 {
     u32::from(COM1_ISA_IRQ)
 }
 
-fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), BootError> {
-    let named = madt.entries().any(|entry| match entry {
-        // ACPI 6.5 Table 5.40 bit 0 = Processor Enabled.
-        acpi::MadtEntry::LocalApic { apic_id, flags, .. } => {
-            flags & 1 != 0 && apic_id == bsp_lapic_id
-        }
-        acpi::MadtEntry::LocalX2Apic {
-            x2apic_id, flags, ..
-        } => flags & 1 != 0 && x2apic_id == u32::from(bsp_lapic_id),
-        _ => false,
-    });
-    if named {
+fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u32) -> Result<(), BootError> {
+    if madt.processors().any(|id| id == bsp_lapic_id) {
         Ok(())
     } else {
         Err(BootError::BspLapicMissing)

@@ -1,8 +1,8 @@
-//! `plans/IOMMU.md` IOM15: boot the production aarch64 pipeline on `virt`
-//! behind an Arm `SMMUv3` and prove the DMA of the functions behind it
-//! confined. The keyboard and mouse are virtio-pci functions
-//! `iommu_platform=on` on the ECAM host whose `iommu-map` names the unit; the
-//! floor disk is a virtio-MMIO device the unit does not front.
+//! `plans/IOMMU.md` IOM15 and IOM17: boot the production aarch64 pipeline on
+//! `virt` behind an Arm `SMMUv3` or a virtio-iommu and prove the DMA of the
+//! functions behind it confined. The keyboard and mouse are virtio-pci
+//! functions `iommu_platform=on` on the ECAM host whose `iommu-map` names the
+//! unit; the floor disk is a virtio-MMIO device the unit does not front.
 //!
 //! The key the runner injects reaches the input-focus arbiter only through
 //! the unit: the autoloaded keyboard driver's rings are reachable only
@@ -12,7 +12,7 @@
 use core::panic::PanicInfo;
 
 use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-use tairix_itest_translation_witness::{first_input_node, Interrupts, TranslationWitness, Verdict};
+use tairix_itest_translation_witness::{first_input_node, Faults, TranslationWitness, Verdict};
 use tairix_kernel::aarch64::boot as boot_aarch64;
 use tairix_kernel::hwtree_store::HW_TREE_SOURCE;
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
@@ -44,8 +44,11 @@ impl Sink for TranslationSink {
     }
 }
 
-static AUDIT_SINK: TranslationSink =
-    TranslationSink(TranslationWitness::new(Interrupts::Wired, super::STAGE));
+static AUDIT_SINK: TranslationSink = TranslationSink(TranslationWitness::new(
+    super::INTERRUPTS,
+    super::TABLES,
+    Faults::Served,
+));
 
 /// A panic halts the guest; the run times out and fails loud.
 #[panic_handler]

@@ -96,6 +96,10 @@ include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 const CPU_COUNT: u32 = 4;
 #[cfg(not(migration_smp))]
 const CPU_COUNT: u32 = 1;
+
+/// The GIC's slot for each of this test's CPUs.
+static GIC_CPUS: [gic::GicCpu; CPU_COUNT as usize] =
+    [const { gic::GicCpu::new() }; CPU_COUNT as usize];
 const CPU_MPIDRS: [u64; 4] = [0, 1, 2, 3];
 
 /// Gigabytes of identity map the boot address space provides: `[0, 2 GiB)`
@@ -416,7 +420,7 @@ fn bring_up_board() -> u64 {
     // SAFETY: called once on the boot CPU after the GIC bases were
     // discovered above.
     unsafe {
-        gic::init();
+        gic::init(gic::GicTopology::new(&GIC_CPUS)).expect("the GIC comes up");
     }
     syscall_entry::set_dispatch_callback(dispatch);
     // Bind the production user-fault resolver to this vertical's slot — the
@@ -604,7 +608,9 @@ extern "C" fn migration_secondary(cpu: CpuId) -> ! {
     // SAFETY: per-CPU vector/GIC/SGI setup on this secondary, exactly once.
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        if gic::init_secondary().is_err() {
+            qemu_exit::exit_failure(FAIL_SECONDARY);
+        }
         preempt::enable_ipi();
         exceptions::enable_irq();
     }

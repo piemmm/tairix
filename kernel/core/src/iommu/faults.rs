@@ -5,9 +5,10 @@
 use alloc::boxed::Box;
 
 use tairix_abi::blkio::FaultDomainState;
+use tairix_abi::{IrqHandle, MsiAllocation};
 use tairix_inline::ArrayVec;
 use tairix_kernel_iommu_api::{
-    Clock, Fault, FaultBudget, FaultLimits, FaultReason, FaultRoute, FaultVerdict,
+    Clock, Fault, FaultBudget, FaultLimits, FaultReason, FaultRoute, FaultVerdict, IommuUnit,
     FAULT_QUEUE_RECORDS,
 };
 use tairix_kernel_irq::{IrqController, IrqTable, WaitOutcome};
@@ -17,10 +18,10 @@ use tairix_log::{Field, FieldValue, Level, Sink};
 
 use crate::audit::{emit, AuditEvent};
 use crate::blockwait::IrqParkWaiter;
-use crate::devres::MsiAllocFacility;
+use crate::devres::KernelMsiFacility;
 use crate::kthread::{KernelServiceBody, YieldHandle};
 
-use super::Translation;
+use super::{FaultSignal, Translation};
 
 /// The kernel identity every unit's fault interrupt is bound to. It sits below
 /// the task-id draw, so no process is given it and no process's exit releases
@@ -53,17 +54,44 @@ const _: () = assert!(
 );
 
 /// What serving the units' faults needs from the kernel.
-pub struct FaultEnv<'a> {
+pub struct FaultEnv {
     /// The table each unit's fault interrupt line is bound in.
     pub table: &'static IrqTable,
     /// The controller that line is re-armed through.
     pub controller: &'static (dyn IrqController + Sync),
-    /// Where each unit's fault interrupt comes from.
-    pub msi: &'a dyn MsiAllocFacility,
+    /// Where a unit raising its faults by message takes its vector, where the
+    /// port has one to give.
+    pub msi: Option<&'static dyn KernelMsiFacility>,
     /// Where faults are recorded.
     pub audit: &'static (dyn Sink + Sync),
     /// The clock the budget's windows run on.
     pub clock: &'static dyn Clock,
+}
+
+/// What a unit's fault interrupt holds while it is set up or served: its
+/// line's binding and, raised by message, its vector.
+#[derive(Clone, Copy)]
+struct FaultInterrupt {
+    table: &'static IrqTable,
+    controller: &'static (dyn IrqController + Sync),
+    handle: Option<IrqHandle>,
+    vector: Option<(&'static dyn KernelMsiFacility, MsiAllocation)>,
+}
+
+impl FaultInterrupt {
+    /// Give back what is held of `unit`'s interrupt, the unit told to raise
+    /// it where `told`: its vector then only once the unit stops, as the
+    /// vector's next owner would hear the unit.
+    fn give_back(&self, unit: &dyn IommuUnit, told: bool) {
+        let quiet = !told || unit.unroute_faults().is_ok();
+        if let Some(handle) = self.handle {
+            self.table
+                .release_binding(handle, FAULT_OWNER, self.controller);
+        }
+        if let (true, Some((msi, vector))) = (quiet, self.vector) {
+            msi.release(&vector);
+        }
+    }
 }
 
 impl Translation {
@@ -72,12 +100,12 @@ impl Translation {
     /// the reason is audited.
     pub fn serve_faults(
         &'static self,
-        env: &FaultEnv<'_>,
+        env: &FaultEnv,
         mut admit: impl FnMut(KernelServiceBody) -> Option<TaskId>,
     ) {
         for index in 0..self.units.len() {
             if let Err(reason) = self.serve_unit(index, env, &mut admit) {
-                unrouted(env.audit, self.units[index].node, reason);
+                self.unrouted(index, env.audit, reason);
             }
         }
     }
@@ -85,56 +113,74 @@ impl Translation {
     fn serve_unit(
         &'static self,
         index: usize,
-        env: &FaultEnv<'_>,
+        env: &FaultEnv,
         admit: &mut impl FnMut(KernelServiceBody) -> Option<TaskId>,
     ) -> Result<(), &'static str> {
         let mut budget =
             FaultBudget::new(FAULT_LIMITS, env.clock.now_ns()).map_err(|_| "exhausted")?;
-        // A unit whose node names a wired fault line raises its faults there;
-        // any other, as a message.
-        let (line, route, trigger) = if let Some(wired) = self.units[index].faults {
-            (
+        let unit = self.units[index].unit;
+        let (line, route, trigger, vector) = match self.units[index].faults {
+            FaultSignal::Wired(wired) => (
                 wired.line,
                 FaultRoute::Wired { place: wired.place },
                 Some(wired.trigger),
-            )
-        } else {
-            let msi = env.msi.allocate().map_err(|_| "no_vector")?;
-            let route = FaultRoute::Message {
-                address: msi.address,
-                data: msi.data,
-            };
-            (msi.line, route, None)
+                None,
+            ),
+            FaultSignal::Message => {
+                let msi = env.msi.ok_or("no_vector")?;
+                let vector = msi.allocate().map_err(|_| "no_vector")?;
+                let route = FaultRoute::Message {
+                    address: vector.address,
+                    data: vector.data,
+                };
+                (vector.line, route, None, Some((msi, vector)))
+            }
+            FaultSignal::Unheard => return Err("no_line"),
+        };
+        let mut held = FaultInterrupt {
+            table: env.table,
+            controller: env.controller,
+            handle: None,
+            vector,
+        };
+        let refuse = |held: &FaultInterrupt, told, reason| {
+            held.give_back(unit, told);
+            reason
         };
         let bound = env
             .table
             .bind_exclusive(line, FAULT_OWNER)
-            .map_err(|_| "unbound")?;
-        let refuse = |reason| {
-            env.table
-                .release_binding(bound.handle, FAULT_OWNER, env.controller);
-            reason
-        };
+            .map_err(|_| refuse(&held, false, "unbound"))?;
+        held.handle = Some(bound.handle);
         // Only once the line is the kernel's alone, so no other owner's
         // trigger is changed under it.
         if let Some(trigger) = trigger {
             env.controller
+                .activate(line)
+                .map_err(|_| refuse(&held, false, "unactivated"))?;
+            env.controller
                 .set_trigger(line, trigger)
-                .map_err(|_| refuse("untriggerable"))?;
+                .map_err(|_| refuse(&held, false, "untriggerable"))?;
         }
         // A dispatched task always parks, so the waiter needs no CPU halt.
         let waiter = IrqParkWaiter::new(env.table, bound.handle, FAULT_OWNER, env.controller, None);
-        self.units[index]
-            .unit
-            .route_faults(route)
-            .map_err(|_| refuse("refused"))?;
+        // A refused route may have reached the unit in part.
+        unit.route_faults(route)
+            .map_err(|_| refuse(&held, true, "refused"))?;
         let (audit, clock) = (env.audit, env.clock);
+        // Taken once, so a vector is never given back twice.
+        let mut serving = Some(held);
         let body: KernelServiceBody = Box::new(move |_: &mut dyn YieldHandle| {
             self.serve(index, &mut budget, &waiter, audit, clock);
+            if let Some(held) = serving.take() {
+                held.give_back(unit, true);
+            }
         });
+        // Before the task can run, so its own stop is the last word.
+        self.units[index].counts.note_heard(true);
         admit(body)
             .map(|_| ())
-            .ok_or_else(|| refuse("not_admitted"))
+            .ok_or_else(|| refuse(&held, true, "not_admitted"))
     }
 
     /// Drain unit `index` each time its fault interrupt fires, and whenever a
@@ -154,14 +200,14 @@ impl Translation {
                 // The line stays masked until the window turns: a level line
                 // the unit still asserts would fire straight back.
                 if crate::sleep::park_until(resume_ns).is_err() {
-                    return unrouted(audit, self.units[index].node, "unparkable");
+                    return self.unrouted(index, audit, "unparkable");
                 }
                 continue;
             }
             if self.drain_pass(index, budget, audit, clock) {
                 let _ = crate::preempt::yield_if_owed();
             } else if let Err(reason) = wait(waiter, u64::MAX) {
-                return unrouted(audit, self.units[index].node, reason);
+                return self.unrouted(index, audit, reason);
             }
         }
     }
@@ -175,12 +221,21 @@ impl Translation {
         audit: &(dyn Sink + Sync),
         clock: &dyn Clock,
     ) -> bool {
+        let counts = &self.units[index].counts;
         self.units[index].unit.drain_faults(&mut |fault| {
             let charge = budget.charge(fault.stream, clock.now_ns());
             match charge.verdict {
-                FaultVerdict::Suppress => {}
-                FaultVerdict::Record => self.record(index, &fault, charge.suppressed, audit),
+                FaultVerdict::Suppress => counts.note_dropped(),
+                FaultVerdict::Record => {
+                    counts.note_recorded();
+                    self.record(index, &fault, charge.suppressed, audit);
+                }
                 FaultVerdict::Storm { recorded } => {
+                    if recorded {
+                        counts.note_recorded();
+                    } else {
+                        counts.note_dropped();
+                    }
                     self.contain(index, &fault, recorded, charge.suppressed, audit);
                 }
             }
@@ -216,7 +271,10 @@ impl Translation {
         audit: &(dyn Sink + Sync),
     ) {
         let outcome = match self.units[index].unit.silence(fault.stream) {
-            Ok(()) => "silenced",
+            Ok(()) => {
+                self.units[index].counts.note_silenced();
+                "silenced"
+            }
             Err(tairix_kernel_iommu_api::IommuError::Unconfirmed) => "unconfirmed",
             Err(tairix_kernel_iommu_api::IommuError::Exhausted) => "exhausted",
             Err(_) => "refused",
@@ -305,6 +363,15 @@ fn audit_fault(
         let _ = fields.try_push(item);
     }
     emit(audit, level, event, &fields);
+}
+
+impl Translation {
+    /// Unit `index`'s faults are drained by nothing from now on, for
+    /// `reason`.
+    fn unrouted(&self, index: usize, audit: &(dyn Sink + Sync), reason: &'static str) {
+        self.units[index].counts.note_heard(false);
+        unrouted(audit, self.units[index].node, reason);
+    }
 }
 
 fn unrouted(audit: &(dyn Sink + Sync), unit: u32, reason: &'static str) {

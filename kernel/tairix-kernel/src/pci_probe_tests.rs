@@ -371,6 +371,10 @@ impl PciBus for CommandBus {
             .map_or(u32::MAX, |&(_, command)| command))
     }
 
+    fn capability_header(&self, _bdf: u64, _id: u8) -> Result<u32, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
     fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
         Err(DriverError::Unsupported)
     }
@@ -606,6 +610,14 @@ impl tairix_abi::driver::msix::MsixBus for FakeSegment {
     ) -> Result<(), DriverError> {
         Err(DriverError::Unsupported)
     }
+
+    fn msix_entries(&self, _bdf: u64) -> Result<u16, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
+    fn mask_msix(&self, _bdf: u64, _masked: bool) -> Result<(), DriverError> {
+        Err(DriverError::NotFound)
+    }
 }
 
 impl PciBus for FakeSegment {
@@ -644,6 +656,10 @@ impl PciBus for FakeSegment {
         Ok(0)
     }
 
+    fn capability_header(&self, _bdf: u64, _id: u8) -> Result<u32, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
     fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
         Err(DriverError::Unsupported)
     }
@@ -675,7 +691,17 @@ impl PciTopology for FakeSegment {
         self.seen.lock().quiesced += 1;
         tairix_abi::driver::pci::Quiesced::default()
     }
+
+    fn decoded_windows(
+        &self,
+        _topology: &Topology,
+    ) -> Result<alloc::vec::Vec<core::ops::Range<u64>>, DriverError> {
+        Ok(alloc::vec![SEGMENT_WINDOW])
+    }
 }
+
+/// The memory a fake segment decodes.
+const SEGMENT_WINDOW: core::ops::Range<u64> = 0xC000_0000..0xC010_0000;
 
 /// Units that cover the segments in `covered`, describe themselves unless
 /// told not to, strand the segments in `stranded`, and know every function
@@ -748,7 +774,7 @@ fn run_probe(
 /// [`run_probe`] with `extra` functions on every segment, recording to `log`.
 fn run_probe_logged(
     segments: &[(u16, bool)],
-    units: &mut FakeUnits,
+    units: &mut dyn UnitTopology,
     extra: &[PciFunction],
     log: &dyn Sink,
 ) -> (
@@ -796,13 +822,50 @@ fn run_probe_logged(
         &mut sink,
         log,
     );
-    let host = crate::pci_host::PciHost::new(owned).unwrap();
+    let host =
+        crate::pci_host::PciHost::new(owned, Box::new(crate::test_support::NoRegisters)).unwrap();
     let numbers = segments
         .iter()
         .map(|&(number, _)| number)
         .filter(|&number| host.with(number, |_| ()).is_some())
         .collect();
     (seen, published, numbers)
+}
+
+/// A walked segment's decoded memory reaches the host, from which the
+/// translation keeps it out of every domain; one whose walk fails decodes
+/// nothing.
+#[test]
+fn a_walked_segment_s_decoded_windows_reach_the_host() {
+    let probed = [(0, false), (1, true)]
+        .into_iter()
+        .map(|(number, refuse)| ProbeSegment {
+            number,
+            bus: Box::new(FakeSegment {
+                functions: vec![endpoint(0, 3, 0, VIRTIO_PCI_VENDOR_ID, 0x01_00_00)],
+                refuse,
+                seen: alloc::sync::Arc::new(SpinLock::new(Seen::default())),
+            }),
+        })
+        .collect();
+    let mut units = FakeUnits {
+        covered: vec![],
+        stranded: vec![],
+        describable: true,
+    };
+    let owned = probe(
+        probed,
+        &mut units,
+        &|_, _| false,
+        &mut |_, _: &dyn HostBus, _: &Topology, _: &[BusDevice], _: DmaIdentity<'_>, _: &mut _| {},
+        &mut CollectingHwNodeSink::new(),
+        &NullSink,
+    );
+    let host =
+        crate::pci_host::PciHost::new(owned, Box::new(crate::test_support::NoRegisters)).unwrap();
+    let mut windows = Vec::new();
+    host.decoded_windows(&mut |window| windows.push(window));
+    assert_eq!(windows, [SEGMENT_WINDOW]);
 }
 
 #[test]
@@ -836,6 +899,21 @@ fn every_segment_is_walked_and_owned_confined_where_a_unit_covers_it() {
         "the platform's external ports reach the segment's walk"
     );
     assert!(seen[0].lock().external_asked.is_empty());
+}
+
+/// The units of a malformed table may sit on any segment and cannot be read,
+/// so every segment is stopped, still the kernel's, and publishes nothing.
+#[test]
+fn a_malformed_table_s_segments_are_all_stopped_and_publish_nothing() {
+    let (seen, published, owned) = run_probe_logged(
+        &[(0, false), (1, false)],
+        &mut crate::pci_probe::Undescribed,
+        &[],
+        &NullSink,
+    );
+    assert!(seen.iter().all(|seen| seen.lock().quiesced == 1));
+    assert!(published.is_empty());
+    assert_eq!(owned, [0, 1]);
 }
 
 #[test]

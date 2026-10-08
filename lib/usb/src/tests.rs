@@ -22,6 +22,7 @@ use super::ring::{EventRingCursor, ProducerRing};
 use super::transport::{drive_urb, UrbEngine, UrbScope};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
+use tairix_abi::driver::DmaReach;
 use tairix_abi::usb_urb::{UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN};
 use tairix_abi::Delay;
 use tairix_abi::{Errno, HwProperty};
@@ -101,6 +102,8 @@ struct MockDma {
     /// Quiesce declarations received, shared so a test can read it after
     /// the bank moves into the engine.
     quiesced: Rc<Cell<usize>>,
+    /// The reach the engine narrowed the bank to, shared likewise.
+    reach: Rc<Cell<Option<DmaReach>>>,
 }
 
 impl MockDma {
@@ -116,6 +119,7 @@ impl MockDma {
             read_bytes: 0,
             read_calls: 0,
             quiesced: Rc::new(Cell::new(0)),
+            reach: Rc::new(Cell::new(None)),
         }
     }
 
@@ -161,7 +165,7 @@ impl DmaBank for MockDma {
         let base = self.next_base;
         let end = base.checked_add(len).ok_or(DriverError::LengthOutOfRange)?;
         if end > self.mem.borrow().len() {
-            return Err(DriverError::LengthOutOfRange);
+            return Err(DriverError::OutOfMemory);
         }
         self.next_base = end.next_multiple_of(4096);
         self.chunks.push((base, len));
@@ -233,6 +237,11 @@ impl DmaBank for MockDma {
     fn device_quiesced(&self) {
         self.quiesced.set(self.quiesced.get() + 1);
     }
+
+    fn narrow_reach(&mut self, reach: DmaReach) -> Result<(), DriverError> {
+        self.reach.set(Some(reach));
+        Ok(())
+    }
 }
 
 impl Drop for MockDma {
@@ -292,7 +301,7 @@ mod bank_test {
     use core::ptr::NonNull;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
+    use tairix_abi::driver::dma::{DmaHost, DmaReach, DmaSlab, PoolId, SlabCoherencyFn, SlabEnd};
     use tairix_abi::DriverError;
 
     /// Free shim recording each dropped slab on the host's own counter.
@@ -302,7 +311,16 @@ mod bank_test {
     /// `pool` is the address of the minting [`MockSlabHost`]'s `frees`
     /// counter; the host is borrowed by the bank for the bank's whole
     /// lifetime, so it outlives every slab it minted.
-    unsafe fn count_free(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+    unsafe fn count_free(
+        pool: *const (),
+        _cpu: NonNull<u8>,
+        _slot: usize,
+        _len: usize,
+        end: SlabEnd,
+    ) {
+        if end == SlabEnd::Withheld {
+            return;
+        }
         // SAFETY: per the function contract, `pool` points at the live
         // host's `frees` counter.
         let frees = unsafe { &*(pool.cast::<AtomicUsize>()) };
@@ -323,6 +341,10 @@ mod bank_test {
         pub(super) frees: AtomicUsize,
         /// Quiesce declarations received.
         pub(super) quiesced: Cell<usize>,
+        /// The reach a bank narrowed the host to, unless it refuses any.
+        pub(super) reach: Cell<Option<DmaReach>>,
+        /// Refuse narrowing, as a host that cannot bound its regions does.
+        pub(super) unbounded: Cell<bool>,
     }
 
     impl MockSlabHost {
@@ -333,6 +355,8 @@ mod bank_test {
                 coherency: Cell::new(None),
                 frees: AtomicUsize::new(0),
                 quiesced: Cell::new(0),
+                reach: Cell::new(None),
+                unbounded: Cell::new(false),
             }
         }
 
@@ -344,7 +368,7 @@ mod bank_test {
     impl DmaHost for MockSlabHost {
         fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
             if self.fail.get() {
-                return Err(DriverError::LengthOutOfRange);
+                return Err(DriverError::OutOfMemory);
             }
             let device = self.next_device.get();
             self.next_device.set(device + 0x1_0000);
@@ -369,7 +393,36 @@ mod bank_test {
         fn device_quiesced(&self) {
             self.quiesced.set(self.quiesced.get() + 1);
         }
+
+        fn narrow_dma_reach(&self, reach: DmaReach) -> Result<(), DriverError> {
+            if self.unbounded.get() {
+                return Err(DriverError::Unsupported);
+            }
+            self.reach.set(Some(reach));
+            Ok(())
+        }
     }
+}
+
+#[test]
+fn a_slab_bank_narrows_its_host_and_refuses_a_chunk_past_the_reach() {
+    let host = bank_test::MockSlabHost::new(0xFFFF_0000);
+    let mut bank = SlabBank::new(&host);
+    bank.narrow_reach(DmaReach::of::<32>()).expect("narrowed");
+    assert_eq!(host.reach.get(), Some(DmaReach::of::<32>()));
+    // The first slab ends at 4 GiB exactly; the next starts past it.
+    assert!(bank.grow(0x1_0000).is_ok());
+    assert_eq!(bank.grow(0x1000).err(), Some(DriverError::OutOfRange));
+    assert_eq!(host.free_count(), 1, "the unreachable slab was returned");
+
+    let host = bank_test::MockSlabHost::new(0x1000);
+    host.unbounded.set(true);
+    assert_eq!(
+        SlabBank::new(&host)
+            .narrow_reach(DmaReach::of::<32>())
+            .err(),
+        Some(DriverError::Unsupported)
+    );
 }
 
 #[test]
@@ -425,7 +478,7 @@ fn slab_bank_propagates_allocator_exhaustion() {
     let host = bank_test::MockSlabHost::new(0x1000);
     let mut bank = SlabBank::new(&host);
     host.fail.set(true);
-    assert_eq!(bank.grow(64).err(), Some(DriverError::LengthOutOfRange));
+    assert_eq!(bank.grow(64).err(), Some(DriverError::OutOfMemory));
 }
 
 #[test]
@@ -3848,7 +3901,7 @@ fn open_parses_capability_block() {
     assert_eq!(xhci.hci_version(), 0x0110);
     assert_eq!(xhci.max_slots(), 32);
     assert_eq!(xhci.max_ports(), 4);
-    assert!(xhci.ac64());
+    assert_eq!(xhci.dma_reach(), DmaReach::FULL);
     assert!(xhci.csz());
     assert_eq!(xhci.runtime_base(), MOCK_RTSOFF as usize);
 }
@@ -4785,7 +4838,7 @@ fn usb_device_start_rejects_bad_regions() {
     let small = MockDma::new(Rc::clone(&tiny), MOCK_DMA_BASE);
     assert!(matches!(
         UsbDevice::start(xhci, small, TestWait::leaked(), 4096).err(),
-        Some(DriverError::LengthOutOfRange)
+        Some(DriverError::OutOfMemory)
     ));
 }
 
@@ -4807,6 +4860,19 @@ fn pagesize_decodes_the_lowest_supported_page() {
     assert_eq!(regs::pagesize_bytes(1 << 4), 1 << 16);
     // An unset register reports no size, so the caller fails closed.
     assert_eq!(regs::pagesize_bytes(0), 0);
+}
+
+#[test]
+fn a_controller_without_ac64_has_its_bank_narrowed_to_32_bits_before_any_chunk() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::new();
+    mock.hccparams1 &= !1;
+    let xhci = Xhci::open(ModelXhci::new(mock)).expect("bring-up succeeds");
+    assert_eq!(xhci.dma_reach(), DmaReach::of::<32>());
+    let dma = MockDma::new(Rc::clone(&mem), MOCK_DMA_BASE);
+    let reach = Rc::clone(&dma.reach);
+    let _device = UsbDevice::start(xhci, dma, TestWait::leaked(), 4096).expect("engine starts");
+    assert_eq!(reach.get(), Some(DmaReach::of::<32>()));
 }
 
 #[test]
@@ -4858,7 +4924,7 @@ fn start_reserves_scratchpad_and_programs_dcbaa0() {
 fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
     // The same VL805-shaped controller, but the engine is denied a region
     // large enough to reserve the 31 scratchpad pages: `start` fails
-    // closed (`LengthOutOfRange`) rather than running a controller whose
+    // closed (`OutOfMemory`) rather than running a controller whose
     // `DCBAA[0]` it could not program.
     let small: SharedMem = Rc::new(RefCell::new(alloc::vec![0u8; 0x4000]));
     let xhci = Xhci::open(ModelXhci::new(MockXhci::with_device_scratchpad(&small, 31)))
@@ -4866,7 +4932,7 @@ fn start_stalls_without_scratchpad_on_a_controller_that_needs_it() {
     let dma = MockDma::new(Rc::clone(&small), MOCK_DMA_BASE);
     assert_eq!(
         UsbDevice::start(xhci, dma, TestWait::leaked(), 4096).err(),
-        Some(DriverError::LengthOutOfRange)
+        Some(DriverError::OutOfMemory)
     );
 }
 

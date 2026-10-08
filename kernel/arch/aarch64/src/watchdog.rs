@@ -18,17 +18,13 @@
 //! (`CNTVOFF_EL2`, UNKNOWN at boot) — only "fire this many ticks from
 //! now".
 //!
-//! On the QEMU `virt` board and the Raspberry Pi 4 the kernel runs at EL1
-//! **non-secure** on a **GICv2**, where FIQ (Group 0) is the secure-world
-//! interrupt a non-secure kernel cannot route to. So the sample is
-//! delivered as an ordinary **IRQ**, and hard-lockup detection is the
-//! cross-CPU *buddy* kind: a CPU that stops taking its watchdog IRQ is
-//! observed by another CPU that is still taking its own. This is the
-//! correct and complete detector for GICv2 non-secure, where FIQ (the
-//! only non-maskable channel) belongs to the secure world. A board that
-//! *does* expose a non-maskable channel (a GICv3 core with `ICC_PMR`
-//! priority masking) can deliver this same sample as a true pseudo-NMI
-//! behind the unchanged HAL surface, with no `kernel/core` change.
+//! The sample is delivered as an ordinary **IRQ**, and hard-lockup detection
+//! is the cross-CPU *buddy* kind: a CPU that stops taking its watchdog IRQ is
+//! observed by another that still takes its own. That is complete wherever
+//! Group 0 (FIQ) is the Secure world's, as on a Pi 4's GIC-400. The debug
+//! image adds a FIQ self-sample where a boot probe proves Group 0 reaches
+//! this kernel, a GICv2 or GICv3 with one Security state
+//! ([`crate::watchdog::fiq_support_from_probe`]).
 //!
 //! The interrupt is dispatched by [`crate::exceptions`]' IRQ path, which
 //! recognises `WATCHDOG_PPI`, calls `on_watchdog_interrupt` (re-arm +
@@ -449,30 +445,104 @@ pub unsafe fn init_local_watchdog(interval_ticks: u64) {
         crate::gic::enable_ppi(WATCHDOG_PPI);
     }
     arm(interval_ticks);
-    // Debug watchdog: clear `DAIF.F` on this CPU so the non-maskable
-    // Group-0/FIQ self-sample can fire in thread-mode kernel code
-    // (`plans/WATCHDOG.md`) — the D13 `stress --cpu N` wedge lives in an
-    // IRQ-masked thread-mode busy-spin the maskable IRQ cadence cannot
-    // observe. Inert until a Group-0 source is routed, and compiled out of
-    // shippable images.
+    // Only once the probe proved FIQ is the kernel's to take is this CPU's
+    // cadence a Group 0 FIQ and its `DAIF.F` clear: where Group 0 is the
+    // Secure world's, an unmasked FIQ is one this kernel cannot service.
     #[cfg(feature = "watchdog-diagnostics")]
-    // SAFETY: the GIC and vector table are installed per this fn's
-    // contract, so a taken FIQ dispatches through a real slot; clearing
-    // `DAIF.F` only changes the FIQ mask.
-    unsafe {
-        crate::exceptions::enable_fiq_delivery();
+    arm_local_fiq(&LocalPe, fiq_cadence_enabled());
+}
+
+/// The processor controls the FIQ self-sample's set-up sequences, behind a
+/// seam so the order is host-tested.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+trait FiqPe {
+    /// `DAIF`.
+    fn daif(&self) -> u64;
+    /// Write `DAIF`.
+    fn set_daif(&self, daif: u64);
+    /// Make this CPU's cadence a Group 0 FIQ.
+    fn route_cadence(&self);
+}
+
+/// Make this CPU's cadence a FIQ and take FIQs, only once the probe proved
+/// delivery: where Group 0 is the Secure world's, an unmasked FIQ is one
+/// this kernel cannot service.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+fn arm_local_fiq(pe: &impl FiqPe, proven: bool) {
+    if proven {
+        pe.route_cadence();
+        pe.set_daif(pe.daif() & !crate::exceptions::daif::REGISTER_F);
     }
-    // If the boot probe confirmed FIQ deliverability, route this CPU's
-    // cadence PPI to Group 0 so its sample fires as a non-maskable FIQ,
-    // observing a core wedged in a `DAIF.I`-masked section (`plans/
-    // WATCHDOG.md`). Otherwise the PPI stays Group 1 (IRQ) and the
-    // cross-CPU buddy detector runs unchanged (fail closed). The group and
-    // CPU-interface control are banked per CPU, so every online core routes
-    // its own; the distributor's Group-0 enable was set once by the probe.
-    #[cfg(feature = "watchdog-diagnostics")]
-    if fiq_cadence_enabled() {
-        // SAFETY: GIC + vectors up per this fn's contract; this configures
-        // only this CPU's banked group bit and CPU-interface control.
+}
+
+/// Run `wait` with IRQs masked and FIQs taken, then put `DAIF` back as it
+/// was, so a probe that saw no FIQ leaves FIQ masked.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        target_os = "none",
+        feature = "watchdog-diagnostics"
+    )
+))]
+fn in_fiq_window(pe: &impl FiqPe, wait: impl FnOnce() -> bool) -> bool {
+    let saved = pe.daif();
+    pe.set_daif(
+        (saved | crate::exceptions::daif::REGISTER_I) & !crate::exceptions::daif::REGISTER_F,
+    );
+    let delivered = wait();
+    pe.set_daif(saved);
+    delivered
+}
+
+/// This CPU's own controls.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+struct LocalPe;
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "none",
+    feature = "watchdog-diagnostics"
+))]
+impl FiqPe for LocalPe {
+    fn daif(&self) -> u64 {
+        let daif: u64;
+        // SAFETY: reading `DAIF` touches no memory.
+        unsafe {
+            core::arch::asm!("mrs {0}, daif", out(reg) daif, options(nomem, nostack, preserves_flags));
+        }
+        daif
+    }
+
+    fn set_daif(&self, daif: u64) {
+        // SAFETY: writing `DAIF` changes only this CPU's exception masks; the
+        // vector table is installed before any FIQ set-up runs.
+        unsafe {
+            core::arch::asm!("msr daif, {0}", in(reg) daif, options(nomem, nostack, preserves_flags));
+        }
+    }
+
+    fn route_cadence(&self) {
+        // SAFETY: called only from the set-up paths above, which run after
+        // this CPU's GIC interface and vector table are up.
         unsafe {
             route_watchdog_group0();
         }
@@ -659,11 +729,9 @@ unsafe fn route_watchdog_group0() {
     // device SPIs stay ordinary IRQs (without this the global FIQEn would
     // route them all to the unserviced FIQ vector and storm the core).
     unsafe {
-        crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
-        // Drop the self-sample below the preemption timer's priority so a
-        // pending-and-masked Group-0 FIQ can never hold off the timer IRQ
-        // and stall scheduling (see [`WATCHDOG_FIQ_PRIORITY`]). Banked per
-        // CPU, so set on every core that routes its own cadence to Group 0.
+        // The probe routed the boot CPU already, so a refusal here is a CPU
+        // that lost its interface, whose cadence then stays an IRQ.
+        let _ = crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
         crate::gic::set_ppi_priority(WATCHDOG_PPI, WATCHDOG_FIQ_PRIORITY);
     }
 }
@@ -722,6 +790,11 @@ pub unsafe fn probe_fiq_deliverability(counter_hz: u64) -> FeatureSupport {
         FIQ_DELIVERABLE.store(2, Ordering::Relaxed);
         return fiq_deliverability();
     }
+    // SAFETY: GIC up per this fn's contract.
+    if !unsafe { crate::gic::selfsample_fiq_reachable() } {
+        FIQ_DELIVERABLE.store(2, Ordering::Relaxed);
+        return fiq_deliverability();
+    }
     // Record the cadence interval first, so an FIQ taken during the probe
     // re-arms the one-shot to ~1 s rather than a zero-tick storm.
     WATCHDOG_INTERVAL_TICKS.store(counter_hz, Ordering::Relaxed);
@@ -731,78 +804,47 @@ pub unsafe fn probe_fiq_deliverability(counter_hz: u64) -> FeatureSupport {
     // ordinary-IRQ enable bit, so restoring them is safe regardless of the
     // GIC's Security configuration.
     // SAFETY: GIC up per this fn's contract.
-    let (saved_cpu_ctlr, saved_dist_ctlr) =
-        unsafe { (crate::gic::read_gicc_ctlr(), crate::gic::read_gicd_ctlr()) };
+    let saved = unsafe { crate::gic::selfsample_route() };
 
-    // SAFETY: GIC up. Route the cadence PPI to Group 0 (FIQ) on this CPU,
-    // enable Group 0 at the distributor and CPU interface, and signal
-    // Group 0 as FIQ. On a two-Security-state GIC these Secure-only bits are
-    // RAO/WI from Non-secure EL1, so this is a harmless no-op there and the
-    // wait below discovers FIQ is undeliverable.
-    unsafe {
+    // SAFETY: GIC up, and its Group 0 controls this level's to change.
+    let routed = unsafe {
         crate::gic::enable_ppi(WATCHDOG_PPI);
-        crate::gic::route_selfsample_fiq(WATCHDOG_PPI);
-        // Same priority discipline as the steady-state routing: keep the
-        // self-sample below the timer so probing never perturbs preemption
-        // (see [`WATCHDOG_FIQ_PRIORITY`]).
         crate::gic::set_ppi_priority(WATCHDOG_PPI, WATCHDOG_FIQ_PRIORITY);
+        crate::gic::route_selfsample_fiq(WATCHDOG_PPI).is_ok()
+    };
+    if !routed {
+        FIQ_DELIVERABLE.store(2, Ordering::Relaxed);
+        return fiq_deliverability();
     }
 
     FIQ_TAKEN.store(false, Ordering::Relaxed);
     // Arm the cadence to fire very soon (~1 ms) so the probe window is short.
     arm((counter_hz / 1000).max(1));
 
-    // Ensure FIQ is deliverable at the PE, then deliberately mask IRQ so
-    // only a *non-maskable* FIQ can fire in the window. Boot already runs
-    // IRQ-masked; save DAIF and restore it exactly afterwards.
-    // SAFETY: clearing `DAIF.F` only unmasks FIQ; the vectors are installed.
-    unsafe {
-        crate::exceptions::enable_fiq_delivery();
-    }
-    let daif: u64;
-    // SAFETY: reading DAIF and setting its IRQ-mask bit is always permitted
-    // at EL1 and touches no memory.
-    unsafe {
-        core::arch::asm!(
-            "mrs {0}, daif",
-            "msr daifset, #{i}",
-            out(reg) daif,
-            i = const crate::exceptions::daif::I,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-
-    // Bounded wait: a counter deadline (~20 ms) backed by a hard iteration
-    // cap. If an FIQ can reach us it fires within the ~1 ms arm above.
-    let start = read_cntpct();
-    let deadline = counter_hz / 50;
-    let mut spins = 0u64;
-    while !FIQ_TAKEN.load(Ordering::Relaxed) {
-        if read_cntpct().wrapping_sub(start) >= deadline || spins >= MAX_PROBE_SPINS {
-            break;
+    let delivered = in_fiq_window(&LocalPe, || {
+        // A counter deadline (~20 ms) backed by a hard iteration cap; a FIQ
+        // that can reach this CPU fires within the ~1 ms arm above.
+        let start = read_cntpct();
+        let deadline = counter_hz / 50;
+        let mut spins = 0u64;
+        while !FIQ_TAKEN.load(Ordering::Relaxed) {
+            if read_cntpct().wrapping_sub(start) >= deadline || spins >= MAX_PROBE_SPINS {
+                break;
+            }
+            spins += 1;
+            core::hint::spin_loop();
         }
-        spins += 1;
-        core::hint::spin_loop();
-    }
-
-    // Restore the exact prior IRQ-mask state.
-    // SAFETY: writing back the captured DAIF value restores the prior mask.
-    unsafe {
-        core::arch::asm!("msr daif, {0}", in(reg) daif, options(nomem, nostack, preserves_flags));
-    }
-
-    let delivered = FIQ_TAKEN.load(Ordering::Relaxed);
+        FIQ_TAKEN.load(Ordering::Relaxed)
+    });
     if delivered {
         FIQ_DELIVERABLE.store(1, Ordering::Relaxed);
     } else {
         // Fail closed: restore the perturbed group/enable state verbatim,
         // back to the buddy detector with no broken channel.
-        // SAFETY: GIC up; these restore the saved register values.
-        unsafe {
-            crate::gic::set_group1(WATCHDOG_PPI);
-            crate::gic::write_gicc_ctlr(saved_cpu_ctlr);
-            crate::gic::write_gicd_ctlr(saved_dist_ctlr);
-        }
+        // SAFETY: GIC up; this puts back the state saved before the route.
+        // A restore the GIC refused leaves the cadence in Group 0 with FIQ
+        // masked again, which delivers nothing.
+        let _ = unsafe { crate::gic::restore_selfsample(WATCHDOG_PPI, saved) };
         FIQ_DELIVERABLE.store(2, Ordering::Relaxed);
     }
     fiq_deliverability()
@@ -833,8 +875,8 @@ impl WatchdogArch for Watchdog {
         // inherent to the hardware, and the loud cross-CPU report is the
         // complete answer for it (`plans/WATCHDOG.md`).
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-        {
-            crate::gic::send_sgi(target);
+        if crate::gic::send_sgi(target).is_err() {
+            return RecoveryOutcome::Unsupported;
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
         {
@@ -1182,5 +1224,77 @@ mod tests {
             |a| (TEXT_LO..TEXT_HI).contains(&a),
         );
         assert_eq!(n, MAX_BACKTRACE_WALK + 1);
+    }
+
+    /// A processor whose `DAIF` writes and cadence routes are recorded.
+    struct RecordingPe {
+        daif: core::cell::Cell<u64>,
+        writes: core::cell::RefCell<std::vec::Vec<u64>>,
+        routed: core::cell::Cell<bool>,
+    }
+
+    impl RecordingPe {
+        fn masked() -> Self {
+            Self {
+                daif: core::cell::Cell::new(
+                    crate::exceptions::daif::REGISTER_F | crate::exceptions::daif::REGISTER_I,
+                ),
+                writes: core::cell::RefCell::new(std::vec::Vec::new()),
+                routed: core::cell::Cell::new(false),
+            }
+        }
+    }
+
+    impl FiqPe for RecordingPe {
+        fn daif(&self) -> u64 {
+            self.daif.get()
+        }
+        fn set_daif(&self, daif: u64) {
+            self.writes.borrow_mut().push(daif);
+            self.daif.set(daif);
+        }
+        fn route_cadence(&self) {
+            self.routed.set(true);
+        }
+    }
+
+    #[test]
+    fn a_cpu_whose_fiq_was_never_proven_keeps_fiq_masked_and_its_cadence_an_irq() {
+        let pe = RecordingPe::masked();
+        arm_local_fiq(&pe, false);
+        assert!(!pe.routed.get());
+        assert!(pe.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_proven_cpu_routes_its_cadence_and_takes_fiqs() {
+        let pe = RecordingPe::masked();
+        arm_local_fiq(&pe, true);
+        assert!(pe.routed.get());
+        assert_eq!(pe.daif() & crate::exceptions::daif::REGISTER_F, 0);
+        assert_ne!(pe.daif() & crate::exceptions::daif::REGISTER_I, 0);
+    }
+
+    #[test]
+    fn a_probe_that_saw_no_fiq_leaves_fiq_masked_as_it_found_it() {
+        let pe = RecordingPe::masked();
+        let before = pe.daif();
+        let mut during = 0;
+        let delivered = in_fiq_window(&pe, || {
+            during = pe.daif();
+            false
+        });
+        assert!(!delivered);
+        assert_eq!(during & crate::exceptions::daif::REGISTER_F, 0);
+        assert_ne!(during & crate::exceptions::daif::REGISTER_I, 0);
+        assert_eq!(pe.daif(), before);
+    }
+
+    #[test]
+    fn a_probe_that_saw_a_fiq_still_puts_the_masks_back() {
+        let pe = RecordingPe::masked();
+        let before = pe.daif();
+        assert!(in_fiq_window(&pe, || true));
+        assert_eq!(pe.daif(), before);
     }
 }

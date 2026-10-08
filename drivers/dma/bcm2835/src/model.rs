@@ -472,7 +472,7 @@ impl BlockStore for ModelStore {
     fn carve(&self, bytes: usize) -> Result<ModelTable, DriverError> {
         let mut memory = self.memory.borrow_mut();
         if memory.refuse {
-            return Err(DriverError::LengthOutOfRange);
+            return Err(DriverError::OutOfMemory);
         }
         let base = memory.next;
         memory.next += TABLE_STEP;
@@ -533,11 +533,13 @@ impl Drop for ModelTable {
     }
 }
 
-/// The model with its resets refused once `armed`, as a bus that drops a
-/// write would.
+/// The model with its resets lost once `armed`: refused, as a bus that drops
+/// a write would, or `ignored` — taken and without effect, as a channel that
+/// will not reset does.
 pub struct Unresettable<'m> {
     pub model: &'m Model,
     pub armed: core::cell::Cell<bool>,
+    pub ignored: bool,
 }
 
 impl RegisterBlock for Unresettable<'_> {
@@ -547,7 +549,11 @@ impl RegisterBlock for Unresettable<'_> {
 
     fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
         if self.armed.get() && offset % CHANNEL_STRIDE == CS && value == CS_RESET {
-            return Err(DriverError::OutOfRange);
+            return if self.ignored {
+                Ok(())
+            } else {
+                Err(DriverError::OutOfRange)
+            };
         }
         self.model.write32(offset, value)
     }

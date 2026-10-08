@@ -99,8 +99,8 @@ resource is changed by a typed service command.
 `run` turns one parsed `Command` into a typed request and renders the
 typed reply, through three steps:
 
-1. Build the `SysinfoRequestHeader` (and, for `processes`, a
-   `ProcessListRequest` payload) from the `sysinfo-v1` ABI.
+1. Build the `SysinfoRequestHeader` (and, for a list, its `PageRequest`
+   payload) from the `sysinfo-v1` ABI.
 2. Hand the encoded request to the injected `Transport`, which carries
    it to `sysinfod` and returns the reply bytes. The transport owns the
    reply allocation, so the client never guesses a buffer size.
@@ -124,10 +124,11 @@ own command grammar on top.
 ### Paging
 
 A process list can be longer than a single reply, so `sysinfo` pages it:
-it issues `ProcessListRequest`s with an increasing `offset` and a fixed
-`limit`, rendering each page, until a page comes back shorter than the
-limit. The paging loop lives in the client; the ABI carries only the
-`offset`/`limit` fields.
+it issues `PageRequest`s with an increasing `offset` and a fixed `limit`,
+rendering each page, until a page comes back shorter than the limit. The
+paging loop lives in the client; the ABI carries the `offset`/`limit`
+fields and the walk id the service holds the list it pages under, and a
+walk the service had to let go is answered `Interrupted`.
 
 Every shared walk also lets its caller end the paging deliberately: a
 per-record sink answers "continue" or "stop", and stopping succeeds

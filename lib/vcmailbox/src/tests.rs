@@ -6,7 +6,7 @@
 
 use core::cell::Cell;
 
-use tairix_abi::driver::dma::PoolId;
+use tairix_abi::driver::dma::{PoolId, SlabEnd};
 
 use super::*;
 use crate::mock::MockFirmware;
@@ -796,7 +796,10 @@ fn a_spinning_wait_takes_one_budget_of_looks_however_the_inbox_chatters() {
 /// # Safety
 ///
 /// `pool` must point at a live `Cell<usize>`.
-unsafe fn count_free(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+unsafe fn count_free(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize, end: SlabEnd) {
+    if end == SlabEnd::Withheld {
+        return;
+    }
     // SAFETY: per the function contract.
     let frees = unsafe { &*pool.cast::<Cell<usize>>() };
     frees.set(frees.get() + 1);

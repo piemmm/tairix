@@ -2,7 +2,7 @@
 //! to them, and invalidation descriptors (VT-d rev. 4.1 §9.3, §9.4, §9.8,
 //! §6.5.2).
 
-use tairix_kernel_iommu_api::{Access, Pte, PteFormat, MESSAGE_WINDOW};
+use tairix_kernel_iommu_api::{Access, Pte, PteFormat, IO_PAGE_SIZE, MESSAGE_WINDOW};
 
 const READ: u64 = 1 << 0;
 const WRITE: u64 = 1 << 1;
@@ -93,6 +93,8 @@ const IEC_INDEX: u64 = 1 << 4;
 const GRANULARITY_GLOBAL: u64 = 0b01 << 4;
 const GRANULARITY_DOMAIN: u64 = 0b10 << 4;
 const GRANULARITY_DEVICE: u64 = 0b11 << 4;
+/// An IOTLB descriptor's page-selective-within-domain granularity.
+const GRANULARITY_PAGES: u64 = 0b11 << 4;
 const IOTLB_DRAIN_WRITES: u64 = 1 << 6;
 const IOTLB_DRAIN_READS: u64 = 1 << 7;
 const WAIT_STATUS_WRITE: u64 = 1 << 5;
@@ -123,6 +125,23 @@ pub(crate) fn iotlb_domain(domain: u16, drain_reads: bool, drain_writes: bool) -
         low |= IOTLB_DRAIN_WRITES;
     }
     [low, 0]
+}
+
+/// Invalidate one domain's cached translations of the `2^order` pages at
+/// `base`, aligned to their size, and the paging-structure entries that
+/// translate them, draining as [`iotlb_domain`] does.
+pub(crate) fn iotlb_pages(
+    domain: u16,
+    base: u64,
+    order: u32,
+    drain_reads: bool,
+    drain_writes: bool,
+) -> Descriptor {
+    let [low, _] = iotlb_domain(domain, drain_reads, drain_writes);
+    [
+        (low & !GRANULARITY_DOMAIN) | GRANULARITY_PAGES,
+        (base & !(IO_PAGE_SIZE - 1)) | u64::from(order),
+    ]
 }
 
 /// Once every earlier descriptor has completed, write `status` to the

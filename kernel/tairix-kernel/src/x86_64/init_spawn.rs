@@ -80,6 +80,13 @@ static INIT_SPAWNED: AtomicBool = AtomicBool::new(false);
 /// root-unlock kthread; a QEMU vertical can wire its own in-kernel service
 /// (e.g. the DMA-fault driver) by building the seam with
 /// [`X86_64InitSpawn::with_pre_dispatch`].
+///
+/// A stand-in for root unlock owns what root unlock settles on every path:
+/// releasing console 0 to `login` (`CONSOLE0_GATE`), resolving the late
+/// users database (`LATE_USERS_DB`) and the application store's readiness
+/// (`APP_STORE`). Until it does, `login` and every store-bundle spawn stay
+/// parked, so a vertical that settles none judges its run on its own
+/// witnesses alone.
 pub type PreDispatch = fn(&'static (dyn InitSpawnCtx + Sync));
 
 /// The x86_64 PID 1 spawn seam installed into the

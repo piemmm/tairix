@@ -13,8 +13,8 @@
 //!   cpu_to_lapic)` triple parsed from the ACPI MADT and returns the
 //!   handle ready to be wrapped in `Arc`.
 //! - `SchedulerArch::current_cpu` — on bare metal, reads the LAPIC
-//!   ID register and consults
-//!   [`crate::preempt::cpu_id_for_lapic`]; on host builds, returns the
+//!   ID register and looks it up in the handle's
+//!   [`crate::cpumap::ApicMap`]; on host builds, returns the
 //!   boot CPU's dense `CpuId` so host tests of the scheduler remain
 //!   deterministic (no flaky tests).
 //! - `SchedulerArch::ticks_now` — on bare metal, reads `RDTSC` (the
@@ -41,19 +41,8 @@ use tairix_arch_api::{
     CoreClass, CpuId, CpuMask, CrossCpuTlbShootdown, SchedulerArch, SecondaryBringup, SmpError,
 };
 
-use crate::apic::XAPIC_BROADCAST;
+use crate::cpumap::{ApicMap, Unmappable, NO_LAPIC, VACANT};
 use crate::hybrid;
-
-/// Sentinel stored in an [`X86_64ArchStorage::cpu_to_lapic`] slot that no
-/// CPU maps to: the x2APIC broadcast id, which no CPU has.
-const NO_LAPIC: u32 = u32::MAX;
-
-/// `id` as the shootdown target set keys it: every mapped id fits, by
-/// [`X86_64Arch::new`]'s refusal of any that does not.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn xapic_id(id: u32) -> Option<u8> {
-    u8::try_from(id).ok()
-}
 
 /// Caller-owned, `&'static` per-CPU backing for an [`X86_64Arch`] handle
 /// (per-CPU bookkeeping is sized by the caller from
@@ -77,6 +66,15 @@ pub struct X86_64ArchStorage<const N: usize> {
     /// needed) and read-only thereafter.
     cpu_to_lapic: [AtomicU32; N],
 
+    /// Reverse map: the slots of the handle's [`ApicMap`].
+    by_apic: [AtomicU64; N],
+
+    /// What each CPU owes the TLB shootdown in flight
+    /// (`crate::tlb_shootdown`).
+    // Only bare metal has a second CPU to shoot down.
+    #[cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
+    shootdown: [AtomicU8; N],
+
     /// Host-only IPI accounting — incremented on every `send_ipi` with
     /// an in-range, mapped target. Bare-metal builds never touch it.
     #[cfg_attr(all(target_arch = "x86_64", target_os = "none"), allow(dead_code))]
@@ -96,6 +94,8 @@ impl<const N: usize> X86_64ArchStorage<N> {
     pub const fn new() -> Self {
         Self {
             cpu_to_lapic: [const { AtomicU32::new(NO_LAPIC) }; N],
+            by_apic: [const { AtomicU64::new(VACANT) }; N],
+            shootdown: [const { AtomicU8::new(crate::tlb_shootdown::IDLE) }; N],
             host_ipi_count: [const { AtomicU64::new(0) }; N],
             core_classes: [const { AtomicU8::new(CoreClass::Performance.as_u8()) }; N],
         }
@@ -120,9 +120,16 @@ pub enum ArchInitError {
     /// `cpu_to_lapic[boot_cpu_id as usize]` disagreed with the
     /// caller-supplied `boot_apic_id`.
     BootCpuLapicMismatch,
-    /// A CPU's APIC id is past the eight bits xAPIC names, which the
-    /// per-CPU maps and the shootdown target set key a CPU by.
+    /// A CPU's APIC id is one the APICs' mode cannot name: past the eight
+    /// bits xAPIC names, or the x2APIC broadcast id.
     ApicIdUnsupported,
+    /// Two CPUs claim one APIC id.
+    ApicIdDuplicated,
+    /// A handle built after the boot's names CPUs the boot's does not.
+    MachineDiffers,
+    /// A handle built after the boot's borrows the storage the boot's
+    /// published.
+    StorageInUse,
 }
 
 impl ArchInitError {
@@ -134,6 +141,9 @@ impl ArchInitError {
             Self::BootCpuMissingFromLapicMap => "boot_cpu_missing_from_lapic_map",
             Self::BootCpuLapicMismatch => "boot_cpu_lapic_mismatch",
             Self::ApicIdUnsupported => "apic_id_unsupported",
+            Self::ApicIdDuplicated => "apic_id_duplicated",
+            Self::MachineDiffers => "machine_differs",
+            Self::StorageInUse => "storage_in_use",
         }
     }
 }
@@ -153,6 +163,15 @@ pub struct X86_64Arch {
     /// [`X86_64ArchStorage`]; its length is the caller's CPU count, so
     /// the handle imposes no compile-time CPU ceiling. Populated once at construction; never mutated thereafter.
     cpu_to_lapic: &'static [AtomicU32],
+
+    /// Reverse mapping: the CPU each LAPIC ID names, built once at
+    /// construction from the forward one.
+    // Only bare metal has a local APIC to read the running CPU's id from.
+    #[cfg_attr(
+        not(any(test, all(target_arch = "x86_64", target_os = "none"))),
+        allow(dead_code)
+    )]
+    apic_map: ApicMap<'static>,
 
     /// Dense `CpuId` of the boot processor.
     boot_cpu_id: CpuId,
@@ -196,6 +215,25 @@ pub struct X86_64Arch {
     core_classes: &'static [AtomicU8],
 }
 
+/// Whether a handle over `slots` naming `cpus` may stand beside the boot's,
+/// whose published map is `boot`: the interrupt paths and the shootdown read
+/// the boot's state with the later handle's dense ids, and rebuilding the
+/// published map in place would shift it under their lookups.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn beside_boot(
+    boot: ApicMap<'_>,
+    slots: &[AtomicU64],
+    cpus: impl IntoIterator<Item = (u32, u32)>,
+) -> Result<(), ArchInitError> {
+    if boot.is_backed_by(slots) {
+        return Err(ArchInitError::StorageInUse);
+    }
+    if !boot.holds_exactly(cpus) {
+        return Err(ArchInitError::MachineDiffers);
+    }
+    Ok(())
+}
+
 impl X86_64Arch {
     /// Build a validated arch handle.
     ///
@@ -209,7 +247,14 @@ impl X86_64Arch {
     /// and imposes no compile-time CPU ceiling. `cpu_to_lapic` is the
     /// dense `CpuId` → LAPIC-ID map read from the ACPI MADT; entries
     /// beyond `storage`'s capacity `N` are ignored — the caller sizes
-    /// `N` to its discovered processor count.
+    /// `N` to its discovered processor count. An id may be any the APICs'
+    /// mode names: x2APIC's 32 bits once the boot CPU runs in it.
+    ///
+    /// The first handle built is the boot's: on bare metal it publishes its
+    /// reverse map for the interrupt paths' lookup and its per-CPU state for
+    /// the TLB shootdown, before any other CPU starts. A later handle reads
+    /// that state too, so it must name the boot's CPUs from storage of its
+    /// own.
     pub fn new<const N: usize>(
         storage: &'static X86_64ArchStorage<N>,
         boot_cpu_id: CpuId,
@@ -228,23 +273,46 @@ impl X86_64Arch {
         if recorded != boot_cpu_lapic_id {
             return Err(ArchInitError::BootCpuLapicMismatch);
         }
+        let x2apic = crate::apic::x2apic();
         if cpu_to_lapic
             .iter()
             .flatten()
-            .any(|&id| id >= u32::from(XAPIC_BROADCAST))
+            .any(|&id| !crate::apic::names_cpu(id, x2apic))
         {
             return Err(ArchInitError::ApicIdUnsupported);
         }
+        // An entry whose dense id exceeds capacity `N` is dropped from both
+        // maps — fail closed, never index out of bounds.
+        let held = cpu_to_lapic.iter().take(N);
+        let cpus = || {
+            held.clone()
+                .enumerate()
+                .filter_map(|(cpu, lapic)| Some((u32::try_from(cpu).ok()?, (*lapic)?)))
+        };
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        if let Some(boot) = crate::cpumap::published() {
+            beside_boot(boot, &storage.by_apic, cpus())?;
+        }
+        let apic_map =
+            ApicMap::build(&storage.by_apic, cpus()).map_err(|refused| match refused {
+                Unmappable::Duplicate => ArchInitError::ApicIdDuplicated,
+                Unmappable::OutOfRange => ArchInitError::ApicIdUnsupported,
+            })?;
         // Populate the caller's `&'static` map through the shared borrow
-        // (atomic stores, so no `&'static mut` is needed). An entry whose
-        // dense id exceeds capacity `N` is silently dropped — fail closed, never index out of bounds.
-        for (cpu, slot) in cpu_to_lapic.iter().enumerate() {
-            if let (Some(lapic), Some(dst)) = (slot, storage.cpu_to_lapic.get(cpu)) {
+        // (atomic stores, so no `&'static mut` is needed).
+        for (slot, dst) in held.zip(&storage.cpu_to_lapic) {
+            if let Some(lapic) = slot {
                 dst.store(*lapic, Ordering::Relaxed);
             }
         }
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        {
+            crate::cpumap::publish(apic_map);
+            crate::tlb_shootdown::install(&storage.shootdown, &storage.cpu_to_lapic);
+        }
         let this = Self {
             cpu_to_lapic: &storage.cpu_to_lapic,
+            apic_map,
             boot_cpu_id,
             boot_cpu_lapic_id,
             host_tick_counter: AtomicU64::new(0),
@@ -297,6 +365,18 @@ impl X86_64Arch {
         }
     }
 
+    /// Drop `cpu`, which never came up, from the map: no shootdown waits on
+    /// its acknowledge, and nothing starts it again.
+    #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+    fn forget_cpu(&self, cpu: CpuId) {
+        if let Some(slot) = usize::try_from(cpu)
+            .ok()
+            .and_then(|idx| self.cpu_to_lapic.get(idx))
+        {
+            slot.store(NO_LAPIC, Ordering::Release);
+        }
+    }
+
     /// Host-test accessor: total IPIs dispatched to `target`.
     ///
     /// Only meaningful on host builds — on bare metal the counter is
@@ -324,20 +404,13 @@ impl X86_64Arch {
 
 impl SchedulerArch for X86_64Arch {
     fn current_cpu(&self) -> CpuId {
+        // Every CPU the handle starts is in its map, so only the boot CPU
+        // before the handle existed could read as unmapped.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            let mapped = crate::preempt::cpu_id_for_lapic(crate::apic::local_apic_id());
-            if mapped == u32::MAX {
-                // Mapping table not yet populated — fall back to the
-                // boot CPU. The bin crate populates the table before
-                // unmasking interrupts, so this branch is only
-                // reachable during the very first instructions after
-                // the trampoline hand-off (fail
-                // closed, do not invent a CpuId).
-                self.boot_cpu_id
-            } else {
-                mapped
-            }
+            self.apic_map
+                .cpu_of(crate::apic::local_apic_id())
+                .unwrap_or(self.boot_cpu_id)
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
@@ -487,12 +560,14 @@ impl CrossCpuTlbShootdown for X86_64Arch {
     fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // Stream every mapped LAPIC id straight to `shootdown`, which
-            // excludes this CPU and invalidates it directly. The iterator
-            // walks the caller-sized per-CPU map, so there is no fixed
-            // `MAX_CPUS` scratch buffer and no allocation.
-            let targets = (0..self.cpu_to_lapic.len())
-                .filter_map(move |idx| xapic_id(self.lapic_id_of(CpuId::try_from(idx).ok()?)?));
+            // Stream every mapped CPU straight to `shootdown`, which excludes
+            // this CPU and invalidates it directly. The iterator walks the
+            // caller-sized per-CPU map, so there is no fixed `MAX_CPUS`
+            // scratch buffer and no allocation.
+            let targets = (0..self.cpu_to_lapic.len()).filter_map(move |idx| {
+                let cpu = CpuId::try_from(idx).ok()?;
+                self.lapic_id_of(cpu).map(|_| cpu)
+            });
             // One IPI round-trip covers the whole range: `invlpg` is
             // per-page but the acknowledge protocol is what costs, so a
             // large teardown must not pay it once per leaf.
@@ -509,7 +584,7 @@ impl CrossCpuTlbShootdown for X86_64Arch {
     fn shootdown_user_range(&self, cpus: CpuMask<'_>, start_vaddr: u64, page_count: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            match cpus.reach(|cpu| xapic_id(self.lapic_id_of(cpu)?)) {
+            match cpus.reach(|cpu| self.lapic_id_of(cpu).map(|_| cpu)) {
                 Some(targets) => {
                     crate::tlb_shootdown::shootdown_remote(start_vaddr, page_count, targets);
                 }
@@ -546,7 +621,10 @@ impl SecondaryBringup for X86_64Arch {
                 Ok(()) => Ok(()),
                 Err(crate::smp::StartCpuError::CpuIdOutOfRange) => Err(SmpError::InvalidCpu),
                 Err(crate::smp::StartCpuError::NoEntryInstalled) => Err(SmpError::NotReady),
-                Err(crate::smp::StartCpuError::StartTimedOut) => Err(SmpError::StartRejected(0)),
+                Err(crate::smp::StartCpuError::StartTimedOut) => {
+                    self.forget_cpu(cpu);
+                    Err(SmpError::StartRejected(0))
+                }
             }
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
@@ -618,6 +696,32 @@ mod tests {
         assert_eq!(arch.lapic_id_of(0), Some(0xA0));
         assert_eq!(arch.lapic_id_of(1), Some(0xA1));
         assert_eq!(arch.lapic_id_of(2), None);
+    }
+
+    /// A handle built after the boot's names the boot's CPUs from storage of
+    /// its own, or is refused.
+    #[test]
+    fn a_later_handle_names_the_boot_s_machine_from_its_own_storage() {
+        static BOOT: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        static LATER: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let boot = X86_64Arch::new(&BOOT, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
+        let same = [(0, 0xA0), (1, 0xA1)];
+        assert_eq!(beside_boot(boot.apic_map, &LATER.by_apic, same), Ok(()));
+        assert_eq!(
+            beside_boot(boot.apic_map, &BOOT.by_apic, same),
+            Err(ArchInitError::StorageInUse)
+        );
+        for other in [
+            &[(0, 0xA0)][..],
+            &[(0, 0xA0), (1, 0xA2)],
+            &[(1, 0xA0), (0, 0xA1)],
+        ] {
+            assert_eq!(
+                beside_boot(boot.apic_map, &LATER.by_apic, other.iter().copied()),
+                Err(ArchInitError::MachineDiffers),
+                "{other:?}"
+            );
+        }
     }
 
     #[test]
@@ -773,7 +877,9 @@ mod tests {
         tairix_arch_api::smp::conformance::run_all(erased, CpuId::MAX);
     }
 
-    /// A CPU map naming an APIC id xAPIC cannot address is refused whole.
+    /// In xAPIC mode, which the host's APICs read as, a CPU map naming an
+    /// id xAPIC cannot address is refused whole; x2APIC ids are
+    /// `names_cpu`'s, tested beside it.
     #[test]
     fn an_apic_id_xapic_cannot_name_is_refused() {
         static STORAGE: X86_64ArchStorage<2> = X86_64ArchStorage::new();
@@ -786,6 +892,30 @@ mod tests {
             Some(ArchInitError::ApicIdUnsupported),
             "the broadcast id is no CPU's"
         );
+    }
+
+    /// Two CPUs claiming one APIC id leave the reverse map ambiguous, so the
+    /// map is refused whole.
+    #[test]
+    fn two_cpus_claiming_one_apic_id_are_refused() {
+        static STORAGE: X86_64ArchStorage<3> = X86_64ArchStorage::new();
+        assert_eq!(
+            X86_64Arch::new(&STORAGE, 0, 4, &[Some(4), Some(9), Some(4)]).err(),
+            Some(ArchInitError::ApicIdDuplicated)
+        );
+    }
+
+    /// The handle maps every CPU of its storage back from its APIC id, and
+    /// a CPU past the storage's capacity from neither side.
+    #[test]
+    fn every_held_cpu_is_mapped_back_from_its_apic_id() {
+        static STORAGE: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&STORAGE, 0, 0x30, &[Some(0x30), Some(0x07), Some(0x55)])
+            .expect("a valid map");
+        assert_eq!(arch.apic_map.cpu_of(0x30), Some(0));
+        assert_eq!(arch.apic_map.cpu_of(0x07), Some(1));
+        assert_eq!(arch.apic_map.cpu_of(0x55), None, "past the storage");
+        assert_eq!(arch.lapic_id_of(2), None);
     }
 
     /// The boot CPU and any unmapped dense id are refused before any
@@ -805,6 +935,22 @@ mod tests {
             assert_eq!(arch.start_secondary(5), Err(SmpError::InvalidCpu));
             assert_eq!(arch.start_secondary(u32::MAX), Err(SmpError::InvalidCpu));
         }
+    }
+
+    /// A CPU whose start timed out is forgotten: it is no shootdown's target
+    /// and is never started again.
+    #[test]
+    fn a_cpu_that_never_came_up_is_forgotten() {
+        static S: X86_64ArchStorage<2> = X86_64ArchStorage::new();
+        let arch = X86_64Arch::new(&S, 0, 0xA0, &[Some(0xA0), Some(0xA1)]).unwrap();
+        arch.forget_cpu(1);
+        assert_eq!(arch.lapic_id_of(1), None);
+        assert_eq!(arch.lapic_id_of(0), Some(0xA0));
+        // SAFETY: refused before any hardware action.
+        assert_eq!(
+            unsafe { arch.start_secondary(1) },
+            Err(SmpError::InvalidCpu)
+        );
     }
 
     /// Compile-time proof that [`halt`] has the `-> !` signature

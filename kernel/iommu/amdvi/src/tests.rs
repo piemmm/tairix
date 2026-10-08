@@ -68,6 +68,11 @@ fn a_unit_that_cannot_flush_at_once_flushes_every_device_and_passes() {
     assert_eq!(model.processed(model::OPCODE_ALL), 0);
     assert_eq!(model.processed(model::OPCODE_DEVICE), DEVICES);
     assert_eq!(model.processed(model::OPCODE_INTERRUPTS), DEVICES);
+    assert_eq!(
+        model.processed(model::OPCODE_PAGES),
+        DEVICES,
+        "every domain id, whichever firmware left cached"
+    );
     conformance::run_all(&unit, &model, &FIXTURE);
 }
 
@@ -85,6 +90,86 @@ fn a_unit_caching_misses_flushes_every_map_and_passes() {
     let clock = clock();
     let unit = enabled(&model, &frames, &clock);
     conformance::run_all(&unit, &model, &FIXTURE);
+}
+
+/// A map writes only entries that were absent, so a unit whose IOMMU
+/// capability header says it caches no absent entry is sent no flush for one;
+/// a header of another type says nothing.
+#[test]
+fn a_map_is_flushed_only_on_a_unit_that_may_cache_absent_entries() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let clock = clock();
+    for (header, flushes) in [
+        (Some(0x000B_000F), 0),
+        (Some(0x000B_000F | CAPABILITY_NP_CACHE), 1),
+        (Some(0x0009_000F), 1),
+        (None, 1),
+    ] {
+        let model = Model::new(&frames, model::FEATURE_INVALIDATE_ALL);
+        let function = Function(Mutex::new(None), header);
+        let unit = AmdViUnit::new(&model, &frames, &clock, Some((&function, 2))).unwrap();
+        unit.enable().unwrap();
+        let domain = unit.create_domain().unwrap();
+        unit.attach(STREAMS[0], domain).unwrap();
+        let before = model.processed(model::OPCODE_PAGES);
+        unit.map(domain, 0x10_0000, PAGES[0], 0x1000, Access::READ_WRITE)
+            .unwrap();
+        assert_eq!(model.processed(model::OPCODE_PAGES) - before, flushes);
+        unit.unmap(domain, 0x10_0000, 0x1000).unwrap();
+        unit.sync(domain).unwrap();
+        unit.block(STREAMS[0]).unwrap();
+        unit.destroy_domain(domain).unwrap();
+        if flushes == 0 {
+            conformance::run_all(&unit, &model, &FIXTURE);
+        }
+    }
+}
+
+/// An unmap's sync names its range, so what the domain still maps stays
+/// cached.
+#[test]
+fn a_range_sync_keeps_the_domain_s_other_translations() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, model::FEATURE_INVALIDATE_ALL);
+    let clock = clock();
+    let unit = enabled(&model, &frames, &clock);
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    let tag = domain.sixteen_bits().unwrap();
+    let iova = 0x10_0000;
+    for (at, phys) in [(iova, PAGES[0]), (iova + 0x10_0000, PAGES[1])] {
+        unit.map(domain, at, phys, 0x1000, Access::READ_WRITE)
+            .unwrap();
+        assert_eq!(model.access(STREAMS[0], at, false), Some(phys));
+    }
+    unit.unmap(domain, iova, 0x1000).unwrap();
+    unit.sync_range(domain, iova, 0x1000).unwrap();
+    assert!(!model.caches(tag, iova));
+    assert_eq!(model.access(STREAMS[0], iova, false), None);
+    assert!(model.caches(tag, iova + 0x10_0000));
+    unit.unmap(domain, iova + 0x10_0000, 0x1000).unwrap();
+    unit.sync(domain).unwrap();
+    assert!(!model.caches(tag, iova + 0x10_0000));
+    unit.block(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+#[test]
+fn an_attach_flushes_the_device_s_entry_and_none_of_its_domain() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, model::FEATURE_INVALIDATE_ALL);
+    let clock = clock();
+    let unit = enabled(&model, &frames, &clock);
+    let domain = unit.create_domain().unwrap();
+    let (pages, devices) = (
+        model.processed(model::OPCODE_PAGES),
+        model.processed(model::OPCODE_DEVICE),
+    );
+    unit.attach(STREAMS[0], domain).unwrap();
+    assert_eq!(model.processed(model::OPCODE_PAGES), pages);
+    assert_eq!(model.processed(model::OPCODE_DEVICE), devices + 1);
+    unit.block(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
 }
 
 /// QEMU runs commands only while translation is on: the unit issues none
@@ -206,7 +291,7 @@ fn a_rejected_command_is_reported_and_the_buffer_runs_on() {
     let domain = unit.create_domain().unwrap();
     unit.attach(STREAMS[0], domain).unwrap();
     model.quirk(Quirks {
-        reject_next_pages: true,
+        reject_next: Some(model::OPCODE_PAGES),
         ..Quirks::default()
     });
     assert_eq!(
@@ -260,7 +345,7 @@ fn an_attach_whose_flush_is_refused_takes_its_entry_back() {
     let unit = enabled(&model, &frames, &clock);
     let domain = unit.create_domain().unwrap();
     model.quirk(Quirks {
-        reject_next_pages: true,
+        reject_next: Some(model::OPCODE_DEVICE),
         ..Quirks::default()
     });
     assert_eq!(unit.attach(STREAMS[0], domain), Err(IommuError::Hardware));
@@ -382,12 +467,49 @@ fn more_records_than_one_batch_are_all_drained() {
     assert_eq!(seen.len(), 3 * FAULT_BATCH + 1);
 }
 
-struct Function(Mutex<Option<(u32, u64, u32)>>);
+struct Function(Mutex<Option<(u32, u64, u32)>>, Option<u32>);
 
+/// The unit's own function, recording the one MSI an AMD-Vi family raises
+/// through it and refusing what such a unit never asks for.
 impl UnitFunction for Function {
     fn route_msi(&self, address: u32, message_address: u64, data: u32) -> Result<(), IommuError> {
         *self.0.lock().unwrap() = Some((address, message_address, data));
         Ok(())
+    }
+
+    fn route_msix(&self, _: u32, _: u16, _: u64, _: u32) -> Result<(), IommuError> {
+        Err(IommuError::Hardware)
+    }
+
+    fn msix_entries(&self, _: u32) -> Result<u16, IommuError> {
+        Err(IommuError::Hardware)
+    }
+
+    fn mask_msix(&self, _: u32, _: bool) -> Result<(), IommuError> {
+        Err(IommuError::Hardware)
+    }
+
+    fn capability_header(&self, _: u32, id: u8) -> Result<Option<u32>, IommuError> {
+        match self.1 {
+            Some(header) if id == SECURE_DEVICE_CAPABILITY => Ok(Some(header)),
+            Some(_) => Ok(None),
+            None => Err(IommuError::Hardware),
+        }
+    }
+
+    fn set_master(&self, _: u32, _: bool) -> Result<(), IommuError> {
+        Err(IommuError::Hardware)
+    }
+
+    fn set_intx(&self, _: u32, _: bool) -> Result<(), IommuError> {
+        Err(IommuError::Hardware)
+    }
+
+    fn virtio_windows(
+        &self,
+        _: u32,
+    ) -> Result<tairix_kernel_iommu_api::VirtioPciWindows, IommuError> {
+        Err(IommuError::Hardware)
     }
 }
 
@@ -396,7 +518,7 @@ fn the_fault_interrupt_is_raised_through_the_unit_s_own_function() {
     let frames = HostFrames::new(0x1_0000_0000);
     let model = Model::new(&frames, model::FEATURE_INVALIDATE_ALL);
     let clock = clock();
-    let function = Function(Mutex::new(None));
+    let function = Function(Mutex::new(None), None);
     let unit = AmdViUnit::new(&model, &frames, &clock, Some((&function, 0x0000_0002))).unwrap();
     let message = FaultRoute::Message {
         address: 0xFEE0_0000,
@@ -414,6 +536,13 @@ fn the_fault_interrupt_is_raised_through_the_unit_s_own_function() {
     assert_ne!(
         model.register(regs::CONTROL) & regs::CONTROL_EVENT_INTERRUPT,
         0
+    );
+    let control = model.register(regs::CONTROL);
+    unit.unroute_faults().unwrap();
+    assert_eq!(
+        model.register(regs::CONTROL),
+        control & !regs::CONTROL_EVENT_INTERRUPT,
+        "only the event interrupt is turned off"
     );
     let orphan = AmdViUnit::new(&model, &frames, &clock, None).unwrap();
     assert_eq!(orphan.route_faults(message), Err(IommuError::Hardware));

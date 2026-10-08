@@ -15,8 +15,8 @@ use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_log::{log, Event, EventId, Level};
 
-// The canonical QEMU `virt` device tree, dumped and embedded at build time.
-include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
+// The board's device tree, embedded at build time.
+use crate::tree::DTB_BLOB;
 
 /// Watchdog cadence for the test: ~10 ms one-shot (`counter_hz / 100`), so a
 /// non-maskable FIQ sample fires well within the masked busy-spin under QEMU
@@ -178,8 +178,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         "aarch64 FIQ masked-section self-sample test: starting",
     );
 
-    // 1. Discover the board from the embedded `virt` device tree: GICv2 bases
-    //    and the generic-timer rate (no hard-coded board constants).
+    // 1. Discover the board from the embedded `virt` device tree: its GIC and
+    //    the generic-timer rate (no hard-coded board constants).
     let Ok(fdt) = Fdt::new(DTB_BLOB) else {
         qemu_exit::exit_failure(FAIL_FDT);
     };
@@ -191,12 +191,16 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_GIC);
     }
 
-    // 2. EL1 vector table + GICv2 bring-up.
+    let Some(topology) = tairix_itest_gic::boot_cpu_topology(&fdt) else {
+        qemu_exit::exit_failure(FAIL_GIC);
+    };
+
+    // 2. EL1 vector table + GIC bring-up.
     // SAFETY: called once on the boot CPU with a stack established and before
     // any interrupt source is armed.
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        gic::init(topology).expect("the GIC comes up");
     }
 
     // 3. Probe non-secure FIQ (Group 0) deliverability — the production,

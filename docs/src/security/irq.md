@@ -25,8 +25,9 @@ page locks down the contract those pieces respect.
     (`kernel/arch/x86_64::acpi::Madt`).
   * **AArch64** — GIC `IntId` (SGI / PPI / SPI namespace per the
     GICv3 architecture reference).
-  * **riscv64** — PLIC source number reported by the device tree's
-    `interrupts-extended` property.
+  * **riscv64** — the PLIC or APLIC source a node's `interrupts` names
+    (`1..=sources`), and for a PCI function whose messages a RISC-V IOMMU
+    confines, a message line from 1024.
   * **wasm32** — reserved; the WASM host has no concept of hardware
     interrupts. A call from a WASM userland returns
     `Errno::NotImplemented`.
@@ -65,8 +66,13 @@ rejected with `Errno::NotFound`. Splitting the gate into separate
 the policy any tighter — the binding step is the security-relevant
 authority.
 
-`irq_bind` gives the line the trigger its node's grant states before the
-line is first unmasked, since a pulse arriving at a line sensed by level
+`irq_bind` first activates the line at its controller, which on x86_64 gives
+an IO-APIC pin a vector of its own the first time it is bound; a line the
+controller has no vector for is refused with `OutOfRange`, as `msi_alloc`
+refuses an exhausted vector space, and one nothing it raises could reach a
+CPU with `NotSupported`. It then gives the line the trigger its node's grant
+states before the line is first unmasked, since a pulse arriving at a line
+sensed by level
 while it is masked is lost: a device tree marks an edge-triggered line, and
 the GIC's configuration for it is set to edge. A line the controller cannot
 sense as stated — one an earlier binder left enabled with the other
@@ -119,7 +125,9 @@ error in the IRQ subsystem (`lib/abi/src/error.rs`).
 | `OutOfRange`        | `line` exceeds the platform's allowable range                   | `SyscallBadArguments`      |
 | `OutOfRange`        | `irq_bind` `line` argument carries non-zero upper 32 bits       | `SyscallBadArguments`      |
 | `OutOfRange`        | the caller already binds `line`                                 | `SyscallHandlerRejected`   |
+| `OutOfRange`        | the controller has no vector left to give `line`                | `SyscallHandlerRejected`   |
 | `OutOfMemory`       | the binding could not be recorded                               | `SyscallHandlerRejected`   |
+| `NotSupported`      | nothing `line` raises could reach a CPU: no remapping entry could be made for it | `SyscallHandlerRejected`   |
 | `NotSupported`      | the controller cannot sense `line` with the trigger its grant states | `SyscallHandlerRejected`   |
 | `NotFound`          | `irq_wait` `handle` was not minted for the calling task, or was released when its device's node was removed | `SyscallHandlerRejected`   |
 | `TimedOut`          | `irq_wait` timeout expired before the line fired                | none (per the audit policy)|
@@ -212,7 +220,7 @@ file (`AGENTS.md` §16.6). The `IRQ_LIST` query returns one `IrqRecord`
 per binding — the line id, the kernel-attested owning driver task,
 the monotonic interrupt count since boot (the classic
 `/proc/interrupts` per-line total), and the `IRQ_FLAG_QUARANTINED`
-flag — paged by an `IrqListRequest`. It is gated on `CAP_SYSINFO_HW`
+flag — paged like every other list. It is gated on `CAP_SYSINFO_HW`
 and audited, exactly like the hardware tree and seat inventory: it
 names which task owns each physical interrupt line, cross-principal
 surface topology, not a self-scoped observer. The count already exists
@@ -427,9 +435,9 @@ phase:
 
 | Architecture | Production controller                                                                                  | Status today |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
-| `x86_64`     | `kernel/tairix-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask through the half of the entry holding it (`IoApic::write_redirection_low`), each pin wired as the MADT's interrupt source overrides say and rewritten whole, in an order that never leaves it unmasked half-written (`IoApic::write_redirection_entry`), when interrupt remapping takes it over (`IoApicController::remap_pin`); trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
+| `x86_64`     | `kernel/tairix-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask through the half of the entry holding it (`IoApic::write_redirection_low`), each pin wired as the MADT's interrupt source overrides say and rewritten whole, in an order that never leaves it unmasked half-written (`IoApic::write_redirection_entry`), when interrupt remapping takes it over (`IoApicController::remap_pin`); trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries and masks every pin, and a pin takes its vector when its line is first activated. The `tests/integration/irq_qemu_x86_64` integration crate activates GSI 2, drives a live PIT-channel-0 one-shot through it, and asserts both `WaitStep::Ready` and the post-fire mask bit. |
 | `aarch64`    | `kernel/tairix-kernel::aarch64::gic_irq::GicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Wired into the boot path and QEMU-validated** (P11 Chunk B-2 INCREMENT (1)). `Aarch64BinArch::irq_routing` returns the GICv2-backed routing and `install_irq_dispatch` publishes the `IrqTable` into the EL1 vector seam, so the kernel/core `irq` phase builds the table against the real controller. Device SPIs are discovered from the device tree (`kernel/arch/aarch64::fdt::gic_device_intid` decodes a node's `interrupts` triple → INTID, no board constant) and a parked **kthread** is woken through `KthreadIrqWaiter`; proven end-to-end by `tests/integration/irq_kthread_qemu_aarch64` (RTC SPI → parked kthread → `WaitOutcome::Ready` + post-fire masked bit) alongside the delivery-path vertical `tests/integration/irq_qemu_aarch64`. The boot path does not yet *bind/route* a device SPI — that arrives with INCREMENT (2)'s root-unlock kthread; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
-| `riscv64`    | `tests/integration/riscv64_boot::PlicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/riscv64::plic::PlicController`, whose inherent `mask` writes the source's PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the `scause` decode, the one-shot dispatch slot, and the `PlicIrqController` bridge (incl. mask-before-wake through `IrqTable`) are unit-tested; the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. The arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
+| `riscv64`    | Whichever controller the tree describes (`kernel/tairix-kernel/src/riscv64/irq.rs`): `riscv64_plic_irq::PlicIrqController`, whose `mask` writes the source's PLIC priority to zero, or `riscv64_aia_irq::AiaIrqController`, whose `mask` disables the APLIC source or clears a device file's vector enable. The S-mode trap vector forwards a supervisor external interrupt to the one dispatcher the boot installed. | **Wired into the boot path and QEMU-validated**: the autoload-input, virtio-MMIO and translation verticals on the PLIC board, and on `aia=aplic-imsic` the autoload-input pair, the RISC-V IOMMU translation run whose keyboard raises its MSI-X through its own file, and `msi_isolation_qemu_riscv64`. |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
 
 There are two `IrqController` traits and they are deliberately
@@ -564,24 +572,29 @@ message that never uses an IO-APIC pin. `kernel/tairix-kernel/src/x86_64/msi.rs`
 models this the way Linux (and the aarch64 `MSI_LINE_BASE` range) does,
 rather than reusing an IO-APIC pin:
 
-1. **Dedicated vectors + a virtual line space.** After the boot pipeline
-   assigns one IDT vector per IO-APIC pin, `msi::install_msi_lines` claims
-   the remaining free external vectors (`0x30..=0xFE`) as MSI vectors:
-   each gets its IDT entry and a `vector → MSI line` entry in the arch
-   routing table, but **no** IO-APIC redirection entry. The MSI lines live
-   in a virtual range at `MSI_LINE_BASE` (far above any real GSI), so an
-   MSI line and a GSI can never alias. A driver allocates a dedicated
-   `(vector, line)` with `msi::allocate` and binds the line in the
+1. **One vector pool + a virtual line space.** The boot installs every
+   external vector's IDT entry (`0x30..=0xFE`) and masks every IO-APIC pin;
+   `vectors::VectorPool` then hands each source a vector of its own. An MSI
+   takes one when `msi::allocate` gives it out, with a `vector → MSI line`
+   entry in the arch routing table and **no** IO-APIC redirection entry, and
+   gives it back once nothing can raise it. A pin takes one the first time
+   its line is activated, which `irq_bind` does before binding it, and keeps
+   it for the boot: nothing proves an interrupt a pin raised has left every
+   CPU. A machine's pins therefore cost vectors only as their lines are
+   used, however many its IO-APICs carry. The MSI lines live in a virtual
+   range at `MSI_LINE_BASE` (far above any real GSI), one per vector, so an
+   MSI line and a GSI can never alias, and a driver binds an MSI line in the
    `IrqTable` exactly as it would a GSI.
 2. **Edge controller.** `msi::CompositeIrqController` is the one
    line→controller fan-out published as `IrqRouting.controller`: a real
-   GSI masks/unmasks the `IoApicController` redirection entry; an MSI line
-   is an edge source with **no** hardware line to mask, so its
-   `mask`/`rearm` are honest no-ops — taking the fire from the `IrqTable`
-   is the whole re-arm interlock, and the runaway-interrupt safety net still
-   contains a storming vector. The bootstrap virtio-blk-PCI root
-   (`root_unlock::virtio_blk_unlock`) routes its MSI-X through a dedicated
-   vector and binds the MSI line, never a shared IO-APIC pin.
+   GSI masks/unmasks the `IoApicController` redirection entry and activates
+   the pin with its vector; an MSI line is an edge source with **no** hardware
+   line to mask, so its `mask`/`rearm` are honest no-ops — taking the fire
+   from the `IrqTable` is the whole re-arm interlock, and the
+   runaway-interrupt safety net still contains a storming vector. The
+   bootstrap virtio-blk-PCI root (`floor::bring_up_virtio_pci`) routes its
+   MSI-X through a dedicated vector and binds the MSI line, never a shared
+   IO-APIC pin.
 
 **Interrupted-frame offset (the D7 triple fault).** The external-IRQ
 trampoline (`external_irq.s`) pushes a synthetic *vector qword* between the
@@ -597,6 +610,27 @@ loaded from a null GS base). The host guard
 pins the two sizes the offset is built from; the QEMU regression is
 `tests/integration/root_unlock_admission_qemu_x86_64` (a D7 regression
 triple-faults before any `/System` mount).
+
+### aarch64 LPI lines (`plans/IOMMU.md` IOM18.2)
+
+On a GICv3 with an ITS, each PCI function the boot routed raises its MSI-X as
+an LPI, which the line space (`kernel/tairix-kernel/src/aarch64_messages.rs`)
+gives a line of its own above the GIC's INTIDs and the root-complex MSI
+vectors: the dispatcher maps an acknowledged LPI to the line its route took,
+and an LPI no route took is a stray that wakes nothing. Like an x86_64 MSI
+line, an LPI line is an edge with nothing to mask, so the composite
+controller's `mask`, `rearm` and `set_trigger` are no-ops for it.
+
+### riscv64 AIA lines (`plans/IOMMU.md` IOM18.3, IOM18.4)
+
+On an AIA board the APLIC sends each source as an identity of the boot hart's
+IMSIC file, given the first time the line is armed; the dispatcher claims every
+identity pending through `stopei` and fires the line it was given to. A level
+source is pended again as it is re-armed, since the domain sends one message
+per assertion. A device message file's notice raises its vector's line only
+while the vector is enabled in the file; masking the line disables it there,
+and a re-arm that finds it pending rings the notice itself. An identity nothing
+was given to is a stray that wakes nothing.
 
 ### riscv64 trap glue (Stage 4.D Item 4 — riscv64 external-IRQ controller)
 

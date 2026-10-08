@@ -15,7 +15,10 @@ vista de todo el sistema únicamente a un llamante que posea
 `CAP_SYSINFO_GLOBAL`.
 
 La pantalla se refresca sola en cada intervalo (3,0 segundos salvo que
-`-d` lo cambie), y `r` la refresca de inmediato.
+`-d` lo cambie), y `r` la refresca de inmediato. Un refresco que el
+servicio de información del sistema no pudo terminar bajo carga conserva
+la última lista, la línea de estado lo indica, y el siguiente refresco
+vuelve a leer la lista.
 
 El visor no acepta operandos: se controla con teclas pulsadas dentro de
 la sesión.

@@ -9,6 +9,7 @@
 //! exceptions: a function the rules cannot prove isolated is grouped.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{config_address, function_of, requester_id, Quiesced};
@@ -248,12 +249,18 @@ impl Function {
         matches!(self.header, Header::Bridge { .. })
     }
 
+    /// Whether it is a host bridge: the root complex's own function.
+    #[must_use]
+    pub const fn is_host_bridge(&self) -> bool {
+        self.class >> 8 == HOST_BRIDGE
+    }
+
     /// Whether it can master DMA of its own: neither a bridge, which forwards
-    /// for the buses below it, nor a host bridge, the root complex's own
-    /// function, whose Bus Master Enable chipsets commonly hardwire on.
+    /// for the buses below it, nor a host bridge, whose Bus Master Enable
+    /// chipsets commonly hardwire on.
     #[must_use]
     pub const fn masters_dma(&self) -> bool {
-        !self.is_bridge() && self.class >> 8 != HOST_BRIDGE
+        !self.is_bridge() && !self.is_host_bridge()
     }
 
     /// Its record as [`tairix_abi::driver::bus::Bus::enumerate`] states it.
@@ -388,6 +395,14 @@ impl Topology {
     #[must_use]
     pub fn functions(&self) -> &[Function] {
         &self.functions
+    }
+
+    /// Every function on a root bus: the host's own and its ports, below
+    /// which every other function lies.
+    pub fn root_functions(&self) -> impl Iterator<Item = &Function> {
+        self.functions
+            .iter()
+            .filter(|function| self.above(function.bus()).is_none())
     }
 
     /// The index of the function at configuration `address`.
@@ -752,6 +767,16 @@ pub trait PciTopology {
     /// many of them were found mastering and stopped, and how many read back
     /// mastering still.
     fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool) -> Quiesced;
+
+    /// The PCI addresses `topology`'s segment decodes as memory: each memory
+    /// BAR of a function on a root bus but the host bridge, and each memory
+    /// window a bridge there forwards, below which every other function's
+    /// BARs lie. A device's DMA to one may reach a peer instead of memory.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when they cannot be held.
+    fn decoded_windows(&self, topology: &Topology) -> Result<Vec<Range<u64>>, DriverError>;
 }
 
 #[cfg(test)]

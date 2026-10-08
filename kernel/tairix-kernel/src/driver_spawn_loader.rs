@@ -333,8 +333,6 @@ impl DriverLoader for SpawnDriverLoader<'_> {
             // carves its own DMA region over the `mmio_map` / `dma_alloc`
             // syscalls against the grants minted here (`lib/drvrt`), never
             // through an in-kernel host view — so the gate ships neither.
-            virtio_host_factory: None,
-            mmio_mapper: None,
         });
         // The host gate verifies the image and spawns it; its own returned
         // handle is a per-instance counter that is `1` for every driver here
@@ -468,7 +466,7 @@ mod tests {
         // spawn mechanism unchanged.
         let spawn = RecordingSpawn::ok(0x1234);
         let window = HwResource::mmio(0xfe34_0000, 0x200);
-        let dma = HwResource::dma(0x3fff_ffff, 0x1000);
+        let dma = HwResource::dma(0x3fff_ffff, 0x1000, tairix_abi::DmaCoherence::Snooped);
         let grants = [window, dma];
         let args: [&[u8]; 2] = [b"drv", b"7"];
         let spawner = SpawningDriverSpawner {
@@ -686,7 +684,7 @@ mod tests {
         let adapter = InitCtxDriverProcessSpawn::new(&init_ctx);
 
         let window = HwResource::mmio(0xfe34_0000, 0x200);
-        let dma = HwResource::dma(0x3fff_ffff, 0x1000);
+        let dma = HwResource::dma(0x3fff_ffff, 0x1000, tairix_abi::DmaCoherence::Snooped);
         let grants = [window, dma];
         let mut granted = CapabilitySet::empty();
         granted.insert(CapabilityId::DRV_LOAD);

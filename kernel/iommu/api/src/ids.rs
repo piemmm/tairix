@@ -10,13 +10,16 @@ use crate::IommuError;
 /// order they were released, so an id is reused as late as possible. One the
 /// unit could not confirm released is never handed out again.
 ///
-/// What it records grows with the ids handed out, not with `limit`: a unit
-/// naming a million domains costs nothing until it is given them.
+/// What it records grows with the ids handed out, not with `limit` or with
+/// where the ids start: a unit naming a million domains, or numbering them
+/// from near the top of the space, costs nothing until it is given them.
 pub struct Ids {
+    /// The first id handed out; none below it ever is.
+    first: u32,
     fresh: u32,
     limit: u32,
     released: VecDeque<u32>,
-    /// One bit per id below `fresh` handed out and not released.
+    /// One bit per id from `first` below `fresh` handed out and not released.
     live: Vec<u64>,
 }
 
@@ -24,8 +27,10 @@ impl Ids {
     /// Ids `0..limit`, with `reserved` ids from the start never handed out.
     #[must_use]
     pub const fn new(reserved: u32, limit: u32) -> Self {
+        let first = if reserved < limit { reserved } else { limit };
         Self {
-            fresh: if reserved < limit { reserved } else { limit },
+            first,
+            fresh: first,
             limit,
             released: VecDeque::new(),
             live: Vec::new(),
@@ -36,7 +41,7 @@ impl Ids {
     /// cannot be recorded.
     pub fn take(&mut self) -> Option<u32> {
         let id = if self.fresh < self.limit {
-            let words = (self.fresh / 64) as usize + 1;
+            let words = ((self.fresh - self.first) / 64) as usize + 1;
             if words > self.live.len() {
                 self.live.try_reserve(words - self.live.len()).ok()?;
                 self.live.resize(words, 0);
@@ -68,9 +73,11 @@ impl Ids {
     /// Whether `id` is handed out and not released.
     #[must_use]
     pub fn is_live(&self, id: u32) -> bool {
-        self.live
-            .get((id / 64) as usize)
-            .is_some_and(|word| word & (1 << (id % 64)) != 0)
+        id.checked_sub(self.first).is_some_and(|bit| {
+            self.live
+                .get((bit / 64) as usize)
+                .is_some_and(|word| word & (1 << (bit % 64)) != 0)
+        })
     }
 
     /// Release live id `id`, to be handed out again once every earlier
@@ -86,11 +93,14 @@ impl Ids {
     }
 
     fn mark(&mut self, id: u32, live: bool) {
-        if let Some(word) = self.live.get_mut((id / 64) as usize) {
+        let Some(bit) = id.checked_sub(self.first) else {
+            return;
+        };
+        if let Some(word) = self.live.get_mut((bit / 64) as usize) {
             if live {
-                *word |= 1 << (id % 64);
+                *word |= 1 << (bit % 64);
             } else {
-                *word &= !(1 << (id % 64));
+                *word &= !(1 << (bit % 64));
             }
         }
     }
@@ -136,8 +146,26 @@ mod tests {
         for expected in 64..130 {
             assert_eq!(ids.take(), Some(expected));
         }
-        assert_eq!(ids.live.len(), 3, "ids 64 to 129 span words 1 and 2");
+        assert_eq!(
+            ids.live.len(),
+            2,
+            "ids 64 to 129 take two words from the first"
+        );
         assert!(ids.is_live(129) && !ids.is_live(130) && !ids.is_live(1 << 19));
+        assert!(!ids.is_live(63) && !ids.is_live(0));
+    }
+
+    /// A device chooses where its domain ids start, so ids from near the top
+    /// of the space cost what ids from zero would.
+    #[test]
+    fn ids_starting_high_cost_what_ids_from_zero_do() {
+        let mut ids = Ids::new(0xFFFF_0000, u32::MAX);
+        assert_eq!(ids.take(), Some(0xFFFF_0000));
+        assert_eq!(ids.take(), Some(0xFFFF_0001));
+        assert_eq!(ids.live.len(), 1);
+        ids.release(0xFFFF_0000, true);
+        assert!(!ids.is_live(0xFFFF_0000) && ids.is_live(0xFFFF_0001));
+        assert_eq!(ids.take(), Some(0xFFFF_0002));
     }
 
     /// An id too wide for a sixteen-bit field is let go rather than left

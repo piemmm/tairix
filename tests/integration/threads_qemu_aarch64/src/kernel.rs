@@ -452,7 +452,7 @@ fn bring_up_board() -> u64 {
     // SAFETY: called once on the boot CPU after the GIC bases were
     // discovered above.
     unsafe {
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
     syscall_entry::set_dispatch_callback(dispatch);
     // Bind the production user-fault resolver to this vertical's slot — the

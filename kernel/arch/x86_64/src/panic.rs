@@ -72,7 +72,7 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
 /// initial APIC id under its own key — read through `CPUID` rather than the
 /// local APIC, which a report taken before the APIC is mapped would fault on.
 fn processor() -> Processor {
-    let apic = core::arch::x86_64::__cpuid(1).ebx >> 24;
+    let apic = initial_apic_id();
     match crate::preempt::cpu_id_for_lapic(apic) {
         u32::MAX => Processor::Hardware {
             key: "apic_id",
@@ -80,4 +80,20 @@ fn processor() -> Processor {
         },
         cpu => Processor::Cpu(cpu),
     }
+}
+
+/// The calling CPU's initial APIC id: all 32 bits where the extended
+/// topology leaf reports them (`CPUID.0BH:EDX`), else the eight of leaf 1,
+/// which are only an x2APIC id's low byte.
+fn initial_apic_id() -> u32 {
+    const EXTENDED_TOPOLOGY: u32 = 0x0B;
+    if core::arch::x86_64::__cpuid(0).eax >= EXTENDED_TOPOLOGY {
+        let topology = core::arch::x86_64::__cpuid_count(EXTENDED_TOPOLOGY, 0);
+        // A leaf with no logical processors at its first level is one the
+        // CPU does not implement.
+        if topology.ebx & 0xFFFF != 0 {
+            return topology.edx;
+        }
+    }
+    core::arch::x86_64::__cpuid(1).ebx >> 24
 }

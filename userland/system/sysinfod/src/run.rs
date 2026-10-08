@@ -61,21 +61,24 @@ mod program {
         RaidArrayRecord, RaidControlOp, RaidMemberRecord, RAID_CONTROL_ENDPOINT,
         RAID_CONTROL_MAX_REPLY, RAID_CONTROL_MAX_REQUEST, RAID_LIST_LIMIT_MAX,
     };
-    use tairix_abi::reply::decode_page_reply;
     use tairix_abi::sysinfo::{
         encode_reply_err, encode_reply_ok, CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord,
-        CpuTimeRecord, CrashRecord, GroupDirectoryRecord, IntrospectDomain, IrqRecord,
-        KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
-        MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord,
-        SelfAccountRecord, SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
-        VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
-        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
+        CpuTimeRecord, CrashRecord, DmaGroupRecord, DmaNodeRecord, DmaUnitRecord,
+        GroupDirectoryRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
+        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
+        RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity, Uptime,
+        UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST,
+        SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, ProcId, PROC_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
-    use tairix_sysinfod::{serve, Caller, ProcessScope, SelfReports, SysinfoSource};
+    use tairix_sysinfod::lists::{page_peer, read_whole};
+    use tairix_sysinfod::{
+        list_budget, serve, Caller, ProcessScope, SelfReports, SysinfoSource, Walks,
+    };
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
@@ -88,43 +91,51 @@ mod program {
         let mut buf = [0u8; 256];
         let n = tairix_rt::sysinfo_introspect(domain.as_u32(), 0, &mut buf)
             .map_err(Errno::from_syscall)?;
-        Ok(buf[..n].to_vec())
+        let record = buf.get(..n).ok_or(Errno::BadMagic)?;
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(record.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        owned.extend_from_slice(record);
+        Ok(owned)
     }
 
-    /// Page a list domain (`Processes`/`Mounts`) to completion, returning the
-    /// concatenated record bytes. Each call reads at most `chunk` bytes; a
-    /// short (zero-record) read terminates the walk.
+    /// Read list `domain` whole, its records concatenated, from one reading
+    /// the kernel makes of it.
     fn read_list(domain: IntrospectDomain, record_len: usize) -> Result<Vec<u8>, Errno> {
-        let mut out = Vec::new();
-        // Read a healthy number of records per call to bound the syscall count.
-        let per_call: usize = 64;
-        let mut scratch = alloc::vec![0u8; per_call * record_len];
-        let mut offset: u64 = 0;
-        loop {
-            let n = tairix_rt::sysinfo_introspect(domain.as_u32(), offset, &mut scratch)
-                .map_err(Errno::from_syscall)?;
-            if n == 0 {
-                break;
-            }
-            let records = n / record_len;
-            if records == 0 {
-                // The kernel guarantees whole records; a partial read is
-                // impossible, so treat it as end-of-list rather than looping.
-                break;
-            }
-            out.extend_from_slice(&scratch[..records * record_len]);
-            offset += records as u64;
+        read_whole(record_len, |buffer| {
+            tairix_rt::sysinfo_introspect(domain.as_u32(), 0, buffer).map_err(Errno::from_syscall)
+        })
+    }
+
+    /// Read list `domain` whole, decoding each `record_len`-byte record with
+    /// `decode`.
+    fn decode_list<R>(
+        domain: IntrospectDomain,
+        record_len: usize,
+        decode: fn(&[u8]) -> Result<R, Errno>,
+    ) -> Result<Vec<R>, Errno> {
+        let bytes = read_list(domain, record_len)?;
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(bytes.len() / record_len)
+            .map_err(|_| Errno::OutOfMemory)?;
+        for chunk in bytes.chunks_exact(record_len) {
+            records.push(decode(chunk)?);
         }
-        Ok(out)
+        Ok(records)
     }
 
     /// The production [`SysinfoSource`]: it answers every query from the
     /// kernel's live introspection primitive (`sysinfo_introspect`) and the
     /// discovered hardware tree (`hw_tree_read`), decoding each wire answer
-    /// into the owned records the dispatcher pages. It holds no state and adds
-    /// no authority: the kernel re-checks `CAP_SYSINFO_INTROSPECT` /
-    /// `CAP_SYSINFO_HW` on every call.
-    struct KernelSysinfoSource;
+    /// into the owned records the dispatcher pages. It adds no authority: the
+    /// kernel re-checks `CAP_SYSINFO_INTROSPECT` / `CAP_SYSINFO_HW` on every
+    /// call.
+    struct KernelSysinfoSource {
+        /// The most bytes of list a peer service's answer may run to.
+        most_bytes: usize,
+    }
 
     impl SysinfoSource for KernelSysinfoSource {
         fn process_records(
@@ -133,8 +144,12 @@ mod program {
             scope: ProcessScope,
         ) -> Result<Vec<ProcessRecord>, Errno> {
             let bytes = read_list(IntrospectDomain::Processes, ProcessRecord::WIRE_LEN)?;
+            let chunks = bytes.as_chunks::<{ ProcessRecord::WIRE_LEN }>().0;
             let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ ProcessRecord::WIRE_LEN }>().0 {
+            records
+                .try_reserve_exact(chunks.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            for chunk in chunks {
                 let record = ProcessRecord::from_bytes(chunk)?;
                 // Self-scope narrowing happens here in the broker: the kernel
                 // returns every process, and a self-scoped query keeps only
@@ -153,8 +168,12 @@ mod program {
 
         fn hardware_tree(&self, _caller: &Caller) -> Result<Vec<u8>, Errno> {
             // Read the discovered tree, growing the buffer until it fits.
-            let mut buf = alloc::vec![0u8; 4096];
+            let mut buf = Vec::new();
+            let mut len = 4096;
             loop {
+                buf.try_reserve_exact(len - buf.len())
+                    .map_err(|_| Errno::OutOfMemory)?;
+                buf.resize(len, 0);
                 match tairix_rt::hw_tree_read(&mut buf) {
                     Ok(n) => {
                         buf.truncate(n);
@@ -162,11 +181,10 @@ mod program {
                     }
                     Err(ret) => {
                         let err = Errno::from_syscall(ret);
-                        // Grow once on a too-small buffer; any other error is
+                        // Grow on a too-small buffer; any other error is
                         // surfaced fail-closed.
-                        if err == Errno::BufferTooSmall && buf.len() < (1 << 20) {
-                            let len = buf.len() * 2;
-                            buf.resize(len, 0);
+                        if err == Errno::BufferTooSmall && len < (1 << 20) {
+                            len *= 2;
                             continue;
                         }
                         return Err(err);
@@ -188,36 +206,27 @@ mod program {
         }
 
         fn mount_records(&self, _caller: &Caller) -> Result<Vec<MountRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::Mounts, MountRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ MountRecord::WIRE_LEN }>().0 {
-                records.push(MountRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::Mounts,
+                MountRecord::WIRE_LEN,
+                MountRecord::from_bytes,
+            )
         }
 
         fn user_directory(&self, _caller: &Caller) -> Result<Vec<UserDirectoryRecord>, Errno> {
-            let bytes = read_list(
+            decode_list(
                 IntrospectDomain::UserDirectory,
                 UserDirectoryRecord::WIRE_LEN,
-            )?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ UserDirectoryRecord::WIRE_LEN }>().0 {
-                records.push(UserDirectoryRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+                UserDirectoryRecord::from_bytes,
+            )
         }
 
         fn group_directory(&self, _caller: &Caller) -> Result<Vec<GroupDirectoryRecord>, Errno> {
-            let bytes = read_list(
+            decode_list(
                 IntrospectDomain::GroupDirectory,
                 GroupDirectoryRecord::WIRE_LEN,
-            )?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ GroupDirectoryRecord::WIRE_LEN }>().0 {
-                records.push(GroupDirectoryRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+                GroupDirectoryRecord::from_bytes,
+            )
         }
 
         fn self_account(&self, caller: &Caller) -> Result<Option<SelfAccountRecord>, Errno> {
@@ -237,21 +246,19 @@ mod program {
         }
 
         fn cpu_times(&self, _caller: &Caller) -> Result<Vec<CpuTimeRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::CpuTimes, CpuTimeRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ CpuTimeRecord::WIRE_LEN }>().0 {
-                records.push(CpuTimeRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::CpuTimes,
+                CpuTimeRecord::WIRE_LEN,
+                CpuTimeRecord::from_bytes,
+            )
         }
 
         fn seats(&self, _caller: &Caller) -> Result<Vec<SeatRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::Seats, SeatRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ SeatRecord::WIRE_LEN }>().0 {
-                records.push(SeatRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::Seats,
+                SeatRecord::WIRE_LEN,
+                SeatRecord::from_bytes,
+            )
         }
 
         fn memory_pressure(&self, _caller: &Caller) -> Result<MemoryPressureStats, Errno> {
@@ -270,7 +277,10 @@ mod program {
             // The whole document in one call: the kernel bounds it at
             // `SYSTEM_CONFIG_MAX_LEN` before reading a byte and answers the
             // whole thing or refuses, so there is nothing to page.
-            let mut buf = alloc::vec![0u8; SYSTEM_CONFIG_MAX_LEN];
+            let mut buf = Vec::new();
+            buf.try_reserve_exact(SYSTEM_CONFIG_MAX_LEN)
+                .map_err(|_| Errno::OutOfMemory)?;
+            buf.resize(SYSTEM_CONFIG_MAX_LEN, 0);
             let n =
                 tairix_rt::sysinfo_introspect(IntrospectDomain::SystemConfig.as_u32(), 0, &mut buf)
                     .map_err(Errno::from_syscall)?;
@@ -279,21 +289,19 @@ mod program {
         }
 
         fn cache_ledger_records(&self, _caller: &Caller) -> Result<Vec<CacheLedgerRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::CacheLedgers, CacheLedgerRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ CacheLedgerRecord::WIRE_LEN }>().0 {
-                records.push(CacheLedgerRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::CacheLedgers,
+                CacheLedgerRecord::WIRE_LEN,
+                CacheLedgerRecord::from_bytes,
+            )
         }
 
         fn live_process_instances(&self) -> Result<Vec<ProcId>, Errno> {
-            let bytes = read_list(IntrospectDomain::Processes, ProcessRecord::WIRE_LEN)?;
-            let mut instances = Vec::new();
-            for chunk in bytes.as_chunks::<{ ProcessRecord::WIRE_LEN }>().0 {
-                instances.push(ProcessRecord::from_bytes(chunk)?.proc_id);
-            }
-            Ok(instances)
+            decode_list(
+                IntrospectDomain::Processes,
+                ProcessRecord::WIRE_LEN,
+                |chunk| Ok(ProcessRecord::from_bytes(chunk)?.proc_id),
+            )
         }
 
         fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
@@ -301,42 +309,40 @@ mod program {
         }
 
         fn cpu_load(&self, _caller: &Caller) -> Result<Vec<CpuLoadRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::CpuLoad, CpuLoadRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ CpuLoadRecord::WIRE_LEN }>().0 {
-                records.push(CpuLoadRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::CpuLoad,
+                CpuLoadRecord::WIRE_LEN,
+                CpuLoadRecord::from_bytes,
+            )
         }
 
         fn cpu_info(&self, _caller: &Caller) -> Result<Vec<CpuInfoRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::CpuInfo, CpuInfoRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ CpuInfoRecord::WIRE_LEN }>().0 {
-                records.push(CpuInfoRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::CpuInfo,
+                CpuInfoRecord::WIRE_LEN,
+                CpuInfoRecord::from_bytes,
+            )
         }
 
         fn net_interface_facts(
             &self,
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceFactsRecord>, Errno> {
-            page_netstack(&NetstackFactsPage)
+            page_netstack(&NetstackFactsPage, self.most_bytes)
         }
 
         fn net_interface_state(
             &self,
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceStateRecord>, Errno> {
-            page_netstack(&NetstackStatePage)
+            page_netstack(&NetstackStatePage, self.most_bytes)
         }
 
         fn net_interface_counters(
             &self,
             _caller: &Caller,
         ) -> Result<Vec<NetInterfaceCountersRecord>, Errno> {
-            page_netstack(&NetstackCountersPage)
+            page_netstack(&NetstackCountersPage, self.most_bytes)
         }
 
         fn net_interface_rates(
@@ -344,7 +350,7 @@ mod program {
             _caller: &Caller,
             window: Duration64,
         ) -> Result<Vec<NetInterfaceRatesRecord>, Errno> {
-            page_netstack(&NetstackRatesPage { window })
+            page_netstack(&NetstackRatesPage { window }, self.most_bytes)
         }
 
         fn net_stack_defence(&self, _caller: &Caller) -> Result<NetStackDefenceCounters, Errno> {
@@ -352,81 +358,91 @@ mod program {
         }
 
         fn net_sockets(&self, _caller: &Caller) -> Result<Vec<NetSocketRecord>, Errno> {
-            page_netstack(&NetstackSocketsPage)
+            page_netstack(&NetstackSocketsPage, self.most_bytes)
         }
 
         fn net_bond_members(&self, _caller: &Caller) -> Result<Vec<NetBondMemberRecord>, Errno> {
-            page_netstack(&NetstackBondMembersPage)
+            page_netstack(&NetstackBondMembersPage, self.most_bytes)
         }
 
         fn net_resolver_servers(&self, _caller: &Caller) -> Result<Vec<NetServerAddr>, Errno> {
-            page_netstack(&NetstackResolverServersPage)
+            page_netstack(&NetstackResolverServersPage, self.most_bytes)
         }
 
         fn net_time_servers(&self, _caller: &Caller) -> Result<Vec<NetServerAddr>, Errno> {
-            page_netstack(&NetstackTimeServersPage)
+            page_netstack(&NetstackTimeServersPage, self.most_bytes)
         }
 
         fn irqs(&self, _caller: &Caller) -> Result<Vec<IrqRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::Irqs, IrqRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ IrqRecord::WIRE_LEN }>().0 {
-                records.push(IrqRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::Irqs,
+                IrqRecord::WIRE_LEN,
+                IrqRecord::from_bytes,
+            )
+        }
+
+        fn dma_units(&self, _caller: &Caller) -> Result<Vec<DmaUnitRecord>, Errno> {
+            decode_list(
+                IntrospectDomain::DmaUnits,
+                DmaUnitRecord::WIRE_LEN,
+                DmaUnitRecord::from_bytes,
+            )
+        }
+
+        fn dma_groups(&self, _caller: &Caller) -> Result<Vec<DmaGroupRecord>, Errno> {
+            decode_list(
+                IntrospectDomain::DmaGroups,
+                DmaGroupRecord::WIRE_LEN,
+                DmaGroupRecord::from_bytes,
+            )
+        }
+
+        fn dma_nodes(&self, _caller: &Caller) -> Result<Vec<DmaNodeRecord>, Errno> {
+            decode_list(
+                IntrospectDomain::DmaNodes,
+                DmaNodeRecord::WIRE_LEN,
+                DmaNodeRecord::from_bytes,
+            )
         }
 
         fn crashes(&self, _caller: &Caller) -> Result<Vec<CrashRecord>, Errno> {
-            let bytes = read_list(IntrospectDomain::Crashes, CrashRecord::WIRE_LEN)?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ CrashRecord::WIRE_LEN }>().0 {
-                records.push(CrashRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+            decode_list(
+                IntrospectDomain::Crashes,
+                CrashRecord::WIRE_LEN,
+                CrashRecord::from_bytes,
+            )
         }
 
         fn volume_io_health(&self, _caller: &Caller) -> Result<Vec<VolumeIoHealthRecord>, Errno> {
-            let bytes = read_list(
+            decode_list(
                 IntrospectDomain::VolumeIoHealth,
                 VolumeIoHealthRecord::WIRE_LEN,
-            )?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ VolumeIoHealthRecord::WIRE_LEN }>().0 {
-                records.push(VolumeIoHealthRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+                VolumeIoHealthRecord::from_bytes,
+            )
         }
 
         fn volume_io_stats(&self, _caller: &Caller) -> Result<Vec<VolumeIoStatsRecord>, Errno> {
-            let bytes = read_list(
+            decode_list(
                 IntrospectDomain::VolumeIoStats,
                 VolumeIoStatsRecord::WIRE_LEN,
-            )?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ VolumeIoStatsRecord::WIRE_LEN }>().0 {
-                records.push(VolumeIoStatsRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+                VolumeIoStatsRecord::from_bytes,
+            )
         }
 
         fn volume_io_queue(&self, _caller: &Caller) -> Result<Vec<VolumeIoQueueRecord>, Errno> {
-            let bytes = read_list(
+            decode_list(
                 IntrospectDomain::VolumeIoQueue,
                 VolumeIoQueueRecord::WIRE_LEN,
-            )?;
-            let mut records = Vec::new();
-            for chunk in bytes.as_chunks::<{ VolumeIoQueueRecord::WIRE_LEN }>().0 {
-                records.push(VolumeIoQueueRecord::from_bytes(chunk)?);
-            }
-            Ok(records)
+                VolumeIoQueueRecord::from_bytes,
+            )
         }
 
         fn raid_arrays(&self, _caller: &Caller) -> Result<Vec<RaidArrayRecord>, Errno> {
-            page_raid(&RaidArraysPage)
+            page_raid(&RaidArraysPage, self.most_bytes)
         }
 
         fn raid_members(&self, _caller: &Caller) -> Result<Vec<RaidMemberRecord>, Errno> {
-            page_raid(&RaidMembersPage)
+            page_raid(&RaidMembersPage, self.most_bytes)
         }
 
         fn gpu_device_stats(&self, _caller: &Caller) -> Result<Vec<DisplayStats>, Errno> {
@@ -600,25 +616,23 @@ mod program {
     /// narrowing already happened in the dispatcher before this runs. A
     /// system without a running `netstack` fails closed with the
     /// transport's typed error, never a fabricated empty table.
-    fn page_netstack<P: NetstackPage>(page: &P) -> Result<Vec<P::Record>, Errno> {
-        let mut records = Vec::new();
+    fn page_netstack<P: NetstackPage>(
+        page: &P,
+        most_bytes: usize,
+    ) -> Result<Vec<P::Record>, Errno> {
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
-        let mut offset: u32 = 0;
-        loop {
-            let request = page.request(offset, NETSTACK_LIST_LIMIT_MAX);
-            let n = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), &mut reply)
-                .map_err(Errno::from_syscall)?;
-            let record_len = P::RECORD_LEN;
-            let (count, body) =
-                decode_page_reply(&reply[..n], record_len, NETSTACK_LIST_LIMIT_MAX)?;
-            for chunk in body.chunks_exact(record_len) {
-                records.push(P::decode(chunk)?);
-            }
-            if count < NETSTACK_LIST_LIMIT_MAX {
-                return Ok(records);
-            }
-            offset = offset.saturating_add(u32::from(count));
-        }
+        page_peer(
+            P::RECORD_LEN,
+            NETSTACK_LIST_LIMIT_MAX,
+            most_bytes,
+            &mut reply,
+            |offset, reply| {
+                let request = page.request(offset, NETSTACK_LIST_LIMIT_MAX);
+                tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request.to_le_bytes(), reply)
+                    .map_err(Errno::from_syscall)
+            },
+            P::decode,
+        )
     }
 
     /// Read the graphics devices' statistics from the display service.
@@ -641,7 +655,12 @@ mod program {
         if n != DISPLAY_STATS_REPLY_LEN {
             return Err(Errno::BadMagic);
         }
-        Ok(alloc::vec![decode_stats_reply(&reply)?])
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        devices.push(decode_stats_reply(&reply)?);
+        Ok(devices)
     }
 
     /// Read the stack-wide connection-defence counters from `netstack`.
@@ -720,26 +739,21 @@ mod program {
     /// already passed in the dispatcher before this runs. A machine with no
     /// running array composer fails closed with the transport's typed
     /// error, never a fabricated empty table.
-    fn page_raid<P: RaidPage>(page: &P) -> Result<Vec<P::Record>, Errno> {
-        let mut records = Vec::new();
+    fn page_raid<P: RaidPage>(page: &P, most_bytes: usize) -> Result<Vec<P::Record>, Errno> {
         let mut request = [0u8; RAID_CONTROL_MAX_REQUEST];
         let mut reply = [0u8; RAID_CONTROL_MAX_REPLY];
-        let mut offset: u32 = 0;
-        loop {
-            let op = page.op(offset, RAID_LIST_LIMIT_MAX);
-            let request_len = op.encode(&mut request)?;
-            let n = tairix_rt::ipc_call(RAID_CONTROL_ENDPOINT, &request[..request_len], &mut reply)
-                .map_err(Errno::from_syscall)?;
-            let record_len = P::RECORD_LEN;
-            let (count, body) = decode_page_reply(&reply[..n], record_len, RAID_LIST_LIMIT_MAX)?;
-            for chunk in body.chunks_exact(record_len) {
-                records.push(P::decode(chunk)?);
-            }
-            if count < RAID_LIST_LIMIT_MAX {
-                return Ok(records);
-            }
-            offset = offset.saturating_add(u32::from(count));
-        }
+        page_peer(
+            P::RECORD_LEN,
+            RAID_LIST_LIMIT_MAX,
+            most_bytes,
+            &mut reply,
+            |offset, reply| {
+                let request_len = page.op(offset, RAID_LIST_LIMIT_MAX).encode(&mut request)?;
+                tairix_rt::ipc_call(RAID_CONTROL_ENDPOINT, &request[..request_len], reply)
+                    .map_err(Errno::from_syscall)
+            },
+            P::decode,
+        )
     }
 
     /// Bind the endpoint and serve requests for the life of the service.
@@ -775,8 +789,11 @@ mod program {
             Err(_) => return 1,
         };
         let mut reports = SelfReports::new(total_ram_bytes);
+        let mut walks = Walks::new(total_ram_bytes);
 
-        let source = KernelSysinfoSource;
+        let source = KernelSysinfoSource {
+            most_bytes: list_budget(total_ram_bytes),
+        };
         let mut request = [0u8; SYSINFO_MAX_REQUEST];
         let mut reply = [0u8; SYSINFO_MAX_REPLY];
         loop {
@@ -807,6 +824,7 @@ mod program {
                 &source,
                 &caller,
                 &mut reports,
+                &mut walks,
                 &LogSink,
                 &request[..request_len],
                 &mut payload,

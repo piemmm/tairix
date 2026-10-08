@@ -453,7 +453,11 @@ fn without_a_hierarchy_every_unit_comes_up_keeping_no_window() {
     ];
     for (node, registers) in sink.0.iter().zip(registers) {
         assert_eq!(node.class(), Some(HwDeviceClass::Iommu));
-        assert_eq!(node.resources(), [registers], "its registers alone");
+        assert_eq!(
+            node.resources(),
+            [registers, crate::acpi::unit_dma()],
+            "its registers and its own DMA alone"
+        );
     }
 }
 
@@ -485,7 +489,8 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
         sink.0[0].resources().len(),
         tairix_abi::HW_NODE_MAX_RESOURCES
     );
-    assert_eq!(placed.dropped, 20 - (tairix_abi::HW_NODE_MAX_RESOURCES - 1));
+    // The registers and the unit's own DMA take two of the node's places.
+    assert_eq!(placed.dropped, 20 - (tairix_abi::HW_NODE_MAX_RESOURCES - 2));
 }
 
 #[test]

@@ -150,7 +150,7 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountListRequest, MountRecord, MountVolumeState, SysinfoRequestHeader,
+        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoRequestHeader,
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
@@ -171,7 +171,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = MountListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

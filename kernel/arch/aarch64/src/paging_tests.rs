@@ -113,32 +113,6 @@ fn dcache_line_bytes_decodes_dminline() {
 }
 
 #[test]
-fn gigapage_mask_from_extents_marks_every_overlapped_gigapage() {
-    let mask = gigapage_mask_from_extents(&[
-        // The Pi 4 kernel image: inside gigapage 0.
-        (0x8_0000, 0x10_0000),
-        // An extent straddling the gigapage 3 / 4 boundary marks both.
-        (0xFFFF_FFF0, 0x20),
-        // A zero-length extent contributes nothing.
-        (0x40_0000_0000, 0),
-    ]);
-    assert_eq!(mask[0], 0b1_1001);
-    assert_eq!(mask[1..], [0u64; GIGAPAGE_MASK_WORDS - 1]);
-}
-
-#[test]
-fn gigapage_mask_from_extents_clamps_at_the_last_slot() {
-    // The last representable gigapage is marked; the overhang is not.
-    let mask = gigapage_mask_from_extents(&[(511u64 << 30, 4 << 30)]);
-    assert_eq!(mask[7], 1 << 63);
-    // An extent entirely beyond an L1 table's span contributes nothing.
-    assert_eq!(
-        gigapage_mask_from_extents(&[(512u64 << 30, 1 << 30)]),
-        [0u64; GIGAPAGE_MASK_WORDS]
-    );
-}
-
-#[test]
 fn identity_gigapage_leaf_leaves_unbacked_slots_invalid() {
     // Device wins over a kernel extent; a kernel extent maps Normal;
     // neither maps nothing — the unbacked-space policy that keeps
@@ -390,6 +364,25 @@ fn leaf_attrs_for_dma_coherent_user_is_normal_non_cacheable() {
     );
 }
 
+/// A DMA buffer's leaf carries its software mark whatever its memory type,
+/// and decodes back to it; no other leaf does.
+#[test]
+fn the_dma_mark_rides_its_own_software_bit() {
+    let shared = PageFlags::READ | PageFlags::WRITE | PageFlags::USER;
+    for memory in [PageFlags::empty(), PageFlags::DMA_COHERENT] {
+        let marked = page_flags_from_leaf(AddressSpace::leaf_attrs_for(
+            shared | memory | PageFlags::DMA,
+        ));
+        assert!(marked.contains(PageFlags::DMA));
+        assert_eq!(
+            marked.contains(PageFlags::DMA_COHERENT),
+            memory == PageFlags::DMA_COHERENT
+        );
+        let plain = page_flags_from_leaf(AddressSpace::leaf_attrs_for(shared | memory));
+        assert!(!plain.contains(PageFlags::DMA));
+    }
+}
+
 #[test]
 fn page_flags_round_trip_through_the_dma_coherent_leaf() {
     // The Normal-NC leaf decodes back to a `DMA_COHERENT` user RW page —
@@ -471,6 +464,7 @@ fn identity_device_mask_derives_the_virt_layout() {
     // "GiB 0 Device" layout falls out of the derivation.
     let mask = identity_device_mask(
         &[(0x0900_0000, 1), (0x0800_0000, 1), (0x0801_0000, 1)],
+        [0; GIGAPAGE_MASK_WORDS],
         0x4020_0000,
         0x4060_0000,
     );
@@ -485,6 +479,7 @@ fn identity_device_mask_derives_the_pi4_layout() {
     // Device side.
     let mask = identity_device_mask(
         &[(0xFE20_1000, 1), (0xFF84_1000, 1), (0xFF84_2000, 1)],
+        [0; GIGAPAGE_MASK_WORDS],
         0x8_0000,
         0x48_0000,
     );
@@ -500,17 +495,33 @@ fn identity_device_mask_keeps_the_kernel_gigapages_normal() {
     // A discovered MMIO base sharing the kernel image's gigapage cannot
     // be expressed at 1 GiB granularity; the kernel's gigapages win
     // (Normal, executable) — including every gigapage the image spans.
-    let mask = identity_device_mask(&[(0x0900_0000, 1)], 0, 0x8000_0000);
+    let mask = identity_device_mask(
+        &[(0x0900_0000, 1)],
+        [0; GIGAPAGE_MASK_WORDS],
+        0,
+        0x8000_0000,
+    );
     assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
+    // So do gigapages a window mask names.
+    let windows = gigapage_mask_from_extents(&[(0x0800_0000, 1), (3 << 30, 1)]);
+    let mask = identity_device_mask(&[], windows, 0, 0x8000_0000);
+    assert!(!gigapage_is_device(&mask, 0));
+    assert!(gigapage_is_device(&mask, 3));
 
     // A base beyond the 512 GiB identity window has no slot to set.
-    let mask = identity_device_mask(&[(1u64 << 60, 1)], 0x4020_0000, 0x4060_0000);
+    let mask = identity_device_mask(
+        &[(1u64 << 60, 1)],
+        [0; GIGAPAGE_MASK_WORDS],
+        0x4020_0000,
+        0x4060_0000,
+    );
     assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
 
     // An extent marks every gigapage it overlaps: a host's configuration
     // region and windows spanning several.
     let mask = identity_device_mask(
         &[(0x40_1000_0000, 0x1000_0000), (0x8000_0000, 3 << 30)],
+        [0; GIGAPAGE_MASK_WORDS],
         0x4020_0000,
         0x4060_0000,
     );
@@ -1131,7 +1142,7 @@ fn the_direct_map_covers_exactly_the_ram_it_was_given() {
     covered[0] |= 1;
     // A configuration region past the identity window, and one sharing a
     // gigapage RAM also asked for: Device wins it.
-    configure_kernel_device_gigapages(gigapage_mask_from_extents(&[
+    KERNEL_DEVICES.name(gigapage_mask_from_extents(&[
         (256 << 30, 1 << 28),
         (6 << 30, 1 << 20),
     ]));
@@ -1180,15 +1191,15 @@ fn the_direct_map_covers_exactly_the_ram_it_was_given() {
 
     // The registers are Device in the kernel regime alone, at their
     // direct-map address, and no RAM leaf shares their gigapage.
-    assert!(kernel_device_covers(256 << 30, 1 << 28));
-    assert!(kernel_device_covers(6 << 30, PAGE_SIZE as u64));
+    assert!(KERNEL_DEVICES.covers(256 << 30, 1 << 28));
+    assert!(KERNEL_DEVICES.covers(6 << 30, PAGE_SIZE as u64));
     assert!(!physmap_covers(6 << 30, PAGE_SIZE as u64));
     assert!(
-        !kernel_device_covers(1 << 30, PAGE_SIZE as u64),
+        !KERNEL_DEVICES.covers(1 << 30, PAGE_SIZE as u64),
         "RAM is not registers"
     );
     assert!(
-        !kernel_device_covers(255 << 30, 2 << 30),
+        !KERNEL_DEVICES.covers(255 << 30, 2 << 30),
         "a straddle fails closed"
     );
     // SAFETY: as above.

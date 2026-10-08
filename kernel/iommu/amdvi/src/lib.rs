@@ -28,20 +28,19 @@ mod tests;
 pub use tairix_kernel_iommu_api::Registers;
 
 use core::ops::Range;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec::Vec;
 
 use tairix_arch_api::PageTableFrames;
-use tairix_collections::HashMap;
-use tairix_hash::BuildFastHash;
 use tairix_kernel_iommu_api::{
     drain_in_batches, reach_bits, wait_for, wait_within, Access, Binding, Bindings, Block, Clock,
-    Command, CommandQueue, DomainId, Fault, FaultBatch, FaultRoute, Ids, InterruptRemapping,
-    InterruptSource, InterruptTarget, IoPageTable, IommuError, IommuUnit, QueueRegisters, Reach,
-    Remapped, Table, TableMemory, UnitFunction, UnitProfile, FAULT_QUEUE_RECORDS, MESSAGE_WINDOW,
-    TABLE_BYTES,
+    Command, CommandQueue, DomainId, DomainMap, Fault, FaultBatch, FaultRoute, FrameRun, Ids,
+    InterruptRemapping, InterruptSource, InterruptTarget, Invalidator, IoPageTable, IommuError,
+    IommuUnit, PageSpan, QueueRegisters, Reach, Remapped, Table, TableMemory, UnitFunction,
+    UnitProfile, FAULT_QUEUE_RECORDS, MESSAGE_WINDOW, TABLE_BYTES,
 };
-use tairix_sync::SpinLock;
+use tairix_sync::{SpinLock, SpinLockGuard};
 
 use crate::format::{HostTables, DTE_WORDS, EVENT_WORDS};
 use crate::regs::Features;
@@ -108,7 +107,10 @@ const REACH: Reach = Reach {
 ///
 /// Its device table, command buffer, event log and remapping tables are
 /// never freed once the unit was pointed at them: nothing proves it stopped
-/// reading them.
+/// reading them. Its state is split so a domain's maps and syncs wait on
+/// neither another domain nor a device's attach: the lifecycle lock, then
+/// the domain map and a domain, then the command buffer's ring, then the
+/// register window, never the reverse.
 pub struct AmdViUnit<'f, R: Registers> {
     memory: TableMemory<'f>,
     clock: &'f dyn Clock,
@@ -116,19 +118,56 @@ pub struct AmdViUnit<'f, R: Registers> {
     /// The PCI function the unit is and its node address, through whose MSI
     /// it raises its faults.
     function: Option<(&'f dyn UnitFunction, u32)>,
-    state: SpinLock<State<'f, R>>,
+    /// It may cache an entry it found absent (`NpCache`), so a map must be
+    /// flushed too. Assumed unless its capability header says otherwise.
+    caches_misses: bool,
+    regs: Regs<R>,
+    queue: CommandQueue,
+    lifecycle: SpinLock<Lifecycle>,
+    domains: DomainMap<IoPageTable<'f, HostTables>>,
+    /// Translation is on, or about to be. Invalidations wait for it: until
+    /// then nothing the unit caches is used, and the flush that turns it on
+    /// drops it all.
+    enabled: AtomicBool,
+    /// The event log, which the one drain at a time reads and blanks.
+    events: SpinLock<Table>,
 }
 
-struct State<'f, R> {
-    regs: R,
+/// The register window, held for one access or one handshake, so a
+/// read-modify-write of `CONTROL` — which the queue's recovery, the event
+/// log's restart and the lifecycle all change — is never interleaved.
+struct Regs<R>(SpinLock<R>);
+
+impl<R> Regs<R> {
+    fn lock(&self) -> SpinLockGuard<'_, R> {
+        self.0.lock()
+    }
+}
+
+/// The PCI capability an AMD-Vi unit describes itself in.
+const SECURE_DEVICE_CAPABILITY: u8 = 0x0F;
+
+/// `NpCache` in that capability's header.
+const CAPABILITY_NP_CACHE: u32 = 1 << 26;
+
+/// `CapType` in that capability's header, and the value an IOMMU's carries.
+const CAPABILITY_TYPE: u32 = 0b111 << 16;
+const CAPABILITY_TYPE_IOMMU: u32 = 0b011 << 16;
+
+/// Whether the unit at `function` may cache an absent entry: unless its
+/// IOMMU capability header can be read and says not.
+fn caches_misses(function: Option<(&dyn UnitFunction, u32)>) -> bool {
+    !matches!(
+        function.map(|(function, at)| function.capability_header(at, SECURE_DEVICE_CAPABILITY)),
+        Some(Ok(Some(header)))
+            if header & CAPABILITY_TYPE == CAPABILITY_TYPE_IOMMU
+                && header & CAPABILITY_NP_CACHE == 0
+    )
+}
+
+/// What attaching a device, silencing one and remapping interrupts change.
+struct Lifecycle {
     devices: Block,
-    queue: CommandQueue,
-    events: Table,
-    /// Translation is on. Invalidations wait for it: until then nothing the
-    /// unit caches is used, and the flush that turns it on drops it all.
-    enabled: bool,
-    /// Each domain's tables.
-    domains: HashMap<u16, IoPageTable<'f, HostTables>, BuildFastHash>,
     /// What each device translates through.
     bindings: Bindings,
     ids: Ids,
@@ -175,9 +214,10 @@ fn update_control(regs: &impl Registers, set: u64, clear: u64) -> Result<(), Iom
 }
 
 impl<'f, R: Registers> AmdViUnit<'f, R> {
-    /// Take over the unit behind `regs`, leaving every device blocked, its
-    /// command buffer and event log running, and translation off:
-    /// [`IommuUnit::enable`] turns it on. `function` is the PCI function the
+    /// Take over the unit behind `regs`, every device's entry blocking, its
+    /// command buffer and event log running, and translation off — so a
+    /// device's DMA passes untranslated until [`IommuUnit::enable`] turns it
+    /// on (`plans/OPEN-DEFECTS.md`). `function` is the PCI function the
     /// unit is and its node address, through which it raises its faults.
     ///
     /// The unit is told to snoop the CPU's caches, as every AMD-Vi unit can,
@@ -210,17 +250,18 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
             clock,
             features,
             function,
-            state: SpinLock::new(State {
-                regs,
+            caches_misses: caches_misses(function),
+            regs: Regs(SpinLock::new(regs)),
+            queue,
+            lifecycle: SpinLock::new(Lifecycle {
                 devices,
-                queue,
-                events,
-                enabled: false,
-                domains: HashMap::with_hasher(BuildFastHash::new()),
                 bindings: Bindings::new(),
                 ids,
                 remap: None,
             }),
+            domains: DomainMap::new(),
+            enabled: AtomicBool::new(false),
+            events: SpinLock::new(events),
         };
         // From here the unit may hold the tables' addresses, so a failure
         // keeps them.
@@ -264,8 +305,9 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
     }
 
     fn take_over(&self) -> Result<(), IommuError> {
-        let state = self.state.lock();
-        let regs = &state.regs;
+        let devices = self.lifecycle.lock().devices.phys();
+        let events = self.events.lock().phys();
+        let regs = self.regs.lock();
         // Firmware may have left the unit translating, or its command buffer
         // or event log running, on tables of its own: all of it stops before
         // anything of ours is installed.
@@ -277,21 +319,18 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         regs.write64(regs::EXCLUSION_LIMIT, 0)?;
         regs.write64(
             regs::DEVICE_TABLE,
-            regs::device_table(state.devices.phys(), DEVICE_TABLE_FRAMES),
+            regs::device_table(devices, DEVICE_TABLE_FRAMES),
         )?;
         regs.write64(
             regs::COMMAND_BUFFER,
-            regs::ring(state.queue.ring(), CommandQueue::SLOTS),
+            regs::ring(self.queue.ring(), CommandQueue::SLOTS),
         )?;
         regs.write64(regs::COMMAND_HEAD, 0)?;
         regs.write64(regs::COMMAND_TAIL, 0)?;
         // A status firmware left set keeps the event log's base from being
         // taken, and raises no interrupt for the next event.
         regs.write64(regs::STATUS, regs::STATUS_CLEAR)?;
-        regs.write64(
-            regs::EVENT_LOG,
-            regs::ring(state.events.phys(), EVENT_SLOTS),
-        )?;
+        regs.write64(regs::EVENT_LOG, regs::ring(events, EVENT_SLOTS))?;
         regs.write64(regs::EVENT_HEAD, 0)?;
         regs.write64(regs::EVENT_TAIL, 0)?;
         regs.write64(
@@ -303,50 +342,65 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         )
     }
 
-    fn run(
+    fn invalidator(&self) -> Invalidator<'_> {
+        Invalidator {
+            queue: &self.queue,
+            memory: self.memory,
+            clock: self.clock,
+            regs: &self.regs,
+            completion: format::completion_wait,
+        }
+    }
+
+    /// Install into `domain`'s tables what `install` maps from `iova`, and
+    /// flush it once where the unit may cache an entry it found absent; one
+    /// that caches none needs nothing, every entry written having been
+    /// absent. A refusal takes it back, since the caller frees the frames
+    /// once this fails.
+    fn publish_mapped(
         &self,
-        regs: &R,
-        queue: &mut CommandQueue,
-        commands: impl IntoIterator<Item = Command>,
+        domain: DomainId,
+        iova: u64,
+        install: impl FnOnce(&mut IoPageTable<'f, HostTables>) -> Result<u64, IommuError>,
     ) -> Result<(), IommuError> {
-        queue.run(
-            &self.memory,
-            self.clock,
-            &Commands(regs),
-            commands,
-            format::completion_wait,
+        let id = domain.sixteen_bits()?;
+        self.domains.map_published(
+            u32::from(id),
+            iova,
+            |table| table,
+            install,
+            |mapped| {
+                if !self.caches_misses {
+                    return Ok(());
+                }
+                let flush = PageSpan::of(iova, mapped)
+                    .ok()
+                    .and_then(|pages| format::invalidate_range(id, pages))
+                    .unwrap_or(format::invalidate_domain(id));
+                self.invalidate([flush])
+            },
         )
     }
 
     /// Run `commands` and wait for the unit to confirm them. Before
     /// translation is on nothing is run: the flush that turns it on drops
     /// whatever the unit cached.
-    fn invalidate(
-        &self,
-        state: &mut State<'f, R>,
-        commands: impl IntoIterator<Item = Command>,
-    ) -> Result<(), IommuError> {
-        if !state.enabled {
+    fn invalidate(&self, commands: impl IntoIterator<Item = Command>) -> Result<(), IommuError> {
+        if !self.enabled.load(Ordering::Acquire) {
             return Ok(());
         }
-        let State { regs, queue, .. } = state;
-        self.run(regs, queue, commands)
+        self.invalidator().run(commands)
     }
 
     /// Drop everything the unit caches: at once where it can, else every
-    /// device's entry and remapping entries and every domain it was told of.
-    fn flush_all(&self, state: &mut State<'f, R>) -> Result<(), IommuError> {
-        if !state.enabled {
+    /// device's entry and remapping entries and every domain id, since what
+    /// firmware left cached under an id survives into its next owner here.
+    fn flush_all(&self) -> Result<(), IommuError> {
+        if !self.enabled.load(Ordering::Acquire) {
             return Ok(());
         }
-        let State {
-            regs,
-            queue,
-            domains,
-            ..
-        } = state;
         if self.features.invalidate_all() {
-            return self.run(regs, queue, [format::INVALIDATE_EVERYTHING]);
+            return self.invalidator().run([format::INVALIDATE_EVERYTHING]);
         }
         let devices = (0..=u16::MAX).flat_map(|device| {
             [
@@ -354,10 +408,8 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
                 format::invalidate_interrupts(device),
             ]
         });
-        let domains = core::iter::once(0)
-            .chain(domains.keys().copied())
-            .map(format::invalidate_domain);
-        self.run(regs, queue, devices.chain(domains))
+        let domains = (0..=u16::MAX).map(format::invalidate_domain);
+        self.invalidator().run(devices.chain(domains))
     }
 
     /// Write device `device`'s DMA words, ordered so a unit reading the entry
@@ -365,7 +417,7 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
     /// translation using it, the block before the domain it drops.
     fn write_device(
         &self,
-        state: &State<'f, R>,
+        life: &Lifecycle,
         device: u16,
         translation: u64,
         domain: u64,
@@ -376,46 +428,43 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         } else {
             ((at + 1, domain), (at, translation))
         };
-        self.memory.write_block(&state.devices, first.0, first.1)?;
+        self.memory.write_block(&life.devices, first.0, first.1)?;
         tairix_dma_barrier::dma_wmb();
-        self.memory.write_block(&state.devices, second.0, second.1)
+        self.memory.write_block(&life.devices, second.0, second.1)
     }
 
     /// Block `device` and confirm the unit kept none of its translation. One
     /// the unit cannot confirm keeps its domain, so the domain's tables
     /// outlive any walk the unit still holds and a later detach can try
     /// again; its silence ends with its entry, confirmed or not.
-    fn detach(&self, state: &mut State<'f, R>, device: u16) -> Result<(), IommuError> {
+    fn detach(&self, life: &mut Lifecycle, device: u16) -> Result<(), IommuError> {
         let stream = u32::from(device);
-        let tag = match state.bindings.get(stream) {
+        let tag = match life.bindings.get(stream) {
             Some(Binding::Domain(id)) => u16::try_from(id).map_err(|_| IommuError::Hardware)?,
             Some(Binding::Silenced) => 0,
             // Blocked already: only the confirmation is owed.
-            None => match state.bindings.held(stream) {
+            None => match life.bindings.held(stream) {
                 Some(held) => u16::try_from(held).map_err(|_| IommuError::Hardware)?,
                 None => return Ok(()),
             },
         };
-        if state.bindings.get(stream).is_some() {
+        if life.bindings.get(stream).is_some() {
             self.write_device(
-                state,
+                life,
                 device,
                 format::DTE_BLOCKED,
                 format::dte_domain(0, false),
             )
             .map_err(|_| IommuError::Unconfirmed)?;
-            state.bindings.unbind(stream);
-            state.bindings.end_silence(stream);
+            life.bindings.unbind(stream);
+            life.bindings.end_silence(stream);
         }
-        self.invalidate(
-            state,
-            [
-                format::invalidate_device(device),
-                format::invalidate_domain(tag),
-            ],
-        )
+        self.invalidate([
+            format::invalidate_device(device),
+            format::invalidate_domain(tag),
+        ])
         .map_err(|_| IommuError::Unconfirmed)?;
-        state.bindings.release(stream);
+        life.bindings.release(stream);
         Ok(())
     }
 
@@ -423,7 +472,7 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
     /// record lands, so one still blank is waited for, and skipped past the
     /// budget.
     ///
-    /// The unit holds its lock meanwhile, so a drain waits for the first
+    /// The drain holds the event log meanwhile, so it waits for the first
     /// record it misses alone: `patient` goes false once that wait expires,
     /// and the records after it are read once each.
     fn read_event(
@@ -456,10 +505,12 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
     /// so a blank slot is one the unit has not written. Whether records may
     /// remain.
     fn take_events(&self, batch: &mut FaultBatch) -> bool {
-        let state = self.state.lock();
-        let regs = &state.regs;
-        let (Ok(head), Ok(tail)) = (regs.read64(regs::EVENT_HEAD), regs.read64(regs::EVENT_TAIL))
-        else {
+        let events = self.events.lock();
+        let read = {
+            let regs = self.regs.lock();
+            (regs.read64(regs::EVENT_HEAD), regs.read64(regs::EVENT_TAIL))
+        };
+        let (Ok(head), Ok(tail)) = read else {
             return false;
         };
         // The records the tail announces are read only after it.
@@ -468,22 +519,21 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         let tail = regs::ring_index(tail, EVENT_SLOTS);
         let mut patient = true;
         while head != tail {
-            let record = self.read_event(&state.events, head, &mut patient);
+            let record = self.read_event(&events, head, &mut patient);
             if let Some(fault) = record.and_then(format::decode_event) {
                 if batch.try_push(fault).is_err() {
                     break;
                 }
             }
             for word in 0..EVENT_WORDS {
-                let _ = self
-                    .memory
-                    .write(&state.events, EVENT_WORDS * head + word, 0);
+                let _ = self.memory.write(&events, EVENT_WORDS * head + word, 0);
             }
             head = (head + 1) % EVENT_SLOTS;
         }
         // Every slot is read, and blanked, before it is handed back to fill.
         tairix_dma_barrier::dma_rmb();
         tairix_dma_barrier::dma_wmb();
+        let regs = self.regs.lock();
         if regs
             .write64(regs::EVENT_HEAD, regs::ring_offset(head))
             .is_err()
@@ -500,7 +550,7 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         if status & regs::STATUS_EVENT_OVERFLOW != 0 {
             // A log stops at an overflow; it restarts empty, as it now is.
             head = 0;
-            if self.restart_event_log(regs).is_err() {
+            if self.restart_event_log(&regs).is_err() {
                 return false;
             }
         }
@@ -525,35 +575,47 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
 }
 
 /// An AMD-Vi unit's command buffer registers.
-struct Commands<'r, R>(&'r R);
-
-impl<R: Registers> QueueRegisters for Commands<'_, R> {
+impl<R: Registers> QueueRegisters for Regs<R> {
     fn head(&self) -> Result<usize, IommuError> {
         Ok(regs::ring_index(
-            self.0.read64(regs::COMMAND_HEAD)?,
+            self.lock().read64(regs::COMMAND_HEAD)?,
             CommandQueue::SLOTS,
         ))
     }
 
     fn set_tail(&self, tail: usize) -> Result<(), IommuError> {
-        self.0.write64(regs::COMMAND_TAIL, regs::ring_offset(tail))
+        self.lock()
+            .write64(regs::COMMAND_TAIL, regs::ring_offset(tail))
     }
 
-    /// A rejected command halts the buffer with its head on it: a fence takes
-    /// its place and the buffer is restarted, so the commands after it run.
-    fn stopped(&self, queue: &CommandQueue, memory: &TableMemory<'_>) -> Result<bool, IommuError> {
-        let control = self.0.read64(regs::CONTROL)?;
-        if control & regs::CONTROL_COMMANDS == 0
-            || self.0.read64(regs::STATUS)? & regs::STATUS_COMMANDS_RUNNING != 0
+    /// A rejected command halts the buffer with its head on it.
+    fn stopped_at(&self) -> Result<Option<usize>, IommuError> {
+        let regs = self.lock();
+        if regs.read64(regs::CONTROL)? & regs::CONTROL_COMMANDS == 0
+            || regs.read64(regs::STATUS)? & regs::STATUS_COMMANDS_RUNNING != 0
         {
-            return Ok(false);
+            return Ok(None);
         }
-        queue.replace(memory, self.head()?, format::FENCE)?;
+        Ok(Some(regs::ring_index(
+            regs.read64(regs::COMMAND_HEAD)?,
+            CommandQueue::SLOTS,
+        )))
+    }
+
+    /// A fence takes the rejected command's place and the buffer is
+    /// restarted, so the commands after it run.
+    fn resume(
+        &self,
+        queue: &CommandQueue,
+        memory: &TableMemory<'_>,
+        slot: usize,
+    ) -> Result<(), IommuError> {
+        let regs = self.lock();
+        queue.replace(memory, slot, format::FENCE)?;
         tairix_dma_barrier::dma_wmb();
-        self.0
-            .write64(regs::CONTROL, control & !regs::CONTROL_COMMANDS)?;
-        self.0.write64(regs::CONTROL, control)?;
-        Ok(true)
+        let control = regs.read64(regs::CONTROL)?;
+        regs.write64(regs::CONTROL, control & !regs::CONTROL_COMMANDS)?;
+        regs.write64(regs::CONTROL, control)
     }
 }
 
@@ -564,9 +626,10 @@ fn device_id(stream: u32) -> Result<u16, IommuError> {
 impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
     fn profile(&self) -> UnitProfile {
         UnitProfile {
-            stage: tairix_kernel_iommu_api::Stage::Second,
+            tables: tairix_kernel_iommu_api::Tables::Walked(tairix_kernel_iommu_api::Stage::Second),
             reach: REACH,
             reserved: &RESERVED,
+            write_only: true,
         }
     }
 
@@ -575,69 +638,66 @@ impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
     }
 
     /// Turn translation on, then drop whatever the unit cached before it was
-    /// taken over.
+    /// taken over. Invalidations run from before it is on, so none skipped
+    /// while it was off can be one it needed.
     fn enable(&self) -> Result<(), IommuError> {
-        let mut state = self.state.lock();
-        update_control(&state.regs, regs::CONTROL_IOMMU, 0)?;
-        state.enabled = true;
-        self.flush_all(&mut state)
+        self.enabled.store(true, Ordering::Release);
+        update_control(&*self.regs.lock(), regs::CONTROL_IOMMU, 0)?;
+        self.flush_all()
     }
 
     fn create_domain(&self) -> Result<DomainId, IommuError> {
         let table = IoPageTable::new(HostTables, LEVELS, self.memory, REACH)?;
-        let mut state = self.state.lock();
-        state
-            .domains
-            .try_reserve(1)
-            .map_err(|_| IommuError::Exhausted)?;
-        let id = state.ids.take_sixteen_bits()?;
-        let _ = state.domains.try_insert(id, table);
+        let mut life = self.lifecycle.lock();
+        let id = life.ids.take_sixteen_bits()?;
+        if let Err((err, _table)) = self.domains.insert(u32::from(id), table) {
+            life.ids.release(u32::from(id), true);
+            return Err(err);
+        }
         Ok(DomainId(u32::from(id)))
     }
 
     fn destroy_domain(&self, domain: DomainId) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        if !state.domains.contains_key(&id) {
+        let mut life = self.lifecycle.lock();
+        if !self.domains.contains(u32::from(id)) {
             return Err(IommuError::OutOfRange);
         }
-        if state.bindings.holders(u32::from(id)) != 0 {
+        if life.bindings.holders(u32::from(id)) != 0 {
             return Err(IommuError::DomainBusy);
         }
         // Nothing the unit cached for the id may outlive its tables, or
         // survive into the id's next owner.
-        self.invalidate(&mut state, [format::invalidate_domain(id)])
+        self.invalidate([format::invalidate_domain(id)])
             .map_err(|_| IommuError::Unconfirmed)?;
-        state.domains.remove(&id);
-        state.ids.release(u32::from(id), true);
+        self.domains.remove(u32::from(id));
+        life.ids.release(u32::from(id), true);
         Ok(())
     }
 
     fn attach(&self, stream: u32, domain: DomainId) -> Result<(), IommuError> {
         let device = device_id(stream)?;
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        let root = state.domains.get(&id).ok_or(IommuError::OutOfRange)?.root();
-        let Some(reserved) = state.bindings.prepare_attach(stream, u32::from(id))? else {
+        let mut life = self.lifecycle.lock();
+        let root = self.domains.with(u32::from(id), |table| Ok(table.root()))?;
+        let Some(reserved) = life.bindings.prepare_attach(stream, u32::from(id))? else {
             return Ok(());
         };
         // A silenced stream may take an owner: it is blocked either way.
-        self.detach(&mut state, device)?;
+        self.detach(&mut life, device)?;
         self.write_device(
-            &state,
+            &life,
             device,
             format::dte_translated(root, LEVELS),
             format::dte_domain(id, false),
         )?;
-        state.bindings.hold(reserved, stream, u32::from(id));
-        let commands = [
-            format::invalidate_device(device),
-            format::invalidate_domain(id),
-        ];
-        if let Err(err) = self.invalidate(&mut state, commands) {
+        life.bindings.hold(reserved, stream, u32::from(id));
+        // What the unit caches for the domain is its own tables', so only
+        // the device's entry is stale.
+        if let Err(err) = self.invalidate([format::invalidate_device(device)]) {
             // The unit may already walk the entry, so it is taken back and
             // stays counted until that is confirmed.
-            self.detach(&mut state, device)?;
+            self.detach(&mut life, device)?;
             return Err(err);
         }
         Ok(())
@@ -645,11 +705,11 @@ impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
 
     fn block(&self, stream: u32) -> Result<(), IommuError> {
         let device = device_id(stream)?;
-        let mut state = self.state.lock();
-        if state.bindings.get(stream) == Some(Binding::Silenced) {
+        let mut life = self.lifecycle.lock();
+        if life.bindings.get(stream) == Some(Binding::Silenced) {
             return Ok(());
         }
-        self.detach(&mut state, device)
+        self.detach(&mut life, device)
     }
 
     /// Its entry suppresses the device's page faults; the invalid requests a
@@ -657,24 +717,22 @@ impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
     /// where the fault service's drain bound contains what they cost.
     fn silence(&self, stream: u32) -> Result<(), IommuError> {
         let device = device_id(stream)?;
-        let mut state = self.state.lock();
-        if state.bindings.get(stream) == Some(Binding::Silenced) {
+        let mut life = self.lifecycle.lock();
+        if life.bindings.get(stream) == Some(Binding::Silenced) {
             return Ok(());
         }
-        let reserved = state.bindings.reserve()?;
-        self.detach(&mut state, device)?;
+        let reserved = life.bindings.reserve()?;
+        self.detach(&mut life, device)?;
         self.write_device(
-            &state,
+            &life,
             device,
             format::DTE_BLOCKED,
             format::dte_domain(0, true),
         )?;
-        state.bindings.silence(reserved, stream);
-        self.invalidate(&mut state, [format::invalidate_device(device)])
+        life.bindings.silence(reserved, stream);
+        self.invalidate([format::invalidate_device(device)])
     }
 
-    /// A unit may cache an entry it found absent, so the mapped range is
-    /// always flushed.
     fn map(
         &self,
         domain: DomainId,
@@ -683,50 +741,41 @@ impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
         len: u64,
         access: Access,
     ) -> Result<(), IommuError> {
-        let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        state
-            .domains
-            .get_mut(&id)
-            .ok_or(IommuError::OutOfRange)?
-            .map(iova, phys, len, access)?;
-        if let Err(err) = self.invalidate(&mut state, [format::invalidate_range(id, iova, len)]) {
-            // The caller frees the frames once this fails, so no leaf may
-            // stay behind to reach them.
-            let taken_back = state
-                .domains
-                .get_mut(&id)
-                .is_some_and(|table| table.unmap(iova, len).is_ok());
-            return Err(if taken_back {
-                err
-            } else {
-                IommuError::Unconfirmed
-            });
-        }
-        Ok(())
+        self.publish_mapped(domain, iova, |table| {
+            table.map(iova, phys, len, access).map(|()| len)
+        })
+    }
+
+    /// Every run installed, then flushed once where the unit caches misses.
+    fn map_runs(
+        &self,
+        domain: DomainId,
+        iova: u64,
+        runs: &[FrameRun],
+        access: Access,
+    ) -> Result<(), IommuError> {
+        self.publish_mapped(domain, iova, |table| table.map_runs(iova, runs, access))
     }
 
     fn unmap(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        self.state
-            .lock()
-            .domains
-            .get_mut(&id)
-            .ok_or(IommuError::OutOfRange)?
-            .unmap(iova, len)
+        self.domains
+            .with(u32::from(id), |table| table.unmap(iova, len))
     }
 
     fn sync(&self, domain: DomainId) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        if !state.domains.contains_key(&id) {
-            return Err(IommuError::OutOfRange);
+        self.confirm(id, format::invalidate_domain(id), None)
+    }
+
+    /// One command, directories included, over the smallest span holding
+    /// the range.
+    fn sync_range(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
+        let id = domain.sixteen_bits()?;
+        match format::invalidate_range(id, PageSpan::of(iova, len)?) {
+            Some(range) => self.confirm(id, range, Some((iova, len))),
+            None => self.confirm(id, format::invalidate_domain(id), None),
         }
-        self.invalidate(&mut state, [format::invalidate_domain(id)])?;
-        if let Some(table) = state.domains.get_mut(&id) {
-            table.release_retired();
-        }
-        Ok(())
     }
 
     /// The unit raises its faults through its own function's MSI, which it
@@ -737,8 +786,17 @@ impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
         };
         let (function, at) = self.function.ok_or(IommuError::Hardware)?;
         function.route_msi(at, address, data)?;
-        let state = self.state.lock();
-        update_control(&state.regs, regs::CONTROL_EVENT_INTERRUPT, 0)
+        update_control(&*self.regs.lock(), regs::CONTROL_EVENT_INTERRUPT, 0)
+    }
+
+    /// The event log's interrupt is the only one the family turns on.
+    fn unroute_faults(&self) -> Result<(), IommuError> {
+        let regs = self.regs.lock();
+        update_control(&*regs, 0, regs::CONTROL_EVENT_INTERRUPT)?;
+        if regs.read64(regs::CONTROL)? & regs::CONTROL_EVENT_INTERRUPT != 0 {
+            return Err(IommuError::Hardware);
+        }
+        Ok(())
     }
 
     /// At most one log's worth of records per call.
@@ -747,16 +805,37 @@ impl<R: Registers> IommuUnit for AmdViUnit<'_, R> {
     }
 }
 
-impl<'f, R: Registers> AmdViUnit<'f, R> {
+impl<R: Registers> AmdViUnit<'_, R> {
+    /// Confirm domain `id`'s retired tables in `range`, or all of them, gone
+    /// through `flush`. Before translation is on there is nothing to confirm:
+    /// the unit walked none of them.
+    fn confirm(
+        &self,
+        id: u16,
+        flush: Command,
+        range: Option<(u64, u64)>,
+    ) -> Result<(), IommuError> {
+        if !self.enabled.load(Ordering::Acquire) {
+            return self.domains.with(u32::from(id), |table| {
+                table.release_retired();
+                Ok(())
+            });
+        }
+        self.domains.confirm(
+            u32::from(id),
+            |table| table,
+            &self.invalidator(),
+            |_| Ok(([flush], range)),
+        )
+    }
+}
+
+impl<R: Registers> AmdViUnit<'_, R> {
     /// The table `wanted`'s devices raise their interrupts through: the one
     /// any of them already uses, grown to hold them all, or a new one. A
     /// device newly covered is pointed at it at once where remapping is on.
-    fn table_for(
-        &self,
-        state: &mut State<'f, R>,
-        wanted: &Range<usize>,
-    ) -> Result<usize, IommuError> {
-        let remap = state.remap.as_mut().ok_or(IommuError::OutOfRange)?;
+    fn table_for(&self, life: &mut Lifecycle, wanted: &Range<usize>) -> Result<usize, IommuError> {
+        let remap = life.remap.as_mut().ok_or(IommuError::OutOfRange)?;
         let mut overlapping = remap
             .tables
             .iter()
@@ -797,17 +876,16 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         let pointer = format::dte_interrupts(Some((table.memory.phys(), INTERRUPT_TABLE_LENGTH)));
         for device in added.clone().into_iter().flatten() {
             self.memory
-                .write_block(&state.devices, DTE_WORDS * device + 2, pointer)?;
+                .write_block(&life.devices, DTE_WORDS * device + 2, pointer)?;
         }
         self.invalidate(
-            state,
             added
                 .into_iter()
                 .flat_map(device_ids)
                 .map(format::invalidate_device),
         )?;
         // Covered only once confirmed, so a retry points them again.
-        if let Some(table) = state
+        if let Some(table) = life
             .remap
             .as_mut()
             .and_then(|remap| remap.tables.get_mut(id))
@@ -817,10 +895,24 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         Ok(id)
     }
 
+    /// Point every device's interrupts at its table, or let them pass, then
+    /// flush outside the lifecycle lock: without a flush-everything command
+    /// that is a command per device and domain.
+    fn set_remapping(&self, remapping: bool) -> Result<(), IommuError> {
+        {
+            let mut life = self.lifecycle.lock();
+            self.point_interrupts(&life, remapping)?;
+            if let Some(remap) = life.remap.as_mut() {
+                remap.enabled = remapping;
+            }
+        }
+        self.flush_all()
+    }
+
     /// Point every device's interrupt word at its table, or, without one, at
     /// refusal; or, with remapping off, let every interrupt pass.
-    fn point_interrupts(&self, state: &State<'f, R>, remapping: bool) -> Result<(), IommuError> {
-        let remap = state.remap.as_ref().ok_or(IommuError::OutOfRange)?;
+    fn point_interrupts(&self, life: &Lifecycle, remapping: bool) -> Result<(), IommuError> {
+        let remap = life.remap.as_ref().ok_or(IommuError::OutOfRange)?;
         let refused = if remapping {
             format::dte_interrupts(None)
         } else {
@@ -828,7 +920,7 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
         };
         for device in 0..DEVICES {
             self.memory
-                .write_block(&state.devices, DTE_WORDS * device + 2, refused)?;
+                .write_block(&life.devices, DTE_WORDS * device + 2, refused)?;
         }
         if !remapping {
             return Ok(());
@@ -838,7 +930,7 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
                 format::dte_interrupts(Some((table.memory.phys(), INTERRUPT_TABLE_LENGTH)));
             for device in table.devices.clone() {
                 self.memory
-                    .write_block(&state.devices, DTE_WORDS * device + 2, pointer)?;
+                    .write_block(&life.devices, DTE_WORDS * device + 2, pointer)?;
             }
         }
         Ok(())
@@ -899,18 +991,11 @@ impl<'f, R: Registers> AmdViUnit<'f, R> {
     /// Device by device where the commands fit one batch; a wider range — a
     /// bridge's buses — at once where the unit can, as each further batch
     /// is another round trip to it.
-    fn invalidate_interrupts(
-        &self,
-        state: &mut State<'f, R>,
-        devices: Range<usize>,
-    ) -> Result<(), IommuError> {
+    fn invalidate_interrupts(&self, devices: Range<usize>) -> Result<(), IommuError> {
         if devices.len() >= CommandQueue::SLOTS && self.features.invalidate_all() {
-            return self.invalidate(state, [format::INVALIDATE_EVERYTHING]);
+            return self.invalidate([format::INVALIDATE_EVERYTHING]);
         }
-        self.invalidate(
-            state,
-            device_ids(devices).map(format::invalidate_interrupts),
-        )
+        self.invalidate(device_ids(devices).map(format::invalidate_interrupts))
     }
 }
 
@@ -931,18 +1016,18 @@ impl<R: Registers> InterruptRemapping for AmdViUnit<'_, R> {
         if extended && !self.supports_extended() {
             return Err(IommuError::OutOfRange);
         }
-        let mut state = self.state.lock();
-        if state.remap.is_some() {
+        let mut life = self.lifecycle.lock();
+        if life.remap.is_some() {
             return Err(IommuError::OutOfRange);
         }
         if extended {
             update_control(
-                &state.regs,
+                &*self.regs.lock(),
                 regs::CONTROL_GUEST_APIC | regs::CONTROL_X2APIC,
                 0,
             )?;
         }
-        state.remap = Some(Remap {
+        life.remap = Some(Remap {
             extended,
             enabled: false,
             tables: Vec::new(),
@@ -962,11 +1047,11 @@ impl<R: Registers> InterruptRemapping for AmdViUnit<'_, R> {
             return Err(IommuError::OutOfRange);
         }
         let wanted = devices_of(source);
-        let mut state = self.state.lock();
-        let extended = state.remap.as_ref().ok_or(IommuError::OutOfRange)?.extended;
+        let mut life = self.lifecycle.lock();
+        let extended = life.remap.as_ref().ok_or(IommuError::OutOfRange)?.extended;
         let entry = format::irte(target, extended).ok_or(IommuError::OutOfRange)?;
-        let id = self.table_for(&mut state, &wanted)?;
-        let table = state
+        let id = self.table_for(&mut life, &wanted)?;
+        let table = life
             .remap
             .as_mut()
             .and_then(|remap| remap.tables.get_mut(id))
@@ -983,21 +1068,13 @@ impl<R: Registers> InterruptRemapping for AmdViUnit<'_, R> {
         let slot = usize::from(index);
         let confirmed = self
             .write_irte(table, slot, entry, extended)
-            .and_then(|()| self.invalidate_interrupts(&mut state, devices.clone()));
+            .and_then(|()| self.invalidate_interrupts(devices.clone()));
         if confirmed.is_err() {
             // The unit may hold the entry already, so it is taken back and
             // never handed out again.
-            if let Some(table) = state.remap.as_ref().and_then(|remap| remap.tables.get(id)) {
-                let _ = self.clear_irte(table, slot, extended);
-            }
-            let _ = self.invalidate_interrupts(&mut state, devices);
-            if let Some(table) = state
-                .remap
-                .as_mut()
-                .and_then(|remap| remap.tables.get_mut(id))
-            {
-                table.ids.release(taken, false);
-            }
+            let _ = self.clear_irte(table, slot, extended);
+            let _ = self.invalidate_interrupts(devices);
+            table.ids.release(taken, false);
             return Err(IommuError::Unconfirmed);
         }
         Ok(Remapped {
@@ -1011,25 +1088,19 @@ impl<R: Registers> InterruptRemapping for AmdViUnit<'_, R> {
     fn release_interrupt(&self, entry: u32) -> Result<(), IommuError> {
         let id = usize::try_from(entry >> 8).map_err(|_| IommuError::NotMapped)?;
         let [index, ..] = entry.to_le_bytes();
-        let mut state = self.state.lock();
-        let remap = state.remap.as_ref().ok_or(IommuError::NotMapped)?;
+        let mut life = self.lifecycle.lock();
+        let remap = life.remap.as_mut().ok_or(IommuError::NotMapped)?;
         let extended = remap.extended;
-        let table = remap.tables.get(id).ok_or(IommuError::NotMapped)?;
+        let table = remap.tables.get_mut(id).ok_or(IommuError::NotMapped)?;
         if !table.ids.is_live(u32::from(index)) {
             return Err(IommuError::NotMapped);
         }
         let devices = table.devices.clone();
         let confirmed = self
             .clear_irte(table, usize::from(index), extended)
-            .and_then(|()| self.invalidate_interrupts(&mut state, devices))
+            .and_then(|()| self.invalidate_interrupts(devices))
             .is_ok();
-        if let Some(table) = state
-            .remap
-            .as_mut()
-            .and_then(|remap| remap.tables.get_mut(id))
-        {
-            table.ids.release(u32::from(index), confirmed);
-        }
+        table.ids.release(u32::from(index), confirmed);
         if confirmed {
             Ok(())
         } else {
@@ -1040,20 +1111,10 @@ impl<R: Registers> InterruptRemapping for AmdViUnit<'_, R> {
     /// From here every device's interrupts go through its source's table,
     /// or are refused.
     fn enable_remapping(&self) -> Result<(), IommuError> {
-        let mut state = self.state.lock();
-        self.point_interrupts(&state, true)?;
-        if let Some(remap) = state.remap.as_mut() {
-            remap.enabled = true;
-        }
-        self.flush_all(&mut state)
+        self.set_remapping(true)
     }
 
     fn disable_remapping(&self) -> Result<(), IommuError> {
-        let mut state = self.state.lock();
-        self.point_interrupts(&state, false)?;
-        if let Some(remap) = state.remap.as_mut() {
-            remap.enabled = false;
-        }
-        self.flush_all(&mut state)
+        self.set_remapping(false)
     }
 }

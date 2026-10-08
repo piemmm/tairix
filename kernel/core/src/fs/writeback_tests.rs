@@ -253,14 +253,12 @@ fn the_host_reads_no_clock_until_the_flusher_arms_it() {
         None,
         "deferral is refused while nothing would publish it"
     );
-    mounts.set_writeback_armed(true);
+    mounts.arm_writeback();
     assert_eq!(
         WritebackHost::now_ns(mounts),
         Some(4_242),
         "an armed host defers against the wait clock"
     );
-    mounts.set_writeback_armed(false);
-    assert_eq!(WritebackHost::now_ns(mounts), None);
 }
 
 #[test]
@@ -403,10 +401,7 @@ fn an_absurd_deadline_cannot_spell_nothing_open() {
         Some(u64::MAX - 1),
         "the sentinel is reserved, so a saturated deadline is clamped below it"
     );
-    assert_eq!(
-        super::publish_due(mounts, sink(), super::EVERYTHING_DUE),
-        None
-    );
+    assert_eq!(super::publish_due(mounts, sink(), u64::MAX), None);
     assert_eq!(flushes(mounts, volume), 1);
 }
 

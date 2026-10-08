@@ -138,8 +138,16 @@ impl Cap {
     pub fn large_page_1g(self) -> bool {
         self.0 & (1 << 35) != 0
     }
+    /// Page-selective-within-domain IOTLB invalidation.
+    pub fn page_selective(self) -> bool {
+        self.0 & (1 << 39) != 0
+    }
     pub fn fault_records(self) -> usize {
         field_usize(self.0, 40, NFR_BITS) + 1
+    }
+    /// The largest address mask one page-selective invalidation takes.
+    pub fn max_address_mask(self) -> u32 {
+        field(self.0, 48, 6)
     }
     pub fn drain_writes(self) -> bool {
         self.0 & (1 << 54) != 0

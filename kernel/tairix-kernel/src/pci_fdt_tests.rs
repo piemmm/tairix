@@ -9,6 +9,7 @@ use tairix_pci::topology::Topology;
 
 use super::*;
 use crate::pci_probe::tests::{at, bridge, endpoint};
+use tairix_pci::topology::{Function as PciFunction, PortType};
 
 fn host(blob: &[u8]) -> PciHost<'_> {
     let fdt = Fdt::new(blob).unwrap();
@@ -21,6 +22,10 @@ fn host(blob: &[u8]) -> PciHost<'_> {
 struct Gic;
 
 impl FdtPort for Gic {
+    fn dma_convention(&self) -> tairix_abi::DmaCoherence {
+        tairix_abi::DmaCoherence::Snooped
+    }
+
     fn registers(&self, _base: u64, _len: usize) -> Option<NonNull<u8>> {
         None
     }
@@ -28,8 +33,10 @@ impl FdtPort for Gic {
     fn reach(&self) -> u64 {
         1 << 39
     }
+}
 
-    fn interrupt(&self, _fdt: &Fdt<'_>, spec: &InterruptSpec) -> Option<u32> {
+impl IntxLines for Gic {
+    fn line(&self, spec: &InterruptSpec) -> Option<u32> {
         match spec.cells() {
             &[0, spi, _] if spec.parent == 0x8002 => spi.checked_add(32),
             _ => None,
@@ -41,6 +48,10 @@ impl FdtPort for Gic {
 struct Asked(core::sync::atomic::AtomicBool);
 
 impl FdtPort for Asked {
+    fn dma_convention(&self) -> tairix_abi::DmaCoherence {
+        tairix_abi::DmaCoherence::Snooped
+    }
+
     fn registers(&self, _base: u64, _len: usize) -> Option<NonNull<u8>> {
         self.0.store(true, core::sync::atomic::Ordering::Relaxed);
         None
@@ -48,10 +59,6 @@ impl FdtPort for Asked {
 
     fn reach(&self) -> u64 {
         1 << 39
-    }
-
-    fn interrupt(&self, _fdt: &Fdt<'_>, _spec: &InterruptSpec) -> Option<u32> {
-        None
     }
 }
 
@@ -200,6 +207,119 @@ fn a_function_s_intx_is_resolved_through_its_bridges_and_the_map() {
     );
     assert_eq!(
         intx_line(&fdt, &Gic, &host, &topology, at(3, 0, 0), 1),
+        None,
+        "not walked"
+    );
+}
+
+/// A router offering each function a route of its own, recording which it
+/// was told were taken.
+#[derive(Default)]
+struct Offering {
+    offered: u32,
+    accepted: std::vec::Vec<u32>,
+}
+
+impl MessageRouter for Offering {
+    fn offer(
+        &mut self,
+        _fdt: &Fdt<'_>,
+        _host: &PciHost<'_>,
+        node: u32,
+        requester: u16,
+    ) -> Option<MessageRoute> {
+        self.offered += 1;
+        Some(MessageRoute {
+            message: MsiMessage {
+                address: 0x0809_0040,
+                data: u32::from(requester),
+            },
+            line: 1052 + node,
+            doorbell: HwResource::msi_doorbell(0x0809_0000, 0x1000).unwrap(),
+        })
+    }
+
+    fn accept(&mut self) {
+        self.accepted.push(self.offered);
+    }
+}
+
+/// A function whose MSI-X takes the route it is offered raises that message
+/// and carries its doorbell; one refusing it keeps its pin, and the route is
+/// never recorded as given.
+#[test]
+fn a_function_raises_the_message_it_took_and_otherwise_its_pin() {
+    let blob = ecam_host_arm(false);
+    let fdt = Fdt::new(&blob).unwrap();
+    let host = host(&blob);
+    let pin = HwResource::irq(37, 1);
+    let mut offering = Offering::default();
+    let routed = interrupt_of(
+        &mut offering,
+        &fdt,
+        &host,
+        3,
+        0x0018,
+        |message| message.data == 0x18,
+        || panic!("a function raising messages is given no pin"),
+    );
+    assert_eq!(
+        routed,
+        Some(DeviceInterrupt {
+            line: HwResource::message_irq(1055, MSIX_ENTRY),
+            doorbell: Some(HwResource::msi_doorbell(0x0809_0000, 0x1000).unwrap()),
+        })
+    );
+    assert_eq!(offering.accepted, [1]);
+    let refused = interrupt_of(
+        &mut offering,
+        &fdt,
+        &host,
+        4,
+        0x0020,
+        |_| false,
+        || Some(pin),
+    );
+    assert_eq!(refused, Some(DeviceInterrupt::line(pin)));
+    assert_eq!(
+        offering.accepted,
+        [1],
+        "a route its function refused is not recorded"
+    );
+    let unrouted = interrupt_of(
+        &mut NoMessages,
+        &fdt,
+        &host,
+        4,
+        0x0020,
+        |_| panic!("no route was offered"),
+        || Some(pin),
+    );
+    assert_eq!(unrouted, Some(DeviceInterrupt::line(pin)));
+}
+
+/// A function's messages reach the fabric as its own requester id, or, below
+/// a bridge to conventional PCI, as that bridge's secondary bus at function
+/// zero.
+#[test]
+fn messages_from_behind_a_bridge_to_conventional_pci_carry_its_secondary_bus() {
+    let topology = Topology::new(std::vec![
+        PciFunction {
+            express: Some(PortType::RootPort),
+            ..bridge(0, 0x1c, 1, 2)
+        },
+        PciFunction {
+            express: Some(PortType::PcieToPci),
+            ..bridge(1, 0, 2, 2)
+        },
+        endpoint(2, 1, 0, 0x1AF4, 0x02_00_00),
+        endpoint(0, 3, 0, 0x1AF4, 0x02_00_00),
+    ])
+    .unwrap();
+    assert_eq!(message_requester(&topology, at(0, 3, 0)), Some(0x0018));
+    assert_eq!(message_requester(&topology, at(2, 1, 0)), Some(0x0200));
+    assert_eq!(
+        message_requester(&topology, at(5, 0, 0)),
         None,
         "not walked"
     );

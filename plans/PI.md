@@ -2771,21 +2771,18 @@ two users — or the same user twice — can be logged in concurrently.
        - `aarch64::root_unlock` (`#[cfg(freestanding)]`, in the aarch64 boot
          subtree beside `boot`/`init_spawn`): the **arch-specific bring-up
          only** — `spawn_if_present` + `run_unlock` (over the arch-neutral
-         helpers above), the GIC/FDT `device_spi`, the `wfi_fallback_park`
-         supplied to the shared `tairix_kernel_core::IrqParkWaiter`,
-         and the throwaway-bookkeeping VBASE/`PageTablePool` constants —
-         build the bring-up
-         off the boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
-         `KernelMmioMapper` over a **throwaway bookkeeping** arch `AddressSpace`
-         (a private `PageTablePool`; device access is via the boot identity map
-         through `DirectPhysMap`, so the table is bookkeeping only, VBASEs far
-         above the identity window) → `provision_virtio_mmio(2)` → SPI via
-         `fdt::gic_device_intid` bound on the **core-published** `IrqTable`
-         (`gic_irq::published_irq_table`) + `gic::route_spi` + initial rearm →
-         `DmaPool` + `KernelVirtioHost` → signed §8 `drvhost::Host::load` gate
-         → `VirtioBlk::open` → `unlock_root_disk_interactively`. EMMC2 (the Pi
-         SD host) is the staged metal increment: an EMMC2 binding fails closed
-         (gate opened, root unbound).
+         helpers above) and the port's `MmioFloorPort` half: its bookkeeping
+         `PageTablePool` and window bases, the `DeviceWindows` register map,
+         the composite interrupt controller, and the `wfi` fallback park. The
+         virtio-blk disk is
+         brought up by the shared `floor_mmio::bring_up_virtio_mmio` off the
+         boot-discovered DTB — `virtio_mmio_bus_from_dtb` → `MmioMap` +
+         `KernelMmioMapper` over a throwaway bookkeeping address space →
+         `provision_virtio_mmio` → the slot's SPI bound on the core-published
+         `IrqTable` and armed → `DmaPool` + `KernelVirtioHost` — and opened by
+         `finish_virtio_unlock` (the signed `drvhost::Host::load` gate →
+         `VirtioBlk::open` → `finish_unlock`). EMMC2 (the Pi SD host) shares
+         the register map, the line binding, and the DMA window.
        - **Interrupt-driven boot + task-parking device wait (load-bearing).**
          The production aarch64 boot brings the GICv2 up for delivery and runs
          interrupt-driven: `gic_irq::install_device_irq_dispatch` (kernel-core

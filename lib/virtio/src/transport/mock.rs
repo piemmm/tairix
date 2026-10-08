@@ -8,6 +8,7 @@
 //! answers each through the [`DeviceShim`] the test installs for its queue.
 
 use super::{Status, Transport, VirtioError};
+use crate::host::{MockHost, MockMemory};
 use crate::queue::ring_view::RingView;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -78,8 +79,8 @@ impl MockQueue {
 /// [`Transport::notify`] call, drains the avail ring of the
 /// selected queue through the [`DeviceShim`] the test installs.
 /// It reaches the driver's memory only through the device addresses the
-/// mock host handed out, never a CPU pointer, so a driver that confuses the
-/// two fails; the shim's response bytes land where
+/// mock host it [reaches](Self::reach) handed out, never a CPU pointer, so a
+/// driver that confuses the two fails; the shim's response bytes land where
 /// [`crate::queue::SplitQueue::poll_used`] reads them back.
 pub struct MockTransport {
     device_features: u64,
@@ -102,6 +103,8 @@ pub struct MockTransport {
     resets_confirmed_left: Option<u32>,
     /// The device model a configuration write is answered by, if any.
     config_responder: Option<ConfigResponder>,
+    /// The memory the device reaches, which none before [`Self::reach`].
+    memory: Option<Rc<MockMemory>>,
 }
 
 impl MockTransport {
@@ -131,7 +134,13 @@ impl MockTransport {
             synchronous_notify: false,
             resets_confirmed_left: None,
             config_responder: None,
+            memory: None,
         }
+    }
+
+    /// Reach the memory `host` hands out, as a device reaches its driver's.
+    pub fn reach(&mut self, host: &MockHost) {
+        self.memory = Some(host.memory());
     }
 
     /// Model a device that wedges after `confirmed` more resets: every later
@@ -203,7 +212,9 @@ impl MockTransport {
         if q.size == 0 || q.used_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        let view = RingView::from_device(q.size, q.desc_device, q.avail_device, q.used_device)?;
+        let memory = self.memory.as_deref().ok_or(VirtioError::DeviceFault)?;
+        let view =
+            RingView::from_device(memory, q.size, q.desc_device, q.avail_device, q.used_device)?;
         view.publish_used(head, written);
         Ok(())
     }
@@ -238,14 +249,19 @@ impl MockTransport {
         if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        if byte_offset >= crate::queue::SplitQueue::desc_table_size(q.size) {
+        let table_len = crate::queue::SplitQueue::desc_table_size(q.size);
+        if byte_offset >= table_len {
             return Ok(());
         }
-        let table = crate::host::device_view(q.desc_device).ok_or(VirtioError::DeviceFault)?;
-        // SAFETY: `table` is the mock's view of the driver-owned descriptor
-        // table; `byte_offset` was bounded to `< desc_table_size(size)`
-        // above, so the write stays inside that table. The mock peer is the
-        // only other holder and we have `&mut self`. This is a
+        let table = self
+            .memory
+            .as_deref()
+            .and_then(|memory| memory.view(q.desc_device, table_len))
+            .ok_or(VirtioError::DeviceFault)?;
+        // SAFETY: `view` found the whole `table_len`-byte descriptor table
+        // inside one driver-owned slab, and `byte_offset` was bounded below
+        // `table_len` above, so the write stays inside that table. The mock
+        // peer is the only other holder and we have `&mut self`. This is a
         // mock-peer-only adversarial seam.
         unsafe {
             table.add(byte_offset).write(value);
@@ -270,7 +286,8 @@ impl MockTransport {
         if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        RingView::from_device(q.size, q.desc_device, q.avail_device, q.used_device)?
+        let memory = self.memory.as_deref().ok_or(VirtioError::DeviceFault)?;
+        RingView::from_device(memory, q.size, q.desc_device, q.avail_device, q.used_device)?
             .chain_indices(head)
     }
 
@@ -300,10 +317,11 @@ impl MockTransport {
         if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
+        let memory = self.memory.as_deref().ok_or(VirtioError::DeviceFault)?;
         // SAFETY-INVARIANT: as in `drain_queue`, the descriptor ring the
         // driver programmed is driver-owned storage the mock handed out;
         // `PackedRingView` validates chain lengths against `q.size`.
-        let view = PackedRingView::from_device(q.size, q.desc_device)?;
+        let view = PackedRingView::from_device(memory, q.size, q.desc_device)?;
         let mut drained = 0usize;
         loop {
             if !view.is_available(q.packed_dev_idx, q.packed_dev_wrap) {
@@ -346,11 +364,13 @@ impl MockTransport {
         if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
+        let memory = self.memory.as_deref().ok_or(VirtioError::DeviceFault)?;
         // SAFETY-INVARIANT: the addresses planted by the driver name
         // driver-owned storage the mock handed out; the mock peer reaches
         // them only through `RingView`, which bounds every descriptor index it
         // reads by `q.size` and every chain by the table's length.
-        let view = RingView::from_device(q.size, q.desc_device, q.avail_device, q.used_device)?;
+        let view =
+            RingView::from_device(memory, q.size, q.desc_device, q.avail_device, q.used_device)?;
         let mut drained = 0usize;
         loop {
             let avail_idx = view.read_avail_idx();
@@ -450,6 +470,9 @@ impl Transport for MockTransport {
             let _ = self.drain_queue(queue);
         }
     }
+    fn config_len(&self) -> usize {
+        self.config.len()
+    }
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         let end = offset + buf.len();
         if end <= self.config.len() {
@@ -527,6 +550,9 @@ impl Transport for Rc<RefCell<MockTransport>> {
     }
     fn notify(&mut self, queue: u16) {
         self.borrow_mut().notify(queue);
+    }
+    fn config_len(&self) -> usize {
+        self.borrow().config_len()
     }
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         self.borrow().read_config(offset, buf);

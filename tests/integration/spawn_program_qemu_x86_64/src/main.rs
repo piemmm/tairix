@@ -28,7 +28,7 @@
 compile_error!(
     "tairix-test-spawn-program-qemu-x86_64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
-     See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
+     See AGENTS.md §2.1 (no hacks) and §5.4.5 (fail closed)."
 );
 
 #[cfg(all(itest_x86_64, feature = "test-hooks"))]

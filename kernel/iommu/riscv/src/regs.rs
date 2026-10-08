@@ -127,6 +127,21 @@ impl Capabilities {
         self.0 & (1 << 22) != 0
     }
 
+    /// A device's messages can be confined to a memory-resident interrupt
+    /// file through an MSI page table, which needs the extended contexts and
+    /// a second stage to translate through.
+    #[must_use]
+    pub const fn message_files(self) -> bool {
+        let second = self.second_stage();
+        self.extended_contexts() && self.0 & (1 << 23) != 0 && (second[0] || second[1] || second[2])
+    }
+
+    /// The unit sets an interrupt file's pending bit atomically.
+    #[must_use]
+    pub const fn atomic_files(self) -> bool {
+        self.0 & (1 << 21) != 0
+    }
+
     /// Interrupts can be message-signalled.
     #[must_use]
     pub const fn msi(self) -> bool {

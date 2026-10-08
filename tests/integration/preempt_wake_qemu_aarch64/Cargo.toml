@@ -34,6 +34,7 @@ name = "tairix-test-preempt-wake-qemu-aarch64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-itest-gic = { path = "../gic_topology", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }

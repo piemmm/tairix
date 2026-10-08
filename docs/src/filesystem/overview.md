@@ -100,8 +100,11 @@ re-derived per call site: `DriverError::AlreadyExists` is
 `VfsError::NotEmpty` (`ENOTEMPTY`), and `DriverError::DirectoryCycle` — a
 rename that would make a directory its own descendant — is
 `VfsError::DirectoryCycle`, distinct because emptying the destination can
-never make that move lawful. One mapping serves every operation, so the
-answer a caller sees does not depend on which one met the conflict.
+never make that move lawful. A full volume (`DriverError::NoSpace`) is
+`VfsError::NoSpace` (`ENOSPC`) and exhausted memory is
+`VfsError::OutOfMemory`, neither an I/O error. One mapping serves every
+operation, so the answer a caller sees does not depend on which one met the
+conflict.
 
 Where that `Metadata` comes from is the one place the two policies differ:
 

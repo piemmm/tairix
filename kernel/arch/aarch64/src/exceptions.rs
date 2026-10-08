@@ -362,6 +362,10 @@ pub mod daif {
     pub const F: u64 = 1 << 0;
     /// `DAIF` IRQ-mask immediate bit (`I`).
     pub const I: u64 = 1 << 1;
+    /// The FIQ mask in the `DAIF` register itself.
+    pub const REGISTER_F: u64 = 1 << 6;
+    /// The IRQ mask in the `DAIF` register itself.
+    pub const REGISTER_I: u64 = 1 << 7;
 }
 
 /// Unmask **FIQ** taking at the PE (`DAIF.F`) so the debug watchdog's
@@ -481,12 +485,10 @@ unsafe fn user_register_frame(frame: *const u64) -> tairix_arch_api::backtrace::
     feature = "watchdog-diagnostics"
 ))]
 fn handle_fiq(frame: *const u64) {
-    let iar = crate::gic::acknowledge();
-    let Some(intid) = crate::gic::acknowledged_intid(iar) else {
-        // Nothing pending (an FIQ that raced its own deactivation): the
-        // GIC requires no EOI for a spurious read.
+    let Some(acknowledged) = crate::gic::acknowledge_fiq() else {
         return;
     };
+    let intid = acknowledged.intid;
     let cpu = crate::smp::current_cpu_index();
     // Publish what this CPU is now inside, so an observer can name it if
     // the core goes silent before completing it. An FIQ nests inside an
@@ -499,9 +501,7 @@ fn handle_fiq(frame: *const u64) {
     if intid == crate::watchdog::WATCHDOG_PPI {
         crate::watchdog::on_watchdog_interrupt(cpu, frame);
     }
-    // Complete the interrupt with the full IAR cookie so the CPU interface
-    // does not wedge with an active Group-0 priority.
-    crate::gic::end_of_interrupt(iar);
+    crate::gic::end_of_fiq(acknowledged);
     tairix_arch_api::watchdog::in_flight::restore(cpu, displaced);
 }
 
@@ -522,18 +522,10 @@ fn handle_fiq(frame: *const u64) {
 /// when the need-resched latch the preempt callback consults is set.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn handle_irq(from_el0: bool, frame: *const u64) {
-    // Keep the *full* IAR value: for a software-generated interrupt it
-    // carries the source CPU in bits [12:10], and the matching EOIR write
-    // must carry those bits back or the GICv2 never deactivates the SGI
-    // (the CPU-interface running priority stays raised and every further
-    // interrupt on this CPU — timer, watchdog, device — is blocked, hanging
-    // the core under IPI-heavy load). Dispatch decisions use only the INTID
-    // field; the end-of-interrupt handshake writes the whole value.
-    let iar = crate::gic::acknowledge();
-    let Some(intid) = crate::gic::acknowledged_intid(iar) else {
-        // Spurious read: nothing pending, and the GIC requires no EOI.
+    let Some(acknowledged) = crate::gic::acknowledge() else {
         return;
     };
+    let intid = acknowledged.intid;
     // The running CPU's dense id, recovered from `MPIDR_EL1`, drives both
     // the per-CPU timer slot and the IPI callback (one
     // identity source).
@@ -567,11 +559,9 @@ fn handle_irq(from_el0: bool, frame: *const u64) {
         // `kernel/irq` mask-before-wake path).
         dispatch_device_irq(intid);
     }
-    // Complete every acknowledged interrupt (timer, SGI/IPI, or device)
-    // so the CPU interface does not wedge with an active priority. The
-    // **full** IAR value is written back (source-CPU field included) so an
-    // SGI from any CPU is actually deactivated.
-    crate::gic::end_of_interrupt(iar);
+    // An interrupt left active keeps this CPU's running priority raised and
+    // blocks every later one.
+    crate::gic::end_of_interrupt(acknowledged);
     // Nothing is in flight once the completion is written — and the record
     // is cleared before the preemption point below, which may switch away
     // and not return to this frame for a long time.

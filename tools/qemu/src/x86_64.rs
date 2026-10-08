@@ -71,25 +71,27 @@ pub const QEMU_BINARY: &str = "qemu-system-x86_64";
 /// still seeds.
 const ENTROPY_FEATURES: &str = "+rdrand,+rdseed,enforce";
 
-/// The translation unit `translation` names, as the device a translated run
-/// builds first: remapping interrupts in extended mode, and on AMD-Vi
-/// translating DMA, which QEMU leaves off by default.
-fn translating_unit(translation: crate::DmaTranslation) -> Option<&'static str> {
-    match translation {
-        crate::DmaTranslation::Vtd => Some("intel-iommu,intremap=on,eim=on"),
-        crate::DmaTranslation::AmdVi => Some("amd-iommu,dma-remap=on,intremap=on,xtsup=on"),
-        // Another board's unit is refused before any argv is built.
-        crate::DmaTranslation::Absent
-        | crate::DmaTranslation::Smmuv3Stage1
-        | crate::DmaTranslation::Smmuv3Stage2
-        | crate::DmaTranslation::RiscvStage1
-        | crate::DmaTranslation::RiscvStage2 => None,
-    }
-}
-
 /// The default CPU model: QEMU's baseline `qemu64` plus the entropy
 /// features every model carries (`RDRAND`/`RDSEED`, `enforce`).
 pub const CPU: &str = "qemu64,+rdrand,+rdseed,enforce";
+
+/// How the board lays its CPUs out.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Topology {
+    /// `Spec::cpus` CPUs at APIC ids from 0, the board's default.
+    #[default]
+    Dense,
+    /// The boot CPU, and one more at the first core of a second socket of
+    /// 256, so its APIC id is 256: past the eight bits xAPIC names.
+    ApPastXapic,
+}
+
+/// [`Topology::ApPastXapic`]'s `-smp`: room for two sockets of 256 cores,
+/// the boot CPU alone present at the start.
+const AP_PAST_XAPIC_SMP: &str = "1,maxcpus=512,sockets=2,cores=256,threads=1";
+
+/// Where [`Topology::ApPastXapic`] plugs its second CPU in.
+const AP_PAST_XAPIC_SLOT: &str = "socket-id=1,core-id=0,thread-id=0";
 
 /// The `-cpu` model for `spec`: its capability override with the entropy
 /// features appended, or the default [`CPU`].
@@ -122,6 +124,40 @@ pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, kernel: &Path) {
     }
 }
 
+/// Push `spec`'s board, its translation unit, and its CPUs: their model, with
+/// x2APIC wherever remapping or their layout needs it, and their layout.
+fn push_board(argv: &mut Vec<OsString>, spec: &Spec) {
+    // Another board's unit is refused before any argv is built. The default
+    // `pc` board holds no translation unit, and no more than 255 CPUs.
+    let unit = spec.dma_translation.unit_device();
+    let past_xapic = spec.x86_64_topology == Topology::ApPastXapic;
+    if unit.is_some() || past_xapic {
+        argv.push("-machine".into());
+        argv.push("q35".into());
+    }
+    if let Some(unit) = unit {
+        argv.push("-device".into());
+        argv.push(unit.into());
+    }
+    let mut cpu = cpu_model(spec);
+    if spec.dma_translation.remaps() || past_xapic {
+        cpu.push_str(",+x2apic");
+    }
+    // The type a plugged-in CPU is of: the model, without its features.
+    let cpu_type = format!("{}-x86_64-cpu", cpu.split(',').next().unwrap_or_default());
+    argv.push("-cpu".into());
+    argv.push(cpu.into());
+    argv.push("-smp".into());
+    match spec.x86_64_topology {
+        Topology::Dense => argv.push(spec.cpus.to_string().into()),
+        Topology::ApPastXapic => {
+            argv.push(AP_PAST_XAPIC_SMP.into());
+            argv.push("-device".into());
+            argv.push(format!("{cpu_type},{AP_PAST_XAPIC_SLOT}").into());
+        }
+    }
+}
+
 /// Pure argv builder used by [`push_argv`] and the host unit tests.
 ///
 /// Splitting the pure builder out keeps the argv-assembly contract
@@ -133,23 +169,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // `-serial stdio`. `-display none` gives the headless behaviour we
     // want without that implicit muxing.
     let mut argv: Vec<OsString> = Vec::with_capacity(22 + spec.extra_args.len());
-    // The unit must exist before any device it translates: QEMU gives a PCI
-    // device an IOMMU address space only if the IOMMU was created first. It
-    // remaps interrupts in extended mode, for a CPU with x2APIC.
-    let unit = translating_unit(spec.dma_translation);
-    let translated = unit.is_some();
-    if let Some(unit) = unit {
-        argv.push("-machine".into());
-        argv.push("q35".into());
-        argv.push("-device".into());
-        argv.push(unit.into());
-    }
-    argv.push("-cpu".into());
-    let mut cpu = cpu_model(spec);
-    if translated {
-        cpu.push_str(",+x2apic");
-    }
-    argv.push(cpu.into());
+    push_board(&mut argv, spec);
     argv.push("-no-reboot".into());
     // Pin the board's emulated real-time clock when the vertical asked for
     // a deterministic one, so a clock-chip driver's reading is a value the
@@ -168,8 +188,6 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     argv.push("stdio".into());
     argv.push("-m".into());
     argv.push(format!("{}M", spec.ram_mib()).into());
-    argv.push("-smp".into());
-    argv.push(spec.cpus.to_string().into());
     argv.push("-device".into());
     argv.push(
         format!(
@@ -313,10 +331,12 @@ mod tests {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: crate::x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
+            interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -382,11 +402,21 @@ mod tests {
 
     #[test]
     fn a_translated_run_builds_its_unit_first_and_routes_every_virtio_function_through_it() {
-        for (unit, device) in [
-            (crate::DmaTranslation::Vtd, "intel-iommu,intremap=on,eim=on"),
+        for (unit, device, remaps) in [
+            (
+                crate::DmaTranslation::Vtd,
+                "intel-iommu,intremap=on,eim=on",
+                true,
+            ),
             (
                 crate::DmaTranslation::AmdVi,
                 "amd-iommu,dma-remap=on,intremap=on,xtsup=on",
+                true,
+            ),
+            (
+                crate::DmaTranslation::VirtioIommu,
+                "virtio-iommu-pci,addr=0x2",
+                false,
             ),
         ] {
             let mut spec = fixture_spec(1).with_dma_translation(unit);
@@ -398,15 +428,16 @@ mod tests {
             assert_eq!(
                 argv[..4],
                 ["-machine", "q35", "-device", device],
-                "the unit precedes every device it translates, and remaps interrupts"
+                "the unit precedes every device it translates"
             );
             let cpu = argv
                 .iter()
                 .position(|a| a == "-cpu")
                 .map(|at| &argv[at + 1])
                 .expect("a CPU model");
-            assert!(
+            assert_eq!(
                 cpu.ends_with(",+x2apic"),
+                remaps,
                 "extended remapping wants x2APIC: {cpu}"
             );
             for device in ["virtio-blk-pci", "virtio-keyboard-pci"] {
@@ -488,6 +519,41 @@ mod tests {
                 "{model} lacks {feature}"
             );
         }
+    }
+
+    /// The AP-past-xAPIC layout plugs a second CPU of the run's own model in
+    /// at the first core of a second 256-core socket, x2APIC on, beside the
+    /// boot CPU alone present at the start; the default stays dense.
+    #[test]
+    fn the_ap_past_xapic_layout_plugs_its_cpu_in_at_apic_id_256() {
+        let spec = fixture_spec(2)
+            .with_x86_64_cpu("max")
+            .with_x86_64_topology(Topology::ApPastXapic);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let after = |argv: &[String], flag: &str| {
+            argv.iter()
+                .position(|a| a == flag)
+                .map(|at| argv[at + 1].clone())
+        };
+        assert_eq!(
+            after(&argv, "-smp").as_deref(),
+            Some("1,maxcpus=512,sockets=2,cores=256,threads=1")
+        );
+        assert_eq!(
+            after(&argv, "-machine").as_deref(),
+            Some("q35"),
+            "past pc's 255"
+        );
+        let cpu = after(&argv, "-cpu").expect("a CPU model");
+        assert!(cpu.split(',').any(|f| f == "+x2apic"), "{cpu}");
+        assert!(
+            argv.iter()
+                .any(|a| a == "max-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"),
+            "{argv:?}"
+        );
+        let dense = render(&build_argv(&fixture_spec(2), Path::new("/tmp/k.elf")));
+        assert_eq!(after(&dense, "-smp").as_deref(), Some("2"));
+        assert!(!dense.iter().any(|a| a.contains("socket-id")));
     }
 
     #[test]

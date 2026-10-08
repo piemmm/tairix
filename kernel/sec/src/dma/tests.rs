@@ -63,6 +63,7 @@ fn fresh_pool<'a>(frames: &'a FrameAllocator, sim: &'a SimPhysMap) -> DmaPool<'a
         16,
         frames,
         sim,
+        tairix_abi::DmaCoherence::Snooped,
     )
     .expect("pool constructs")
 }
@@ -117,7 +118,7 @@ fn alloc_refused_without_mem_dma() {
     let caller = task_with(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW], &sink);
     let err = alloc_dma(&mut pool, &caller, PAGE_SIZE, 0, &sink).unwrap_err();
     assert_eq!(err, DmaGateError::CapabilityMissing);
-    assert_eq!(err.as_errno(), Errno::PermissionDenied);
+    assert_eq!(err.as_driver_error(), DriverError::PermissionDenied);
     assert_eq!(
         ids_after_derive(&sink),
         [AuditEvent::DmaAllocDenied.id().0],
@@ -136,7 +137,7 @@ fn alloc_zero_size_propagates_pool_error_with_audit() {
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     let err = alloc_dma(&mut pool, &caller, 0, 0, &sink).unwrap_err();
     assert_eq!(err, DmaGateError::Pool(DmaError::ZeroSize));
-    assert_eq!(err.as_errno(), Errno::BufferTooSmall);
+    assert_eq!(err.as_driver_error(), DriverError::BufferTooSmall);
     // The capability check passed, the pool refused — no DmaAllocated
     // record (the alloc never succeeded) and no DmaAllocDenied (the
     // capability was held).
@@ -144,7 +145,7 @@ fn alloc_zero_size_propagates_pool_error_with_audit() {
 }
 
 #[test]
-fn alloc_oversized_request_maps_to_length_out_of_range() {
+fn an_oversized_carve_is_too_long_not_exhausted() {
     let frames = FrameAllocator::new(&small_map(16)).unwrap();
     let sim = fresh_sim();
     let mut pool = fresh_pool(&frames, &sim);
@@ -153,7 +154,7 @@ fn alloc_oversized_request_maps_to_length_out_of_range() {
     // Exceed MAX_ORDER ⇒ DmaError::SizeUnsupported.
     let too_big = (1usize << (tairix_kernel_mem::MAX_ORDER + 1)) * PAGE_SIZE;
     let err = alloc_dma(&mut pool, &caller, too_big, 0, &sink).unwrap_err();
-    assert_eq!(err.as_errno(), Errno::LengthOutOfRange);
+    assert_eq!(err.as_driver_error(), DriverError::LengthOutOfRange);
 }
 
 #[test]
@@ -184,7 +185,7 @@ fn free_refused_without_mem_dma_and_buffer_is_retained() {
     let revoked = task_with(&[CapabilityId::FS_MOUNT], &revoked_sink);
     let err = free_dma(&mut pool, &revoked, buf, &revoked_sink).unwrap_err();
     assert_eq!(err, DmaGateError::CapabilityMissing);
-    assert_eq!(err.as_errno(), Errno::PermissionDenied);
+    assert_eq!(err.as_driver_error(), DriverError::PermissionDenied);
     assert_eq!(
         ids_after_derive(&revoked_sink),
         [AuditEvent::DmaAllocDenied.id().0]
@@ -193,37 +194,53 @@ fn free_refused_without_mem_dma_and_buffer_is_retained() {
     assert_eq!(pool.live(), 1);
 }
 
+/// A refused carve reaches its driver as what it was: exhausted memory is
+/// never a bad length or a faulted device.
 #[test]
-fn as_errno_maps_every_pool_error_into_abi_v1() {
-    // Every variant of `DmaError` must produce a valid `abi-v1`
-    // errno; the test fails if a future variant slips through
-    // without a deliberate decision in `as_errno`.
-    assert_eq!(
-        DmaGateError::CapabilityMissing.as_errno(),
-        Errno::PermissionDenied
-    );
-    assert_eq!(
-        DmaGateError::Pool(DmaError::ZeroSize).as_errno(),
-        Errno::BufferTooSmall
-    );
-    assert_eq!(
-        DmaGateError::Pool(DmaError::SizeUnsupported).as_errno(),
-        Errno::LengthOutOfRange
-    );
-    assert_eq!(
-        DmaGateError::Pool(DmaError::Alloc(tairix_kernel_mem::AllocError::OutOfMemory)).as_errno(),
-        Errno::LengthOutOfRange
-    );
-    assert_eq!(
-        DmaGateError::Pool(DmaError::UnknownBuffer).as_errno(),
-        Errno::OutOfRange
-    );
-    assert_eq!(
-        DmaGateError::Pool(DmaError::DirectMap).as_errno(),
-        Errno::OutOfRange
-    );
-    assert_eq!(
-        DmaGateError::Pool(DmaError::InvalidPoolConfig).as_errno(),
-        Errno::OutOfRange
-    );
+fn a_refused_carve_reaches_the_driver_as_itself() {
+    use tairix_kernel_mem::AllocError;
+    for (refusal, read) in [
+        (
+            DmaGateError::CapabilityMissing,
+            DriverError::PermissionDenied,
+        ),
+        (
+            DmaGateError::Pool(DmaError::Alloc(AllocError::OutOfMemory)),
+            DriverError::OutOfMemory,
+        ),
+        (
+            DmaGateError::Pool(DmaError::ZeroSize),
+            DriverError::BufferTooSmall,
+        ),
+        (
+            DmaGateError::Pool(DmaError::Alloc(AllocError::ZeroSize)),
+            DriverError::BufferTooSmall,
+        ),
+        (
+            DmaGateError::Pool(DmaError::SizeUnsupported),
+            DriverError::LengthOutOfRange,
+        ),
+        (
+            DmaGateError::Pool(DmaError::Alloc(AllocError::SizeUnsupported)),
+            DriverError::LengthOutOfRange,
+        ),
+        (
+            DmaGateError::Pool(DmaError::Alloc(AllocError::OutOfRange)),
+            DriverError::OutOfRange,
+        ),
+        (
+            DmaGateError::Pool(DmaError::UnknownBuffer),
+            DriverError::OutOfRange,
+        ),
+        (
+            DmaGateError::Pool(DmaError::DirectMap),
+            DriverError::OutOfRange,
+        ),
+        (
+            DmaGateError::Pool(DmaError::InvalidPoolConfig),
+            DriverError::OutOfRange,
+        ),
+    ] {
+        assert_eq!(refusal.as_driver_error(), read, "{refusal:?}");
+    }
 }

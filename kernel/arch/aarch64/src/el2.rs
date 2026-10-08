@@ -42,6 +42,18 @@ pub const CPTR_EL2_HANDOFF: u64 = 0x33FF;
 /// register access from EL1/EL0 traps to EL2.
 pub const MDCR_EL2_HANDOFF: u64 = 0;
 
+/// `ICC_SRE_EL2` hand-off value on a core with the GICv3 system-register
+/// interface: `SRE` (bit 0) so the interface is used at all, `DFB` and
+/// `DIB` (bits 1–2) so only it signals FIQ and IRQ, and `Enable` (bit 3) so
+/// EL1's `ICC_SRE_EL1` accesses do not trap to EL2. `ICH_HCR_EL2` is zeroed
+/// beside it: no virtual CPU interface.
+pub const ICC_SRE_EL2_HANDOFF: u64 = 0xF;
+
+/// The `ID_AA64PFR0_EL1.GIC` field (bits `[27:24]`): non-zero where the core
+/// implements the GICv3 system-register interface, whose EL2 registers are
+/// otherwise undefined.
+pub const ID_AA64PFR0_GIC_SHIFT: u32 = 24;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +67,8 @@ mod tests {
         assert_eq!(CNTHCTL_EL2_HANDOFF, 0x3);
         assert_eq!(CPTR_EL2_HANDOFF, 0x33FF);
         assert_eq!(MDCR_EL2_HANDOFF, 0);
+        assert_eq!(ICC_SRE_EL2_HANDOFF, 0xF);
+        assert_eq!(ID_AA64PFR0_GIC_SHIFT, 24);
     }
 
     /// The `HCR_EL2` booby-trap bits whose UNKNOWN reset state hangs or

@@ -258,7 +258,7 @@ impl TransferQueue {
         let mut carried = Vec::new();
         carried
             .try_reserve_exact(usize::from(ring.size()))
-            .map_err(|_| DriverError::NoSpace)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         carried.resize_with(usize::from(ring.size()), || None);
         Ok(Self { ring, carried })
     }
@@ -491,22 +491,15 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         host: &'h dyn VirtioHost,
         clock: &'h dyn MonotonicClock,
     ) -> Result<Self, DriverError> {
-        transport.reset().map_err(VirtioError::as_driver_error)?;
-        host.device_quiesced();
-        let mut status = Status::default().with(Status::ACKNOWLEDGE);
-        transport.set_status(status);
-        status = status.with(Status::DRIVER);
-        transport.set_status(status);
         // No device-specific feature: `VIRTIO_SND_F_CTLS` exposes mixer
         // controls this driver does not model, since the one volume model
         // lives in the engine rather than in a device's control graph.
-        let driver_features = transport.device_features() & TRANSPORT_FEATURES;
-        transport.set_driver_features(driver_features);
-        status = status.with(Status::FEATURES_OK);
-        transport.set_status(status);
-        if !transport.status().contains(Status::FEATURES_OK) {
-            return Err(VirtioError::FeaturesRejected.as_driver_error());
-        }
+        let negotiated = tairix_virtio::negotiate::<_, DriverError>(
+            &mut transport,
+            || host.device_quiesced(),
+            |offered| Ok(offered & TRANSPORT_FEATURES),
+        )?;
+        let mut status = negotiated.status;
         if transport.num_queues() < wire::QUEUE_COUNT {
             return Err(DriverError::DeviceFault);
         }
@@ -589,7 +582,7 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         let chmaps = wire::read_u32(config, wire::config::CHMAPS);
         self.streams
             .try_reserve_exact(usize::from(streams))
-            .map_err(|_| DriverError::NoSpace)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         for id in 0..u32::from(streams) {
             let stream = self.read_stream_info(id)?;
             self.streams.push(stream);
@@ -1264,7 +1257,7 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         let mut periods = Vec::new();
         periods
             .try_reserve_exact(PERIODS_IN_FLIGHT)
-            .map_err(|_| DriverError::NoSpace)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         for _ in 0..PERIODS_IN_FLIGHT {
             let slab = self
                 .host

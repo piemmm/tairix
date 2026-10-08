@@ -28,20 +28,19 @@ pub use tairix_kernel_iommu_api::Registers;
 use core::ops::Range;
 
 use tairix_arch_api::PageTableFrames;
-use tairix_collections::HashMap;
-use tairix_hash::BuildFastHash;
 use tairix_kernel_iommu_api::{
     drain_in_batches, reach_bits, wait_for, Access, Binding, Bindings, Block, Clock, CommandQueue,
-    DomainId, Fault, FaultBatch, FaultReason, FaultRoute, Ids, InterruptRemapping, InterruptSource,
-    InterruptTarget, IoPageTable, IommuError, IommuUnit, QueueRegisters, Reach, Remapped, Table,
-    TableCoherence, TableMemory, UnitProfile, FAULT_QUEUE_RECORDS, IO_PAGE_SIZE, MESSAGE_WINDOW,
+    DomainId, DomainMap, Fault, FaultBatch, FaultReason, FaultRoute, FrameRun, Ids,
+    InterruptRemapping, InterruptSource, InterruptTarget, Invalidator, IoPageTable, IommuError,
+    IommuUnit, PageSpan, QueueRegisters, Reach, Remapped, Table, TableCoherence, TableMemory,
+    UnitProfile, FAULT_QUEUE_RECORDS, IO_PAGE_SIZE, MESSAGE_WINDOW,
 };
 
 const _: () = assert!(
     regs::MOST_FAULT_RECORDS <= FAULT_QUEUE_RECORDS as usize,
     "a unit holds no more fault records than the containment bound allows"
 );
-use tairix_sync::SpinLock;
+use tairix_sync::{SpinLock, SpinLockGuard};
 
 use crate::format::{Descriptor, SecondLevel};
 use crate::regs::{Cap, Ecap};
@@ -78,7 +77,10 @@ const CONTEXT_FPD: u64 = 1 << 1;
 /// One VT-d unit.
 ///
 /// Its root, queue and context tables are never freed: nothing proves the
-/// unit stopped reading them.
+/// unit stopped reading them. Its state is split so a domain's maps and
+/// syncs wait on neither another domain nor a stream's attach: the
+/// lifecycle lock, then the domain map and a domain, then the queue's ring,
+/// then the register window, never the reverse.
 pub struct VtdUnit<'f, R: Registers> {
     memory: TableMemory<'f>,
     clock: &'f dyn Clock,
@@ -87,17 +89,29 @@ pub struct VtdUnit<'f, R: Registers> {
     iotlb: usize,
     levels: u32,
     profile: UnitProfile,
-    state: SpinLock<State<'f, R>>,
+    regs: Regs<R>,
+    queue: CommandQueue,
+    lifecycle: SpinLock<Lifecycle<'f>>,
+    domains: DomainMap<IoPageTable<'f, SecondLevel>>,
+    /// The fault record after the last one drained.
+    next_fault: SpinLock<usize>,
 }
 
-struct State<'f, R> {
-    regs: R,
+/// The register window, held for one access or one handshake, so a
+/// read-modify-write is never interleaved with another.
+struct Regs<R>(SpinLock<R>);
+
+impl<R> Regs<R> {
+    fn lock(&self) -> SpinLockGuard<'_, R> {
+        self.0.lock()
+    }
+}
+
+/// What attaching a stream, silencing one and remapping interrupts change.
+struct Lifecycle<'f> {
     root: Table,
-    queue: CommandQueue,
     /// The context table of each bus a stream was ever attached on.
     contexts: [Option<Table>; BUSES],
-    /// Each domain's tables.
-    domains: HashMap<u16, IoPageTable<'f, SecondLevel>, BuildFastHash>,
     /// What each source id translates through: its domain, or the silent
     /// table.
     bindings: Bindings,
@@ -105,8 +119,6 @@ struct State<'f, R> {
     /// own.
     silent: Option<Silent<'f>>,
     ids: Ids,
-    /// The fault record after the last one drained.
-    next_fault: usize,
     /// The interrupt remapping table, once prepared.
     remap: Option<Remap>,
     /// A context change the unit did not confirm, so it may still cache an
@@ -127,10 +139,10 @@ struct Silent<'f> {
 }
 
 impl<'f, R: Registers> VtdUnit<'f, R> {
-    /// Take over the unit behind `regs`, leaving it blocked: translation
-    /// disabled, a root table with no context tables installed, queued
-    /// invalidation running, its fault interrupt masked.
-    /// [`IommuUnit::enable`] starts translating.
+    /// Take over the unit behind `regs`: translation off — so a device's DMA
+    /// passes untranslated until [`IommuUnit::enable`] starts translating
+    /// (`plans/OPEN-DEFECTS.md`) — over a root table with no context tables
+    /// installed, queued invalidation running, its fault interrupt masked.
     ///
     /// `coherence` writes tables back for a unit whose walker does not
     /// snoop. Tables name frames up to the entry format's reach: every frame
@@ -168,12 +180,13 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             .ok_or(IommuError::OutOfRange)?;
         let memory = TableMemory::new(frames, if ecap.coherent() { None } else { coherence });
         let profile = UnitProfile {
-            stage: tairix_kernel_iommu_api::Stage::Second,
+            tables: tairix_kernel_iommu_api::Tables::Walked(tairix_kernel_iommu_api::Stage::Second),
             reach: Reach {
                 input_bits: reach_bits(levels).min(cap.mgaw()),
                 output_bits: ENTRY_ADDRESS_BITS,
             },
             reserved: &RESERVED,
+            write_only: true,
         };
         // No unit holds these yet, so a failure gives them back.
         let ids = Ids::new(FIRST_DOMAIN, cap.domains());
@@ -193,19 +206,19 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             iotlb,
             levels,
             profile,
-            state: SpinLock::new(State {
-                regs,
+            regs: Regs(SpinLock::new(regs)),
+            queue,
+            lifecycle: SpinLock::new(Lifecycle {
                 root,
-                queue,
                 contexts: [const { None }; BUSES],
-                domains: HashMap::with_hasher(BuildFastHash::new()),
                 bindings: Bindings::new(),
                 silent: None,
                 ids,
-                next_fault: 0,
                 remap: None,
                 stale_contexts: false,
             }),
+            domains: DomainMap::new(),
+            next_fault: SpinLock::new(0),
         };
         // From here the unit may hold the tables' addresses, so a failure
         // keeps them.
@@ -214,39 +227,32 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     }
 
     fn take_over(&self) -> Result<(), IommuError> {
-        let state = self.state.lock();
+        let root = self.lifecycle.lock().root.phys();
+        let regs = self.regs.lock();
         // Firmware may have left translation and the queue running on tables
         // of its own; both stop before anything of ours is installed.
-        let gsts = state.regs.read32(regs::GSTS)?;
+        let gsts = regs.read32(regs::GSTS)?;
         if gsts & regs::GSTS_TES != 0 {
-            self.command(&state.regs, 0, regs::GCMD_TE, regs::GSTS_TES, 0)?;
+            self.command(&regs, 0, regs::GCMD_TE, regs::GSTS_TES, 0)?;
         }
         // Interrupt remapping firmware left on would deliver through a table
         // of its own; ours replaces it before any source is unmasked.
         if gsts & regs::GSTS_IRES != 0 {
-            self.command(&state.regs, 0, regs::GCMD_IRE, regs::GSTS_IRES, 0)?;
+            self.command(&regs, 0, regs::GCMD_IRE, regs::GSTS_IRES, 0)?;
         }
         if gsts & regs::GSTS_QIES != 0 {
-            self.command(&state.regs, 0, regs::GCMD_QIE, regs::GSTS_QIES, 0)?;
+            self.command(&regs, 0, regs::GCMD_QIE, regs::GSTS_QIES, 0)?;
         }
-        state.regs.write32(regs::FECTL, regs::FECTL_IM)?;
+        regs.write32(regs::FECTL, regs::FECTL_IM)?;
         // An error firmware left set would be blamed on our first batch, and a
         // status already set raises no fault event for the next one.
-        state.regs.write32(regs::FSTS, regs::FSTS_ERRORS)?;
-        state.regs.write64(regs::RTADDR, state.root.phys())?;
-        self.command(
-            &state.regs,
-            regs::GCMD_SRTP,
-            0,
-            regs::GSTS_RTPS,
-            regs::GSTS_RTPS,
-        )?;
+        regs.write32(regs::FSTS, regs::FSTS_ERRORS)?;
+        regs.write64(regs::RTADDR, root)?;
+        self.command(&regs, regs::GCMD_SRTP, 0, regs::GSTS_RTPS, regs::GSTS_RTPS)?;
         // Until the queue runs, the register interface flushes whatever the
         // unit cached from an earlier root.
-        state
-            .regs
-            .write64(regs::CCMD, regs::CCMD_ICC | regs::CCMD_GLOBAL)?;
-        self.wait_register64(&state.regs, regs::CCMD, regs::CCMD_ICC)?;
+        regs.write64(regs::CCMD, regs::CCMD_ICC | regs::CCMD_GLOBAL)?;
+        self.wait_register64(&regs, regs::CCMD, regs::CCMD_ICC)?;
         let mut flush = regs::IOTLB_IVT | regs::IOTLB_GLOBAL;
         if self.cap.drain_reads() {
             flush |= regs::IOTLB_DRAIN_READS;
@@ -255,17 +261,11 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             flush |= regs::IOTLB_DRAIN_WRITES;
         }
         let iotlb = self.iotlb + regs::IOTLB_REG;
-        state.regs.write64(iotlb, flush)?;
-        self.wait_register64(&state.regs, iotlb, regs::IOTLB_IVT)?;
-        state.regs.write64(regs::IQT, 0)?;
-        state.regs.write64(regs::IQA, state.queue.ring())?;
-        self.command(
-            &state.regs,
-            regs::GCMD_QIE,
-            0,
-            regs::GSTS_QIES,
-            regs::GSTS_QIES,
-        )
+        regs.write64(iotlb, flush)?;
+        self.wait_register64(&regs, iotlb, regs::IOTLB_IVT)?;
+        regs.write64(regs::IQT, 0)?;
+        regs.write64(regs::IQA, self.queue.ring())?;
+        self.command(&regs, regs::GCMD_QIE, 0, regs::GSTS_QIES, regs::GSTS_QIES)
     }
 
     /// Issue a global command: set `set`, clear `clear`, keep every other
@@ -297,38 +297,58 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         wait_for(self.clock, || Ok(regs.read64(offset)? & busy == 0))
     }
 
+    fn invalidator(&self) -> Invalidator<'_> {
+        Invalidator {
+            queue: &self.queue,
+            memory: self.memory,
+            clock: self.clock,
+            regs: &self.regs,
+            completion: format::wait,
+        }
+    }
+
     /// Queue `descriptors` and an invalidation wait behind them, and return
     /// once the unit has written the wait's status.
-    fn invalidate(
-        &self,
-        state: &mut State<'f, R>,
-        descriptors: &[Descriptor],
-    ) -> Result<(), IommuError> {
-        let State { regs, queue, .. } = state;
-        queue.run(
-            &self.memory,
-            self.clock,
-            &Queue(regs),
-            descriptors.iter().copied(),
-            format::wait,
-        )
+    fn invalidate(&self, descriptors: &[Descriptor]) -> Result<(), IommuError> {
+        self.invalidator().run(descriptors.iter().copied())
     }
 
     fn domain_iotlb(&self, domain: u16) -> Descriptor {
         format::iotlb_domain(domain, self.cap.drain_reads(), self.cap.drain_writes())
     }
 
+    /// The invalidation reaching `[iova, iova + len)` of `domain` and the walk
+    /// caches above it: page-selective where the unit can name the span, else
+    /// the whole domain. Whether it is page-selective.
+    fn range_iotlb(
+        &self,
+        domain: u16,
+        iova: u64,
+        len: u64,
+    ) -> Result<(Descriptor, bool), IommuError> {
+        let (base, order) = PageSpan::of(iova, len)?.covering_block();
+        if self.cap.page_selective() && order <= self.cap.max_address_mask() {
+            let drain = (self.cap.drain_reads(), self.cap.drain_writes());
+            Ok((
+                format::iotlb_pages(domain, base, order, drain.0, drain.1),
+                true,
+            ))
+        } else {
+            Ok((self.domain_iotlb(domain), false))
+        }
+    }
+
     /// Link a context table for `bus` from the root the first time a stream
     /// on the bus is attached.
-    fn link_context_table(&self, state: &mut State<'f, R>, bus: u8) -> Result<(), IommuError> {
-        if state.contexts[usize::from(bus)].is_some() {
+    fn link_context_table(&self, life: &mut Lifecycle<'f>, bus: u8) -> Result<(), IommuError> {
+        if life.contexts[usize::from(bus)].is_some() {
             return Ok(());
         }
         let table = self.memory.alloc()?;
         let slot = 2 * usize::from(bus);
-        let linked = self.memory.write(&state.root, slot + 1, 0).and_then(|()| {
+        let linked = self.memory.write(&life.root, slot + 1, 0).and_then(|()| {
             self.memory.write(
-                &state.root,
+                &life.root,
                 slot,
                 (table.phys() & format::ADDRESS) | format::PRESENT,
             )
@@ -337,8 +357,8 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             self.memory.free(table);
             return Err(err);
         }
-        self.memory.publish(&state.root, slot, 2);
-        state.contexts[usize::from(bus)] = Some(table);
+        self.memory.publish(&life.root, slot, 2);
+        life.contexts[usize::from(bus)] = Some(table);
         Ok(())
     }
 
@@ -346,14 +366,14 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     /// unit never sees a present entry with a stale domain.
     fn write_context(
         &self,
-        state: &mut State<'f, R>,
+        life: &mut Lifecycle<'f>,
         source: u16,
         low: u64,
         high: u64,
     ) -> Result<(), IommuError> {
         let [bus, devfn] = source.to_be_bytes();
-        self.link_context_table(state, bus)?;
-        let table = state.contexts[usize::from(bus)]
+        self.link_context_table(life, bus)?;
+        let table = life.contexts[usize::from(bus)]
             .as_ref()
             .ok_or(IommuError::Hardware)?;
         let slot = 2 * usize::from(devfn);
@@ -365,9 +385,9 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     }
 
     /// Clear stream `source`'s context entry, low word first.
-    fn clear_context(&self, state: &State<'f, R>, source: u16) -> Result<(), IommuError> {
+    fn clear_context(&self, life: &Lifecycle<'f>, source: u16) -> Result<(), IommuError> {
         let [bus, devfn] = source.to_be_bytes();
-        let Some(table) = state.contexts[usize::from(bus)].as_ref() else {
+        let Some(table) = life.contexts[usize::from(bus)].as_ref() else {
             return Ok(());
         };
         let slot = 2 * usize::from(devfn);
@@ -378,30 +398,64 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         Ok(())
     }
 
-    /// Make a not-present-to-present change visible: a unit in caching mode
-    /// caches not-present entries (under domain id 0 for a context entry);
-    /// otherwise only a unit that buffers writes needs a flush.
-    fn publish_new(
+    /// Install into `domain`'s tables what `install` maps from `iova`, and
+    /// publish it once, flushing only what it installed; a refusal takes it
+    /// back, since the caller frees the frames once this fails.
+    fn publish_mapped(
         &self,
-        state: &mut State<'f, R>,
-        source: Option<u16>,
-        domain: u16,
+        domain: DomainId,
+        iova: u64,
+        install: impl FnOnce(&mut IoPageTable<'f, SecondLevel>) -> Result<u64, IommuError>,
     ) -> Result<(), IommuError> {
-        if core::mem::take(&mut state.stale_contexts) {
-            if let Err(err) = self.invalidate(state, &[format::context_global()]) {
-                state.stale_contexts = true;
+        let id = domain.sixteen_bits()?;
+        self.domains.map_published(
+            u32::from(id),
+            iova,
+            |table| table,
+            install,
+            |mapped| {
+                self.range_iotlb(id, iova, mapped)
+                    .and_then(|(iotlb, _)| self.publish_mapping(iotlb))
+            },
+        )
+    }
+
+    /// Make a new mapping visible: a unit in caching mode caches not-present
+    /// entries, so `iotlb` flushes them; otherwise only a unit that buffers
+    /// writes needs a flush.
+    fn publish_mapping(&self, iotlb: Descriptor) -> Result<(), IommuError> {
+        if self.cap.caching_mode() {
+            return self.invalidate(&[iotlb]);
+        }
+        self.flush_write_buffer()
+    }
+
+    /// Make `source`'s new context entry visible, as [`Self::publish_mapping`]
+    /// does a mapping (a caching unit caches a not-present context entry
+    /// under domain id 0), every context entry flushed first where an earlier
+    /// change went unconfirmed.
+    fn publish_context(
+        &self,
+        life: &mut Lifecycle<'f>,
+        source: u16,
+        iotlb: Descriptor,
+    ) -> Result<(), IommuError> {
+        if core::mem::take(&mut life.stale_contexts) {
+            if let Err(err) = self.invalidate(&[format::context_global()]) {
+                life.stale_contexts = true;
                 return Err(err);
             }
         }
         if self.cap.caching_mode() {
-            let iotlb = self.domain_iotlb(domain);
-            return match source {
-                Some(source) => self.invalidate(state, &[format::context_device(0, source), iotlb]),
-                None => self.invalidate(state, &[iotlb]),
-            };
+            return self.invalidate(&[format::context_device(0, source), iotlb]);
         }
+        self.flush_write_buffer()
+    }
+
+    fn flush_write_buffer(&self) -> Result<(), IommuError> {
         if self.cap.required_write_buffer_flush() {
-            self.command(&state.regs, regs::GCMD_WBF, 0, regs::GSTS_WBFS, 0)?;
+            let regs = self.regs.lock();
+            self.command(&regs, regs::GCMD_WBF, 0, regs::GSTS_WBFS, 0)?;
         }
         Ok(())
     }
@@ -414,13 +468,13 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     /// a run begins, so a drain that stopped part-way cannot resume from it;
     /// a run firmware left elsewhere is found by the sweep.
     fn take_faults(&self, records: usize, batch: &mut FaultBatch) -> bool {
-        let mut state = self.state.lock();
-        let Ok(fsts) = state.regs.read32(regs::FSTS) else {
+        let mut next_fault = self.next_fault.lock();
+        let Ok(fsts) = self.regs.lock().read32(regs::FSTS) else {
             return false;
         };
         // Nothing more is recorded while the overflow stands.
         if fsts & regs::FSTS_PFO != 0 {
-            let _ = state.regs.write32(regs::FSTS, regs::FSTS_PFO);
+            let _ = self.regs.lock().write32(regs::FSTS, regs::FSTS_PFO);
         }
         if fsts & regs::FSTS_PPF == 0 {
             return false;
@@ -429,33 +483,35 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         let mut in_run = false;
         let mut took = false;
         for _ in 0..records {
-            let offset = base + state.next_fault * regs::FAULT_RECORD_LEN;
-            let Ok(high) = state.regs.read64(offset + 8) else {
+            // A record at a time, so a long sweep never holds up the queue.
+            let regs = self.regs.lock();
+            let offset = base + *next_fault * regs::FAULT_RECORD_LEN;
+            let Ok(high) = regs.read64(offset + 8) else {
                 return false;
             };
             if high & FAULT_F != 0 {
-                let low = state.regs.read64(offset).unwrap_or(0);
+                let low = regs.read64(offset).unwrap_or(0);
                 if batch.try_push(decode_fault(low, high)).is_err() {
                     return true;
                 }
-                let _ = state.regs.write32(offset + 12, regs::low32(FAULT_F >> 32));
+                let _ = regs.write32(offset + 12, regs::low32(FAULT_F >> 32));
                 in_run = true;
                 took = true;
-            } else if core::mem::take(&mut in_run) && !faults_pending(&state.regs) {
+            } else if core::mem::take(&mut in_run) && !faults_pending(&*regs) {
                 return false;
             }
-            state.next_fault = (state.next_fault + 1) % records;
+            *next_fault = (*next_fault + 1) % records;
         }
         // A sweep that took nothing while PPF stands is a unit misreporting,
         // not records a further drain could reach.
-        took && faults_pending(&state.regs)
+        took && faults_pending(&*self.regs.lock())
     }
 
     /// The id `binding`'s context entry was written under.
-    fn tag(state: &State<'f, R>, binding: Binding) -> Option<u16> {
+    fn tag(life: &Lifecycle<'f>, binding: Binding) -> Option<u16> {
         match binding {
             Binding::Domain(id) => u16::try_from(id).ok(),
-            Binding::Silenced => state.silent.as_ref().map(|silent| silent.id),
+            Binding::Silenced => life.silent.as_ref().map(|silent| silent.id),
         }
     }
 
@@ -463,34 +519,34 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     /// unit cannot confirm keeps its domain, so the domain's tables outlive
     /// any walk the unit still holds and a later detach can try again; its
     /// silence ends with its context, confirmed or not.
-    fn detach(&self, state: &mut State<'f, R>, source: u16) -> Result<(), IommuError> {
+    fn detach(&self, life: &mut Lifecycle<'f>, source: u16) -> Result<(), IommuError> {
         let stream = u32::from(source);
-        let id = match state.bindings.get(stream) {
-            Some(binding) => Self::tag(state, binding).ok_or(IommuError::Hardware)?,
+        let id = match life.bindings.get(stream) {
+            Some(binding) => Self::tag(life, binding).ok_or(IommuError::Hardware)?,
             // Cleared already: only the confirmation is owed.
-            None => match state.bindings.held(stream) {
+            None => match life.bindings.held(stream) {
                 Some(held) => u16::try_from(held).map_err(|_| IommuError::Hardware)?,
                 None => return Ok(()),
             },
         };
         let descriptors = [format::context_device(id, source), self.domain_iotlb(id)];
-        if state.bindings.get(stream).is_some() {
-            self.clear_context(state, source)
+        if life.bindings.get(stream).is_some() {
+            self.clear_context(life, source)
                 .map_err(|_| IommuError::Unconfirmed)?;
-            state.bindings.unbind(stream);
-            state.bindings.end_silence(stream);
+            life.bindings.unbind(stream);
+            life.bindings.end_silence(stream);
         }
-        if self.invalidate(state, &descriptors).is_err() {
-            state.stale_contexts = true;
+        if self.invalidate(&descriptors).is_err() {
+            life.stale_contexts = true;
             return Err(IommuError::Unconfirmed);
         }
-        state.bindings.release(stream);
+        life.bindings.release(stream);
         Ok(())
     }
 
     /// The silent table and its id, made the first time a stream is silenced.
-    fn silent_root(&self, state: &mut State<'f, R>) -> Result<(u16, u64), IommuError> {
-        if let Some(silent) = &state.silent {
+    fn silent_root(&self, life: &mut Lifecycle<'f>) -> Result<(u16, u64), IommuError> {
+        if let Some(silent) = &life.silent {
             return Ok((silent.id, silent.table.root()));
         }
         let table = IoPageTable::new(
@@ -502,42 +558,53 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             self.memory,
             self.profile.reach,
         )?;
-        let id = state.ids.take_sixteen_bits()?;
+        let id = life.ids.take_sixteen_bits()?;
         let root = table.root();
-        state.silent = Some(Silent { id, table });
+        life.silent = Some(Silent { id, table });
         Ok((id, root))
     }
 }
 
 /// A VT-d unit's invalidation queue registers.
-struct Queue<'r, R>(&'r R);
-
-impl<R: Registers> QueueRegisters for Queue<'_, R> {
+impl<R: Registers> QueueRegisters for Regs<R> {
     fn head(&self) -> Result<usize, IommuError> {
-        Ok(regs::queue_index(self.0.read64(regs::IQH)?))
+        Ok(regs::queue_index(self.lock().read64(regs::IQH)?))
     }
 
     fn set_tail(&self, tail: usize) -> Result<(), IommuError> {
-        self.0.write64(regs::IQT, (tail as u64) << 4)
+        self.lock().write64(regs::IQT, (tail as u64) << 4)
     }
 
-    /// A rejected descriptor stops the queue at it: replace it with a bare
-    /// fence so the queue runs on, and clear the error.
-    fn stopped(&self, queue: &CommandQueue, memory: &TableMemory<'_>) -> Result<bool, IommuError> {
-        let errors =
-            self.0.read32(regs::FSTS)? & (regs::FSTS_IQE | regs::FSTS_ICE | regs::FSTS_ITE);
-        if errors == 0 {
-            return Ok(false);
+    /// Where a descriptor was rejected, or a completion or device-TLB
+    /// invalidation failed, the queue stops at its head.
+    fn stopped_at(&self) -> Result<Option<usize>, IommuError> {
+        let regs = self.lock();
+        if regs.read32(regs::FSTS)? & QUEUE_ERRORS == 0 {
+            return Ok(None);
         }
+        Ok(Some(regs::queue_index(regs.read64(regs::IQH)?)))
+    }
+
+    /// A rejected descriptor is replaced with a bare fence so the queue runs
+    /// on, and the error cleared.
+    fn resume(
+        &self,
+        queue: &CommandQueue,
+        memory: &TableMemory<'_>,
+        slot: usize,
+    ) -> Result<(), IommuError> {
+        let regs = self.lock();
+        let errors = regs.read32(regs::FSTS)? & QUEUE_ERRORS;
         if errors & regs::FSTS_IQE != 0 {
-            let head = regs::queue_index(self.0.read64(regs::IQH)?);
-            queue.replace(memory, head, format::fence())?;
+            queue.replace(memory, slot, format::fence())?;
             tairix_dma_barrier::dma_wmb();
         }
-        self.0.write32(regs::FSTS, errors)?;
-        Ok(true)
+        regs.write32(regs::FSTS, errors)
     }
 }
+
+/// The errors that stop the invalidation queue.
+const QUEUE_ERRORS: u32 = regs::FSTS_IQE | regs::FSTS_ICE | regs::FSTS_ITE;
 
 /// PPF: whether any fault record holds a fault.
 fn faults_pending(regs: &impl Registers) -> bool {
@@ -625,33 +692,33 @@ impl<R: Registers> InterruptRemapping for VtdUnit<'_, R> {
             .next_power_of_two();
         let order = (entries / REMAP_ENTRIES_PER_FRAME).trailing_zeros();
         let ids = Ids::new(0, entries);
-        let mut state = self.state.lock();
-        if state.remap.is_some() {
+        let mut life = self.lifecycle.lock();
+        if life.remap.is_some() {
             return Err(IommuError::OutOfRange);
         }
         let table = self.memory.alloc_block(order)?;
         // The size field names 2^(S + 1) entries.
         let size = u64::from(entries.trailing_zeros() - 1);
         let mode = if extended { regs::IRTA_EIME } else { 0 };
-        state
-            .regs
-            .write64(regs::IRTA, (table.phys() & format::ADDRESS) | mode | size)?;
-        // The table's frames stay the unit's from here whatever follows: it
-        // may already hold their address.
-        let remap = Remap {
+        {
+            let regs = self.regs.lock();
+            regs.write64(regs::IRTA, (table.phys() & format::ADDRESS) | mode | size)?;
+            // The table's frames stay the unit's from here whatever follows:
+            // it may already hold their address.
+            self.command(
+                &regs,
+                regs::GCMD_SIRTP,
+                0,
+                regs::GSTS_IRTPS,
+                regs::GSTS_IRTPS,
+            )?;
+        }
+        life.remap = Some(Remap {
             table,
             extended,
             ids,
-        };
-        self.command(
-            &state.regs,
-            regs::GCMD_SIRTP,
-            0,
-            regs::GSTS_IRTPS,
-            regs::GSTS_IRTPS,
-        )?;
-        state.remap = Some(remap);
-        self.invalidate(&mut state, &[format::iec_global()])
+        });
+        self.invalidate(&[format::iec_global()])
     }
 
     fn remap_interrupt(
@@ -659,31 +726,23 @@ impl<R: Registers> InterruptRemapping for VtdUnit<'_, R> {
         source: InterruptSource,
         target: InterruptTarget,
     ) -> Result<Remapped, IommuError> {
-        let mut state = self.state.lock();
-        let remap = state.remap.as_mut().ok_or(IommuError::OutOfRange)?;
+        let mut life = self.lifecycle.lock();
+        let remap = life.remap.as_mut().ok_or(IommuError::OutOfRange)?;
         let irte = format::irte(source, target, remap.extended).ok_or(IommuError::OutOfRange)?;
         let entry = remap
             .ids
             .take()
             .and_then(|entry| u16::try_from(entry).ok())
             .ok_or(IommuError::Exhausted)?;
-        let written = state
-            .remap
-            .as_ref()
-            .ok_or(IommuError::Hardware)
-            .and_then(|remap| self.write_irte(remap, entry, irte));
-        let confirmed =
-            written.and_then(|()| self.invalidate(&mut state, &[format::iec_entry(entry)]));
+        let confirmed = self
+            .write_irte(remap, entry, irte)
+            .and_then(|()| self.invalidate(&[format::iec_entry(entry)]));
         if confirmed.is_err() {
             // The unit may hold the entry already, so it is taken back and
             // never handed out again.
-            if let Some(remap) = state.remap.as_ref() {
-                let _ = self.clear_irte(remap, entry);
-            }
-            let _ = self.invalidate(&mut state, &[format::iec_entry(entry)]);
-            if let Some(remap) = state.remap.as_mut() {
-                remap.ids.release(u32::from(entry), false);
-            }
+            let _ = self.clear_irte(remap, entry);
+            let _ = self.invalidate(&[format::iec_entry(entry)]);
+            remap.ids.release(u32::from(entry), false);
             return Err(IommuError::Unconfirmed);
         }
         Ok(Remapped {
@@ -696,18 +755,16 @@ impl<R: Registers> InterruptRemapping for VtdUnit<'_, R> {
 
     fn release_interrupt(&self, entry: u32) -> Result<(), IommuError> {
         let entry = u16::try_from(entry).map_err(|_| IommuError::NotMapped)?;
-        let mut state = self.state.lock();
-        let remap = state.remap.as_ref().ok_or(IommuError::NotMapped)?;
+        let mut life = self.lifecycle.lock();
+        let remap = life.remap.as_mut().ok_or(IommuError::NotMapped)?;
         if !remap.ids.is_live(u32::from(entry)) {
             return Err(IommuError::NotMapped);
         }
-        let cleared = self.clear_irte(remap, entry);
-        let confirmed = cleared
-            .and_then(|()| self.invalidate(&mut state, &[format::iec_entry(entry)]))
+        let confirmed = self
+            .clear_irte(remap, entry)
+            .and_then(|()| self.invalidate(&[format::iec_entry(entry)]))
             .is_ok();
-        if let Some(remap) = state.remap.as_mut() {
-            remap.ids.release(u32::from(entry), confirmed);
-        }
+        remap.ids.release(u32::from(entry), confirmed);
         if confirmed {
             Ok(())
         } else {
@@ -718,29 +775,24 @@ impl<R: Registers> InterruptRemapping for VtdUnit<'_, R> {
     /// Compatibility-format interrupts are blocked from here on: every
     /// interrupt a device raises names an entry, or is refused.
     fn enable_remapping(&self) -> Result<(), IommuError> {
-        let state = self.state.lock();
-        if state.remap.is_none() {
+        let life = self.lifecycle.lock();
+        if life.remap.is_none() {
             return Err(IommuError::OutOfRange);
         }
+        let regs = self.regs.lock();
         // One command per write. Compatibility-format interrupts are refused
         // first, which changes nothing until remapping is on, so none slips
         // past it once it is.
-        self.command(&state.regs, 0, regs::GCMD_CFI, regs::GSTS_CFIS, 0)?;
-        self.command(
-            &state.regs,
-            regs::GCMD_IRE,
-            0,
-            regs::GSTS_IRES,
-            regs::GSTS_IRES,
-        )
+        self.command(&regs, 0, regs::GCMD_CFI, regs::GSTS_CFIS, 0)?;
+        self.command(&regs, regs::GCMD_IRE, 0, regs::GSTS_IRES, regs::GSTS_IRES)
     }
 
     fn disable_remapping(&self) -> Result<(), IommuError> {
-        let state = self.state.lock();
-        if state.remap.is_none() {
+        let life = self.lifecycle.lock();
+        if life.remap.is_none() {
             return Err(IommuError::OutOfRange);
         }
-        self.command(&state.regs, 0, regs::GCMD_IRE, regs::GSTS_IRES, 0)
+        self.command(&self.regs.lock(), 0, regs::GCMD_IRE, regs::GSTS_IRES, 0)
     }
 }
 
@@ -758,19 +810,13 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
     /// Enable translation, then retire firmware's protected memory regions,
     /// which translation now supersedes.
     fn enable(&self) -> Result<(), IommuError> {
-        let state = self.state.lock();
-        self.command(
-            &state.regs,
-            regs::GCMD_TE,
-            0,
-            regs::GSTS_TES,
-            regs::GSTS_TES,
-        )?;
+        let regs = self.regs.lock();
+        self.command(&regs, regs::GCMD_TE, 0, regs::GSTS_TES, regs::GSTS_TES)?;
         if self.cap.protected_low_memory() || self.cap.protected_high_memory() {
-            let pmen = state.regs.read32(regs::PMEN)?;
+            let pmen = regs.read32(regs::PMEN)?;
             if pmen & regs::PMEN_EPM != 0 {
-                state.regs.write32(regs::PMEN, pmen & !regs::PMEN_EPM)?;
-                self.wait_register(&state.regs, regs::PMEN, regs::PMEN_PRS, 0)?;
+                regs.write32(regs::PMEN, pmen & !regs::PMEN_EPM)?;
+                self.wait_register(&regs, regs::PMEN, regs::PMEN_PRS, 0)?;
             }
         }
         Ok(())
@@ -786,56 +832,55 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
             self.memory,
             self.profile.reach,
         )?;
-        let mut state = self.state.lock();
-        state
-            .domains
-            .try_reserve(1)
-            .map_err(|_| IommuError::Exhausted)?;
-        let id = state.ids.take_sixteen_bits()?;
-        let _ = state.domains.try_insert(id, table);
+        let mut life = self.lifecycle.lock();
+        let id = life.ids.take_sixteen_bits()?;
+        if let Err((err, _table)) = self.domains.insert(u32::from(id), table) {
+            life.ids.release(u32::from(id), true);
+            return Err(err);
+        }
         Ok(DomainId(u32::from(id)))
     }
 
     fn destroy_domain(&self, domain: DomainId) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        if !state.domains.contains_key(&id) {
+        let mut life = self.lifecycle.lock();
+        if !self.domains.contains(u32::from(id)) {
             return Err(IommuError::OutOfRange);
         }
-        if state.bindings.holders(u32::from(id)) != 0 {
+        if life.bindings.holders(u32::from(id)) != 0 {
             return Err(IommuError::DomainBusy);
         }
         // Nothing the unit cached for the id may outlive its tables, or
         // survive into the id's next owner.
-        let flush = [self.domain_iotlb(id)];
-        self.invalidate(&mut state, &flush)
+        self.invalidate(&[self.domain_iotlb(id)])
             .map_err(|_| IommuError::Unconfirmed)?;
-        state.domains.remove(&id);
-        state.ids.release(u32::from(id), true);
+        self.domains.remove(u32::from(id));
+        life.ids.release(u32::from(id), true);
         Ok(())
     }
 
     fn attach(&self, stream: u32, domain: DomainId) -> Result<(), IommuError> {
         let source = source_id(stream)?;
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        let root = state.domains.get(&id).ok_or(IommuError::OutOfRange)?.root();
-        let Some(reserved) = state.bindings.prepare_attach(stream, u32::from(id))? else {
+        let mut life = self.lifecycle.lock();
+        let root = self.domains.with(u32::from(id), |table| Ok(table.root()))?;
+        let Some(reserved) = life.bindings.prepare_attach(stream, u32::from(id))? else {
             return Ok(());
         };
         // A silenced stream may take an owner: it is blocked either way.
-        self.detach(&mut state, source)?;
+        self.detach(&mut life, source)?;
         self.write_context(
-            &mut state,
+            &mut life,
             source,
             format::context_low(root),
             format::context_high(id, self.levels),
         )?;
-        state.bindings.hold(reserved, stream, u32::from(id));
-        if let Err(err) = self.publish_new(&mut state, Some(source), id) {
+        life.bindings.hold(reserved, stream, u32::from(id));
+        let iotlb = self.domain_iotlb(id);
+        if let Err(err) = self.publish_context(&mut life, source, iotlb) {
             // The unit may already walk the entry, so it is taken back and
             // stays counted until that is confirmed.
-            self.detach(&mut state, source)?;
+            self.detach(&mut life, source)?;
             return Err(err);
         }
         Ok(())
@@ -843,30 +888,31 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
 
     fn block(&self, stream: u32) -> Result<(), IommuError> {
         let source = source_id(stream)?;
-        let mut state = self.state.lock();
-        if state.bindings.get(stream) == Some(Binding::Silenced) {
+        let mut life = self.lifecycle.lock();
+        if life.bindings.get(stream) == Some(Binding::Silenced) {
             return Ok(());
         }
-        self.detach(&mut state, source)
+        self.detach(&mut life, source)
     }
 
     fn silence(&self, stream: u32) -> Result<(), IommuError> {
         let source = source_id(stream)?;
-        let mut state = self.state.lock();
-        if state.bindings.get(stream) == Some(Binding::Silenced) {
+        let mut life = self.lifecycle.lock();
+        if life.bindings.get(stream) == Some(Binding::Silenced) {
             return Ok(());
         }
-        let reserved = state.bindings.reserve()?;
-        let (id, root) = self.silent_root(&mut state)?;
-        self.detach(&mut state, source)?;
+        let reserved = life.bindings.reserve()?;
+        let (id, root) = self.silent_root(&mut life)?;
+        self.detach(&mut life, source)?;
         self.write_context(
-            &mut state,
+            &mut life,
             source,
             format::context_low(root) | CONTEXT_FPD,
             format::context_high(id, self.levels),
         )?;
-        state.bindings.silence(reserved, stream);
-        self.publish_new(&mut state, Some(source), id)
+        life.bindings.silence(reserved, stream);
+        let iotlb = self.domain_iotlb(id);
+        self.publish_context(&mut life, source, iotlb)
     }
 
     fn map(
@@ -877,51 +923,50 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
         len: u64,
         access: Access,
     ) -> Result<(), IommuError> {
-        let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        state
-            .domains
-            .get_mut(&id)
-            .ok_or(IommuError::OutOfRange)?
-            .map(iova, phys, len, access)?;
-        if let Err(err) = self.publish_new(&mut state, None, id) {
-            // The caller frees the frames once this fails, so no leaf may stay
-            // behind to reach them.
-            let taken_back = state
-                .domains
-                .get_mut(&id)
-                .is_some_and(|table| table.unmap(iova, len).is_ok());
-            return Err(if taken_back {
-                err
-            } else {
-                IommuError::Unconfirmed
-            });
-        }
-        Ok(())
+        self.publish_mapped(domain, iova, |table| {
+            table.map(iova, phys, len, access).map(|()| len)
+        })
+    }
+
+    /// Every run installed, then published once.
+    fn map_runs(
+        &self,
+        domain: DomainId,
+        iova: u64,
+        runs: &[FrameRun],
+        access: Access,
+    ) -> Result<(), IommuError> {
+        self.publish_mapped(domain, iova, |table| table.map_runs(iova, runs, access))
     }
 
     fn unmap(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        self.state
-            .lock()
-            .domains
-            .get_mut(&id)
-            .ok_or(IommuError::OutOfRange)?
-            .unmap(iova, len)
+        self.domains
+            .with(u32::from(id), |table| table.unmap(iova, len))
     }
 
     fn sync(&self, domain: DomainId) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        if !state.domains.contains_key(&id) {
-            return Err(IommuError::OutOfRange);
-        }
         let flush = [self.domain_iotlb(id)];
-        self.invalidate(&mut state, &flush)?;
-        if let Some(table) = state.domains.get_mut(&id) {
-            table.release_retired();
-        }
-        Ok(())
+        self.domains.confirm(
+            u32::from(id),
+            |table| table,
+            &self.invalidator(),
+            |_| Ok((flush, None)),
+        )
+    }
+
+    /// Page-selective where the unit has it and one mask covers the range,
+    /// paging-structure entries included; the domain otherwise.
+    fn sync_range(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
+        let id = domain.sixteen_bits()?;
+        let (flush, by_pages) = self.range_iotlb(id, iova, len)?;
+        self.domains.confirm(
+            u32::from(id),
+            |table| table,
+            &self.invalidator(),
+            |_| Ok(([flush], by_pages.then_some((iova, len)))),
+        )
     }
 
     /// Unmasking delivers a fault event the mask held pending. A VT-d unit
@@ -930,13 +975,20 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
         let FaultRoute::Message { address, data } = route else {
             return Err(IommuError::OutOfRange);
         };
-        let state = self.state.lock();
-        state.regs.write32(regs::FEDATA, data)?;
-        state.regs.write32(regs::FEADDR, regs::low32(address))?;
-        state
-            .regs
-            .write32(regs::FEUADDR, regs::low32(address >> 32))?;
-        state.regs.write32(regs::FECTL, 0)
+        let regs = self.regs.lock();
+        regs.write32(regs::FEDATA, data)?;
+        regs.write32(regs::FEADDR, regs::low32(address))?;
+        regs.write32(regs::FEUADDR, regs::low32(address >> 32))?;
+        regs.write32(regs::FECTL, 0)
+    }
+
+    fn unroute_faults(&self) -> Result<(), IommuError> {
+        let regs = self.regs.lock();
+        regs.write32(regs::FECTL, regs::FECTL_IM)?;
+        if regs.read32(regs::FECTL)? & regs::FECTL_IM == 0 {
+            return Err(IommuError::Hardware);
+        }
+        Ok(())
     }
 
     /// At most one ring's worth of records per call. The fault event is raised

@@ -6,11 +6,12 @@ use std::vec::Vec;
 use tairix_kernel_iommu_api::conformance::{self, Fixture, TranslationProbe};
 use tairix_kernel_iommu_api::hostmem::HostFrames;
 use tairix_kernel_iommu_api::{
-    Clock, Domain, Fault, FaultReason, FaultRoute, IommuError, IommuUnit,
+    Clock, Domain, Fault, FaultReason, FaultRoute, IommuError, IommuUnit, IO_PAGE_SIZE,
 };
 
 use super::*;
 use crate::model::{event, op, Features, Model, Quirks};
+use tairix_kernel_iommu_api::FrameRun;
 
 /// A clock that moves a millisecond every time it is read, so a wait that
 /// never completes runs out of budget in a thousand spins.
@@ -55,6 +56,113 @@ fn a_stage_2_unit_confirming_by_consumption_passes_the_conformance_suite() {
     unit.enable().unwrap();
     conformance::run_all(&unit, &model, &fixture());
     assert!(model.processed(op::TLBI_S12_VMALL) > 0);
+}
+
+/// A short range is forgotten a page at a time at either stage, so what the
+/// domain still maps stays cached; a long one forgets the domain.
+#[test]
+fn a_range_sync_keeps_the_domain_s_other_translations_at_either_stage() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let clock = clock();
+    for stage2 in [true, false] {
+        let model = Model::new(
+            &frames,
+            Features {
+                stage2,
+                msi: !stage2,
+                ..QEMU
+            },
+        );
+        let unit = Smmuv3Unit::new(&model, &frames, &clock).unwrap();
+        unit.enable().unwrap();
+        let domain = unit.create_domain().unwrap();
+        unit.attach(STREAMS[0], domain).unwrap();
+        let id = domain.sixteen_bits().unwrap();
+        let tag = if stage2 {
+            u32::from(id)
+        } else {
+            0x1_0000 | u32::from(id)
+        };
+        let iova = 0x4000_0000;
+        let far = iova + 0x10_0000;
+        for (at, phys) in [(iova, PAGES[0]), (far, PAGES[1])] {
+            unit.map(domain, at, phys, 0x1000, Access::READ_WRITE)
+                .unwrap();
+            assert_eq!(model.access(STREAMS[0], at, false), Some(phys));
+        }
+        let (pages, whole) = (
+            model.processed(if stage2 {
+                op::TLBI_S2_IPA
+            } else {
+                op::TLBI_NH_VA
+            }),
+            model.processed(if stage2 {
+                op::TLBI_S12_VMALL
+            } else {
+                op::TLBI_NH_ASID
+            }),
+        );
+        unit.unmap(domain, iova, 0x1000).unwrap();
+        unit.sync_range(domain, iova, 0x1000).unwrap();
+        assert_eq!(model.access(STREAMS[0], iova, false), None);
+        assert!(model.caches(tag, far), "the other mapping stayed cached");
+        assert_eq!(
+            model.processed(if stage2 {
+                op::TLBI_S2_IPA
+            } else {
+                op::TLBI_NH_VA
+            }),
+            pages + 1
+        );
+        // An unaligned range reaches into the page its end falls in, and an
+        // empty one is no range.
+        let pair = iova + 0x2000;
+        unit.map(domain, pair, PAGES[0] + 0x2000, 0x2000, Access::READ_WRITE)
+            .unwrap();
+        assert!(model.access(STREAMS[0], pair + 0x1000, false).is_some());
+        unit.unmap(domain, pair, 0x2000).unwrap();
+        unit.sync_range(domain, pair + 0x800, 0x1000).unwrap();
+        assert!(
+            !model.caches(tag, pair + 0x1000),
+            "the page its end falls in is forgotten"
+        );
+        assert_eq!(
+            unit.sync_range(domain, pair, 0),
+            Err(IommuError::OutOfRange)
+        );
+        let span = (PAGE_INVALIDATIONS + 1) * IO_PAGE_SIZE;
+        unit.map(domain, iova, PAGES[0] + 0x10_0000, span, Access::READ_WRITE)
+            .unwrap();
+        unit.unmap(domain, iova, span).unwrap();
+        unit.sync_range(domain, iova, span).unwrap();
+        assert!(!model.caches(tag, far), "a long range forgets the domain");
+        assert_eq!(
+            model.processed(if stage2 {
+                op::TLBI_S12_VMALL
+            } else {
+                op::TLBI_NH_ASID
+            }),
+            whole + 1
+        );
+        unit.block(STREAMS[0]).unwrap();
+        unit.destroy_domain(domain).unwrap();
+    }
+}
+
+/// A page's invalidation leaves `Leaf` clear, so the walk caches above a
+/// freed table go with its leaf, and names the whole address its stage reads.
+#[test]
+fn a_page_invalidation_reaches_the_walk_caches_and_names_the_whole_address() {
+    let va = 0x00FF_FFFF_FFFF_F123;
+    let [head, address] = format::tlbi_va(0x1234, va);
+    assert_eq!(head & 0xFF, 0x12);
+    assert_eq!(head >> 48, 0x1234);
+    assert_eq!(address, va & !0xFFF, "bits 63:12; Leaf, TTL and TG clear");
+    let ipa = 0x000F_FFFF_FFFF_F456;
+    let [head, address] = format::tlbi_ipa(0x77, ipa);
+    assert_eq!(head & 0xFF, 0x2A);
+    assert_eq!((head >> 32) & 0xFFFF, 0x77);
+    assert_eq!(address, ipa & !0xFFF, "bits 51:12; Leaf, TTL and TG clear");
 }
 
 #[test]
@@ -181,11 +289,19 @@ fn streams_far_apart_each_link_their_own_second_level_table() {
     let clock = clock();
     let unit = Smmuv3Unit::new(&model, &frames, &clock).unwrap();
     unit.enable().unwrap();
-    let mut domain = Domain::new(&unit, &[]).unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
     for stream in [0x0001, 0x0002, 0xFF40] {
         domain.attach(stream).unwrap();
     }
-    let iova = domain.map(PAGES[0], 0, 0).unwrap();
+    let iova = domain
+        .map(
+            &[FrameRun {
+                phys: PAGES[0],
+                order: 0,
+            }],
+            0,
+        )
+        .unwrap();
     for stream in [0x0001, 0x0002, 0xFF40] {
         assert_eq!(model.access(stream, iova, true), Some(PAGES[0]));
     }
@@ -322,6 +438,8 @@ fn a_wired_route_raises_the_interrupts_and_a_message_needs_a_unit_that_sends_one
     assert_eq!(unit.route_faults(message), Err(IommuError::OutOfRange));
     unit.route_faults(FaultRoute::Wired { place: 1 }).unwrap();
     assert_eq!(model.interrupts(), regs::IRQ_EVENTQ | regs::IRQ_GERROR);
+    unit.unroute_faults().unwrap();
+    assert_eq!(model.interrupts(), 0, "unrouted, both are off");
 
     let frames = HostFrames::new(0x1_0000_0000);
     let sending = Model::new(&frames, Features { msi: true, ..QEMU });
@@ -553,9 +671,17 @@ fn a_narrow_output_s_domains_start_at_level_1_over_concatenated_tables() {
             "output {output:#05b}"
         );
         unit.enable().unwrap();
-        let mut domain = Domain::new(&unit, &[]).unwrap();
+        let mut domain = Domain::new(&unit, &[], &[]).unwrap();
         domain.attach(STREAMS[0]).unwrap();
-        let iova = domain.map(PAGES[0], 0, 0).unwrap();
+        let iova = domain
+            .map(
+                &[FrameRun {
+                    phys: PAGES[0],
+                    order: 0,
+                }],
+                0,
+            )
+            .unwrap();
         assert!(
             iova >> (bits - 1) == 1,
             "{iova:#x} is the top of {bits} bits"
@@ -659,6 +785,31 @@ fn an_attach_the_unit_cannot_confirm_is_taken_back() {
     assert_eq!(model.access(STREAMS[0], 0x1000, true), None);
     unit.block(STREAMS[0]).unwrap();
     unit.destroy_domain(domain).unwrap();
+}
+
+/// A completion message the unit could not write fails its sync once the
+/// waiter looks at the unit, well inside the budget, and the next sync is
+/// confirmed as before.
+#[test]
+fn an_aborted_completion_message_fails_its_sync_at_once() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, Features { msi: true, ..QEMU });
+    let clock = clock();
+    let unit = Smmuv3Unit::new(&model, &frames, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    model.quirk(Quirks {
+        abort_sync_message: true,
+        ..Quirks::default()
+    });
+    let before = clock.0.load(Ordering::Relaxed);
+    assert_eq!(unit.sync(domain), Err(IommuError::Unconfirmed));
+    let spent = clock.0.load(Ordering::Relaxed) - before;
+    assert!(
+        spent < tairix_kernel_iommu_api::COMMAND_BUDGET_NS / 10,
+        "{spent} ns"
+    );
+    assert_eq!(unit.sync(domain), Ok(()));
 }
 
 /// A refused ATS translation request is blocked, as every family classes it;

@@ -464,7 +464,7 @@ impl KernelArch for BinArch {
         self.irq_routing
     }
 
-    fn install_irq_dispatch(&self, table: &'static IrqTable) {
+    fn install_irq_dispatch(&self, table: &'static IrqTable) -> Result<(), &'static str> {
         // Publish the IrqTable into the dispatcher slot. A second
         // publish (e.g. a stray re-call from a future code path)
         // is fail-closed via `arch_halt` (one-shot
@@ -489,6 +489,7 @@ impl KernelArch for BinArch {
         // `init` drops to ring 3 — installing here cannot preempt the
         // cooperative kernel, only a runaway user task.
         crate::x86_64_preempt_wiring::install_callbacks();
+        Ok(())
     }
 
     fn wait_for_interrupt(&self) {
@@ -642,7 +643,7 @@ impl KernelArch for BinArch {
 
     fn kernel_msi_facility(
         &self,
-    ) -> Option<&'static (dyn tairix_kernel_core::MsiAllocFacility + 'static)> {
+    ) -> Option<&'static (dyn tairix_kernel_core::KernelMsiFacility + 'static)> {
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
             Some(&crate::x86_64::msi::KERNEL_MSI)
@@ -657,6 +658,7 @@ impl KernelArch for BinArch {
         &self,
         remapper: Option<&'static tairix_kernel_core::iommu::Translation>,
         cpus: u32,
+        _frames: &'static tairix_kernel_mem::FrameAllocator,
         log: &dyn tairix_log::Sink,
     ) -> tairix_kernel_core::iommu::InterruptRouting {
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
@@ -672,6 +674,10 @@ impl KernelArch for BinArch {
 
     fn unit_function(&self) -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
         crate::pci_host::unit_function()
+    }
+
+    fn pci_windows(&self, sink: &mut dyn FnMut(core::ops::Range<u64>)) {
+        crate::pci_host::decoded_windows(sink);
     }
 
     /// The boot probe owns the PCI configuration space it enumerated.

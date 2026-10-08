@@ -54,6 +54,37 @@ pub const fn context(stage: Stage, id: u32, root: u64, mode: u64, silent: bool) 
     }
 }
 
+/// `msiptp.MODE`: a flat MSI page table, indexed by interrupt file number.
+const MSI_FLAT: u64 = 1;
+/// `msipte.M`: memory-resident interrupt file mode.
+const MRIF_MODE: u64 = 1 << 1;
+
+/// The largest identity an interrupt file holds.
+pub const MAX_IDENTITY: u32 = 2047;
+
+/// `context` with its messages written to the page at `doorbell` confined
+/// through the one-entry MSI page table at `table`: `msiptp`, then a
+/// `msi_addr_mask` of no bits, so the doorbell's page alone is recognised.
+#[must_use]
+pub const fn with_messages(mut context: Context, table: u64, doorbell: u64) -> Context {
+    context[4] = MSI_FLAT << MODE_SHIFT | table >> IO_PAGE_SHIFT;
+    context[5] = 0;
+    context[6] = doorbell >> IO_PAGE_SHIFT;
+    context
+}
+
+/// The MSI page-table entry setting the identity a message writes in the
+/// 512-byte file at `file`, the unit then writing `notice` to the page at
+/// `page`.
+#[must_use]
+pub const fn mrif_entry(file: u64, page: u64, notice: u32) -> [u64; 2] {
+    let notice = notice as u64;
+    [
+        VALID | MRIF_MODE | (file >> 9) << 7,
+        (page >> IO_PAGE_SHIFT) << 10 | notice & 0x3FF | (notice >> 10 & 1) << 60,
+    ]
+}
+
 /// Whether `context` is valid.
 #[must_use]
 pub const fn is_valid(context: &Context) -> bool {
@@ -80,6 +111,32 @@ const FENCE_STORE: u64 = 1 << 10;
 /// `IOFENCE.C.PR` and `PW`: the devices' earlier reads and writes complete
 /// first.
 const FENCE_REQUESTS: u64 = 0b11 << 12;
+
+/// `IOTINVAL.AV`: only the page at `ADDR` is forgotten.
+const ADDRESS_VALID: u64 = 1 << 10;
+
+/// `ADDR`'s place in an `IOTINVAL`'s second word: the page number from bit 10.
+const fn page_operand(address: u64) -> u64 {
+    (address >> IO_PAGE_SHIFT) << 10
+}
+
+/// Forget the second-stage leaf cached for the page at `gpa` under `gscid`.
+#[must_use]
+pub const fn forget_second_stage_page(gscid: u16, gpa: u64) -> Command {
+    [
+        IOTINVAL | SECOND_STAGE | ADDRESS_VALID | GSCID_VALID | (gscid as u64) << GSCID_SHIFT,
+        page_operand(gpa),
+    ]
+}
+
+/// Forget the first-stage leaf cached for the page at `iova` under `pscid`.
+#[must_use]
+pub const fn forget_first_stage_page(pscid: u32, iova: u64) -> Command {
+    [
+        IOTINVAL | ADDRESS_VALID | PSCID_VALID | (pscid as u64) << PSCID_SHIFT,
+        page_operand(iova),
+    ]
+}
 
 /// Forget the second-stage translations cached for `gscid`, or for every one.
 #[must_use]

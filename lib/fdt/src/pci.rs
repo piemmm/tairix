@@ -1,8 +1,8 @@
 //! The generic PCI host bridge a device tree describes
 //! (`pci-host-ecam-generic`): its configuration region, buses and segment,
 //! the windows it forwards, how its INTx lines reach their interrupt
-//! controller, how its requester ids reach translation units, and the ports
-//! it marks external-facing.
+//! controller, how its requester ids reach translation units and MSI
+//! controllers, and the ports it marks external-facing.
 //!
 //! Layouts are the IEEE 1275 PCI bus binding's and those of the Devicetree
 //! spec v0.4 §2.4.
@@ -91,6 +91,9 @@ pub struct PciHost<'a> {
     node: (usize, u32),
     interrupt_map: Option<InterruptMap<'a>>,
     iommu_map: Result<Option<IdMap<'a>>, FdtError>,
+    msi_map: Result<Option<IdMap<'a>>, FdtError>,
+    /// `msi-parent`'s controller; `Err` for one naming no node.
+    msi_parent: Result<Option<u32>, FdtError>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -100,6 +103,13 @@ struct InterruptMap<'a> {
 }
 
 impl<'a> PciHost<'a> {
+    /// Its node's [`Node::offset`](crate::Node::offset), by which a pass
+    /// over the tree finds it.
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.node.0
+    }
+
     /// The windows it forwards.
     pub fn windows(&self) -> impl Iterator<Item = PciWindow> + '_ {
         self.windows.iter().flatten().copied()
@@ -115,6 +125,24 @@ impl<'a> PciHost<'a> {
     /// devices are behind units no one can name their streams on.
     pub fn iommu_map(&self) -> Result<Option<IdMap<'a>>, FdtError> {
         self.iommu_map
+    }
+
+    /// The MSI controller the messages of requester id `requester` are
+    /// written to, and the id they reach it as (`pci-msi.txt`): through
+    /// `msi-map` where the host has one, a requester it maps none of raising
+    /// none; else to `msi-parent`'s controller, as the requester id itself.
+    /// `Ok(None)` for a host naming neither.
+    ///
+    /// # Errors
+    ///
+    /// [`FdtError::BadProperty`] for an `msi-map` that does not decode or an
+    /// `msi-parent` naming no node: no controller can be told the host's
+    /// messages apart.
+    pub fn msi_target(&self, requester: u32) -> Result<Option<(u32, u32)>, FdtError> {
+        match self.msi_map? {
+            Some(map) => Ok(map.map(requester)),
+            None => Ok(self.msi_parent?.map(|parent| (parent, requester))),
+        }
     }
 
     /// Whether the port at configuration `address` — `bus << 16 | device <<
@@ -146,6 +174,40 @@ impl<'a> PciHost<'a> {
             }
         }
         false
+    }
+
+    /// Visit each translation unit that is a function on the host's root bus
+    /// — a child of its node holding `#iommu-cells`, as the `virtio,pci-iommu`
+    /// binding places one — with its requester id: the root bus `bus-range`
+    /// starts at, and the device and function its `reg` names. A unit below a
+    /// bridge is no root-bus function, and is not visited.
+    pub fn units(&self, fdt: &Fdt<'a>, visit: &mut dyn FnMut(u16, &Node<'a>)) {
+        let (offset, depth) = self.node;
+        let mut nodes = fdt.operational_nodes();
+        if !nodes.any(|node| node.is_ok_and(|node| node.offset() == offset)) {
+            return;
+        }
+        for node in nodes {
+            let Ok(node) = node else {
+                return;
+            };
+            if node.depth() <= depth {
+                return;
+            }
+            if node.depth() != depth + 1 || crate::iommu::iommu_cells(&node).is_none() {
+                continue;
+            }
+            // `reg`'s first cell is the PCI binding's `phys.hi`: its third
+            // byte the device and function.
+            let Some(devfn) = node
+                .property("reg")
+                .and_then(|reg| reg.read_be_u32(0).ok())
+                .map(|reg| reg.to_be_bytes()[2])
+            else {
+                continue;
+            };
+            visit(u16::from_be_bytes([self.buses.0, devfn]), &node);
+        }
     }
 
     /// The interrupt INTx pin `pin` (1 for INTA) of the device in slot
@@ -313,7 +375,23 @@ fn host_of<'a>(
         node: (node.offset(), node.depth()),
         interrupt_map,
         iommu_map: IdMap::of(node, "iommu-map", "iommu-map-mask"),
+        msi_map: IdMap::of(node, "msi-map", "msi-map-mask"),
+        msi_parent: msi_parent_of(node),
     })
+}
+
+/// The controller `node`'s `msi-parent` names: its first cell, any specifier
+/// after it being one a PCI host's requester ids replace.
+fn msi_parent_of(node: &Node<'_>) -> Result<Option<u32>, FdtError> {
+    let Some(parent) = node.property("msi-parent") else {
+        return Ok(None);
+    };
+    parent
+        .read_be_u32(0)
+        .ok()
+        .and_then(crate::phandle_ref)
+        .map(Some)
+        .ok_or(FdtError::BadProperty)
 }
 
 /// The windows the host's `ranges` names, each CPU address translated to

@@ -205,7 +205,7 @@ is what makes `KernelMemoryStats::kernel_heap_bytes` a live reading of the
 heap's capacity rather than a boot-time constant.
 
 **The re-entrancy trap** is why the bookkeeping is new code rather than a
-reuse. `FrameAllocator::alloc_chunks` returns a `Vec` — its order-step-down
+reuse. `FrameAllocator::alloc_chunks_user` returns `Chunks` (a `SmallVec`) — its order-step-down
 *algorithm* is reused inline, never its surface. `AnonWindowMap` keeps its
 holes in `BTreeMap`s and would deadlock, so `kvslots::SlotWindow` is its
 heap-free counterpart: one address-sorted boundary-tag list covering

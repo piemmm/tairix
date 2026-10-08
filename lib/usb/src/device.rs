@@ -25,6 +25,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::DmaReach;
 use tairix_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource};
 use tairix_inline::BitSet256;
 
@@ -65,8 +66,8 @@ pub trait DmaBank {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::LengthOutOfRange`] on genuine memory exhaustion
-    ///   (the DMA pool, or the bank's bookkeeping heap).
+    /// * [`DriverError::OutOfMemory`] on genuine memory exhaustion (the DMA
+    ///   pool, or the bank's bookkeeping heap).
     /// * [`DriverError::OutOfRange`] if the chunk would lie beyond the
     ///   device-visible aperture the controller can reach, or `len` is 0.
     fn grow(&mut self, len: usize) -> Result<usize, DriverError>;
@@ -114,6 +115,14 @@ pub trait DmaBank {
     ///
     /// [`DriverError::OutOfRange`] if `offset` lies in no live chunk.
     fn device_addr_of(&self, offset: usize) -> Result<u64, DriverError>;
+
+    /// Place every later chunk where a controller driving `reach` reaches
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal to bound its regions so.
+    fn narrow_reach(&mut self, reach: DmaReach) -> Result<(), DriverError>;
 
     /// Copy `buf.len()` bytes at `offset` into `buf`.
     ///
@@ -1994,7 +2003,7 @@ impl ReportQueue {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(total)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         bytes.resize(total, 0);
         *self = Self {
             bytes,
@@ -2779,9 +2788,7 @@ struct AwaitedDisable {
 /// exhaustion of the bookkeeping heap surfaces as a typed error, never a
 /// panic (deterministic OOM).
 fn push_free_entry<T>(table: &mut Vec<Option<T>>) -> Result<usize, DriverError> {
-    table
-        .try_reserve(1)
-        .map_err(|_| DriverError::LengthOutOfRange)?;
+    table.try_reserve(1).map_err(|_| DriverError::OutOfMemory)?;
     table.push(None);
     Ok(table.len() - 1)
 }
@@ -2952,11 +2959,12 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     ///   base is zero, not 64-byte aligned, or (when the controller needs
     ///   scratchpad) leaves the scratchpad pages off a controller-page
     ///   boundary.
-    /// * [`DriverError::LengthOutOfRange`] if the bank cannot supply the
-    ///   shared chunk (deterministic OOM — the [`DmaHost`] exhaustion
-    ///   convention).
+    /// * [`DriverError::OutOfMemory`] if the bank cannot supply the shared
+    ///   chunk (deterministic OOM — the [`DmaHost`] exhaustion convention).
     /// * [`DriverError::DeviceFault`] if the controller does not
     ///   start within `budget` polls.
+    /// * The bank's refusal to place chunks where a controller without AC64
+    ///   reaches them.
     ///
     /// [`DmaHost`]: tairix_abi::driver::dma::DmaHost
     pub fn start(
@@ -2968,6 +2976,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         let mut xhci = xhci;
         let mut dma = dma;
         dma.device_quiesced();
+        dma.narrow_reach(xhci.dma_reach())?;
         let layout = Layout::new(
             xhci.max_slots(),
             xhci.csz(),
@@ -4480,7 +4489,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         let mut config_bytes = Vec::new();
         config_bytes
             .try_reserve_exact(CTRL_DATA_LEN)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         config_bytes.resize(CTRL_DATA_LEN, 0);
         let total = self.read_configuration(&mut config_bytes)?;
         let interfaces = InterfaceInfo::decode_all(&config_bytes[..total])?;

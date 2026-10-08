@@ -3,7 +3,7 @@
 use core::cell::Cell;
 use core::ptr::NonNull;
 
-use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabCoherencyFn};
+use tairix_abi::driver::dma::{DmaHost, DmaReach, DmaSlab, PoolId, SlabCoherencyFn, SlabEnd};
 use tairix_abi::driver::i2c::I2cPort;
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
@@ -81,6 +81,8 @@ pub struct RtDriverHost<S: GrantSyscalls> {
     dma_window: Option<usize>,
     /// The shared buffer has been handed out ([`Self::shared_buffer`]).
     shared_taken: Cell<bool>,
+    /// What the driver's device reaches, stated with every carve.
+    dma_reach: Cell<DmaReach>,
 }
 
 impl<S: GrantSyscalls> RtDriverHost<S> {
@@ -215,6 +217,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             irq_handle: Cell::new(0),
             dma_window: None,
             shared_taken: Cell::new(false),
+            dma_reach: Cell::new(DmaReach::FULL),
         }
     }
 
@@ -618,11 +621,13 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
             return Err(DriverError::PermissionDenied);
         }
         if size == 0 {
-            return Err(DriverError::LengthOutOfRange);
+            return Err(DriverError::BufferTooSmall);
         }
         let grant = self.dma_grant().ok_or(DriverError::Unsupported)?;
         let mut device: u64 = 0;
-        let ret = self.syscalls.dma_alloc(grant.handle, size, &mut device);
+        let ret = self
+            .syscalls
+            .dma_alloc(grant.handle, size, self.dma_reach.get(), &mut device);
         if ret <= 0 {
             return Err(dma_error(ret));
         }
@@ -634,8 +639,8 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
         self.next_slot.set(slot.wrapping_add(1));
         let pool_ptr: *const () = core::ptr::from_ref::<Self>(self).cast::<()>();
         // SAFETY: `dma_alloc` carved exactly `size` bytes of zeroed,
-        // physically-contiguous, coherent, `RW` (non-executable),
-        // guard-bracketed memory mapped into this process's own address space.
+        // coherent, `RW` (non-executable), guard-bracketed memory mapped
+        // contiguously into this process's own address space.
         // `ptr` is its non-null, page-aligned CPU base and `device` its
         // device-visible base; the region is exclusively this slab's (a fresh
         // carve per call), so no other live reference aliases it. `pool_ptr`
@@ -670,6 +675,11 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
             let _ = self.syscalls.dma_quiesced();
         }
     }
+
+    fn narrow_dma_reach(&self, reach: DmaReach) -> Result<(), DriverError> {
+        self.dma_reach.set(self.dma_reach.get().min(reach));
+        Ok(())
+    }
 }
 
 /// Drop-path shim invoked by [`DmaSlab::drop`] for a slab minted by
@@ -696,7 +706,11 @@ unsafe fn free_dma_shim<S: GrantSyscalls>(
     cpu: NonNull<u8>,
     _slot: usize,
     _len: usize,
+    end: SlabEnd,
 ) {
+    if end == SlabEnd::Withheld {
+        return;
+    }
     // SAFETY: `pool` was produced at the matching `from_pool` call by casting
     // `&RtDriverHost<S>` through `*const Self as *const ()`; the host outlives
     // the slab (see the `from_pool` SAFETY note), so this observes a live host
@@ -827,10 +841,6 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
         self.syscalls.boot_facts()
     }
 
-    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
-        Some(self)
-    }
-
     fn mmio_mapper(&self) -> Option<&dyn MmioMapper> {
         Some(self)
     }
@@ -890,16 +900,15 @@ fn mmio_error(ret: i64) -> MmioMapError {
 /// Map a non-positive `dma_alloc` result to a [`DriverError`].
 ///
 /// `ret` is `≤ 0`. A kernel `PermissionDenied` maps to
-/// [`DriverError::PermissionDenied`]; an exhausted pool / over-limit / oversize
-/// carve maps to [`DriverError::LengthOutOfRange`] (the documented
-/// [`DmaHost::alloc_dma_zeroed`] exhaustion error); anything else (an inert
-/// facility, an unknown code, a `0` base) is [`DriverError::Unsupported`].
+/// [`DriverError::PermissionDenied`]; exhausted memory or DMA budget to
+/// [`DriverError::OutOfMemory`]; a carve larger than the kernel can make to
+/// [`DriverError::LengthOutOfRange`]; anything else (an inert facility, an
+/// unknown code, a `0` base) is [`DriverError::Unsupported`].
 fn dma_error(ret: i64) -> DriverError {
     match Errno::try_from_syscall(ret) {
         Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
-        Some(Errno::LengthOutOfRange | Errno::OutOfMemory | Errno::OutOfRange) => {
-            DriverError::LengthOutOfRange
-        }
+        Some(Errno::OutOfMemory) => DriverError::OutOfMemory,
+        Some(Errno::LengthOutOfRange | Errno::OutOfRange) => DriverError::LengthOutOfRange,
         _ => DriverError::Unsupported,
     }
 }

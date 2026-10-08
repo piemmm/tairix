@@ -81,6 +81,9 @@ tairix-syshelp = { path = "../syshelp", version = "=0.0.0" }
 # crate keeps the test-execution contract (`isa-debug-exit`, strict
 # timeouts, no retries) in exactly one place.
 tairix-qemu = { path = "../qemu", version = "=0.0.0" }
+# The fixtures the runner plants for a guest to check are defined once,
+# beside what the guests' witnesses read.
+tairix-itest-witness = { path = "../../tests/integration/witness", version = "=0.0.0" }
 # The fatal-fault verticals name the record a fatal report ends with through
 # its one definition rather than restating it.
 tairix-arch-api = { path = "../../kernel/arch/api", version = "=0.0.0" }

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-itest-witness"
-description = "What the freestanding QEMU integration kernels' PASS witnesses read off an audit record, defined once and host-unit-tested so no vertical re-derives it. Test scaffolding: nothing in TAIRiX itself links it."
+description = "What the freestanding QEMU integration kernels' PASS witnesses read off an audit record or a fixture the runner plants, defined once and host-unit-tested so no vertical re-derives it. Test scaffolding: nothing in TAIRiX itself links it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

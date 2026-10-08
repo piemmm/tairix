@@ -68,66 +68,18 @@
 // --- Freestanding test bin (`aarch64-unknown-none`) ----------------
 
 #[cfg(itest_aarch64)]
-mod kernel {
-    use core::panic::PanicInfo;
+mod vertical;
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, SERIAL_SINK};
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
-    use tairix_kernel::aarch64::boot as boot_aarch64;
-
-    // The canonical QEMU `virt` device tree, dumped and embedded at build
-    // time (`build.rs`). The boot pipeline discovers the board from it
-    // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
+#[cfg(itest_aarch64)]
+mod tree {
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
+}
 
-    /// Static boot heap, mirroring the production aarch64 kernel binary's
-    /// `.bss`-resident heap (zeroed by the boot trampoline).
-    ///
-    /// `static mut` because the free-list allocator hands out disjoint slices
-    /// via an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
-
-    /// Global allocator backed by [`HEAP`].
-    ///
-    /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
-    /// allocator is its only consumer.
-    #[global_allocator]
-    static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
-
-    /// Forward to the shared aarch64 panic bridge. A panic parks the CPU; the
-    /// guest never self-exits, so the run times out and the harness reports
-    /// `Outcome::Timeout` — the documented fail-loud behaviour.
-    #[panic_handler]
-    fn tairix_netstack_autoload_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
-        handle_panic_via_serial(info)
-    }
-
-    /// Boot entry point — the symbol the arch crate's `boot.s` trampoline
-    /// calls (via `tairix_arch_aarch64_main`).
-    ///
-    /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline. [`SERIAL_SINK`]
-    /// takes both the log and the audit streams, so every boot/autoload/bind/
-    /// echo record reaches the QEMU transcript for diagnosis. The guest does
-    /// not self-exit: the harness ends the run when the host peer confirms the
-    /// echo round-trip (its success gate), so teardown can never precede that
-    /// confirmation. Boot at the default `Info` filter: keeping the noisier
-    /// `Debug` syscall trace off the wire stops the console-login read-retry
-    /// chatter from crowding the network timeline out of a failing run's serial
-    /// tail.
-    #[no_mangle]
-    pub extern "C" fn kernel_main(_dtb: u64) -> ! {
-        let dtb = DTB_BLOB.as_ptr() as u64;
-        boot_aarch64::boot(
-            dtb,
-            &ALLOCATOR,
-            &SERIAL_SINK,
-            &SERIAL_SINK,
-            tairix_log::Level::Info,
-            &tairix_kernel::hwtree_store::HW_TREE_SOURCE,
-        )
-    }
+/// The symbol the arch crate's boot trampoline calls: the one-CPU machine.
+#[cfg(itest_aarch64)]
+#[no_mangle]
+pub extern "C" fn kernel_main(_dtb: u64) -> ! {
+    vertical::boot(tree::DTB_BLOB)
 }
 
 // --- Host stub -----------------------------------------------------

@@ -295,7 +295,15 @@ window every bus between it and the root composes to through its
 `dma-ranges`, carrying the bus address it starts at. A window is flagged
 `HwResource::DMA_TRANSLATED`, because its bus address may be `0`: an
 unflagged `Dma` resource is a plain addressing limit, whose length is the
-largest buffer rather than a window's extent. Each entry of a consumer's `dmas`
+largest buffer rather than a window's extent. Every `Dma` resource also
+states whether its master snoops the CPU's caches
+(`HwResource::DMA_SNOOPED`, read as `HwResource::dma_coherence`): what
+`dma-coherent` or `dma-noncoherent` says on the node or the nearest node
+above it, else the architecture's convention (Arm's that a master does not,
+RISC-V's that it does), and on x86 that every master does. A child a bus
+driver publishes inherits it, because its `Dma` grant must carry its
+parent's flags to be covered. A translation unit states its own as a
+`Dma` resource declaring no reach. Each entry of a consumer's `dmas`
 becomes a `DmaRequest` naming its controller's endpoint, the specifier (up
 to two cells), the entry's position, and its `dma-names` string. The
 [DMA-engine class](dma.md) page covers both.

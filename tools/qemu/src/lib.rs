@@ -833,6 +833,24 @@ pub(crate) fn virtio_pci_options(spec: &Spec) -> &'static str {
     }
 }
 
+/// The PCI slot the first `edu` message source sits in, the next ones after
+/// it.
+pub const MESSAGE_SOURCE_SLOT: u32 = 2;
+
+/// `edu` functions raising MSIs on demand, a slot each from
+/// [`MESSAGE_SOURCE_SLOT`], for a vertical proving which messages the
+/// interrupt translation lets through.
+pub(crate) fn message_source_args(spec: &Spec) -> Vec<OsString> {
+    (0..spec.devices.message_sources)
+        .flat_map(|slot| {
+            [
+                "-device".into(),
+                format!("edu,addr={:#x}", u32::from(slot) + MESSAGE_SOURCE_SLOT).into(),
+            ]
+        })
+        .collect()
+}
+
 /// The input devices as PCI functions on an FDT board's host bridge, each
 /// in a slot four past the last: the host's `interrupt-map` keys on the slot
 /// modulo four, so every INTA pin lands on one line they all share.
@@ -886,6 +904,12 @@ pub struct AttachedDevices {
     /// AES-CBC, which is what the accelerator vertical checks the device's
     /// arithmetic against. Only the aarch64 argv honours it today.
     pub crypto_accelerator: bool,
+    /// QEMU `edu` test functions on the board's PCI host, each raising an
+    /// MSI whenever the guest asks it to, carrying the data the guest wrote
+    /// to its MSI capability: a vertical proving which messages the
+    /// interrupt translation lets through drives them. The aarch64 and
+    /// riscv64 argvs honour it.
+    pub message_sources: u8,
     /// The pointing devices beside the keyboard.
     pub pointing: PointingDevices,
     /// Where the input devices sit.
@@ -945,6 +969,7 @@ impl AttachedDevices {
     pub const NONE: Self = Self {
         ramfb: false,
         crypto_accelerator: false,
+        message_sources: 0,
         pointing: PointingDevices::NONE,
         input: InputPlacement::Board,
     };
@@ -975,19 +1000,105 @@ pub enum DmaTranslation {
     /// Through a RISC-V IOMMU with the first stage alone: the same unit with
     /// `riscv-iommu-device.g-stage=false`.
     RiscvStage1,
+    /// Through the paravirtual unit every board can attach: a
+    /// `virtio-iommu-pci`, described by the ACPI VIOT on x86_64 and by the
+    /// device tree elsewhere.
+    VirtioIommu,
 }
 
 impl DmaTranslation {
-    /// The architecture whose board can attach the unit; [`None`] for
-    /// [`Self::Absent`], which every board can run.
+    /// The architecture whose board can attach the unit; [`None`] for one
+    /// every board can run.
     #[must_use]
     pub const fn arch(self) -> Option<Arch> {
         match self {
-            Self::Absent => None,
+            Self::Absent | Self::VirtioIommu => None,
             Self::Vtd | Self::AmdVi => Some(Arch::X86_64),
             Self::Smmuv3Stage1 | Self::Smmuv3Stage2 => Some(Arch::Aarch64),
             Self::RiscvStage1 | Self::RiscvStage2 => Some(Arch::Riscv64),
         }
+    }
+
+    /// The unit as the device a run creates ahead of every device it
+    /// translates — QEMU gives a PCI device an IOMMU address space only if
+    /// the IOMMU exists first — or [`None`] for one the board builds itself.
+    #[must_use]
+    pub const fn unit_device(self) -> Option<&'static str> {
+        match self {
+            Self::Vtd => Some("intel-iommu,intremap=on,eim=on"),
+            // QEMU leaves AMD-Vi's own translation off by default.
+            Self::AmdVi => Some("amd-iommu,dma-remap=on,intremap=on,xtsup=on"),
+            // In a slot of its own, whose INTx line on an FDT board no other
+            // function's pin shares.
+            Self::VirtioIommu => Some("virtio-iommu-pci,addr=0x2"),
+            Self::Absent
+            | Self::Smmuv3Stage1
+            | Self::Smmuv3Stage2
+            | Self::RiscvStage1
+            | Self::RiscvStage2 => None,
+        }
+    }
+
+    /// Whether the unit remaps interrupts: in extended mode, for a CPU with
+    /// x2APIC.
+    #[must_use]
+    pub const fn remaps(self) -> bool {
+        matches!(self, Self::Vtd | Self::AmdVi)
+    }
+}
+
+/// The interrupt controllers a board is built with, where it offers a
+/// choice.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InterruptControllers {
+    /// The board's own default: aarch64 `virt`'s GICv2, riscv64 `virt`'s
+    /// PLIC.
+    #[default]
+    Default,
+    /// aarch64 `virt`'s GICv3, with its interrupt translation service.
+    Gicv3,
+    /// riscv64 `virt`'s AIA: an APLIC delivering by message to each hart's
+    /// IMSIC.
+    Aia,
+}
+
+impl InterruptControllers {
+    /// The architecture whose board offers them; [`None`] for the default
+    /// every board has.
+    #[must_use]
+    pub const fn arch(self) -> Option<Arch> {
+        match self {
+            Self::Default => None,
+            Self::Gicv3 => Some(Arch::Aarch64),
+            Self::Aia => Some(Arch::Riscv64),
+        }
+    }
+}
+
+/// The board a run boots, where it offers a choice: the unit in front of its
+/// PCI devices and its interrupt controllers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Board {
+    /// How the board's PCI devices reach memory.
+    pub translation: DmaTranslation,
+    /// Its interrupt controllers.
+    pub interrupts: InterruptControllers,
+}
+
+impl Board {
+    /// The default board behind `translation`.
+    #[must_use]
+    pub const fn translated(translation: DmaTranslation) -> Self {
+        Self {
+            translation,
+            interrupts: InterruptControllers::Default,
+        }
+    }
+
+    /// The same board built with `interrupts`.
+    #[must_use]
+    pub const fn with_interrupts(self, interrupts: InterruptControllers) -> Self {
+        Self { interrupts, ..self }
     }
 }
 
@@ -1035,6 +1146,9 @@ pub struct Spec {
     /// every x86_64 test that does not care; set through
     /// [`Spec::with_x86_64_cpu`] and read through [`Spec::x86_64_cpu`].
     x86_64_cpu: Option<&'static str>,
+    /// How an x86_64 board lays its CPUs out; set through
+    /// [`Spec::with_x86_64_topology`].
+    pub x86_64_topology: x86_64::Topology,
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
     pub block_devices: Vec<BlockDevice>,
@@ -1046,6 +1160,8 @@ pub struct Spec {
     pub devices: AttachedDevices,
     /// How the board's PCI devices reach memory.
     pub dma_translation: DmaTranslation,
+    /// The interrupt controllers the board is built with.
+    pub interrupts: InterruptControllers,
     /// When `Some`, start the board's emulated real-time clock at this
     /// instant (Unix seconds) instead of the host clock, through QEMU's
     /// `-rtc base=<datetime>`. Every board QEMU models an RTC for — the
@@ -1227,10 +1343,12 @@ impl Spec {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -1277,6 +1395,14 @@ impl Spec {
     #[must_use]
     pub fn with_x86_64_cpu(mut self, cpu: &'static str) -> Self {
         self.x86_64_cpu = Some(cpu);
+        self
+    }
+
+    /// Lay the x86_64 board's CPUs out as `topology` says. Ignored on every
+    /// other arch.
+    #[must_use]
+    pub fn with_x86_64_topology(mut self, topology: x86_64::Topology) -> Self {
+        self.x86_64_topology = topology;
         self
     }
 
@@ -1380,10 +1506,12 @@ impl Spec {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -1413,10 +1541,12 @@ impl Spec {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -1546,12 +1676,36 @@ impl Spec {
         self
     }
 
+    /// Attach `count` QEMU `edu` test functions to the PCI host, each in a
+    /// slot of its own from 2 up, for a vertical that raises MSIs on demand.
+    #[must_use]
+    pub fn with_message_sources(mut self, count: u8) -> Self {
+        self.devices.message_sources = count;
+        self
+    }
+
     /// Put the translation unit `unit` in front of the PCI devices, so every
     /// virtio function reaches memory through the domain the guest gave it.
     #[must_use]
     pub fn with_dma_translation(mut self, unit: DmaTranslation) -> Self {
         self.dma_translation = unit;
         self
+    }
+
+    /// Build the board with `interrupts`.
+    #[must_use]
+    pub fn with_interrupts(mut self, interrupts: InterruptControllers) -> Self {
+        self.interrupts = interrupts;
+        self
+    }
+
+    /// The board this run boots.
+    #[must_use]
+    pub const fn board(&self) -> Board {
+        Board {
+            translation: self.dma_translation,
+            interrupts: self.interrupts,
+        }
     }
 
     /// Put the input devices behind a PCIe-to-PCI bridge
@@ -1942,6 +2096,15 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
             format!("no DMA translation unit to attach on {:?}", spec.arch),
         ));
     }
+    if spec.interrupts.arch().is_some_and(|arch| arch != spec.arch) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "no {:?} interrupt controllers on {:?}",
+                spec.interrupts, spec.arch
+            ),
+        ));
+    }
     // The bridge hangs from the `q35` PCIe root, which only a translated
     // x86_64 run boots.
     let refused = match spec.devices.input {
@@ -1951,7 +2114,11 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
             .then_some("an input bridge needs the translated x86_64 q35 board"),
         InputPlacement::SharedLine => (!matches!(spec.arch, Arch::Aarch64 | Arch::Riscv64))
             .then_some("a shared input line needs an aarch64 or riscv64 virt board"),
-    };
+    }
+    .or_else(|| {
+        (spec.dma_translation == DmaTranslation::VirtioIommu && spec.devices.message_sources > 0)
+            .then_some("the virtio-iommu takes the slot the first message source would")
+    });
     if let Some(refused) = refused {
         return Err(io::Error::new(io::ErrorKind::Unsupported, refused));
     }
@@ -3547,21 +3714,26 @@ impl InjectionState {
         what: &str,
         command: &str,
     ) -> Result<(), String> {
-        let fail = |e: io::Error| format!("{what} injection failed: {e}");
-        if self.conn.is_none() {
-            // Every run attaches a monitor, so this is unreachable in a real
-            // run; refuse rather than panic if one ever is not.
-            let mon = monitor.ok_or_else(|| fail(io::Error::other("no monitor attached")))?;
-            self.conn = Some(UnixStream::connect(mon.path()).map_err(fail)?);
-        }
-        let Some(stream) = self.conn.as_mut() else {
-            // Unreachable after the ensure above; refuse rather than panic.
-            return Err(fail(io::Error::other("monitor connection vanished")));
-        };
-        stream
-            .write_all(format!("{command}\n").as_bytes())
-            .and_then(|()| stream.flush())
-            .map_err(fail)
+        self.connected(monitor)
+            .and_then(|stream| {
+                stream.write_all(format!("{command}\n").as_bytes())?;
+                stream.flush()
+            })
+            .map_err(|e| format!("{what} injection failed: {e}"))
+    }
+
+    /// The run's one monitor connection, opened on first use.
+    fn connected(&mut self, monitor: Option<&ReservedSocket>) -> io::Result<&mut UnixStream> {
+        let stream = self.conn.take().map_or_else(
+            || {
+                // Every run attaches a monitor, so this is unreachable in a
+                // real run; refuse rather than panic if one ever is not.
+                let mon = monitor.ok_or_else(|| io::Error::other("no monitor attached"))?;
+                UnixStream::connect(mon.path())
+            },
+            Ok,
+        )?;
+        Ok(self.conn.insert(stream))
     }
 
     /// Read every vCPU's register file off the QEMU monitor, for a run that
@@ -3588,35 +3760,46 @@ impl InjectionState {
 
     /// The raw monitor answer [`Self::hang_report`] names addresses from.
     fn read_monitor_state(&mut self, monitor: Option<&ReservedSocket>) -> String {
-        if let Err(e) = self.send(monitor, "hang diagnosis", "info cpus") {
-            return format!("unavailable: {e}\n");
+        // Bounded twice over — per-read and in total — because the monitor is
+        // being read at the one moment the run has already decided something
+        // is wrong, so it must never become a second thing that hangs. Armed
+        // before asking, while the monitor is still there to take the option:
+        // macOS refuses options on a socket its peer has shut both ways, and a
+        // read of such a socket cannot block anyway.
+        if let Ok(stream) = self.connected(monitor) {
+            let _ = stream.set_read_timeout(Some(MONITOR_READ_QUIET));
         }
-        if let Err(e) = self.send(monitor, "hang diagnosis", "info registers -a") {
-            return format!("unavailable: {e}\n");
+        for command in ["info cpus", "info registers -a"] {
+            if let Err(e) = self.send(monitor, "hang diagnosis", command) {
+                return format!("unavailable: {e}\n");
+            }
         }
         let Some(stream) = self.conn.as_mut() else {
             return String::from("unavailable: monitor connection vanished\n");
         };
-        // Bounded twice over — per-read and in total — because the monitor is
-        // being read at the one moment the run has already decided something
-        // is wrong, so it must never become a second thing that hangs.
-        if let Err(e) = stream.set_read_timeout(Some(MONITOR_READ_QUIET)) {
-            return format!("unavailable: {e}\n");
-        }
         let deadline = Instant::now() + MONITOR_READ_BUDGET;
         let mut raw: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
+        let mut closed = false;
         while Instant::now() < deadline && raw.len() < MONITOR_READ_MAX_BYTES {
             // A closed socket and a read that times out both mean the reply
             // has ended: the monitor sends nothing further until it is asked
             // again, so neither is a failure.
             match stream.read(&mut chunk) {
-                Ok(n) if n > 0 => raw.extend_from_slice(&chunk[..n]),
-                _ => break,
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(n) => raw.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
             }
         }
         if raw.is_empty() {
-            return String::from("unavailable: the monitor answered nothing\n");
+            return String::from(if closed {
+                "unavailable: the monitor closed\n"
+            } else {
+                "unavailable: the monitor answered nothing\n"
+            });
         }
         String::from_utf8_lossy(&raw).into_owned()
     }
@@ -4754,6 +4937,47 @@ mod tests {
         let _ = std::fs::remove_file(&dump);
     }
 
+    /// A monitor that answered the hang diagnosis and hung up, as a QEMU that
+    /// is going away does, still has its answer read.
+    #[test]
+    fn a_monitor_that_hangs_up_after_answering_is_still_read() {
+        assert_eq!(
+            hang_diagnosis(Some("CPU#0 pc=0x1000\n")),
+            "CPU#0 pc=0x1000\n"
+        );
+    }
+
+    /// One that hangs up without answering is reported as closed, not as the
+    /// error a refused socket option would name.
+    #[test]
+    fn a_monitor_that_hangs_up_without_answering_is_reported_closed() {
+        assert_eq!(hang_diagnosis(None), "unavailable: the monitor closed\n");
+    }
+
+    /// The hang diagnosis read off a fake monitor that has written `answer`
+    /// and shut its side before the runner reads, checking both commands
+    /// reached it.
+    fn hang_diagnosis(answer: Option<&str>) -> String {
+        use std::os::unix::net::UnixListener;
+
+        let socket = ReservedSocket::reserve("hangdiag").expect("a socket path");
+        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
+        let spec = Spec::for_aarch64_kernel("/kernel");
+        let mut state = InjectionState::new(&spec, None);
+        state.connected(Some(&socket)).expect("the runner connects");
+        let (mut peer, _) = listener.accept().expect("the runner connected");
+        if let Some(answer) = answer {
+            peer.write_all(answer.as_bytes()).expect("the answer");
+        }
+        peer.shutdown(std::net::Shutdown::Write).expect("hangs up");
+        let report = state.read_monitor_state(Some(&socket));
+        drop(state);
+        let mut asked = String::new();
+        peer.read_to_string(&mut asked).expect("the commands");
+        assert_eq!(asked, "info cpus\ninfo registers -a\n");
+        report
+    }
+
     /// A key and a click read their own flag before the dump's, so the drain
     /// must raise a dump's flag before theirs: raised after, a drain
     /// descheduled between the two let either overtake the dump it waited on.
@@ -5179,12 +5403,14 @@ mod tests {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: x86_64::Topology::Dense,
             block_devices: vec![BlockDevice {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -5256,7 +5482,23 @@ mod tests {
 
 #[cfg(test)]
 mod dma_translation_tests {
-    use super::{validate_boot_inputs, DmaTranslation, Spec};
+    use super::{validate_boot_inputs, Arch, DmaTranslation, InterruptControllers, Spec};
+    use std::io;
+
+    #[test]
+    fn interrupt_controllers_another_board_builds_are_refused_before_qemu_starts() {
+        for (arch, interrupts) in [
+            (Arch::Riscv64, InterruptControllers::Gicv3),
+            (Arch::Aarch64, InterruptControllers::Aia),
+            (Arch::X86_64, InterruptControllers::Gicv3),
+        ] {
+            let mut spec = Spec::for_x86_64_kernel("/definitely/not/a/kernel.elf");
+            spec.arch = arch;
+            let refused = validate_boot_inputs(&spec.with_interrupts(interrupts))
+                .expect_err("no such controller on this board");
+            assert_eq!(refused.kind(), io::ErrorKind::Unsupported, "{arch:?}");
+        }
+    }
 
     /// A run that asked for a translation unit is refused on every board but
     /// the one that attaches it, before anything is checked or started.
@@ -5308,6 +5550,20 @@ mod dma_translation_tests {
         )
         .expect_err("no kernel");
         assert_eq!(x86.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// The virtio-iommu sits in the slot the first message source would, so
+    /// the two are refused together rather than left for QEMU to reject.
+    #[test]
+    fn message_sources_beside_a_virtio_iommu_are_refused() {
+        let spec = || {
+            Spec::for_aarch64_kernel("/nonexistent/kernel")
+                .with_dma_translation(DmaTranslation::VirtioIommu)
+        };
+        let refused = validate_boot_inputs(&spec().with_message_sources(1)).expect_err("refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        let alone = validate_boot_inputs(&spec()).expect_err("no kernel");
+        assert_eq!(alone.kind(), std::io::ErrorKind::NotFound);
     }
 
     /// A shared input line needs an FDT board's generic host bridge.

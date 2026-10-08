@@ -49,7 +49,8 @@
 #![deny(missing_docs)]
 
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
+    CapabilityId, DmaCoherence, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey,
+    RegisterBlock,
 };
 
 pub mod regs;
@@ -151,6 +152,9 @@ pub struct PcieWindows {
     /// verbatim onto the published xHCI node so the kernel's DMA-grant
     /// coverage check and `dma_alloc` translation agree on one aperture.
     pub inbound_cpu_top: u64,
+    /// How DMA through the inbound viewport meets the CPU's caches, as the
+    /// discovered grant says; forwarded with it.
+    pub inbound_coherence: DmaCoherence,
     /// CPU-physical base of the outbound MMIO window (the high PCIe
     /// MMIO aperture, e.g. `0x6_0000_0000` on the Pi 4), from `ranges`.
     pub outbound_cpu_base: u64,

@@ -8,12 +8,11 @@ use core::cell::RefCell;
 
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{
-    fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord,
-    CacheOwnerKind, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest, CpuTimeRecord,
-    IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
-    MountAvailability, MountListRequest, MountRecord, MountVolumeState, ProcessListRequest,
-    ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-    SysinfoQueryId, SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
+    fold_cache_ledgers, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind, CpuLoadRecord,
+    CpuTimeRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureStats,
+    MountAvailability, MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState,
+    RamzipStats, ReclaimClassRecord, SysinfoQueryId, SysinfoRequestHeader, Uptime,
+    IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, MEMORY_CLASS_COUNT};
 use tairix_curses::{Event, Screen, Size, Tty};
@@ -199,7 +198,7 @@ impl Transport for FakeService {
                 let Some(records) = &self.reclaim else {
                     return Err(Errno::NotFound);
                 };
-                let req = ReclaimListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -208,7 +207,7 @@ impl Transport for FakeService {
                 let Some(records) = &self.caches else {
                     return Err(Errno::NotFound);
                 };
-                let req = CacheLedgerListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -217,7 +216,7 @@ impl Transport for FakeService {
                 let Some(records) = &self.cpu_loads else {
                     return Err(Errno::NotFound);
                 };
-                let req = CpuLoadRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -227,7 +226,7 @@ impl Transport for FakeService {
                 let Some(records) = cpu_times.as_ref() else {
                     return Err(Errno::NotFound);
                 };
-                let req = CpuTimeListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -236,7 +235,7 @@ impl Transport for FakeService {
                 let Some(records) = &self.irqs else {
                     return Err(Errno::NotFound);
                 };
-                let req = IrqListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -245,13 +244,13 @@ impl Transport for FakeService {
                 let Some(records) = &self.mounts else {
                     return Err(Errno::NotFound);
                 };
-                let req = MountListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page_bytes(records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
             }
             SysinfoQueryId::GLOBAL_PROCESS_LIST | SysinfoQueryId::SELF_PROCESS_LIST => {
-                let req = ProcessListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let records = self.processes.borrow();
                 Ok(page_bytes(&records, req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()

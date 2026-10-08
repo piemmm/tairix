@@ -40,6 +40,38 @@ const IO_UPPER: u8 = 12;
 
 /// A disabled memory window: its base above its limit.
 const MEMORY_WINDOW_OFF: u32 = 0x0000_FFF0;
+
+/// The memory windows the bridge at `addr` forwards, as `config` reads them:
+/// its memory window and its prefetchable one, each where its base is not
+/// above its limit.
+pub(crate) fn bridge_memory_windows<C: ConfigSpace>(
+    config: &C,
+    addr: ConfigAddress,
+) -> [Option<Range<u64>>; 2] {
+    let read = |register: u8| {
+        config.read32(ConfigAddress {
+            register: u16::from(register),
+            ..addr
+        })
+    };
+    let window = |base_limit: u32, upper: Option<(u32, u32)>| {
+        let (base_high, limit_high) = upper.map_or((0, 0), |(base, limit)| {
+            (u64::from(base) << 32, u64::from(limit) << 32)
+        });
+        let base = (u64::from(base_limit & 0xFFF0) << 16) | base_high;
+        let limit = u64::from(base_limit & 0xFFF0_0000) | (MEMORY_GRANULE - 1) | limit_high;
+        (base <= limit).then(|| base..limit.saturating_add(1))
+    };
+    let prefetch = read(PREFETCH_BASE_LIMIT);
+    let wide = prefetch & 0xF == 1;
+    [
+        window(read(MEMORY_BASE_LIMIT), None),
+        window(
+            prefetch,
+            wide.then(|| (read(PREFETCH_BASE_UPPER), read(PREFETCH_LIMIT_UPPER))),
+        ),
+    ]
+}
 /// A disabled I/O window.
 const IO_WINDOW_OFF: u32 = 0x0000_00F0;
 

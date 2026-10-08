@@ -10,23 +10,21 @@
 //! [`WRITEBACK_WAITQ`] between
 //! deadlines.
 //!
-//! # Deferral is enabled only while the flusher can fire it
+//! # Deferral is enabled only once the flusher can fire it
 //!
 //! The flusher arms deferral itself, from its own body, once it has proved it
-//! can register on the queue and be woken — and disarms it if it ever stops.
-//! Until then, and ever after, the host declines to read its clock and every
-//! driver publishes at each operation exactly as it did before batching
-//! existed. So a transaction can never be held against a timer that will not
-//! come back for it, whatever fails: a port with no storage floor, a service
-//! that was not admitted, a scheduler hook that is not wired.
+//! can register on the queue and be woken, and then parks for the life of the
+//! system. Until then the host declines to read its clock and every driver
+//! publishes at each operation exactly as it did before batching existed. So a
+//! transaction can never be held against a timer that will not come back for
+//! it, whatever fails: a port with no storage floor, a service that was not
+//! admitted, a scheduler hook that is not wired.
 
 use alloc::boxed::Box;
 
 use tairix_kernel_core::fs::writeback;
 use tairix_kernel_core::kthread::YieldHandle;
-use tairix_kernel_core::waitq::{
-    rearm_timed_wakeup, wait_arch, wait_now_ns, WaitQueueArch, NO_DEADLINE, WRITEBACK_WAITQ,
-};
+use tairix_kernel_core::waitq::{Parker, WRITEBACK_WAITQ};
 use tairix_kernel_core::InitSpawnCtx;
 use tairix_log::{Event, Field, FieldValue, Level, Sink};
 
@@ -64,51 +62,22 @@ pub fn start(ctx: &'static (dyn InitSpawnCtx + Sync), audit: &'static (dyn Sink 
 /// The park is registered *before* it is taken, so a deadline published in
 /// the window between the scan and the park is not slept through: the
 /// scheduler's wake-pending token re-readies a task whose wake arrived before
-/// it committed. With nothing dirty the flusher registers [`NO_DEADLINE`],
+/// it committed. With nothing dirty the flusher registers no deadline,
 /// which arms no timer at all, so an idle machine takes no wakeups.
 fn flusher(yielder: &mut dyn YieldHandle, audit: &'static (dyn Sink + Sync)) {
     // Prove the park works before any driver is allowed to defer against it.
-    if !arm(None) {
+    let Some(parker) = Parker::current() else {
         unavailable(audit, "flusher_cannot_park");
         return;
-    }
-    LATE_FILESYSTEM.set_writeback_armed(true);
+    };
+    parker.register(&WRITEBACK_WAITQ, None);
+    LATE_FILESYSTEM.arm_writeback();
     loop {
         yielder.park();
-        let due = match wait_now_ns() {
-            Some(now) => writeback::publish_due(&LATE_FILESYSTEM, audit, now),
-            // No monotonic clock means the host read none either, so nothing
-            // can have been deferred; there is nothing due to publish.
-            None => LATE_FILESYSTEM.earliest_writeback_due(),
-        };
-        if !arm(due) {
-            break;
-        }
+        parker.rearm(&WRITEBACK_WAITQ, |now| {
+            writeback::publish_due(&LATE_FILESYSTEM, audit, now)
+        });
     }
-    // Leaving means nothing will fire a window again: stop every driver
-    // deferring, then publish what is still held so the exit costs recency
-    // only up to this moment.
-    LATE_FILESYSTEM.set_writeback_armed(false);
-    let _ = writeback::publish_due(&LATE_FILESYSTEM, audit, writeback::EVERYTHING_DUE);
-    unavailable(audit, "flusher_cannot_park");
-}
-
-/// Register this task on the write-back queue for `due` (or with no
-/// deadline) and re-point the timed one-shot, returning whether the
-/// registration succeeded.
-fn arm(due: Option<u64>) -> bool {
-    let Some(arch) = wait_arch() else {
-        return false;
-    };
-    let Some(task) = arch
-        .current_cpu()
-        .and_then(|cpu| WaitQueueArch::current_task(arch, cpu))
-    else {
-        return false;
-    };
-    WRITEBACK_WAITQ.register(task, due.unwrap_or(NO_DEADLINE));
-    rearm_timed_wakeup();
-    true
 }
 
 /// Log that the dirty-age window is not being enforced from above, naming a

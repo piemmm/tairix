@@ -153,8 +153,6 @@ fn autoload_matches_and_loads_through_the_real_gate() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     });
 
     let report = DeviceManager::new(&sink).autoload(
@@ -219,8 +217,6 @@ fn autoload_without_cap_drv_load_fails_closed_at_the_real_gate() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     });
 
     // The caller holds no CAP_DRV_LOAD: the gate refuses, the node

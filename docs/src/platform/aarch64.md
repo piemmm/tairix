@@ -4,7 +4,7 @@ TAIRiX targets `aarch64-unknown-none` as a Tier-1 platform. Stage 3b
 delivers the QEMU `virt`-board boot and Arch-HAL primitives for the
 64-bit Arm port: an EL1 boot trampoline, a PL011 UART console, the
 `Aarch64Arch` implementation of the Arch HAL, the EL1 exception vector
-table, a GICv2 driver, generic-timer preemption, the stage-1 MMU
+table, GICv2 and GICv3 drivers, generic-timer preemption, the stage-1 MMU
 primitives, the `svc` syscall-entry marshalling, and the ARM semihosting
 test finisher. This page documents the boot model, the result protocol,
 the arch primitives, and the QEMU argv contract.
@@ -166,8 +166,8 @@ Since P2 the console base is **device-tree-discovered**: `kernel_main`
 calls `tairix_arch_aarch64::console::configure_from_fdt` on the `x0` DTB
 before its first log line, so the console points at whatever UART the
 firmware tree describes (see [Board-discovered console](#board-discovered-console)).
-Since **P3** it also points the GICv2 driver at the discovered GICD/GICC
-bases (`gic::configure_from_fdt`) and reads the `/memory` window, logging
+Since **P3** it also points the GIC driver at the discovered controller
+(`gic::configure_from_fdt`) and reads the `/memory` window, logging
 `gic_discovered` / `ram_discovered` (see
 [Board-discovered interrupt controller](#board-discovered-interrupt-controller)).
 Since **P5** it discovers the board's secondary-start mechanism and
@@ -179,7 +179,7 @@ tree whose cpu nodes declare `enable-method = "spin-table"` (the Pi 4's
 stock firmware) selects the spin-table release over the declared
 per-CPU `cpu-release-addr` words, so bring-up rides whatever the board
 declares rather than an assumed mechanism (see
-[SMP secondary-core bring-up](#smp-secondary-core-bring-up-psci--gicv2-ipi)).
+[SMP secondary-core bring-up](#smp-secondary-core-bring-up-psci--gic-ipi)).
 The production boot **uses** that mechanism end to end: it collects every
 `/cpus/cpu@*` affinity, validates the list into the dense CPU map
 (`cpu_topology::order_cpus` — boot core at dense id 0, fail-closed to a
@@ -191,7 +191,7 @@ on the boot line. After `BootCompleted`, `kernel_core::kernel_main`
 starts each secondary over the discovered mechanism (audited
 `SecondaryCpuStarted` / `SecondaryCpuStartFailed`); each core's entry
 adopts the boot identity map (`paging::adopt_boot_translation` over the
-published park root), installs its own EL1 vectors, GICv2 CPU
+published park root), installs its own EL1 vectors, GIC CPU
 interface, and tickless preemption/IPI arming, and joins the shared
 kernel dispatch loop through `tairix_kernel_core::run_secondary`,
 attesting `SecondaryCpuOnline`. The boot CPU publishes the park root
@@ -731,35 +731,30 @@ fails at build time, not when the session starts.
 
 ## Board-discovered interrupt controller
 
-The GICv2 distributor (`GICD`) and CPU-interface (`GICC`) MMIO bases are
-**discovered from the firmware device tree**, not hard-wired (`plans/PI.md`
-P3). The host-testable `gic` module holds the active `(gicd, gicc)` pair as
-an atomic (the pre-discovery default is the `virt` GICv2 base
-`0x0800_0000` / `0x0801_0000`), and the freestanding `VolatileGicMmio`
-accessor reads it on every register access — so a single GICv2 driver
-drives both the `virt` board and the Pi 4's **GIC-400** (`arm,gic-400`,
-`0xFF84_1000` / `0xFF84_2000`) with no `cfg(board)` fork. GIC-400 *is* a
-GICv2, so only the bases move (`AGENTS.md` §2.2). `gic::find_gic` /
-`configure_from_fdt` walk the shared `lib/fdt` reader for the first node
-whose `compatible` names a GICv2-class controller and read its `reg`
-(region 0 = distributor, region 1 = CPU interface), decoding each region
-with the parent bus's cell counts and translating it through the
-ancestor buses' `ranges` (`fdt::translated_reg`) — on the real Pi 4
-tree the GIC-400 sits under `/soc` with one-cell *bus* `reg` values
-(`0x4004_1000`) remapped to the CPU-physical bases; an unrecognised,
-absent, or untranslatable controller leaves the fail-safe default in
-place (`AGENTS.md` §2.9). The generic `platform::FdtDiscovery` walk emits an
-`InterruptController` `HwNode` carrying the discovered `compatible` bind
-keys and both register windows as capability-gated MMIO resources.
+The GIC is read from the firmware device tree, never assumed (`plans/PI.md`
+P3, `plans/IOMMU.md` IOM18.1). `gic::find_gic` takes the first node whose
+`compatible` names a GICv2-class controller (`arm,gic-400`, the Cortex-A
+integrated GICs, `arm,gic-v2`) or a GICv3 (`arm,gic-v3`), its `reg` decoded
+with the parent bus's cells and translated through the ancestor buses'
+`ranges`. A GICv2's region 0 is its distributor and region 1 its CPU
+interface. A GICv3's region 0 is its distributor and the next
+`#redistributor-regions` its redistributor regions, stepped by
+`redistributor-stride` where the tree names one. `configure_from_fdt` points
+the driver at what was found and leaves the `virt` GICv2 bases in place for a
+tree naming none. The walks return at the GIC's node, or once past its subtree,
+so they are safe with the MMU off.
 
-The runtime walk is MMU-off-safe for the same byte-wise reason as the
-console (`plans/PI.md` W17), and is CI-proven on `virt`: the
-`tairix-test-ipi-smp-qemu-aarch64` vertical **poisons** the GIC base, then
-discovers it from the embedded `virt` tree before `gic::init`, so the
-delivered IPI exercises the *discovered* base. The Pi 4's specific GIC-400
-bases are covered by host unit tests against the `raspi_like_arm` fixture
-and are an on-metal acceptance item (no `raspi4b` in QEMU — the same gap
-as the console).
+`gic::for_each_window` hands the boot every register window — distributor, CPU
+interface or redistributor regions, and each `arm,gic-v3-its` beneath the GIC —
+to map as Device memory. `platform::FdtDiscovery` emits the controller as an
+`InterruptController` node marked `HwProperty::KernelDriven`: the kernel drives
+it, so it is never a driver's load target and its windows are never granted.
+
+The `tairix-test-ipi-smp-qemu-aarch64` vertical poisons the base and
+rediscovers it from its embedded tree, on a GICv2 board and on a GICv3 one, so
+the IPI it delivers proves the discovered controller. The Pi 4's GIC-400 bases
+are covered by host tests against the `raspi_like_arm` fixture and are an
+on-metal acceptance item (QEMU has no `raspi4b`).
 
 ## Board-discovered timer frequency
 
@@ -1231,7 +1226,9 @@ through the semihosting finisher. They are enrolled in
   `SecondaryCpuOnline` from the kernel dispatch loop; PASS fires only
   with all three online (a `SecondaryCpuStartFailed` is an immediate
   FAIL) — the aarch64 analogue of the x86_64 / riscv64 boot verticals,
-  extended into the end-to-end multi-core boot proof.
+  extended into the end-to-end multi-core boot proof. Its
+  `tairix-test-kernel-arch-boot-gicv3-aarch64` binary boots the same pipeline
+  on a GICv3 `virt` board.
 - `tairix-test-uart-console-qemu-aarch64` — **the console base is
   discovered, not hard-wired** (PI Stage P2): poisons the console base,
   then proves `console::configure_from_fdt` overwrites it with the base
@@ -1260,14 +1257,15 @@ through the semihosting finisher. They are enrolled in
   the stack's unmapped guard slot and takes a synchronous data abort the
   `fault` handler confirms, rather than a next-reschedule canary detection.
 - `tairix-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
-  (Stage W6) **over a discovered GIC base** (PI Stage P3): the boot core
-  first poisons the GICv2 base and rediscovers it from the embedded
-  `virt` device tree (`gic::configure_from_fdt`), then starts core 1
-  through `smp::start_secondary` (PSCI `CPU_ON`), waits for it to bring up
-  its GICv2 interface and enable the IPI SGI, then delivers a directed IPI
-  through `Aarch64Arch::send_ipi` (a GICv2 SGI); PASS once core 1's IRQ
-  path runs the IPI callback with core 1's id — so the IPI is delivered
-  over the *discovered* base. Runs with `--cpus 2`.
+  (Stage W6) **over a discovered GIC** (PI Stage P3): the boot core
+  first poisons the GIC base and rediscovers it from the embedded
+  `virt` device tree (`gic::configure_from_fdt`), then starts each
+  secondary through `smp::start_secondary` (PSCI `CPU_ON`), waits for it to
+  bring up its GIC interface and enable the IPI SGI, then delivers a directed
+  IPI through `Aarch64Arch::send_ipi`; PASS once each secondary's IRQ path
+  runs the IPI callback with its own id — so the IPI is delivered over the
+  *discovered* controller. It runs on a GICv2 board and, as a second binary,
+  on a GICv3 one.
 - `tairix-test-sched-drive-qemu-aarch64` — **the arch primitives drive
   the live scheduler** (Stage W7): the EL1/GICv2 analogue of
   `tairix-test-sched-drive-qemu-riscv64`. With interrupts off it performs
@@ -1340,7 +1338,9 @@ no driver binds a device the secure world or another agent owns (a
 `disabled` CPU is quiescent, not absent, and is still started). A node
 with `#iommu-cells` is a translation unit, and a master's `iommus` its
 streams ([DMA translation](../security/iommu.md#topology-in-the-hardware-tree));
-the kernel drives an `arm,smmu-v3` unit itself (`kernel/iommu/smmuv3`). Every node carrying a `compatible` property becomes a
+the kernel drives an `arm,smmu-v3` unit (`kernel/iommu/smmuv3`) and a
+virtio-iommu, a host's function or a slot's device (`kernel/iommu/virtio`),
+itself. Every node carrying a `compatible` property becomes a
 hardware-tree node whose match keys are that property's strings in
 devicetree (most-specific-first) order — the keys `devmgr` resolves
 driver bind tables against (`AGENTS.md` §18.3); `/memory` nodes
@@ -1690,8 +1690,10 @@ processing the command ring at all. One contributor is a **cache
 coherency** gap: the BCM2711 PCIe root complex is **not** I/O-coherent
 (it does not snoop the CPU caches — this is why the VideoCore mailbox
 buffer and the HVS framebuffer already perform explicit cache
-maintenance). The user-space driver maps its device-shared DMA slab
-Normal-Non-Cacheable, but the kernel zeroes each allocated/freeing carve
+maintenance). The PCIe host's node states no `dma-coherent`, so the
+functions behind it are unsnooped and the user-space driver's
+device-shared DMA slab is mapped Normal-Non-Cacheable, but the kernel
+zeroes each allocated/freeing carve
 through the cacheable direct-map alias; those dirty zero cache lines must
 be cleaned and invalidated before the controller or a later owner uses the
 same frames. The production `PhysMap` therefore **requires** a
@@ -2306,14 +2308,21 @@ dropped two things the metal-debugged scaffold relied on:
    Enable Slot (no completion ⇒ the budget-poll timeout), so the onboard
    hub's downstream ports were never powered — the "no device power" metal
    symptom, the chain exiting ~644 ms after the last syscall with no `delay`
-   ever reached. Fixed structurally and arch-neutrally: the kernel DMA carve
-   (`kernel/mem::dma`) maps the device-shared buffer with the new
-   `PageFlags::DMA_COHERENT` (the W5b-4 HAL attribute), which on aarch64 is
-   **Normal Non-Cacheable** (`MAIR` index 2). The buffer is coherent by
-   construction with no per-access maintenance and no EL0 privilege, the
-   driver stays platform-neutral (`AGENTS.md` §2.20), and Normal-NC — unlike
-   Device-nGnRE — still permits the ordinary ring/context accesses the engine
-   makes. x86_64/riscv64 are coherent and map it cacheable.
+   ever reached. Fixed structurally and arch-neutrally: whether a device
+   snoops is a discovered fact its `Dma` grant carries
+   (`HwResource::dma_coherence`, from the tree's `dma-coherent` /
+   `dma-noncoherent` and, where neither is stated, Arm's convention that a
+   master does not), and the kernel DMA carve (`kernel/mem::dma`) maps a
+   buffer an unsnooped device shares with `PageFlags::DMA_COHERENT`, which
+   on aarch64 is **Normal Non-Cacheable** (`MAIR` index 2). The buffer is
+   coherent by construction with no per-access maintenance and no EL0
+   privilege, the driver stays platform-neutral (`AGENTS.md` §2.20), and
+   Normal-NC — unlike Device-nGnRE — still permits the ordinary ring/context
+   accesses the engine makes. A snooping device's buffer is ordinary
+   cacheable memory; riscv64 and x86_64 refuse an unsnooped one
+   (`MapError::Unsupported`). Either way its leaf carries `PageFlags::DMA`
+   in the software bit 56 (x86_64's bit 9, riscv64's RSW bit 8), so no tier
+   that moves ordinary memory takes it.
 2. **The per-stage diagnostics.** The scaffold logged `4101`/`4106`/`4126`
    per-stage records; the user-space driver exited silently with code `82`.
    Restored as a user-space one-shot structured `log_emit` record:
@@ -2377,9 +2386,10 @@ ADMA2 command, the driver synchronizes the active data range and its
 descriptor table, then issues `dma_wmb()` before the MMIO command. After a read
 completion, it issues `dma_rmb()`, synchronizes the device-written data
 range, and only then copies bytes to the caller. The aarch64 bootstrap host
-attaches `clean_invalidate_dcache_range` to both slabs, which performs `dc
-civac` over the cache lines followed by `dsb sy`; coherent and
-Normal-Non-Cacheable hosts retain the no-op callback. Bring-up keeps ADMA2
+attaches `clean_invalidate_dcache_range` to both slabs when the controller's
+node states it does not snoop, as the Pi 4's does, which performs `dc civac`
+over the cache lines followed by `dsb sy`; a snooping controller's slabs, and
+Normal-Non-Cacheable hosts, retain the no-op callback. Bring-up keeps ADMA2
 only after a DMA read into staging filled with the inverse of the expected
 bytes returns what programmed I/O read, so a coherency or addressing fault
 on metal leaves the card on programmed I/O rather than corrupting it.
@@ -2437,48 +2447,77 @@ port's own report takes the fatal latch without an atomic read-modify-write
 and leaves the lock-guarded queued console alone, since an exclusive to
 Device memory may never complete.
 
-## Interrupt controller (GICv2)
+## Interrupt controller (GIC)
 
-The aarch64 port implements the Arch HAL `IrqController` and
-`InterruptEntry` slices (`AGENTS.md` §17.2 / `plans/WIRING.md` Stage W3)
-on `kernel/arch/aarch64::gic::GicController`. The GICv2 register logic
-was lifted behind a host-testable `GicMmio` seam (mirroring riscv64's
-`PlicMmio`, §2.2): a low-level `Gicv2<M>` driver carries the one MMIO
-path — enable/disable (`ISENABLER`/`ICENABLER`), priority, `init`,
-acknowledge (`IAR`), end-of-interrupt (`EOIR`), and SGI raise — and the
-freestanding `init`/`enable_ppi`/`acknowledge`/`end_of_interrupt`/
-`send_sgi` free functions are now thin wrappers over a
-`Gicv2<VolatileGicMmio>`, so there is no duplicate register logic.
-`VolatileGicMmio` reads the **discovered** GICD/GICC bases
-(`gic::current`) on every access, so the same driver serves the `virt`
-GICv2 and the Pi 4's GIC-400 (see
-[Board-discovered interrupt controller](#board-discovered-interrupt-controller)).
-`IrqController::mask` / `unmask` clear / set the distributor enable bit
-(mask pairs the write with a `SeqCst` fence for mask-before-wake) and
-reject an INTID above `MAX_INTID` with `IrqControlError::OutOfRange`;
-`InterruptEntry::claim` / `complete` are the `IAR`/`EOIR` handshake, with
-the spurious INTID (`1023`) mapping to `None`. The
-`gic_controller_passes_arch_hal_irq_conformance` host test drives both
-conformance verticals over a real `GicController` on a mock MMIO (INTID
-42 valid, 2000 out of range).
+The port drives a GICv2 or a GICv3, whichever the tree names, through one
+version-neutral surface in `kernel/arch/aarch64::gic`: `init`,
+`init_secondary`, `enable_ppi`, `route_spi`, `acknowledge`,
+`end_of_interrupt`, `send_sgi` and `stuck_spi` dispatch on the discovered
+version, so interrupt entry, IPIs and line routing are written once.
+`GicController` implements the Arch HAL `IrqController` and `InterruptEntry`
+slices over either: `mask` and `unmask` clear and set the line's enable bit,
+`mask` fenced for mask-before-wake, an INTID above `MAX_INTID` is
+`IrqControlError::OutOfRange`, and `claim`/`complete` are the
+acknowledge/end-of-interrupt handshake, a spurious acknowledge answering
+`None`.
+
+- **GICv2** (`Gicv2<M: GicMmio>`): a memory-mapped CPU interface, SGIs through
+  `GICD_SGIR`, an SPI routed by its `GICD_ITARGETSR` byte. Each CPU records the
+  interface mask its banked `GICD_ITARGETSR0` reads back, so no CPU is taken to
+  be interface number `id`.
+- **GICv3** (`kernel/arch/aarch64::gicv3`): the distributor runs with affinity
+  routing (`GICD_CTLR.ARE`); each CPU wakes and configures its own
+  redistributor, found by matching `GICR_TYPER`'s affinity across the
+  redistributor regions; the CPU interface is the system registers
+  (`ICC_*_EL1`), which the boot opens to EL1 through `ICC_SRE_EL2` where it
+  entered at EL2 on a core that has them. An SPI is routed by its
+  `GICD_IROUTER` affinity and an SGI raised through `ICC_SGI1R_EL1`, with range
+  selectors where `Aff0` exceeds 15 and the controller has them. A distributor
+  or redistributor whose `PIDR2` does not report architecture 3 or 4 is
+  refused.
+
+`init` takes a `GicTopology` — every CPU's slot and, for a GICv3, the
+redistributor regions — and fails closed with a `GicError`; the kernel core
+audits the failed `Irq` phase (`KERNEL_PHASE_FAILED`) rather than run with
+interrupts it cannot deliver. Host tests drive the Arch HAL IRQ conformance
+verticals over both versions on mock registers, and the IPI, FIQ self-sample,
+boot and DMA-translation verticals each run on a GICv3 `virt` board beside the
+GICv2 one.
+
+### LPIs and the interrupt translation service
+
+A GICv3's ITS (`kernel/arch/aarch64::its`, Arm IHI 0069H chapter 5) raises
+LPIs for PCI functions' MSI-X. `LpiTables::allocate` draws the configuration
+table, a byte per LPI, and a 64 KiB-aligned pending table;
+`gic::enable_lpis` points a redistributor at them, programming them
+non-cacheable where its table reads read back non-shareable, and refuses one
+whose LPIs firmware left on. `Its::take_over` quiesces a service firmware left
+running, gives it a command queue, a device table — two-level where it walks
+one, its leaf pages drawn as their entries are first used — and a collection
+table where its own collections run short, each at the smallest page size it
+takes; `ItsUnit::map` then maps one collection and every route at once, each
+device an ITT for its events, and waits for a `SYNC` to be consumed, the queue
+handed over a queue's worth at a time. Every table and command is cleaned to
+the point of coherency where the service shares nothing. The crate stays
+allocator-free: routes are sorted in place and commands written straight into
+the queue. Host tests drive it over a model that reads its queue and tables
+from memory, and `tairix-test-msi-isolation-qemu-aarch64` proves on QEMU that
+one `edu` function's message carrying an event only another was given raises
+nothing. How the kernel chooses each route is in
+[the IOMMU page](../security/iommu.md#msi-isolation-through-a-gicv3-its).
 
 ### Device-IRQ delivery (Stage W3-B)
 
-GICv2 shared-peripheral interrupts (SPIs, INTID `>= MIN_SPI_INTID`) reset
-to *no* CPU target, so a device interrupt is never delivered until its
-`GICD_ITARGETSR` byte names a CPU. `Gicv2::route_spi(intid, cpu_targets)`
-(and the freestanding `gic::route_spi` wrapper) writes that byte — the
-SPI analogue of the x86_64 IO-APIC redirection-entry destination — and
-skips SGIs/PPIs, whose target bytes are read-only and banked per CPU. On
-the IRQ path, `exceptions::handle_irq` dispatches the timer PPI to the
-scheduler-tick path and forwards **any other** acknowledged INTID to a
-set-once device-IRQ dispatcher published through
-`exceptions::set_device_irq_dispatch` (the EL1 analogue of riscv64's
-`set_trap_dispatch`); the GIC `EOIR` handshake stays in the vector path.
-The `route_spi` register arithmetic, the `MIN_SPI_INTID` boundary, and
-the fail-closed set-once dispatch slot are host-tested; the
-`tairix-test-irq-qemu-aarch64` vertical above proves the full SPI → GIC →
-EL1 → dispatcher → `IrqTable::fire` path end-to-end under QEMU.
+An SPI is delivered to no CPU until it is routed: `gic::route_spi(intid, cpu)`
+writes its `GICD_ITARGETSR` byte on a GICv2 and its `GICD_IROUTER` affinity on
+a GICv3, and leaves an SGI or PPI as it is, since each is private to its CPU
+and has no route to write. On the IRQ
+path, `exceptions::handle_irq` dispatches the timer PPI to the scheduler-tick
+path and forwards any other acknowledged INTID to a set-once device-IRQ
+dispatcher published through `exceptions::set_device_irq_dispatch`; the
+end-of-interrupt stays in the vector path. The `tairix-test-irq-qemu-aarch64`
+vertical proves the SPI → GIC → EL1 → dispatcher → `IrqTable::fire` path under
+QEMU.
 
 ### External-debug PC sampling (CoreSight EDPCSR)
 
@@ -2505,7 +2544,7 @@ closed, the cross-CPU buddy detector runs unchanged). Firing it on a Pi 4
 therefore requires the debug nodes supplied in the DTB (or an overlay), and the
 live `EDPCSR` read is confirmable only on hardware (QEMU models no `EDPCSR`).
 
-## SMP secondary-core bring-up (PSCI + GICv2 IPI)
+## SMP secondary-core bring-up (PSCI + GIC IPI)
 
 The aarch64 port brings secondary cores up through PSCI (`plans/WIRING.md`
 Stage W6), in `kernel/arch/aarch64::smp`:
@@ -2540,28 +2579,21 @@ Stage W6), in `kernel/arch/aarch64::smp`:
   `Aarch64Arch::with_cpus`); `SchedulerArch::current_cpu` reverse-maps the
   running affinity through it.
 
-A directed IPI is a GICv2 software-generated interrupt (SGI): `send_ipi`
-raises INTID 0 on the target CPU through `gic::send_sgi`, and
-`exceptions::handle_irq` dispatches an acknowledged SGI (INTID
-`< MIN_SPI_INTID`) to `preempt::on_ipi_interrupt` → the IPI callback
-installed via `preempt::set_ipi_callback`. This replaces the former
-single-CPU self-target best-effort send. The `tairix-test-ipi-smp-qemu-aarch64`
-vertical above proves the full start-core → enable-IPI → directed-SGI →
-callback path on two emulated cores.
+A directed IPI is a software-generated interrupt: `send_ipi` raises SGI 0 on
+the target CPU through `gic::send_sgi` — `GICD_SGIR` on a GICv2,
+`ICC_SGI1R_EL1` on a GICv3 — and `exceptions::handle_irq` dispatches an
+acknowledged SGI to `preempt::on_ipi_interrupt`, which runs the IPI callback
+installed through `preempt::set_ipi_callback`. The
+`tairix-test-ipi-smp-qemu-aarch64` vertical proves the start-core →
+enable-IPI → directed-SGI → callback path on emulated cores, on both versions.
 
-`gic::send_sgi` issues a `dsb ishst` (`GicMmio::publish_barrier`)
-immediately before the `GICD_SGIR` write. Raising the reschedule IPI is a
-cross-CPU hand-off: the waker enqueues the woken task (a normal-memory
-store in `Scheduler::wake_from_parked`) and *then* signals the target.
-On a weakly-ordered PE the enqueue is not guaranteed observable to the
-target before it takes the SGI, so without the barrier the target's next
-dispatch can read a stale, empty run queue and re-park, stranding the
-woken task — a lost wake-up that hangs the system. It reproduced only on
-real multi-core hardware (the Pi 4's Cortex-A72), never under QEMU's
-stronger emulated ordering. The barrier is the store analogue of the
-mask-before-wake fence `GicController::mask` issues, and the host
-`send_sgi_publishes_prior_stores_before_raising_the_interrupt` test pins
-the publish-before-signal order.
+Either raise is preceded by `dsb ishst`. The waker enqueues the woken task and
+then signals its CPU; on a weakly-ordered PE the enqueue need not be visible to
+the target before it takes the SGI, so without the barrier its next dispatch
+can read an empty run queue and park again, a lost wake-up. It reproduced only
+on the Pi 4's Cortex-A72, never under QEMU. The host
+`send_sgi_publishes_prior_stores_before_raising_the_interrupt` test pins the
+order.
 
 Secondary bring-up is reached through the Arch HAL `SecondaryBringup`
 slice (`tairix_arch_api::smp`, `plans/WIRING.md` Stage W14):
@@ -2942,10 +2974,11 @@ hands those bytes to the scenario; the virtio-MMIO transport bases and
 SPIs in that blob are the stable `virt`-board layout, independent of
 which transport slot the backing device lands on.
 
-The dump lives in one place: `tairix_itest_harness::dump_aarch64_virt_dtb`
-(gated to the aarch64-none target) shells out to `qemu-system-aarch64 ...
-dumpdtb` so every aarch64 vertical reuses one helper rather than copying
-the invocation (`AGENTS.md` §2.2). `dumpdtb` pads the blob out to the
+The dump lives in one place: `tairix_itest_harness::aarch64_virt_guest_build`
+(and its siblings for several machines or a RAM override) is each aarch64
+vertical's whole build script, and on the aarch64-none target shells out to
+`qemu-system-aarch64 ... dumpdtb`, so no vertical copies the invocation or
+the fixture it writes (`AGENTS.md` §2.2). `dumpdtb` pads the blob out to the
 machine's 1 MiB device-tree region, so the helper trims it to the extent
 its FDT header describes (`trim_fdt_to_extent`, rewriting `totalsize`)
 before it is embedded — the few-KiB meaningful tree, not ~1 MiB of zero

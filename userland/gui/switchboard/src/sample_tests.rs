@@ -16,13 +16,12 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::rlimit::{LimitKind, ResourceLimit};
 use tairix_abi::sysinfo::{
-    CacheLedgerRecord, CacheOwnerKind, CpuCoreClass, CpuInfoRecord, CpuLoadRecord,
-    CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashRecord,
-    KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
-    MountAvailability, MountListRequest, MountRecord, MountVolumeState, ProcessListRequest,
-    ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
-    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord,
-    CPU_INFO_FLAG_FREQ_MEASURED, MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
+    CacheLedgerRecord, CacheOwnerKind, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
+    CrashFaultBucket, CrashFaultClass, CrashRecord, KernelMemoryStats, LoadAverage,
+    MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability, MountRecord,
+    MountVolumeState, PageRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord,
+    ResourceLimitRecord, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+    VolumeIoHealthRecord, CPU_INFO_FLAG_FREQ_MEASURED, MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, Time64};
 use tairix_procinfo::Transport;
@@ -197,7 +196,7 @@ impl Transport for Fixture {
                 if self.process_answer == Answer::Fail {
                     return Err(Errno::NotFound);
                 }
-                let req = ProcessListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 Ok(page(&self.processes.borrow(), req.offset, req.limit, |r| {
                     r.to_le_bytes().to_vec()
                 }))
@@ -206,7 +205,7 @@ impl Transport for Fixture {
                 Answer::Deny => Err(Errno::PermissionDenied),
                 Answer::Fail => Err(Errno::NotFound),
                 Answer::Serve => {
-                    let req = CpuTimeListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     Ok(page(&self.cpu.borrow(), req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     }))
@@ -237,7 +236,7 @@ impl Transport for Fixture {
                         // Every paged list request shares the same
                         // `{offset, limit}` header, exactly as the sampler
                         // relies on.
-                        let req = MountListRequest::from_bytes(payload)?;
+                        let req = PageRequest::from_bytes(payload)?;
                         Ok(page(blobs, req.offset, req.limit, Clone::clone))
                     }
                 }

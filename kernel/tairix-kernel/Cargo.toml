@@ -102,6 +102,9 @@ tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0" }
 # (`plans/IOMMU.md`).
 tairix-kernel-iommu-smmuv3 = { path = "../iommu/smmuv3", version = "=0.0.0" }
 tairix-kernel-iommu-riscv = { path = "../iommu/riscv", version = "=0.0.0" }
+# The virtio-iommu's match key and device id, which discovery gives a unit
+# that is a virtio function, from a device tree or the ACPI VIOT.
+tairix-kernel-iommu-virtio = { path = "../iommu/virtio", version = "=0.0.0" }
 # The shared reclaimable-memory model: the boot path classifies the
 # block, transform, and filesystem caches it installs through this one
 # gate, budgets them against it, and governs them by its pressure band.
@@ -129,7 +132,7 @@ tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # console echo key off, so a Backspace or Delete can never disagree between
 # screen and buffer.
 tairix-vt = { path = "../../lib/vt", version = "=0.0.0" }
-# The architecture-neutral virtio factory + provisioning walks (shared
+# The architecture-neutral virtio host + provisioning walks (shared
 # with the riscv64 / aarch64 `virt`-board MMIO verticals) live here so
 # no architecture port duplicates them.
 tairix-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
@@ -436,10 +439,6 @@ tairix-kernel-core = { path = "../core", version = "=0.0.0", features = [
 tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0.0.0", features = [
     "app-image",
 ] }
-# The `virtio_factory` unit tests drive a real `DmaPool` through
-# `kernel/mem`'s in-memory `HostPageTable` test double, gated behind
-# the `host-tests` feature so production builds never link it.
-tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
 # The `root_mount` host tests author a real users-root arxfs volume under
 # a passphrase-derived key through the shared fixture (one on-disk-layout
 # source of truth) and re-open it through the production

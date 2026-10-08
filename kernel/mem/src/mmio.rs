@@ -38,6 +38,7 @@
 use core::fmt;
 use core::ptr::NonNull;
 
+use tairix_abi::DmaCoherence;
 use tairix_collections::RangeMap;
 
 use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
@@ -135,17 +136,32 @@ impl MmioRegion {
 pub enum SharedMemory {
     /// Ordinary write-back RAM two processes exchange data through.
     Cacheable,
-    /// A buffer a DMA master reads or writes, mapped coherent in every
-    /// process so no mapping can hold a line the device never sees.
+    /// A buffer a DMA master that snoops reads or writes: ordinary RAM,
+    /// marked [`MapFlags::DMA`] in every mapping.
+    DmaSnooped,
+    /// A buffer a DMA master that does not snoop reads or writes, mapped
+    /// coherent in every process so no mapping can hold a line the device
+    /// never sees, and marked [`MapFlags::DMA`].
     DmaCoherent,
 }
 
 impl SharedMemory {
+    /// The memory a buffer shared with a DMA master whose accesses are
+    /// `coherence` is.
+    #[must_use]
+    pub const fn dma(coherence: DmaCoherence) -> Self {
+        match coherence {
+            DmaCoherence::Snooped => Self::DmaSnooped,
+            DmaCoherence::Unsnooped => Self::DmaCoherent,
+        }
+    }
+
     fn data_flags(self) -> MapFlags {
         let data = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
         match self {
             Self::Cacheable => data,
-            Self::DmaCoherent => data | MapFlags::DMA_COHERENT,
+            Self::DmaSnooped => data | MapFlags::DMA,
+            Self::DmaCoherent => data | MapFlags::DMA | MapFlags::DMA_COHERENT,
         }
     }
 }
@@ -521,12 +537,23 @@ impl MmioWindowMap {
     /// — and a released run's slots, guards included, are free again the
     /// moment its record leaves.
     fn claim_run(&mut self, data_pages: usize, span: WindowSpan) -> Result<usize, MmioError> {
-        let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
-        let count = u64::try_from(block_pages).map_err(|_| MmioError::NoVirtualSpace)?;
+        let count = run_slots(data_pages).ok_or(MmioError::NoVirtualSpace)?;
         self.regions
             .place(0..self.capacity_pages, count, span)
             .map(|run| run.start)
             .ok_or(MmioError::NoVirtualSpace)
+    }
+
+    /// Whether a run of `data_pages` and its guards is free now: what a
+    /// caller asks before paying for memory it would then have nowhere to
+    /// map.
+    #[must_use]
+    pub fn has_room(&self, data_pages: usize) -> bool {
+        run_slots(data_pages).is_some_and(|count| {
+            self.regions
+                .first_free(0..self.capacity_pages, count)
+                .is_some()
+        })
     }
 
     /// Describe the run claimed at `leading_guard_slot` as the
@@ -752,6 +779,11 @@ impl MmioWindowMap {
         );
         self.regions.remove(leading_guard_slot);
     }
+}
+
+/// Slots a run of `data_pages` takes with its two guards.
+fn run_slots(data_pages: usize) -> Option<u64> {
+    u64::try_from(data_pages.checked_add(2)?).ok()
 }
 
 /// Per-process MMIO register-window mapper.

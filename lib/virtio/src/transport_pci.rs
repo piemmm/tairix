@@ -29,7 +29,6 @@
 //! the fallible [`Transport::queue_set`] path before
 //! [`Transport::notify`] ever uses it.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::virtio_pci::VirtioPciWindows;
@@ -84,11 +83,17 @@ impl PciTransport {
             .common
             .read_u16(common::NUM_QUEUES)
             .map_err(|_| VirtioError::DeviceFault)?;
+        // As many as the device says it has, up to 64Ki.
+        let mut notify_offsets = Vec::new();
+        notify_offsets
+            .try_reserve_exact(usize::from(num_queues))
+            .map_err(|_| VirtioError::OutOfMemory)?;
+        notify_offsets.resize(usize::from(num_queues), None);
         Ok(Self {
             windows,
             num_queues,
             selected_queue: 0,
-            notify_offsets: vec![None; num_queues as usize],
+            notify_offsets,
             msix_entry,
         })
     }
@@ -282,15 +287,23 @@ impl Transport for PciTransport {
         }
     }
 
+    fn config_len(&self) -> usize {
+        self.windows.device.len()
+    }
+
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         for (i, b) in buf.iter_mut().enumerate() {
-            *b = self.windows.device.read_u8(offset + i).unwrap_or(0);
+            *b = crate::transport::config_byte(0, offset, i)
+                .and_then(|at| self.windows.device.read_u8(at).ok())
+                .unwrap_or(0);
         }
     }
 
     fn write_config(&mut self, offset: usize, data: &[u8]) {
         for (i, &b) in data.iter().enumerate() {
-            let _ = self.windows.device.write_u8(offset + i, b);
+            if let Some(at) = crate::transport::config_byte(0, offset, i) {
+                let _ = self.windows.device.write_u8(at, b);
+            }
         }
     }
 
@@ -306,40 +319,9 @@ impl Transport for PciTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::register_region::Region;
     use crate::{MockHost, SplitQueue};
-    use alloc::boxed::Box;
-    use core::ptr::NonNull;
     use tairix_abi::RegisterWindow;
-
-    /// One device register region. The leaked, 8-byte-aligned
-    /// backing storage outlives every window built over it (the test
-    /// process never frees it), and a region is accessed only through
-    /// the volatile [`RegisterWindow`] accessors, so the driver-side
-    /// window held by [`PciTransport`] and the test's `dev` window
-    /// alias the same bytes exactly as real hardware does.
-    struct Region {
-        base: NonNull<u8>,
-        len: usize,
-    }
-
-    impl Region {
-        fn new(len: usize) -> Self {
-            let words = len.div_ceil(8);
-            let boxed = alloc::vec![0u64; words.max(1)].into_boxed_slice();
-            let raw = Box::leak(boxed);
-            let base = NonNull::new(raw.as_mut_ptr().cast::<u8>()).expect("non-null");
-            Self { base, len }
-        }
-
-        /// Build a fresh window over the region. `phys` is synthetic.
-        fn window(&self, phys: u64) -> RegisterWindow {
-            // SAFETY: `base` covers `len` bytes of leaked storage that
-            // lives for the rest of the process; the window only ever
-            // performs volatile accesses, so aliasing windows are
-            // sound for the single-threaded test.
-            unsafe { RegisterWindow::from_mapping(phys, self.base, self.len) }
-        }
-    }
 
     /// A buffer-backed stand-in for a modern virtio PCI device. The
     /// `dev_*` windows let a test pre-load device-supplied registers
@@ -364,22 +346,24 @@ mod tests {
             }
         }
 
+        // SAFETY (each window below): every test holds its fake for its whole
+        // body, so the regions outlive the windows and transports over them.
         fn dev_common(&self) -> RegisterWindow {
-            self.common.window(0xC000_0000)
+            unsafe { self.common.window(0xC000_0000) }
         }
         fn dev_notify(&self) -> RegisterWindow {
-            self.notify.window(0xC001_0000)
+            unsafe { self.notify.window(0xC001_0000) }
         }
         fn dev_device(&self) -> RegisterWindow {
-            self.device.window(0xC002_0000)
+            unsafe { self.device.window(0xC002_0000) }
         }
 
         fn windows(&self) -> PciTransportWindows {
             PciTransportWindows {
-                common: self.common.window(0xC000_0000),
-                notify: self.notify.window(0xC001_0000),
-                isr: self.isr.window(0xC003_0000),
-                device: self.device.window(0xC002_0000),
+                common: unsafe { self.common.window(0xC000_0000) },
+                notify: unsafe { self.notify.window(0xC001_0000) },
+                isr: unsafe { self.isr.window(0xC003_0000) },
+                device: unsafe { self.device.window(0xC002_0000) },
                 notify_off_multiplier: self.notify_off_multiplier,
             }
         }
@@ -412,17 +396,19 @@ mod tests {
                 0xC003_0000 => &self.dev.isr,
                 _ => return Err(tairix_abi::MmioMapError::InvalidRegion),
             };
-            assert_eq!(len, region.len, "the grant's length is mapped");
-            Ok(region.window(phys))
+            assert_eq!(len, region.len(), "the grant's length is mapped");
+            // SAFETY: the mapper borrows the fake, which outlives the test's
+            // transport.
+            Ok(unsafe { region.window(phys) })
         }
     }
 
     fn granted(dev: &FakeDevice, msix_entry: Option<u16>) -> VirtioPciWindows {
         VirtioPciWindows {
-            common: (0xC000_0000, dev.common.len),
-            notify: (0xC001_0000, dev.notify.len),
-            isr: (0xC003_0000, dev.isr.len),
-            device: (0xC002_0000, dev.device.len),
+            common: (0xC000_0000, dev.common.len()),
+            notify: (0xC001_0000, dev.notify.len()),
+            isr: (0xC003_0000, dev.isr.len()),
+            device: (0xC002_0000, dev.device.len()),
             notify_off_multiplier: dev.notify_off_multiplier,
             msix_entry,
         }
@@ -430,13 +416,21 @@ mod tests {
 
     #[test]
     fn new_rejects_short_common_window() {
-        let short = Region::new(common::CFG_LEN - 1);
-        let windows = PciTransportWindows {
-            common: short.window(0),
-            notify: Region::new(8).window(0),
-            isr: Region::new(4).window(0),
-            device: Region::new(8).window(0),
-            notify_off_multiplier: 0,
+        let (short, notify, isr, device) = (
+            Region::new(common::CFG_LEN - 1),
+            Region::new(8),
+            Region::new(4),
+            Region::new(8),
+        );
+        // SAFETY: the regions are this test's locals, outliving the windows.
+        let windows = unsafe {
+            PciTransportWindows {
+                common: short.window(0),
+                notify: notify.window(0),
+                isr: isr.window(0),
+                device: device.window(0),
+                notify_off_multiplier: 0,
+            }
         };
         assert!(matches!(
             PciTransport::new(windows, None),
@@ -451,8 +445,10 @@ mod tests {
             PciTransport::new(dev.windows(), Some(VIRTIO_MSI_NO_VECTOR)),
             Err(VirtioError::DeviceFault)
         ));
+        let empty = Region::new(0);
         let windows = PciTransportWindows {
-            isr: Region::new(0).window(0),
+            // SAFETY: a local of the test, outliving the window.
+            isr: unsafe { empty.window(0) },
             ..dev.windows()
         };
         assert!(matches!(
@@ -667,6 +663,12 @@ mod tests {
     }
 
     #[test]
+    fn the_config_window_is_the_device_capability_s_window() {
+        assert_eq!(FakeDevice::new(8, 40, 0).transport().config_len(), 40);
+        assert_eq!(FakeDevice::new(8, 8, 0).transport().config_len(), 8);
+    }
+
+    #[test]
     fn write_config_writes_the_device_window_and_drops_bytes_past_it() {
         let dev = FakeDevice::new(8, 8, 0);
         let mut t = dev.transport();
@@ -685,7 +687,7 @@ mod tests {
         c.write_u16(common::QUEUE_SIZE, 8).unwrap();
         c.write_u16(common::QUEUE_NOTIFY_OFF, 1).unwrap();
         let mut t = dev.transport();
-        let host: &'static MockHost = Box::leak(Box::new(MockHost::new()));
+        let host = &MockHost::new();
         let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("queue setup");
         assert_eq!(q.size(), 8);
         // The queue allocated its descriptor table through the host

@@ -277,25 +277,20 @@ fn install_data_shim(t: &mut MockTransport, log: &Rc<RefCell<DeviceLog>>) {
 /// The mock device, shared by the driver under test and the host playing it.
 type Device = Rc<RefCell<MockTransport>>;
 
-type Crypto = Box<VirtioCrypto<'static, Device>>;
+type Crypto<'h> = Box<VirtioCrypto<'h, Device>>;
 
 /// Open a driver on `t`, whose waits `host` answers by playing the device.
-fn open_played_by(t: MockTransport, host: MockHost) -> (Crypto, Device, &'static MockHost) {
-    let host: &'static MockHost = Box::leak(Box::new(host));
+fn open_played_by(t: MockTransport, host: &MockHost) -> (Crypto<'_>, Device) {
     let device = t.into_shared();
     host.attach(&device);
     let driver = Box::new(VirtioCrypto::open(Rc::clone(&device), host).expect("open"));
-    (driver, device, host)
+    (driver, device)
 }
 
-fn auto_host() -> &'static MockHost {
-    Box::leak(Box::new(MockHost::new()))
-}
-
-fn open_healthy() -> (Crypto, Rc<RefCell<DeviceLog>>, &'static MockHost, Device) {
+fn open_healthy(host: &MockHost) -> (Crypto<'_>, Rc<RefCell<DeviceLog>>, Device) {
     let (t, log) = build_device(healthy_config());
-    let (driver, device, host) = open_played_by(t, MockHost::new());
-    (driver, log, host, device)
+    let (driver, device) = open_played_by(t, host);
+    (driver, log, device)
 }
 
 /// Let the wait `answered` waits from now time out without the device
@@ -353,7 +348,8 @@ fn bind_table_names_the_virtio_crypto_device_type_and_nothing_else() {
 
 #[test]
 fn open_negotiates_the_transport_features_and_reports_what_the_device_offered() {
-    let (driver, _log, _host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (driver, _log, device) = open_healthy(host);
     assert!(device.borrow().status().contains(Status::DRIVER_OK));
     assert_eq!(
         device.borrow().negotiated_driver_features(),
@@ -374,7 +370,7 @@ fn open_refuses_a_device_that_is_not_ready() {
     let (mut t, _log) = build_device(healthy_config());
     t.set_config(wire::config::STATUS, &0u32.to_le_bytes());
     assert_eq!(
-        VirtioCrypto::open(t, auto_host()).err(),
+        VirtioCrypto::open(t, &MockHost::new()).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -383,7 +379,7 @@ fn open_refuses_a_device_that_is_not_ready() {
 fn open_refuses_a_device_offering_no_cipher_service() {
     let (t, _log) = build_device(config(0, wire::CIPHER_AES_CBC_BIT, 1, 4096));
     assert_eq!(
-        VirtioCrypto::open(t, auto_host()).err(),
+        VirtioCrypto::open(t, &MockHost::new()).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -394,7 +390,7 @@ fn open_refuses_a_device_whose_algorithms_this_driver_cannot_encode() {
     // not implement: binding would accept jobs it could only fail.
     let (t, _log) = build_device(config(wire::SERVICE_CIPHER, 1 << 13, 1, 4096));
     assert_eq!(
-        VirtioCrypto::open(t, auto_host()).err(),
+        VirtioCrypto::open(t, &MockHost::new()).err(),
         Some(DriverError::Unsupported)
     );
 }
@@ -407,7 +403,8 @@ fn an_algorithm_bit_this_driver_cannot_encode_is_ignored_not_offered() {
     // driver, where the caller can act on it.
     let offered = wire::CIPHER_AES_CBC_BIT | (1 << 13) | (1 << 1);
     let (t, _log) = build_device(config(wire::SERVICE_CIPHER, offered, 1, 4096));
-    let driver = VirtioCrypto::open(t, auto_host()).expect("open");
+    let host = &MockHost::new();
+    let driver = VirtioCrypto::open(t, host).expect("open");
     let report = driver.device_report();
     assert!(report.ciphers.contains(CipherAlgorithm::AesCbc));
     assert_eq!(report.ciphers.len(), 1);
@@ -422,7 +419,7 @@ fn open_refuses_a_device_that_advertises_no_data_queue() {
         4096,
     ));
     assert_eq!(
-        VirtioCrypto::open(t, auto_host()).err(),
+        VirtioCrypto::open(t, &MockHost::new()).err(),
         Some(DriverError::DeviceFault)
     );
 }
@@ -437,17 +434,20 @@ fn the_staged_ceiling_is_the_smaller_of_the_devices_and_the_drivers() {
         1,
         u64::MAX,
     ));
-    let driver = VirtioCrypto::open(t, auto_host()).expect("open");
+    let host = &MockHost::new();
+    let driver = VirtioCrypto::open(t, host).expect("open");
     assert_eq!(driver.device_report().max_job_bytes, MAX_STAGED_JOB_BYTES);
     // A device declaring no ceiling of its own gets the driver's.
     let (t, _log) = build_device(config(wire::SERVICE_CIPHER, wire::CIPHER_AES_CBC_BIT, 1, 0));
-    let driver = VirtioCrypto::open(t, auto_host()).expect("open");
+    let host = &MockHost::new();
+    let driver = VirtioCrypto::open(t, host).expect("open");
     assert_eq!(driver.device_report().max_job_bytes, MAX_STAGED_JOB_BYTES);
 }
 
 #[test]
 fn a_cipher_job_round_trips_through_the_device() {
-    let (mut driver, _log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, _device) = open_healthy(host);
     let plain = [0x11u8; 32];
     let mut encrypted = [0u8; 32];
     driver
@@ -463,7 +463,8 @@ fn a_cipher_job_round_trips_through_the_device() {
 
 #[test]
 fn the_control_frames_carry_the_layout_the_device_decodes() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out))
@@ -481,7 +482,8 @@ fn the_control_frames_carry_the_layout_the_device_decodes() {
 
 #[test]
 fn the_data_frame_carries_the_session_the_algorithm_and_every_length() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let plain = [0u8; 48];
     let mut out = [0u8; 48];
     driver
@@ -503,7 +505,8 @@ fn a_decrypt_job_binds_the_decrypt_direction_into_its_session() {
     // The peer refuses a data request whose direction is not the one its
     // session was created for, so a driver that hard-coded the session's `op`
     // could not complete this.
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Decrypt, &[0u8; 16], &mut out))
@@ -513,7 +516,8 @@ fn a_decrypt_job_binds_the_decrypt_direction_into_its_session() {
 
 #[test]
 fn the_session_is_destroyed_even_when_the_job_fails_and_the_jobs_error_wins() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     log.borrow_mut().data_status = wire::STATUS_ERR;
     let mut out = [0xAAu8; 16];
     assert_eq!(
@@ -530,7 +534,8 @@ fn the_session_is_destroyed_even_when_the_job_fails_and_the_jobs_error_wins() {
 
 #[test]
 fn a_refused_key_and_an_unsupported_request_are_request_level_refusals() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let mut out = [0u8; 16];
     log.borrow_mut().data_status = wire::STATUS_KEY_REJECTED;
     assert_eq!(
@@ -575,7 +580,8 @@ fn status_decoding_fails_an_undefined_value_closed() {
 
 #[test]
 fn a_job_the_device_cannot_do_is_refused_before_any_of_it_is_submitted() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let mut out = [0u8; 16];
     // A key length the algorithm does not accept.
     let job = CipherJob {
@@ -608,7 +614,8 @@ fn a_job_the_device_cannot_do_is_refused_before_any_of_it_is_submitted() {
 
 #[test]
 fn a_job_above_the_devices_own_ceiling_is_refused_rather_than_split() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let ceiling = usize::try_from(driver.device_report().max_job_bytes).expect("fits");
     let plain = vec![0u8; ceiling + 16];
     let mut out = vec![0u8; ceiling + 16];
@@ -628,7 +635,8 @@ fn a_job_above_the_devices_own_ceiling_is_refused_rather_than_split() {
 #[test]
 fn a_silent_device_releases_the_caller_rather_than_parking_it_for_ever() {
     let (t, _log) = build_device(healthy_config());
-    let (mut driver, _device, _host) = open_played_by(t, MockHost::silent());
+    let host = &MockHost::silent();
+    let (mut driver, _device) = open_played_by(t, host);
     let mut out = [0u8; 16];
     assert_eq!(
         driver.cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out)),
@@ -645,7 +653,7 @@ fn a_wake_storm_with_no_completion_fails_the_job_closed() {
         MockWait::Spurious { after_ns: 0 },
         wakes,
     ));
-    let (mut driver, _device, _host) = open_played_by(t, host);
+    let (mut driver, _device) = open_played_by(t, &host);
     let mut out = [0u8; 16];
     assert_eq!(
         driver.cipher(cipher_job(CipherDirection::Encrypt, &[0u8; 16], &mut out)),
@@ -655,7 +663,8 @@ fn a_wake_storm_with_no_completion_fails_the_job_closed() {
 
 #[test]
 fn the_job_path_reuses_its_staging_rather_than_re_granting_dma() {
-    let (mut driver, _log, host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, _device) = open_healthy(host);
     let after_open = host.bytes_allocated();
     let mut out = [0u8; 32];
     for _ in 0..4 {
@@ -672,7 +681,8 @@ fn the_job_path_reuses_its_staging_rather_than_re_granting_dma() {
 
 #[test]
 fn the_device_interrupt_is_acknowledged_once_per_published_chain() {
-    let (mut driver, _log, _host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, device) = open_healthy(host);
     let before = device.borrow().ack_interrupts;
     let mut out = [0u8; 16];
     driver
@@ -714,7 +724,8 @@ fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
 #[test]
 fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
     let (t, _log) = build_device(healthy_config());
-    let (driver, device, host) = open_played_by(t, MockHost::new());
+    let host = &MockHost::new();
+    let (driver, device) = open_played_by(t, host);
     let held = host.slabs_outstanding();
     assert!(held > 0);
     device.borrow_mut().refuse_resets_after(0);
@@ -724,7 +735,8 @@ fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
 
 /// What a healthy device returns for `input`, run on a fresh one.
 fn healthy_output(input: &[u8]) -> Vec<u8> {
-    let (mut driver, _log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, _device) = open_healthy(host);
     let mut out = vec![0u8; input.len()];
     driver
         .cipher(cipher_job(CipherDirection::Encrypt, input, &mut out))
@@ -734,7 +746,8 @@ fn healthy_output(input: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_late_jobs_output_is_never_handed_to_the_next_caller() {
-    let (mut driver, log, host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, device) = open_healthy(host);
     let first = [0x11u8; 16];
     let second = [0x22u8; 16];
     // The create answers; the job itself is answered only after its deadline.
@@ -759,7 +772,8 @@ fn a_late_jobs_output_is_never_handed_to_the_next_caller() {
 
 #[test]
 fn a_session_an_abandoned_create_made_is_destroyed_once_the_device_answers() {
-    let (mut driver, log, host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, device) = open_healthy(host);
     go_silent_after(host, 0);
     let mut out = [0u8; 16];
     assert_eq!(
@@ -786,7 +800,8 @@ fn a_session_an_abandoned_create_made_is_destroyed_once_the_device_answers() {
 #[test]
 fn a_destroy_the_device_refuses_is_retried_before_the_next_job() {
     // A refused destroy leaves the device holding the caller's key schedule.
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     log.borrow_mut().refuse_destroys = 1;
     let mut out = [0u8; 16];
     assert_eq!(
@@ -802,7 +817,8 @@ fn a_destroy_the_device_refuses_is_retried_before_the_next_job() {
 
 #[test]
 fn an_abandoned_destroy_the_device_then_refuses_is_retried_before_the_next_job() {
-    let (mut driver, log, host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, device) = open_healthy(host);
     // The create and the job are answered; the destroy's wait goes silent.
     go_silent_after(host, 2);
     let mut out = [0u8; 16];
@@ -823,7 +839,8 @@ fn an_abandoned_destroy_the_device_then_refuses_is_retried_before_the_next_job()
 fn a_job_the_device_completed_without_answering_hands_back_nothing() {
     // The status staging is reused, so without a fresh sentinel a job the
     // device never answered reads as the last one's OK.
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Encrypt, &[0x41; 16], &mut out))
@@ -840,7 +857,8 @@ fn a_job_the_device_completed_without_answering_hands_back_nothing() {
 #[test]
 fn a_create_the_device_completed_without_answering_runs_no_job() {
     // Read stale, the session reply would name the last, destroyed session.
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     let mut out = [0u8; 16];
     driver
         .cipher(cipher_job(CipherDirection::Encrypt, &[0x51; 16], &mut out))
@@ -859,8 +877,10 @@ fn a_ring_too_shallow_for_a_job_is_refused_before_it_is_programmed() {
     // A device whose data queue holds four descriptors could run no job.
     let (t, _log) = build_device_with_queue_max(healthy_config(), 4);
     let device = t.into_shared();
+    let host = MockHost::new();
+    device.borrow_mut().reach(&host);
     assert_eq!(
-        VirtioCrypto::open(Rc::clone(&device), auto_host()).err(),
+        VirtioCrypto::open(Rc::clone(&device), &host).err(),
         Some(DriverError::Unsupported)
     );
     assert_eq!(
@@ -875,8 +895,10 @@ fn a_control_queue_too_shallow_for_a_session_is_refused_at_open() {
     let (mut t, _log) = build_device(healthy_config());
     t.set_queue_max(1, 2);
     let device = t.into_shared();
+    let host = MockHost::new();
+    device.borrow_mut().reach(&host);
     assert_eq!(
-        VirtioCrypto::open(Rc::clone(&device), auto_host()).err(),
+        VirtioCrypto::open(Rc::clone(&device), &host).err(),
         Some(DriverError::Unsupported)
     );
     assert_eq!(
@@ -888,7 +910,8 @@ fn a_control_queue_too_shallow_for_a_session_is_refused_at_open() {
 
 #[test]
 fn a_job_whose_completion_does_not_cover_its_output_hands_back_nothing() {
-    let (mut driver, log, _host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, log, _device) = open_healthy(host);
     log.borrow_mut().short_output = true;
     let mut out = [0u8; 16];
     assert_eq!(
@@ -904,31 +927,26 @@ fn a_job_whose_completion_does_not_cover_its_output_hands_back_nothing() {
 
 #[test]
 fn a_key_the_device_held_is_scrubbed_when_the_driver_is_dropped() {
-    let (mut driver, _log, host, _device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, _device) = open_healthy(host);
     go_silent_after(host, 0);
     let mut out = [0u8; 16];
     assert_eq!(
         driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x78; 16], &mut out)),
         Err(DriverError::DeviceOffline)
     );
-    let (bytes, len) = driver
-        .key
-        .as_ref()
-        .map(|key| (key.as_bytes().as_ptr(), key.len()))
-        .expect("put back");
+    let slot = driver.key.as_ref().map(DmaSlab::slot).expect("put back");
     drop(driver);
-    // SAFETY: the mock host leaks every slab's storage, so these bytes
-    // outlive the driver that freed them.
-    let staging = unsafe { core::slice::from_raw_parts(bytes, len) };
     assert!(
-        staging.iter().all(|b| *b == 0),
+        host.released_zeroed(slot),
         "the confirmed reset took it back"
     );
 }
 
 #[test]
 fn no_job_is_published_while_the_device_still_holds_an_abandoned_chain() {
-    let (mut driver, _log, host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, device) = open_healthy(host);
     go_silent_after(host, 1);
     let mut out = [0u8; 16];
     assert_eq!(
@@ -950,7 +968,8 @@ fn no_job_is_published_while_the_device_still_holds_an_abandoned_chain() {
 
 #[test]
 fn a_key_the_device_held_is_scrubbed_when_it_comes_back() {
-    let (mut driver, _log, host, device) = open_healthy();
+    let host = &MockHost::new();
+    let (mut driver, _log, device) = open_healthy(host);
     go_silent_after(host, 0);
     let mut out = [0u8; 16];
     assert_eq!(

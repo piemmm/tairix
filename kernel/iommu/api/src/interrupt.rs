@@ -141,3 +141,52 @@ pub trait InterruptRemapping: Sync {
     /// [`Self::prepare_remapping`].
     fn disable_remapping(&self) -> Result<(), IommuError>;
 }
+
+/// Where a unit writes once it has recorded a confined device's message: an
+/// interrupt file's page, as the hart it belongs to reaches it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Notice {
+    /// The physical address of the interrupt file's page.
+    pub address: u64,
+    /// The identity written there.
+    pub data: u32,
+}
+
+/// Bytes of a memory-resident interrupt file, and the alignment it needs
+/// (RISC-V Advanced Interrupt Architecture, "Memory-resident interrupt
+/// files").
+pub const MESSAGE_FILE_BYTES: u64 = 512;
+
+/// The half of a unit that intercepts its devices' message writes itself (the
+/// RISC-V IOMMU's MSI page tables): each confined stream's messages set an
+/// identity in a memory-resident interrupt file the kernel owns, and the unit
+/// then writes a notice the kernel chose, so the stream reaches no interrupt
+/// file but its own.
+pub trait MessageFiles: Sync {
+    /// Whether the unit sets a file's pending bit atomically. Where it does
+    /// not, a pending bit the kernel clears as the unit sets another can come
+    /// back: a repeated interrupt, never a lost one.
+    fn atomic_files(&self) -> bool;
+
+    /// Confine `stream`'s messages, at once where it translates and from its
+    /// next attach otherwise: a write it makes to the page at IOVA
+    /// `doorbell`, which its domains keep clear, sets the identity it writes
+    /// in the file at physical address `file`, and the unit then writes
+    /// `notice`. Every stream of a domain is confined alike, since the unit
+    /// caches what a message translates to by domain, not by stream.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::OutOfRange`] for a file not aligned to
+    /// [`MESSAGE_FILE_BYTES`], a
+    /// doorbell or notice address not page-aligned, a notice identity past
+    /// 2047, or a stream the unit cannot name; [`IommuError::Exhausted`]
+    /// when the table cannot be had.
+    fn confine_messages(
+        &self,
+        stream: u32,
+        doorbell: u64,
+        file: u64,
+        notice: Notice,
+    ) -> Result<(), IommuError>;
+}

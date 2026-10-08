@@ -91,6 +91,13 @@ pub enum Command<'a> {
     /// under the same authority as the hardware tree, not the kernel-state
     /// authority the per-volume `storage` counters need).
     Raid,
+    /// List the DMA translation units — each one's family, whether it
+    /// translates or why not, how it raises its faults, the owners and
+    /// firmware streams it holds, and what its faults came to — then the
+    /// isolation groups owners hold and each node a unit translates for an
+    /// owner (`DMA_UNITS`, `DMA_GROUPS` and `DMA_NODES`, which the service
+    /// gates on `CAP_SYSINFO_HW`).
+    Dma,
     /// Read one `info:`/`state:`/`stats:` resource reference and print its
     /// value (`plans/ALIAS.md` §15.4 `show`).
     ///
@@ -153,6 +160,7 @@ pub enum Command<'a> {
 /// | `frames`              | [`Command::Frames`]              |
 /// | `storage`, `io`       | [`Command::Storage`]             |
 /// | `raid`, `arrays`      | [`Command::Raid`]                |
+/// | `dma`, `iommu`        | [`Command::Dma`]                 |
 /// | `show <ref>`          | [`Command::Show`]                |
 /// | `describe <ref>`      | [`Command::Describe`]            |
 ///
@@ -188,6 +196,7 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
         "frames" => no_more(rest).map(|()| Command::Frames),
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
+        "dma" | "iommu" => no_more(rest).map(|()| Command::Dma),
         "show" => one_operand(rest).map(|reference| Command::Show { reference }),
         "describe" => one_operand(rest).map(|reference| Command::Describe { reference }),
         _ => Err(SysinfoError::Usage),
@@ -281,6 +290,9 @@ mod tests {
         assert_eq!(parse(&["io"]), Ok(Command::Storage));
         assert_eq!(parse(&["raid"]), Ok(Command::Raid));
         assert_eq!(parse(&["arrays"]), Ok(Command::Raid));
+        assert_eq!(parse(&["dma"]), Ok(Command::Dma));
+        assert_eq!(parse(&["iommu"]), Ok(Command::Dma));
+        assert_eq!(parse(&["dma", "nodes"]), Err(SysinfoError::Usage));
     }
 
     #[test]

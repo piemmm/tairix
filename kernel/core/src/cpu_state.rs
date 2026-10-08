@@ -620,6 +620,19 @@ pub(crate) fn states() -> &'static [CpuState] {
     }
 }
 
+/// The CPUs whose load the frequency governor weighs: every installed one.
+#[cfg(not(test))]
+pub(crate) fn governed() -> impl Iterator<Item = &'static CpuState> {
+    states().iter()
+}
+
+/// In a host test, the CPUs that test claimed, so a load a concurrent test
+/// stamps on its own CPU never reads as this test's.
+#[cfg(test)]
+pub(crate) fn governed() -> impl Iterator<Item = &'static CpuState> {
+    crate::test_boot::claimed_cpus().into_iter().filter_map(get)
+}
+
 /// Sum the monotonic preemption counters across installed CPUs.
 pub(crate) fn total_preemptions() -> u64 {
     states()

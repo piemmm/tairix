@@ -1,19 +1,18 @@
 //! The shared paged-list walk for sysinfo queries that return a homogeneous
 //! sequence of fixed-size records.
 //!
-//! Several `sysinfo-v1` queries — the process list, the mount list — answer
-//! with a run of fixed-[`WIRE_LEN`] records that the client pages through
-//! with an `offset`/`limit` request. The paging loop is identical across
-//! them: request a page, reject a structurally invalid reply, decode each
-//! record, and stop on a short page. It lives here once rather than being
-//! copied per query.
+//! Every `sysinfo-v1` list query answers with a run of fixed-[`WIRE_LEN`]
+//! records that the client pages through with a [`PageRequest`]. The paging
+//! loop is identical across them: request a page, reject a structurally
+//! invalid reply, decode each record, and stop on a short page. It lives here
+//! once rather than being copied per query.
 //!
 //! [`WIRE_LEN`]: tairix_abi::sysinfo::ProcessRecord::WIRE_LEN
 
 use alloc::string::String;
-use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use tairix_abi::sysinfo::SysinfoQueryId;
+use tairix_abi::sysinfo::{PageRequest, SysinfoQueryId};
 use tairix_abi::Errno;
 
 use crate::request::{call, CallError};
@@ -67,15 +66,26 @@ pub enum WalkStep {
     Stop,
 }
 
+/// A walk id distinct among this process's walks: every page of one walk is
+/// answered from one reading of its list.
+fn next_walk() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    loop {
+        let walk = NEXT.fetch_add(1, Ordering::Relaxed);
+        if walk != PageRequest::FRESH {
+            return walk;
+        }
+    }
+}
+
 /// Page through `query` and hand each record's raw bytes to `on_record`,
 /// until the list is exhausted or `on_record` answers
 /// [`WalkStep::Stop`].
 ///
-/// `record_len` is the fixed wire size of one record; `page` is the per-page
-/// record count baked into each request by `make_request`. The walk **fails
-/// closed**: a reply whose length is not a whole
-/// number of `record_len` records, one that would overflow the page
-/// offset, or a `record_len` of zero, is rejected rather than partially
+/// Each page is asked for with a [`PageRequest`] for `page` records of
+/// `record_len` bytes. The walk **fails closed**: a reply whose length is not
+/// a whole number of records, one that would overflow the page offset, or a
+/// `record_len` or `page` of zero, is rejected rather than partially
 /// delivered.
 ///
 /// Public so a consumer with its own bounding or cadence policy (for
@@ -89,7 +99,9 @@ pub enum WalkStep {
 /// # Errors
 ///
 /// * [`ListError::Call`] — the transport failed, the service denied the
-///   query, or the reply was structurally invalid.
+///   query, the reply was structurally invalid, or the service let the walk
+///   go before it ended ([`Errno::Interrupted`]), which its caller starts
+///   again.
 /// * [`ListError::Sink`] — `on_record` returned an error; the walk stops at
 ///   that record.
 pub fn walk_pages(
@@ -97,21 +109,74 @@ pub fn walk_pages(
     query: SysinfoQueryId,
     record_len: usize,
     page: u16,
-    make_request: impl Fn(u32, u16) -> Vec<u8>,
+    on_record: impl FnMut(&[u8]) -> Result<WalkStep, ListError>,
+) -> Result<(), ListError> {
+    walk_pages_with(
+        transport,
+        query,
+        record_len,
+        page,
+        PageRequest::to_le_bytes,
+        on_record,
+    )
+}
+
+/// [`walk_pages`] over the records `decode` reads from each chunk, handing
+/// each to `sink`: a record that does not decode fails the walk as the
+/// service's error, and a refusal from `sink` as the sink's.
+///
+/// # Errors
+///
+/// As [`walk_pages`].
+pub fn walk_records<R>(
+    transport: &dyn Transport,
+    query: SysinfoQueryId,
+    record_len: usize,
+    page: u16,
+    decode: impl Fn(&[u8]) -> Result<R, Errno>,
+    mut sink: impl FnMut(&R) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_pages(transport, query, record_len, page, |chunk| {
+        let record = decode(chunk).map_err(|errno| ListError::Call(CallError::Service(errno)))?;
+        sink(&record).map_err(ListError::Sink)
+    })
+}
+
+/// [`walk_pages`] for a query whose payload carries more than its page:
+/// `make_request` encodes each page's payload from the [`PageRequest`] the
+/// walk has reached.
+///
+/// # Errors
+///
+/// As [`walk_pages`].
+pub fn walk_pages_with<const N: usize>(
+    transport: &dyn Transport,
+    query: SysinfoQueryId,
+    record_len: usize,
+    page: u16,
+    make_request: impl Fn(&PageRequest) -> [u8; N],
     mut on_record: impl FnMut(&[u8]) -> Result<WalkStep, ListError>,
 ) -> Result<(), ListError> {
     // An empty page is answered empty for ever, so the walk would never end.
     if record_len == 0 || page == 0 {
         return Err(ListError::Call(CallError::Service(Errno::LengthOutOfRange)));
     }
+    let walk = next_walk();
     let mut offset: u32 = 0;
     loop {
-        let request = make_request(offset, page);
+        let request = make_request(&PageRequest {
+            offset,
+            limit: page,
+            flags: 0,
+            walk,
+        });
         let reply = call(transport, query, &request).map_err(ListError::Call)?;
-        if reply.len() % record_len != 0 {
+        let count = reply.len() / record_len;
+        // More than was asked for breaks the protocol as surely as a partial
+        // record does: nothing of such a page is believed.
+        if reply.len() % record_len != 0 || count > usize::from(page) {
             return Err(ListError::Call(CallError::Service(Errno::BadMagic)));
         }
-        let count = reply.len() / record_len;
         for chunk in reply.chunks_exact(record_len) {
             if on_record(chunk)? == WalkStep::Stop {
                 return Ok(());
@@ -130,12 +195,12 @@ pub fn walk_pages(
 
 #[cfg(test)]
 mod tests {
-    use super::{walk_pages, ListError, WalkStep};
+    use super::{walk_pages, walk_pages_with, ListError, WalkStep};
     use crate::request::CallError;
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::sysinfo::{SysinfoQueryId, SysinfoRequestHeader};
+    use tairix_abi::sysinfo::{PageRequest, SysinfoQueryId, SysinfoRequestHeader};
     use tairix_abi::Errno;
 
     /// One record per byte value, so a page's worth of records is trivially
@@ -167,9 +232,166 @@ mod tests {
             SysinfoQueryId::MOUNT_LIST,
             record_len,
             PAGE,
-            |_, _| Vec::new(),
             on_record,
         )
+    }
+
+    /// Answers `total` one-byte records a page at a time, keeping every
+    /// payload it was asked with.
+    struct Recording {
+        total: usize,
+        payloads: RefCell<Vec<Vec<u8>>>,
+    }
+
+    impl Transport for Recording {
+        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
+            SysinfoRequestHeader::from_bytes(request)?;
+            let payload = &request[SysinfoRequestHeader::WIRE_LEN..];
+            self.payloads.borrow_mut().push(payload.to_vec());
+            let page = PageRequest::from_bytes(payload)?;
+            let offset = usize::try_from(page.offset).map_err(|_| Errno::LengthOutOfRange)?;
+            let take = self
+                .total
+                .saturating_sub(offset)
+                .min(usize::from(page.limit));
+            Ok(alloc::vec![7u8; take * RECORD_LEN])
+        }
+    }
+
+    /// Answers its first page with one record more than was asked for, and
+    /// every later one empty.
+    struct Overlong {
+        answered: RefCell<bool>,
+    }
+
+    impl Transport for Overlong {
+        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
+            let payload = &request[SysinfoRequestHeader::WIRE_LEN..];
+            let page = PageRequest::from_bytes(payload)?;
+            if self.answered.replace(true) {
+                return Ok(Vec::new());
+            }
+            Ok(alloc::vec![7u8; (usize::from(page.limit) + 1) * RECORD_LEN])
+        }
+    }
+
+    /// A page longer than was asked for breaks the protocol, so none of it
+    /// reaches the sink.
+    #[test]
+    fn a_page_longer_than_was_asked_for_is_refused_whole() {
+        let transport = Overlong {
+            answered: RefCell::new(false),
+        };
+        let mut seen = 0usize;
+        let result = walk(&transport, RECORD_LEN, |_| {
+            seen += 1;
+            Ok(WalkStep::Continue)
+        });
+        assert_eq!(
+            result,
+            Err(ListError::Call(CallError::Service(Errno::BadMagic)))
+        );
+        assert_eq!(seen, 0);
+    }
+
+    /// A whole record that does not decode ends the walk as the service's
+    /// fault, and nothing after it reaches the sink.
+    #[test]
+    fn a_record_that_does_not_decode_ends_the_walk_as_the_service_s_fault() {
+        let transport = Recording {
+            total: 3,
+            payloads: RefCell::new(Vec::new()),
+        };
+        let decoded = core::cell::Cell::new(0usize);
+        let mut seen = 0usize;
+        let result = super::walk_records(
+            &transport,
+            SysinfoQueryId::MOUNT_LIST,
+            RECORD_LEN,
+            PAGE,
+            |_| {
+                decoded.set(decoded.get() + 1);
+                if decoded.get() == 2 {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(())
+            },
+            |()| {
+                seen += 1;
+                Ok(WalkStep::Continue)
+            },
+        );
+        assert_eq!(
+            result,
+            Err(ListError::Call(CallError::Service(Errno::BadMagic)))
+        );
+        assert_eq!((decoded.get(), seen), (2, 1));
+    }
+
+    /// Each page asks for the window after the last, every page naming the
+    /// walk's one id, and the short page ends the walk; the next walk names
+    /// another.
+    #[test]
+    fn each_page_asks_for_the_window_after_the_last() {
+        let pages_of = || {
+            let transport = Recording {
+                total: usize::from(PAGE) * 2 + 1,
+                payloads: RefCell::new(Vec::new()),
+            };
+            let mut seen = 0usize;
+            let result = walk(&transport, RECORD_LEN, |_| {
+                seen += 1;
+                Ok(WalkStep::Continue)
+            });
+            assert_eq!(result, Ok(()));
+            assert_eq!(seen, transport.total);
+            let asked: Vec<PageRequest> = transport
+                .payloads
+                .borrow()
+                .iter()
+                .map(|payload| PageRequest::from_bytes(payload).unwrap())
+                .collect();
+            asked
+        };
+        let asked = pages_of();
+        let walk = asked[0].walk;
+        assert_ne!(walk, PageRequest::FRESH, "a walk names itself");
+        let at = |offset: u16| PageRequest {
+            offset: u32::from(offset),
+            limit: PAGE,
+            flags: 0,
+            walk,
+        };
+        assert_eq!(asked, [at(0), at(PAGE), at(PAGE * 2)]);
+        assert_ne!(pages_of()[0].walk, walk, "another walk, another id");
+    }
+
+    /// A payload carrying more than its page is sent whole, on every page.
+    #[test]
+    fn an_extended_payload_rides_every_page() {
+        let transport = Recording {
+            total: usize::from(PAGE) + 1,
+            payloads: RefCell::new(Vec::new()),
+        };
+        let result = walk_pages_with(
+            &transport,
+            SysinfoQueryId::NET_INTERFACE_RATES,
+            RECORD_LEN,
+            PAGE,
+            |page| {
+                let mut payload = [0xA5u8; PageRequest::WIRE_LEN + 2];
+                payload[..PageRequest::WIRE_LEN].copy_from_slice(&page.to_le_bytes());
+                payload
+            },
+            |_| Ok(WalkStep::Continue),
+        );
+        assert_eq!(result, Ok(()));
+        let payloads = transport.payloads.borrow();
+        assert_eq!(payloads.len(), 2);
+        for payload in payloads.iter() {
+            assert_eq!(payload.len(), PageRequest::WIRE_LEN + 2);
+            assert_eq!(payload[PageRequest::WIRE_LEN..], [0xA5, 0xA5]);
+        }
     }
 
     /// A page of no records is refused before anything is asked, rather than
@@ -184,7 +406,6 @@ mod tests {
             SysinfoQueryId::MOUNT_LIST,
             RECORD_LEN,
             0,
-            |_, _| Vec::new(),
             |_| Ok(WalkStep::Continue),
         );
         assert_eq!(

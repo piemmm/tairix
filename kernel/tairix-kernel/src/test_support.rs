@@ -40,6 +40,20 @@ impl tairix_log::Sink for NullSink {
     fn write_event(&self, _event: &tairix_log::Event<'_>) {}
 }
 
+/// A register mapper that maps nothing, for a PCI host whose test reaches no
+/// device register through it.
+pub(crate) struct NoRegisters;
+
+impl tairix_abi::driver::MmioMapper for NoRegisters {
+    fn map_window(
+        &self,
+        _phys_base: u64,
+        _len: usize,
+    ) -> Result<tairix_abi::driver::RegisterWindow, tairix_abi::driver::MmioMapError> {
+        Err(tairix_abi::driver::MmioMapError::InvalidRegion)
+    }
+}
+
 /// Block size every [`RamBlock`] fixture serves.
 pub const BLOCK_SIZE: usize = 512;
 

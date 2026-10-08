@@ -322,6 +322,118 @@ fn a_host_whose_map_does_not_decode_says_so_rather_than_naming_none() {
     assert_eq!(host.iommu_map().map(|_| ()), Err(FdtError::BadProperty));
 }
 
+/// A minimal host carrying `msi_map` and `msi_parent` where given.
+fn host_with_msi(msi_map: Option<&[u32]>, msi_parent: Option<&[u32]>) -> Vec<u8> {
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.begin_node("pci@30000000");
+    b.prop_str("compatible", "pci-host-ecam-generic");
+    b.prop_u32("#address-cells", 3);
+    b.prop_u32("#size-cells", 2);
+    b.prop("reg", &cells(&[0, 0x3000_0000, 0, 0x1000_0000]));
+    b.prop(
+        "ranges",
+        &cells(&[0x0200_0000, 0, 0x4000_0000, 0, 0x4000_0000, 0, 0x4000_0000]),
+    );
+    if let Some(map) = msi_map {
+        b.prop("msi-map", &cells(map));
+    }
+    if let Some(parent) = msi_parent {
+        b.prop("msi-parent", &cells(parent));
+    }
+    b.end_node();
+    b.end_node();
+    b.build()
+}
+
+#[test]
+fn a_requester_s_messages_reach_the_controller_its_msi_map_names_as_the_id_it_maps() {
+    let blob = host_with_msi(Some(&[0, 0x8003, 0x100, 0x10]), Some(&[0x8009]));
+    let host = hosts(&blob)[0];
+    assert_eq!(host.msi_target(0x3), Ok(Some((0x8003, 0x103))));
+    assert_eq!(
+        host.msi_target(0x10),
+        Ok(None),
+        "an id the map leaves out raises no message, msi-parent or not"
+    );
+}
+
+#[test]
+fn without_a_map_messages_reach_msi_parent_as_the_requester_id() {
+    let blob = host_with_msi(None, Some(&[0x8003]));
+    assert_eq!(
+        hosts(&blob)[0].msi_target(0x0108),
+        Ok(Some((0x8003, 0x0108)))
+    );
+    let neither = host_with_msi(None, None);
+    assert_eq!(hosts(&neither)[0].msi_target(0x0108), Ok(None));
+}
+
+#[test]
+fn a_map_or_parent_that_does_not_decode_names_no_controller() {
+    let short = host_with_msi(Some(&[0, 0x8003, 0]), None);
+    assert_eq!(hosts(&short)[0].msi_target(0), Err(FdtError::BadProperty));
+    let nameless = host_with_msi(None, Some(&[0]));
+    assert_eq!(
+        hosts(&nameless)[0].msi_target(0),
+        Err(FdtError::BadProperty)
+    );
+}
+
+/// A unit that is a function on the root bus is found with its requester
+/// id, from the bus the host's range starts at; one below a bridge, one that
+/// is disabled, and a child that is no unit are not.
+#[test]
+fn a_unit_that_is_a_root_bus_function_is_found_by_its_requester_id() {
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.begin_node("pcie@10000000");
+    b.prop_str("compatible", "pci-host-ecam-generic");
+    b.prop_u32("#address-cells", 3);
+    b.prop_u32("#size-cells", 2);
+    b.prop("reg", &cells(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    b.prop("bus-range", &cells(&[0x10, 0x1F]));
+    b.prop(
+        "ranges",
+        &cells(&[0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x1000_0000]),
+    );
+    let function =
+        |b: &mut DtbBuilder, name: &str, devfn: u32, unit: bool, status: Option<&str>| {
+            b.begin_node(name);
+            b.prop("reg", &cells(&[devfn << 8, 0, 0, 0, 0]));
+            if unit {
+                b.prop_u32("#iommu-cells", 1);
+            }
+            if let Some(status) = status {
+                b.prop_str("status", status);
+            }
+        };
+    function(&mut b, "virtio_iommu@2,0", 0x10, true, None);
+    b.end_node();
+    function(&mut b, "ethernet@3,0", 0x18, false, None);
+    b.end_node();
+    function(&mut b, "iommu@4,0", 0x20, true, Some("disabled"));
+    b.end_node();
+    function(&mut b, "pcie@5,0", 0x28, false, None);
+    function(&mut b, "iommu@0,0", 0x1_0000, true, None);
+    b.end_node();
+    b.end_node();
+    b.end_node();
+    b.end_node();
+    let blob = b.build();
+    let fdt = Fdt::new(&blob).unwrap();
+    let host = hosts(&blob)[0];
+    let mut found = Vec::new();
+    host.units(&fdt, &mut |requester, node| {
+        found.push((requester, node.name()));
+    });
+    assert_eq!(found, [(0x1010, &b"virtio_iommu@2,0"[..])]);
+}
+
 #[test]
 fn a_host_under_a_disabled_bus_is_not_one() {
     assert!(hosts(&host_on_bus(Some("disabled"), None)).is_empty());

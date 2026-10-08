@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-dma-translation-qemu-aarch64"
-description = "QEMU integration test (plans/IOMMU.md IOM15): boot the production aarch64 pipeline on the virt board behind an Arm SMMUv3, the keyboard and mouse virtio-pci functions iommu_platform=on on the ECAM host the unit fronts. One binary runs the unit at stage 2, the other at stage 1. PASS via semihosting once a key is delivered after the unit audited translating with nothing stopped or refused and the keyboard was granted bus mastering; any other unit outcome, a translation fault, or a key first fails the run."
+description = "QEMU integration test (plans/IOMMU.md IOM15): boot the production aarch64 pipeline on the virt board behind an Arm SMMUv3 or a virtio-iommu-pci, the keyboard and mouse virtio-pci functions iommu_platform=on on the ECAM host the unit fronts. One binary runs the SMMU at stage 2, one at stage 1, and one runs the virtio-iommu. PASS via semihosting once a key is delivered after the unit audited translating with nothing stopped or refused and the keyboard was granted bus mastering; any other unit outcome, a translation fault, or a key first fails the run."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,14 @@ path = "src/main.rs"
 [[bin]]
 name = "tairix-test-dma-translation-stage1-qemu-aarch64"
 path = "src/stage1.rs"
+
+[[bin]]
+name = "tairix-test-dma-translation-virtio-qemu-aarch64"
+path = "src/virtio.rs"
+
+[[bin]]
+name = "tairix-test-dma-translation-gicv3-qemu-aarch64"
+path = "src/gicv3.rs"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }

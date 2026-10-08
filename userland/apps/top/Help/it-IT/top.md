@@ -15,7 +15,10 @@ concessa dal servizio solo a un chiamante che detiene
 `CAP_SYSINFO_GLOBAL`.
 
 Lo schermo si aggiorna da solo a ogni intervallo (3,0 secondi salvo che
-`-d` lo cambi), e `r` lo aggiorna immediatamente.
+`-d` lo cambi), e `r` lo aggiorna immediatamente. Un aggiornamento che il
+servizio di informazioni di sistema non è riuscito a completare sotto
+carico conserva l'ultimo elenco, la riga di stato lo dice, e
+l'aggiornamento successivo rilegge l'elenco.
 
 Il visualizzatore non accetta operandi: si controlla con tasti premuti
 dentro la sessione.

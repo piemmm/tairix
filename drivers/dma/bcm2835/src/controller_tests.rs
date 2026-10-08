@@ -16,7 +16,7 @@ use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, ProcId, PROC_ID_LEN};
 
-use crate::controller::{Buffer, Controller, ControllerHost, Record};
+use crate::controller::{split_windows, Buffer, Controller, ControllerHost, Record};
 use crate::engine::Bcm2835Dma;
 use crate::model::{
     Model, ModelStore, Timeline, Trace, CONBLK_AD, CS, CS_ERROR, CS_RESET, DEBUG_READ_ERROR,
@@ -41,7 +41,12 @@ const RECORDER: ProcId = instance(2);
 /// The window covering the controller's registers, the only one it reaches
 /// peripherals through.
 fn peripheral_window() -> HwResource {
-    HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000)
+    HwResource::dma_translated(
+        0xFF80_0000,
+        0x0380_0000,
+        0x7C00_0000,
+        tairix_abi::DmaCoherence::Snooped,
+    )
 }
 
 fn endpoint_id() -> u64 {
@@ -411,6 +416,7 @@ fn a_channel_that_will_not_reset_keeps_the_memory_quarantined() {
     let refusing = crate::model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(true),
+        ignored: false,
     };
     let engine = Bcm2835Dma::new(&refusing, &rig.store).expect("whole channels");
     assert!(Controller::new(
@@ -718,14 +724,27 @@ fn a_channel_that_refuses_its_reset_takes_only_stop_and_close() {
     let refusing = crate::model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(false),
+        ignored: false,
     };
     let mut endpoint = endpoint_over(&rig, &refusing);
     let channel = rig.running(&mut endpoint);
     refusing.armed.set(true);
-    rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Stop { channel })
-        .expect("stops");
+    assert_eq!(
+        rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Stop { channel }),
+        Err(Errno::DeviceFault),
+        "a channel that would not stop is never reported stopped"
+    );
     assert!(rig.records().contains(&Record::Unreset { channel }));
     assert_eq!(endpoint.usable() & (1 << channel), 0, "withdrawn");
+    // Nothing stopped the chain: it runs on to its next boundary.
+    rig.model.set_active(usize::from(channel), true);
+    rig.model.advance(usize::from(channel), u32::MAX);
+    assert!(rig.model.pending(usize::from(channel)), "its chain ran on");
+    endpoint.interrupt(1 << channel);
+    assert!(
+        !rig.model.pending(usize::from(channel)),
+        "quietened, so its line is not held up"
+    );
     assert_eq!(
         rig.prepare(&mut endpoint, PLAYER, channel, params()),
         Err(Errno::DeviceFault)
@@ -758,6 +777,57 @@ fn a_channel_that_refuses_its_reset_takes_only_stop_and_close() {
     assert_eq!(rig.model.live_tables(), 1, "and so does its chain");
 }
 
+/// A channel that takes its reset without effect is withdrawn as one that
+/// refuses it is, is not reset again as it closes, and keeps all it reached.
+#[test]
+fn a_channel_that_ignores_its_reset_is_withdrawn_and_keeps_what_it_reached() {
+    let rig = Rig::new();
+    let ignoring = crate::model::Unresettable {
+        model: &rig.model,
+        armed: core::cell::Cell::new(false),
+        ignored: true,
+    };
+    let mut endpoint = endpoint_over(&rig, &ignoring);
+    let channel = rig.running(&mut endpoint);
+    ignoring.armed.set(true);
+    rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Close { channel })
+        .expect("closes");
+    let unreset = rig
+        .records()
+        .iter()
+        .filter(|record| **record == Record::Unreset { channel })
+        .count();
+    assert_eq!(unreset, 1, "one reset tried, not a second on release");
+    assert_eq!(endpoint.usable() & (1 << channel), 0, "withdrawn");
+    assert_eq!(rig.kernel.borrow().live.len(), 1, "its buffer stays held");
+    assert_eq!(rig.model.live_tables(), 1, "and so does its chain");
+}
+
+#[test]
+fn the_window_covering_the_registers_is_the_peripherals_and_another_the_memory() {
+    let memory = HwResource::dma_translated(
+        0x0000_0000,
+        0x4000_0000,
+        0xC000_0000,
+        tairix_abi::DmaCoherence::Snooped,
+    );
+    let registers = 0xFE00_7000;
+    for order in [[peripheral_window(), memory], [memory, peripheral_window()]] {
+        assert_eq!(
+            split_windows(&order, registers, 0x1000),
+            (Some(peripheral_window()), Some(memory))
+        );
+    }
+    assert_eq!(
+        split_windows(&[peripheral_window()], registers, 0x1000),
+        (Some(peripheral_window()), None)
+    );
+    assert_eq!(
+        split_windows(&[memory], registers, 0x1000),
+        (None, Some(memory))
+    );
+}
+
 /// A grant refused on a channel that then refuses its reset frees neither
 /// buffer, and the shape of the chain it replaced is forgotten.
 #[test]
@@ -766,6 +836,7 @@ fn a_failed_grant_on_a_channel_that_refuses_its_reset_keeps_both_buffers() {
     let refusing = crate::model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(false),
+        ignored: false,
     };
     let mut endpoint = endpoint_over(&rig, &refusing);
     let channel = rig.open(&mut endpoint, PLAYER, 2).expect("opens");

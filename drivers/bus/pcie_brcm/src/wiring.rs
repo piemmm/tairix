@@ -23,8 +23,8 @@
 
 use tairix_abi::driver::mmio::MmioMapError;
 use tairix_abi::{
-    CapabilityId, DriverError, DriverHost, HwNode, HwResource, HwResourceKind, MmioMapper,
-    MsiMessage, PciBus, RegisterWindow,
+    CapabilityId, DmaCoherence, DriverError, DriverHost, HwNode, HwResource, HwResourceKind,
+    MmioMapper, MsiMessage, PciBus, RegisterWindow,
 };
 use tairix_pci::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, mechanism_brcm,
@@ -123,21 +123,25 @@ where
     I: IntoIterator<Item = &'a HwResource>,
 {
     let mut regs: Option<&HwResource> = None;
-    let mut inbound: Option<&HwResource> = None;
+    let mut inbound: Option<(&HwResource, DmaCoherence)> = None;
     let mut outbound: Option<&HwResource> = None;
     // One pass: a grant iterator is consumed once, and a node's resource
     // ordering is not guaranteed, so latch the first of each kind.
     for resource in resources {
         match resource.kind() {
             Some(HwResourceKind::Mmio) if regs.is_none() => regs = Some(resource),
-            Some(HwResourceKind::Dma) if inbound.is_none() => inbound = Some(resource),
+            Some(HwResourceKind::Dma) if inbound.is_none() => {
+                inbound = resource
+                    .dma_coherence()
+                    .map(|coherence| (resource, coherence));
+            }
             Some(HwResourceKind::BusWindow) if outbound.is_none() => outbound = Some(resource),
             _ => {}
         }
     }
 
     let regs = regs.ok_or(BringupError::NoControllerWindow)?;
-    let inbound = inbound.ok_or(BringupError::NoInboundAperture)?;
+    let (inbound, inbound_coherence) = inbound.ok_or(BringupError::NoInboundAperture)?;
     let outbound = outbound.ok_or(BringupError::NoOutboundWindow)?;
 
     Ok(PcieBringup {
@@ -146,6 +150,7 @@ where
             inbound_pcie_base: inbound.translated_base(),
             inbound_size: inbound.length(),
             inbound_cpu_top: inbound.base(),
+            inbound_coherence,
             outbound_cpu_base: outbound.base(),
             outbound_pcie_base: outbound.translated_base(),
             outbound_size: outbound.length(),
@@ -376,6 +381,7 @@ pub fn publish_usb_function(
         windows.inbound_cpu_top,
         windows.inbound_size,
         windows.inbound_pcie_base,
+        windows.inbound_coherence,
     ))
     .map_err(|_| DriverError::NoSpace)?;
 

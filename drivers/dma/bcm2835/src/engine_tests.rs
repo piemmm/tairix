@@ -540,7 +540,8 @@ fn a_carve_the_controller_cannot_make_leaves_the_channel_unprepared() {
     let channel = engine.channel(0).expect("channel 0");
     assert_eq!(
         channel.prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D)),
-        Err(DriverError::LengthOutOfRange)
+        Err(DriverError::OutOfMemory),
+        "an exhausted carve is reported as memory"
     );
     assert_eq!(channel.start(), Err(DriverError::NotFound));
 }
@@ -554,6 +555,7 @@ fn a_channel_that_will_not_reset_keeps_its_chain_and_refuses_another() {
     let refusing = Unresettable {
         model: &model,
         armed: core::cell::Cell::new(false),
+        ignored: false,
     };
     let mut engine = Bcm2835Dma::new(&refusing, &store).expect("whole channels");
     let channel = engine.channel(0).expect("channel 0");
@@ -574,6 +576,35 @@ fn a_channel_that_will_not_reset_keeps_its_chain_and_refuses_another() {
         Err(DriverError::Busy),
         "and no chain replaces it"
     );
+}
+
+/// A reset the channel takes without effect leaves it fetching its chain: the
+/// stop is refused rather than taken as idling it, and the chain is kept.
+#[test]
+fn a_reset_the_channel_ignores_is_not_taken_as_idling_it() {
+    let model = Model::pi4();
+    let store = model.store();
+    let ignoring = Unresettable {
+        model: &model,
+        armed: core::cell::Cell::new(false),
+        ignored: true,
+    };
+    let mut engine = Bcm2835Dma::new(&ignoring, &store).expect("whole channels");
+    let channel = engine.channel(0).expect("channel 0");
+    channel
+        .prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D))
+        .expect("prepares");
+    channel.start().expect("starts");
+    ignoring.armed.set(true);
+    assert_eq!(channel.release(), Err(DriverError::DeviceFault));
+    assert_eq!(model.live_tables(), 1, "the chain it still fetches is kept");
+    assert_eq!(
+        channel.prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D)),
+        Err(DriverError::Busy)
+    );
+    ignoring.armed.set(false);
+    assert!(channel.release().is_ok(), "a reset that takes idles it");
+    assert_eq!(model.live_tables(), 0);
 }
 
 /// The index of `channel`'s last start, and of the first chain freed after it.
@@ -630,6 +661,7 @@ fn dropping_a_channel_that_will_not_reset_keeps_its_chain() {
     let refusing = Unresettable {
         model: &model,
         armed: core::cell::Cell::new(false),
+        ignored: false,
     };
     let mut engine = Bcm2835Dma::new(&refusing, &store).expect("whole channels");
     let channel = engine.channel(0).expect("channel 0");

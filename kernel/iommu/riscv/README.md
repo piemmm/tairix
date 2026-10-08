@@ -7,8 +7,9 @@ or `Sv57x4`, the 16 KiB root resolving two bits more, and first-stage
 translation tagged by PSCID otherwise, both at a 4 KiB granule with 2 MiB and
 1 GiB leaves, in the shallowest mode wide enough for an identity window
 anywhere the unit reaches; the command queue, every removal confirmed by an
-`IOFENCE.C` before it is reported done and a rejected command replaced by a
-fence so the queue consumes on; and the fault queue, drained in batches
+`IOFENCE.C` before it is reported done, a carve's free that changed leaves
+alone invalidated a page at a time up to half a ring and its domain otherwise,
+and a rejected command replaced by a fence so the queue consumes on; and the fault queue, drained in batches
 outside the unit's lock, an overflow acknowledged. Bound by discovery to
 nodes keyed `compatible "riscv,iommu"` (`COMPATIBLE`). The design is
 `plans/IOMMU.md` IOM16.
@@ -32,8 +33,11 @@ device's own domain, which the record does not say. Faults are raised on the
 first wired line the unit's node names, where every cause's vector is set, or
 by message, chosen as the unit is taken over, while nothing is live; its
 performance counters are stopped. A unit that keeps big-endian access or
-`GXL` set is refused. Page requests, ATS, process contexts, MSI translation and nested
-translation are not used.
+`GXL` set is refused. A second-stage unit with memory-resident interrupt files
+confines each device's messages to a file of its own through an MSI page
+table; a stream translating through a domain is confined as every other
+stream of that domain is. Page requests, ATS, process contexts, flat MSI
+translation and nested translation are not used.
 
 ## Tests
 

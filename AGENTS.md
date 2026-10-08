@@ -553,7 +553,8 @@ tairix/
 │   │   ├── vtd/         #   Intel VT-d.
 │   │   ├── amdvi/       #   AMD-Vi.
 │   │   ├── smmuv3/      #   Arm SMMUv3.
-│   │   └── riscv/       #   The RISC-V IOMMU.
+│   │   ├── riscv/       #   The RISC-V IOMMU.
+│   │   └── virtio/      #   virtio-iommu.
 │   ├── arch/            # Pluggable architecture backends:
 │   │   ├── api/         #   The closed Arch HAL trait surface.
 │   │   ├── x86_64/

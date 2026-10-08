@@ -1,24 +1,31 @@
-//! `plans/IOMMU.md` MI0 and MI2: boot the production x86_64 pipeline on `q35`
-//! behind a translation unit, every virtio function `iommu_platform=on`, and
-//! prove the boot's DMA confined. One binary runs behind an `intel-iommu`,
-//! the other behind an `amd-iommu`, each judged by the shared translation
-//! witness.
+//! `plans/IOMMU.md` MI0, MI2 and MI3: boot the production x86_64 pipeline on
+//! `q35` behind a translation unit, every virtio function `iommu_platform=on`,
+//! and prove the boot's DMA confined. One binary runs behind an
+//! `intel-iommu`, one behind an `amd-iommu` and one behind a
+//! `virtio-iommu-pci`, each judged by the shared translation witness against
+//! the unit it names.
 //!
 //! The key the runner injects reaches the input-focus arbiter only through
 //! the unit: the floor disk reads the driver store through the kernel's
 //! domain, and the autoloaded keyboard driver's buffers are reachable only
 //! through its node's. The keyboard sits behind a PCIe-to-PCI bridge, so its
-//! DMA arrives under the bridge's alias (IOM8), and its interrupt is its own
-//! remapping entry, in extended mode with the CPU in x2APIC mode.
+//! DMA arrives under the bridge's alias (IOM8).
+
+/// What a run proves of its unit: how interrupts reach the CPUs, where the
+/// unit keeps its translations, and where its faults reach the kernel.
+#[cfg(itest_x86_64)]
+pub type Unit = (
+    tairix_itest_translation_witness::Interrupts,
+    tairix_itest_translation_witness::Tables,
+    tairix_itest_translation_witness::Faults,
+);
 
 #[cfg(itest_x86_64)]
 mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::qemu_exit;
-    use tairix_itest_translation_witness::{
-        first_input_node, Interrupts, Stage, TranslationWitness, Verdict,
-    };
+    use tairix_itest_translation_witness::{first_input_node, TranslationWitness, Verdict};
     use tairix_kernel::hwtree_store::HW_TREE_SOURCE;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{
@@ -52,12 +59,10 @@ mod kernel {
         }
     }
 
-    /// The CPUs take remapped interrupts in x2APIC mode.
     static AUDIT_SINK: TranslationSink = TranslationSink(TranslationWitness::new(
-        Interrupts::Remapped {
-            extended: tairix_arch_x86_64::apic::x2apic,
-        },
-        Stage::Second,
+        crate::UNIT.0,
+        crate::UNIT.1,
+        crate::UNIT.2,
     ));
 
     /// A panic halts the guest; the run times out and fails loud.

@@ -51,6 +51,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_collections::SmallVec;
 use tairix_inline::intrusive::{IntrusiveList, Link};
 use tairix_reclaim::RESERVE_DIVISOR;
 use tairix_sync::SpinLock;
@@ -88,6 +89,34 @@ pub const MAX_ORDER: u32 = 13;
 /// Type alias for "number of frames", used to keep call-site arithmetic
 /// distinct from frame-index arithmetic.
 pub type FrameCount = usize;
+
+/// A naturally aligned block of `2^order` frames, as the buddy allocator
+/// hands one out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrameBlock {
+    /// Its first frame.
+    pub frame: Frame,
+    /// Its buddy order.
+    pub order: u32,
+}
+
+impl FrameBlock {
+    /// Bytes the block spans.
+    #[must_use]
+    pub fn len(self) -> usize {
+        PAGE_SIZE << self.order
+    }
+
+    /// Always `false`: a block spans at least one page.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        false
+    }
+}
+
+/// The blocks of one [`FrameAllocator::alloc_chunks_user`] draw, largest
+/// first; a draw of one block allocates no list.
+pub type Chunks = SmallVec<FrameBlock, 1>;
 
 /// Physical byte address.
 ///
@@ -270,8 +299,8 @@ struct FrameAllocatorState {
     /// Kernel reserve floor, in frames (`usable_frames / RESERVE_DIVISOR`).
     /// A *user* commit ([`FrameAllocator::alloc_user`] /
     /// [`FrameAllocator::alloc_order_user`]) is refused when it would drop
-    /// `free_frames` to or below this, so the kernel always keeps headroom
-    /// to make progress (heap growth, page-table build, fault service).
+    /// `free_frames` below this, so the kernel always keeps headroom to make
+    /// progress (heap growth, page-table build, fault service).
     /// Kernel-internal allocations draw the whole pool. Fixed after
     /// construction.
     reserve_frames: usize,
@@ -300,6 +329,13 @@ struct FrameAllocatorState {
 }
 
 impl FrameAllocatorState {
+    /// Frames a user draw or commit may take without dropping the pool below
+    /// the kernel reserve and every page committed but not yet resident.
+    fn user_headroom(&self) -> usize {
+        self.free_frames
+            .saturating_sub(self.reserve_frames.saturating_add(self.committed_frames))
+    }
+
     /// The bitmap slot for `frame`, or `None` when `frame` lies outside the
     /// represented usable span `[base_frame, base_frame + span)`.
     #[inline]
@@ -495,32 +531,77 @@ impl FrameAllocatorState {
             return Err(AllocError::OutOfRange);
         }
         let start = self
-            .highest_free_run_under(order, ceiling)
-            .ok_or(AllocError::OutOfMemory)?;
+            .largest_free_run_under(order, ceiling)
+            .filter(|&(_, got)| got == order)
+            .ok_or(AllocError::OutOfMemory)?
+            .0;
         self.claim_free_run(start, order)?;
         self.charge(start, order, class);
         Ok(start)
     }
 
-    /// The start of the highest aligned `2^order` run of free frames lying
-    /// wholly below frame `ceiling`.
+    /// The largest block of order up to `order` the pool holds, below frame
+    /// `ceiling` where one is given, and its order: a fragmented pool steps
+    /// the order down within one search rather than in one per order.
+    fn alloc_largest(
+        &mut self,
+        class: MemoryClass,
+        order: u32,
+        ceiling: Option<usize>,
+    ) -> Result<(usize, u32), AllocError> {
+        if order > MAX_ORDER {
+            return Err(AllocError::SizeUnsupported);
+        }
+        let Some(ceiling) = ceiling.filter(|&ceiling| ceiling < self.base_frame + self.span) else {
+            let got = (0..=MAX_ORDER)
+                .rev()
+                .find(|&o| !self.free_lists[o as usize].is_empty())
+                .ok_or(AllocError::OutOfMemory)?
+                .min(order);
+            return self.alloc_order(class, got).map(|start| (start, got));
+        };
+        if ceiling <= self.base_frame {
+            return Err(AllocError::OutOfRange);
+        }
+        let (start, got) = self
+            .largest_free_run_under(order, ceiling)
+            .ok_or(AllocError::OutOfMemory)?;
+        self.claim_free_run(start, got)?;
+        self.charge(start, got, class);
+        Ok((start, got))
+    }
+
+    /// The start and order of the highest aligned run of free frames lying
+    /// wholly below frame `ceiling` of the largest order up to `order` any
+    /// holds.
     ///
     /// Walks maximal free runs downward a bitmap word at a time: one step per
-    /// word and per free run it passes below the ceiling.
-    fn highest_free_run_under(&self, order: u32, ceiling: usize) -> Option<usize> {
-        let n = 1usize << order;
+    /// word and per free run it passes below the ceiling, stopping at the
+    /// first run holding a block of `order`.
+    fn largest_free_run_under(&self, order: u32, ceiling: usize) -> Option<(usize, u32)> {
+        let mut best: Option<(usize, u32)> = None;
         let mut end = ceiling.checked_sub(self.base_frame)?.min(self.span);
         while let Some(last) = self.last_slot_before(end, |word| !word) {
             let first = self
                 .last_slot_before(last, |word| word)
                 .map_or(0, |used| used + 1);
-            let candidate = ((self.base_frame + last + 1) / n).checked_sub(1)? * n;
-            if candidate >= self.base_frame + first {
-                return Some(candidate);
+            let (lowest, past) = (self.base_frame + first, self.base_frame + last + 1);
+            // A higher run already gave as large a block as a lower one can.
+            let floor = best.map_or(0, |(_, got)| got + 1);
+            let block = (floor..=order).rev().find_map(|o| {
+                let n = 1usize << o;
+                let start = (past / n).checked_sub(1)? * n;
+                (start >= lowest).then_some((start, o))
+            });
+            if block.is_some() {
+                best = block;
+            }
+            if best.is_some_and(|(_, got)| got == order) {
+                break;
             }
             end = first;
         }
-        None
+        best
     }
 
     /// The highest slot below `end` whose bit `select` keeps set: `!word`
@@ -898,48 +979,20 @@ impl FrameAllocator {
         g.alloc_order(class, order).map(Frame)
     }
 
-    /// [`Self::alloc_order`] for a device that reaches only part of RAM:
-    /// every frame of the block lies below `ceiling` when one is given.
-    ///
-    /// The block is the highest one below the ceiling, so a device reaching
-    /// less keeps the memory beneath it. A ceiling above every usable frame
-    /// constrains nothing and costs nothing; one inside RAM costs a search
-    /// of the bitmap below it, a step per word and per free run it passes.
-    ///
-    /// # Errors
-    ///
-    /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
-    /// - [`AllocError::OutOfRange`] if no usable frame lies below the ceiling.
-    /// - [`AllocError::OutOfMemory`] if no free block of the order does.
-    pub fn alloc_order_under(
-        &self,
-        class: MemoryClass,
-        order: u32,
-        ceiling: Option<PhysAddr>,
-    ) -> Result<Frame, AllocError> {
-        let Some(ceiling) = ceiling else {
-            return self.alloc_order(class, order);
-        };
-        // A ceiling past the frame index space constrains nothing.
-        let ceiling = usize::try_from(ceiling.frame_index()).unwrap_or(usize::MAX);
-        let mut g = self.inner.lock();
-        g.alloc_order_under(class, order, ceiling).map(Frame)
-    }
-
     /// Allocate a single frame on behalf of **userland** (reserve-gated),
     /// charged to `class`.
     ///
     /// # Errors
     ///
     /// [`AllocError::OutOfMemory`] if satisfying it would drop the free
-    /// pool to or below the kernel reserve, or if no frame is available.
+    /// pool below the kernel reserve, or if no frame is available.
     pub fn alloc_user(&self, class: MemoryClass) -> Result<Frame, AllocError> {
         self.alloc_order_user(class, 0)
     }
 
     /// Allocate `2^order` contiguous frames on behalf of **userland**,
     /// charged to `class`, refusing when the draw would drop the free pool
-    /// to or below the kernel reserve ([`RESERVE_DIVISOR`]).
+    /// below the kernel reserve ([`RESERVE_DIVISOR`]).
     ///
     /// A greedy user process therefore fails closed with
     /// [`AllocError::OutOfMemory`] while the kernel still has reserved
@@ -954,24 +1007,48 @@ impl FrameAllocator {
     /// - [`AllocError::OutOfMemory`] if the draw would breach the reserve,
     ///   or if no block of any order ≥ `order` is available.
     pub fn alloc_order_user(&self, class: MemoryClass, order: u32) -> Result<Frame, AllocError> {
+        self.alloc_order_under_user(class, order, None)
+    }
+
+    /// [`Self::alloc_order_user`] for a device that reaches only part of
+    /// RAM: every frame of the block lies below `ceiling` when one is given.
+    ///
+    /// The block is the highest one below the ceiling, so a device reaching
+    /// less keeps the memory beneath it. A ceiling above every usable frame
+    /// constrains nothing and costs nothing; one inside RAM costs a search
+    /// of the bitmap below it, a step per word and per free run it passes.
+    ///
+    /// # Errors
+    ///
+    /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
+    /// - [`AllocError::OutOfRange`] if no usable frame lies below the ceiling.
+    /// - [`AllocError::OutOfMemory`] if the draw would breach the reserve, or
+    ///   no free block of the order lies below the ceiling.
+    pub fn alloc_order_under_user(
+        &self,
+        class: MemoryClass,
+        order: u32,
+        ceiling: Option<PhysAddr>,
+    ) -> Result<Frame, AllocError> {
         if order > MAX_ORDER {
             return Err(AllocError::SizeUnsupported);
         }
         let n = 1usize << order;
         let mut g = self.inner.lock();
-        // Reserve guard: refuse if the draw would leave the free pool at or
-        // below the reserve *plus the frames already promised to committed
-        // (reserved-but-not-yet-resident) user pages*. Checked before the
-        // carve so this eager draw never even transiently dips into kernel
-        // headroom or into the physical frames a prior `mem_map`/stack
-        // reservation is guaranteeing — an eager user allocation can never
-        // steal a committed page's frame, so a committed first touch can
-        // never fail closed.
-        let floor = g.reserve_frames.saturating_add(g.committed_frames);
-        if g.free_frames < n || g.free_frames - n <= floor {
+        // Checked before the carve, so an eager draw never takes, even for a
+        // moment, a frame the kernel reserve or a committed page is owed.
+        if n > g.user_headroom() {
             return Err(AllocError::OutOfMemory);
         }
-        g.alloc_order(class, order).map(Frame)
+        match ceiling {
+            // A ceiling past the frame index space constrains nothing.
+            Some(ceiling) => {
+                let ceiling = usize::try_from(ceiling.frame_index()).unwrap_or(usize::MAX);
+                g.alloc_order_under(class, order, ceiling)
+            }
+            None => g.alloc_order(class, order),
+        }
+        .map(Frame)
     }
 
     /// Reserve physical headroom for `pages` frames of anonymous/stack user
@@ -1007,13 +1084,7 @@ impl FrameAllocator {
             return Ok(());
         }
         let mut g = self.inner.lock();
-        // Admit only while the free pool still covers the kernel reserve,
-        // every already-committed page, and this request together. Computed
-        // saturating so a momentarily tiny pool can never wrap into a
-        // spurious admission.
-        let floor = g.reserve_frames.saturating_add(g.committed_frames);
-        let headroom = g.free_frames.saturating_sub(floor);
-        if pages > headroom {
+        if pages > g.user_headroom() {
             return Err(AllocError::OutOfMemory);
         }
         g.committed_frames += pages;
@@ -1041,9 +1112,10 @@ impl FrameAllocator {
     /// commitment guarantees a frame is available, so this fails only on a
     /// genuine invariant breach.
     ///
-    /// The frame is charged to [`MemoryClass::UserAnon`] with no parameter:
-    /// the no-overcommit commitment budget covers anonymous and stack memory
-    /// only, so there is no other class a committed page could belong to.
+    /// The frame is charged to [`MemoryClass::UserAnon`] with no parameter: a
+    /// page committed ahead of its first touch is always anonymous or stack
+    /// memory. A draw admitted and taken at once, which may be of any class,
+    /// is [`Self::alloc_chunks_user`].
     ///
     /// # Errors
     ///
@@ -1051,10 +1123,35 @@ impl FrameAllocator {
     /// matching prior commit, indicates the commitment invariant was
     /// violated rather than ordinary pressure; the caller still fails closed.
     pub fn alloc_user_committed(&self) -> Result<Frame, AllocError> {
+        self.alloc_order_committed(MemoryClass::UserAnon, 0, None)
+            .map(|block| block.frame)
+    }
+
+    /// Draw a `2^order` block a prior [`Self::commit`] admitted, from the
+    /// whole pool, turning that many committed pages into drawn ones under
+    /// the same lock, so no observer ever counts them twice.
+    fn alloc_order_committed(
+        &self,
+        class: MemoryClass,
+        order: u32,
+        ceiling: Option<usize>,
+    ) -> Result<FrameBlock, AllocError> {
         let mut g = self.inner.lock();
-        let frame = g.alloc_order(MemoryClass::UserAnon, 0).map(Frame)?;
-        g.committed_frames = g.committed_frames.saturating_sub(1);
-        Ok(frame)
+        let (start, order) = g.alloc_largest(class, order, ceiling)?;
+        g.committed_frames = g.committed_frames.saturating_sub(1 << order);
+        Ok(FrameBlock {
+            frame: Frame(start),
+            order,
+        })
+    }
+
+    /// Return a block [`Self::alloc_order_committed`] drew to the
+    /// commitment it was drawn against; re-charged only on a successful free.
+    fn free_order_committed(&self, frame: Frame, order: u32) -> Result<(), AllocError> {
+        let mut g = self.inner.lock();
+        g.free_order(frame.0, order)?;
+        g.committed_frames += 1 << order;
+        Ok(())
     }
 
     /// Return a frame taken by [`Self::alloc_user_committed`] **back to its
@@ -1071,10 +1168,7 @@ impl FrameAllocator {
     /// unowned/misaligned frame (as [`Self::free`]); the commitment is
     /// re-charged only on a successful free.
     pub fn free_committed(&self, frame: Frame) -> Result<(), AllocError> {
-        let mut g = self.inner.lock();
-        g.free_order(frame.0, 0)?;
-        g.committed_frames += 1;
-        Ok(())
+        self.free_order_committed(frame, 0)
     }
 
     /// Frames currently committed to demand-paged user memory but not yet
@@ -1112,80 +1206,109 @@ impl FrameAllocator {
         g.free_order(frame.0, order)
     }
 
-    /// Allocate `pages` frames as a *set* of physically-contiguous buddy
-    /// chunks, each of order `≤` [`MAX_ORDER`], preferring the largest block
-    /// that fits the remainder so a large request costs few chunks.
+    /// Allocate `pages` frames on behalf of **userland** as a *set* of
+    /// physically-contiguous buddy chunks, each of order `≤` [`MAX_ORDER`],
+    /// preferring the largest block that fits the remainder so a large
+    /// request costs few chunks.
     ///
     /// This is the path a cross-process shared-memory region draws its
     /// backing from: a region larger than the single-block ceiling
     /// ([`MAX_ORDER`]) is satisfied by several blocks the caller then maps
     /// into one contiguous virtual window, so the region size is bounded by
-    /// available RAM rather than a fixed order. A region that fits one block
-    /// is returned as a single chunk (the common small case). Each chunk is
-    /// returned as `(start_frame, order)` in allocation order.
+    /// available RAM rather than a fixed order, and a device a translation
+    /// unit lets reach scattered frames is given its carve the same way. A
+    /// request that fits one block is a single chunk (the common small case),
+    /// held inline. Each chunk is `(start_frame, order)`, no larger than the
+    /// one before it, so laid end to end every chunk starts at a multiple of
+    /// its own size.
     ///
-    /// Like [`Self::alloc_order`] this is the kernel-internal path and may
-    /// draw the reserve. When a block of the preferred order is unavailable
-    /// the search steps down one order at a time before giving up, so a
-    /// fragmented pool is still satisfied while enough total RAM is free.
+    /// The draw is admitted first, exactly as [`Self::commit`] admits a
+    /// reservation, so a request the machine cannot spare past the kernel
+    /// reserve and every committed page is refused before it takes a frame.
+    /// Each block then draws the admission down as it is taken, so a
+    /// concurrent commit counts the request once, never once as promised and
+    /// again as drawn. When a block of the preferred order is unavailable the
+    /// search steps down one order at a time, so a fragmented pool is still
+    /// satisfied.
     ///
-    /// On any failure every chunk already taken is returned to the allocator
-    /// before the error propagates, so a failed call leaks nothing and leaves
-    /// the free pool unchanged.
+    /// On any failure every chunk already taken is returned and the
+    /// admission released before the error propagates, so a failed call
+    /// leaves the free pool and the commitment as it found them.
     ///
     /// # Errors
     ///
     /// - [`AllocError::SizeUnsupported`] if `pages` is zero.
-    /// - [`AllocError::OutOfMemory`] if the request cannot be satisfied even
-    ///   after stepping down to single frames, or if the chunk-list
-    ///   bookkeeping cannot be grown.
+    /// - [`AllocError::OutOfRange`] if no usable frame lies below `ceiling`.
+    /// - [`AllocError::OutOfMemory`] if the draw cannot be admitted, no free
+    ///   frame lies below `ceiling`, or the chunk-list bookkeeping cannot be
+    ///   grown.
+    /// - [`AllocError::InvariantViolation`] if the allocator's books are
+    ///   found inconsistent part-way.
     ///
-    /// Every chunk is charged to `class`.
-    pub fn alloc_chunks(
+    /// Every chunk is charged to `class`, and lies wholly below `ceiling`
+    /// when one is given.
+    pub fn alloc_chunks_user(
         &self,
         class: MemoryClass,
         pages: u64,
-    ) -> Result<Vec<(Frame, u32)>, AllocError> {
+        ceiling: Option<PhysAddr>,
+    ) -> Result<Chunks, AllocError> {
         if pages == 0 {
             return Err(AllocError::SizeUnsupported);
         }
-        let mut out: Vec<(Frame, u32)> = Vec::new();
+        self.commit(pages)?;
+        let ceiling =
+            ceiling.map(|ceiling| usize::try_from(ceiling.frame_index()).unwrap_or(usize::MAX));
+        Self::draw_chunks(
+            pages,
+            |order| self.alloc_order_committed(class, order, ceiling),
+            |block| {
+                let _ = self.free_order_committed(block.frame, block.order);
+            },
+        )
+        .inspect_err(|_| self.uncommit(pages))
+    }
+
+    /// Draw `pages` frames through `draw`, which answers the largest block
+    /// of order up to the one asked it can, as blocks largest first, each no
+    /// larger than the one before it, handing every block already taken to
+    /// `release` when a draw fails.
+    fn draw_chunks(
+        pages: u64,
+        mut draw: impl FnMut(u32) -> Result<FrameBlock, AllocError>,
+        mut release: impl FnMut(FrameBlock),
+    ) -> Result<Chunks, AllocError> {
+        let mut out = Chunks::new();
         let mut remaining = pages;
+        // A block freed elsewhere between draws could otherwise be taken
+        // larger than one before it.
+        let mut ceiling = MAX_ORDER;
         while remaining > 0 {
-            // Largest order whose block fits the remainder, capped at
-            // MAX_ORDER. `remaining >= 1` (the loop guard), so `ilog2` is
-            // well-defined (it is `floor(log2(remaining))`).
-            let fit = remaining.ilog2();
-            let mut order = core::cmp::min(fit, MAX_ORDER);
-            let (frame, taken) = loop {
-                match self.alloc_order(class, order) {
-                    Ok(frame) => break (frame, order),
-                    // No block of this order is free; the pool may be
-                    // fragmented, so step down one size and retry before
-                    // declaring the whole request out of memory.
-                    Err(AllocError::OutOfMemory) if order > 0 => order -= 1,
-                    Err(e) => {
-                        for (f, o) in out.drain(..) {
-                            let _ = self.free_order(f, o);
-                        }
-                        return Err(e);
-                    }
+            let pushed = draw(remaining.ilog2().min(ceiling)).and_then(|block| {
+                out.try_push(block).map(|()| block).map_err(|_| {
+                    release(block);
+                    AllocError::OutOfMemory
+                })
+            });
+            let block = match pushed {
+                Ok(block) => block,
+                Err(err) => {
+                    out.iter().copied().for_each(&mut release);
+                    return Err(err);
                 }
             };
-            // Grow the chunk list fallibly before recording the block, so a
-            // bookkeeping OOM returns every chunk (including this one) rather
-            // than aborting.
-            if out.try_reserve(1).is_err() {
-                let _ = self.free_order(frame, taken);
-                for (f, o) in out.drain(..) {
-                    let _ = self.free_order(f, o);
-                }
-                return Err(AllocError::OutOfMemory);
-            }
-            out.push((frame, taken));
-            remaining -= 1u64 << taken;
+            remaining -= 1u64 << block.order;
+            ceiling = block.order;
         }
         Ok(out)
+    }
+
+    /// Return every chunk of an [`Self::alloc_chunks_user`] draw no one has
+    /// reached.
+    pub fn free_chunks(&self, chunks: &[FrameBlock]) {
+        for block in chunks {
+            let _ = self.free_order(block.frame, block.order);
+        }
     }
 
     /// Every accounting figure, read under **one** lock acquisition.
@@ -1235,7 +1358,7 @@ impl FrameAllocator {
 
     /// The kernel reserve floor, in frames: the free-pool level a user
     /// commit ([`Self::alloc_user`] / [`Self::alloc_order_user`]) may not
-    /// draw to or below. Derived from discovered RAM
+    /// draw below. Derived from discovered RAM
     /// (`usable_frames / RESERVE_DIVISOR`), fixed after construction.
     #[must_use]
     pub fn reserve_frames(&self) -> FrameCount {
@@ -1527,8 +1650,8 @@ mod tests {
     }
 
     /// Total frames across a chunk list.
-    fn chunk_frames(chunks: &[(Frame, u32)]) -> u64 {
-        chunks.iter().map(|&(_, o)| 1u64 << o).sum()
+    fn chunk_frames(chunks: &[FrameBlock]) -> u64 {
+        chunks.iter().map(|block| 1u64 << block.order).sum()
     }
 
     #[test]
@@ -1536,7 +1659,7 @@ mod tests {
         let m = small_map(4);
         let a = FrameAllocator::new(&m).unwrap();
         assert_eq!(
-            a.alloc_chunks(MemoryClass::Kernel, 0).err(),
+            a.alloc_chunks_user(MemoryClass::Kernel, 0, None).err(),
             Some(AllocError::SizeUnsupported)
         );
     }
@@ -1547,14 +1670,46 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Four frames is one order-2 block: the common small case stays a
         // single chunk (so the USB URB-buffer path is unaffected).
-        let chunks = a.alloc_chunks(MemoryClass::Kernel, 4).unwrap();
+        let chunks = a.alloc_chunks_user(MemoryClass::Kernel, 4, None).unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].1, 2);
+        assert_eq!(chunks[0].order, 2);
         assert_eq!(a.free_frames(), 16 - 4);
-        for (f, o) in chunks {
-            a.free_order(f, o).unwrap();
+        for block in chunks {
+            a.free_order(block.frame, block.order).unwrap();
         }
         assert_eq!(a.free_frames(), 16);
+    }
+
+    /// A ceilinged draw takes every chunk below it though frames above are
+    /// free, and is refused where no usable frame lies below it.
+    #[test]
+    fn alloc_chunks_under_a_ceiling_lie_wholly_below_it() {
+        let m = small_map(64);
+        let a = FrameAllocator::new(&m).unwrap();
+        let floor = (16 * PAGE_SIZE) as u64;
+        let ceiling = PhysAddr::new(floor + (16 * PAGE_SIZE) as u64);
+        let unbounded = a.alloc_chunks_user(MemoryClass::Dma, 6, None).unwrap();
+        assert!(
+            unbounded.iter().any(|block| block.frame.start() >= ceiling),
+            "an unbounded draw reaches above the ceiling"
+        );
+        a.free_chunks(&unbounded);
+        let free = a.free_frames();
+        let chunks = a
+            .alloc_chunks_user(MemoryClass::Dma, 6, Some(ceiling))
+            .unwrap();
+        assert_eq!(chunk_frames(&chunks), 6);
+        for block in &chunks {
+            let end = block.frame.start().as_u64() + (PAGE_SIZE << block.order) as u64;
+            assert!(end <= ceiling.as_u64(), "a chunk ends at {end:#x}");
+        }
+        assert_eq!(
+            a.alloc_chunks_user(MemoryClass::Dma, 1, Some(PhysAddr::new(floor)))
+                .err(),
+            Some(AllocError::OutOfRange)
+        );
+        a.free_chunks(&chunks);
+        assert_eq!(a.free_frames(), free, "the refusal took and kept nothing");
     }
 
     #[test]
@@ -1563,12 +1718,15 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Six frames = one order-2 block (4) + one order-1 block (2), largest
         // first.
-        let chunks = a.alloc_chunks(MemoryClass::Kernel, 6).unwrap();
+        let chunks = a.alloc_chunks_user(MemoryClass::Kernel, 6, None).unwrap();
         assert_eq!(chunk_frames(&chunks), 6);
-        assert_eq!(chunks.iter().map(|&(_, o)| o).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(
+            chunks.iter().map(|block| block.order).collect::<Vec<_>>(),
+            [2, 1]
+        );
         assert_eq!(a.free_frames(), 16 - 6);
-        for (f, o) in chunks {
-            a.free_order(f, o).unwrap();
+        for block in chunks {
+            a.free_order(block.frame, block.order).unwrap();
         }
         assert_eq!(a.free_frames(), 16);
     }
@@ -1582,33 +1740,147 @@ mod tests {
         // order ceiling is: one-and-a-half of the largest block.
         let max_block: usize = 1 << MAX_ORDER;
         let want_pages = max_block + max_block / 2;
-        let total = want_pages + 100;
+        // Room for the kernel reserve on top of the draw.
+        let total = want_pages + want_pages / 32;
         let m = small_map(total);
         let a = FrameAllocator::new(&m).unwrap();
         let want = want_pages as u64;
-        let chunks = a.alloc_chunks(MemoryClass::Kernel, want).unwrap();
+        let chunks = a
+            .alloc_chunks_user(MemoryClass::Kernel, want, None)
+            .unwrap();
         assert!(chunks.len() >= 2, "must span multiple blocks");
-        assert!(chunks.iter().all(|&(_, o)| o <= MAX_ORDER));
+        assert!(chunks.iter().all(|block| block.order <= MAX_ORDER));
         assert_eq!(chunk_frames(&chunks), want);
         assert_eq!(a.free_frames(), total - want_pages);
-        for (f, o) in chunks {
-            a.free_order(f, o).unwrap();
+        for block in chunks {
+            a.free_order(block.frame, block.order).unwrap();
         }
         assert_eq!(a.free_frames(), total);
     }
 
     #[test]
-    fn alloc_chunks_frees_every_block_on_exhaustion() {
-        let m = small_map(4);
+    fn alloc_chunks_of_a_fragmented_pool_never_grows_a_chunk() {
+        let m = small_map(16);
         let a = FrameAllocator::new(&m).unwrap();
-        // Nine frames cannot be satisfied by four: the partial progress (an
-        // order-2 block over the whole pool) is returned and the call fails
-        // closed, leaving the pool exactly as it was found.
+        let singles: Vec<Frame> = (0..16)
+            .map(|_| a.alloc(MemoryClass::Kernel).unwrap())
+            .collect();
+        // Free the first half whole and every other frame of the rest, so the
+        // largest free block sits first and only singles follow it.
+        for (i, &frame) in singles.iter().enumerate() {
+            if i < 8 || i % 2 == 0 {
+                a.free(frame).unwrap();
+            }
+        }
+        let chunks = a.alloc_chunks_user(MemoryClass::Kernel, 11, None).unwrap();
+        assert_eq!(chunk_frames(&chunks), 11);
+        let orders: Vec<u32> = chunks.iter().map(|block| block.order).collect();
+        assert_eq!(orders, [3, 0, 0, 0]);
+        a.free_chunks(&chunks);
+        assert_eq!(a.free_frames(), 12);
+    }
+
+    #[test]
+    fn alloc_chunks_is_refused_before_it_takes_a_frame_the_machine_cannot_spare() {
+        let a = FrameAllocator::new(&small_map(4 * RESERVE_DIVISOR)).unwrap();
+        let reserve = a.reserve_frames() as u64;
+        assert!(reserve > 0);
+        a.commit(3).unwrap();
+        let spare = 4 * RESERVE_DIVISOR as u64 - reserve - 3;
         assert_eq!(
-            a.alloc_chunks(MemoryClass::Kernel, 9).err(),
+            a.alloc_chunks_user(MemoryClass::Dma, spare + 1, None).err(),
             Some(AllocError::OutOfMemory)
         );
-        assert_eq!(a.free_frames(), 4);
+        assert_eq!(a.free_frames(), 4 * RESERVE_DIVISOR);
+        assert_eq!(a.committed_frames(), 3);
+        let chunks = a.alloc_chunks_user(MemoryClass::Dma, spare, None).unwrap();
+        assert_eq!(chunk_frames(&chunks), spare);
+        assert_eq!(a.committed_frames(), 3, "the draw spent its own admission");
+        assert_eq!(a.commit(1), Err(AllocError::OutOfMemory));
+        a.free_chunks(&chunks);
+        a.uncommit(3);
+        assert_eq!(a.free_frames(), 4 * RESERVE_DIVISOR);
+        assert_eq!(a.committed_frames(), 0);
+    }
+
+    /// A concurrent commit sees an admitted draw counted once at every block,
+    /// never once as promised and again as drawn.
+    #[test]
+    fn an_admitted_draw_is_counted_once_while_it_runs() {
+        let a = FrameAllocator::new(&small_map(4 * RESERVE_DIVISOR)).unwrap();
+        let headroom = |a: &FrameAllocator| {
+            let figures = a.snapshot();
+            figures.free - a.reserve_frames() - figures.committed
+        };
+        a.commit(7).unwrap();
+        let before = headroom(&a);
+        let mut seen = Vec::new();
+        let chunks = FrameAllocator::draw_chunks(
+            7,
+            |order| {
+                let drawn = a.alloc_order_committed(MemoryClass::Dma, order, None);
+                seen.push(headroom(&a));
+                drawn
+            },
+            |_| unreachable!("nothing fails"),
+        )
+        .unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(seen, [before; 3]);
+        assert_eq!(a.committed_frames(), 0);
+        a.free_chunks(&chunks);
+    }
+
+    /// A block freed elsewhere between draws never lets a later block grow
+    /// past the one before it, so laid end to end each stays aligned to its
+    /// own size.
+    #[test]
+    fn a_draw_never_takes_a_block_larger_than_the_one_before() {
+        let mut next = 0;
+        let mut draws = 0;
+        let chunks = FrameAllocator::draw_chunks(
+            7,
+            |order| {
+                draws += 1;
+                // Only the first draw finds the pool short of large blocks.
+                let order = if draws == 1 { order.min(1) } else { order };
+                next += 1 << order;
+                Ok(FrameBlock {
+                    frame: Frame(next),
+                    order,
+                })
+            },
+            |_| unreachable!("nothing fails"),
+        )
+        .unwrap();
+        let orders: Vec<u32> = chunks.iter().map(|block| block.order).collect();
+        assert_eq!(orders, [1, 1, 1, 0]);
+    }
+
+    /// A draw that fails part-way hands back every block it took, and the
+    /// committed draw's release re-charges what each block spent, so the
+    /// admission's own release leaves the books as they started.
+    #[test]
+    fn a_failed_draw_returns_every_block_and_its_admission() {
+        let a = FrameAllocator::new(&small_map(64)).unwrap();
+        a.commit(7).unwrap();
+        let mut draws = 0;
+        let refused = FrameAllocator::draw_chunks(
+            7,
+            |order| {
+                draws += 1;
+                if draws == 3 {
+                    return Err(AllocError::InvariantViolation);
+                }
+                a.alloc_order_committed(MemoryClass::Dma, order, None)
+            },
+            |block| a.free_order_committed(block.frame, block.order).unwrap(),
+        );
+        assert_eq!(refused.err(), Some(AllocError::InvariantViolation));
+        assert_eq!(a.committed_frames(), 7);
+        a.uncommit(7);
+        assert_eq!(a.free_frames(), 64);
+        assert_eq!(a.committed_frames(), 0);
     }
 
     #[test]
@@ -1797,13 +2069,14 @@ mod tests {
         assert_eq!(reserve, usable / RESERVE_DIVISOR);
         assert!(reserve > 0, "test needs a non-zero reserve");
 
-        // User commits succeed until one more would drop the free pool to or
-        // below the reserve; the last success leaves exactly `reserve + 1`.
+        // User commits succeed until one more would drop the free pool below
+        // the reserve, the same budget a commit is held to; the last success
+        // leaves exactly `reserve`.
         let mut held = Vec::new();
         while let Ok(f) = a.alloc_user(MemoryClass::UserAnon) {
             held.push(f);
         }
-        assert_eq!(a.free_frames(), reserve + 1);
+        assert_eq!(a.free_frames(), reserve);
         assert_eq!(
             a.alloc_user(MemoryClass::UserAnon).err(),
             Some(AllocError::OutOfMemory)
@@ -2150,12 +2423,12 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Not a power of two, so the draw is several blocks of descending
         // order rather than one.
-        let chunks = a.alloc_chunks(MemoryClass::UserAnon, 7).unwrap();
+        let chunks = a.alloc_chunks_user(MemoryClass::UserAnon, 7, None).unwrap();
         assert!(chunks.len() > 1);
         assert_eq!(a.snapshot().class[MemoryClass::UserAnon.index()], 7);
         assert_partitions(&a, 32);
-        for (frame, order) in chunks {
-            a.free_order(frame, order).unwrap();
+        for block in chunks {
+            a.free_order(block.frame, block.order).unwrap();
         }
         assert_eq!(a.snapshot().charged(), 0);
     }
@@ -2199,11 +2472,11 @@ mod tests {
         assert!(front.0 >= 48, "the list front lies above the ceiling");
 
         let one = a
-            .alloc_order_under(MemoryClass::Dma, 0, Some(Frame(48).start()))
+            .alloc_order_under_user(MemoryClass::Dma, 0, Some(Frame(48).start()))
             .unwrap();
         assert_eq!(one, Frame(47));
         let four = a
-            .alloc_order_under(MemoryClass::Dma, 2, Some(Frame(48).start()))
+            .alloc_order_under_user(MemoryClass::Dma, 2, Some(Frame(48).start()))
             .unwrap();
         assert_eq!(four, Frame(40), "44..48 holds the frame already taken");
         assert_eq!(a.snapshot().class[MemoryClass::Dma.index()], 5);
@@ -2220,21 +2493,52 @@ mod tests {
         );
     }
 
+    /// A draw under a ceiling a fragmented pool cannot meet at the order it
+    /// asks takes the largest block below the ceiling there is, the highest
+    /// of those first.
+    #[test]
+    fn a_ceiling_draw_on_a_fragmented_pool_takes_the_largest_block_below_it() {
+        let a = FrameAllocator::new(&small_map(64)).unwrap();
+        let mut held = Vec::new();
+        while let Ok(frame) = a.alloc(MemoryClass::Kernel) {
+            held.push(frame);
+        }
+        // Room above the ceiling, so the draw is admitted.
+        let freed: Vec<usize> = [24, 25, 26, 27, 44, 46].into_iter().chain(60..80).collect();
+        held.retain(|frame| !freed.contains(&frame.0));
+        for &frame in &freed {
+            a.free(Frame(frame)).unwrap();
+        }
+        let chunks = a
+            .alloc_chunks_user(MemoryClass::Dma, 5, Some(Frame(48).start()))
+            .unwrap();
+        let taken: Vec<(usize, u32)> = chunks
+            .iter()
+            .map(|block| (block.frame.0, block.order))
+            .collect();
+        assert_eq!(taken, [(24, 2), (46, 0)]);
+        a.free_chunks(&chunks);
+        for frame in held {
+            a.free(frame).unwrap();
+        }
+        assert_eq!(a.free_frames(), 64);
+    }
+
     #[test]
     fn a_ceiling_carve_refuses_only_when_nothing_below_the_ceiling_is_free() {
         let a = FrameAllocator::new(&small_map(64)).unwrap();
         let low = a
-            .alloc_order_under(MemoryClass::Dma, 4, Some(Frame(32).start()))
+            .alloc_order_under_user(MemoryClass::Dma, 4, Some(Frame(32).start()))
             .unwrap();
         assert_eq!(low, Frame(16));
         assert_eq!(
-            a.alloc_order_under(MemoryClass::Dma, 0, Some(Frame(32).start())),
+            a.alloc_order_under_user(MemoryClass::Dma, 0, Some(Frame(32).start())),
             Err(AllocError::OutOfMemory)
         );
         assert_eq!(a.free_frames(), 48, "memory above the ceiling is untouched");
         a.free_order(low, 4).unwrap();
         assert_eq!(
-            a.alloc_order_under(MemoryClass::Dma, 0, Some(Frame(32).start())),
+            a.alloc_order_under_user(MemoryClass::Dma, 0, Some(Frame(32).start())),
             Ok(Frame(31))
         );
     }
@@ -2244,23 +2548,23 @@ mod tests {
         let a = FrameAllocator::new(&small_map(64)).unwrap();
         for ceiling in [0, 10, 16] {
             assert_eq!(
-                a.alloc_order_under(MemoryClass::Dma, 0, Some(Frame(ceiling).start())),
+                a.alloc_order_under_user(MemoryClass::Dma, 0, Some(Frame(ceiling).start())),
                 Err(AllocError::OutOfRange),
                 "no usable frame lies below frame {ceiling}"
             );
         }
         assert_eq!(
-            a.alloc_order_under(MemoryClass::Dma, MAX_ORDER + 1, Some(Frame(48).start())),
+            a.alloc_order_under_user(MemoryClass::Dma, MAX_ORDER + 1, Some(Frame(48).start())),
             Err(AllocError::SizeUnsupported)
         );
         // A ceiling part-way into a frame excludes that frame.
         let unaligned = Some(PhysAddr::new(Frame(17).start().as_u64() + 1));
         assert_eq!(
-            a.alloc_order_under(MemoryClass::Dma, 0, unaligned),
+            a.alloc_order_under_user(MemoryClass::Dma, 0, unaligned),
             Ok(Frame(16))
         );
         assert_eq!(
-            a.alloc_order_under(MemoryClass::Dma, 0, unaligned),
+            a.alloc_order_under_user(MemoryClass::Dma, 0, unaligned),
             Err(AllocError::OutOfMemory)
         );
     }
@@ -2271,7 +2575,7 @@ mod tests {
         let ordinary = FrameAllocator::new(&small_map(64)).unwrap();
         for ceiling in [None, Some(Frame(80).start()), Some(PhysAddr::new(u64::MAX))] {
             assert_eq!(
-                constrained.alloc_order_under(MemoryClass::Kernel, 1, ceiling),
+                constrained.alloc_order_under_user(MemoryClass::Kernel, 1, ceiling),
                 ordinary.alloc_order(MemoryClass::Kernel, 1),
                 "{ceiling:?}"
             );
@@ -2328,12 +2632,19 @@ mod tests {
                         continue;
                     }
                     let got = if op % 3 == 0 {
-                        a.alloc_order_under(MemoryClass::Dma, order, Some(Frame(ceiling).start()))
+                        a.alloc_order_under_user(
+                            MemoryClass::Dma,
+                            order,
+                            Some(Frame(ceiling).start()),
+                        )
                     } else {
                         a.alloc_order(MemoryClass::Kernel, order)
                     };
                     let n = 1usize << order;
-                    if op % 3 == 0 && ceiling < END {
+                    let free = used[FIRST..].iter().filter(|&&taken| !taken).count();
+                    if op % 3 == 0 && (free < n || free - n < a.reserve_frames()) {
+                        prop_assert_eq!(got, Err(AllocError::OutOfMemory), "the reserve refuses");
+                    } else if op % 3 == 0 && ceiling < END {
                         match (got, best(&used, order, ceiling)) {
                             (Ok(frame), Some(want)) => prop_assert_eq!(frame.0, want),
                             (Err(AllocError::OutOfRange), None) => prop_assert!(ceiling <= FIRST),

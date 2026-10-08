@@ -34,6 +34,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tairix_arch_api::frames::{
     active_frames, pool_slot_of, reclaim_hierarchy, PageTableFrames, TableFrame,
 };
+use tairix_arch_api::gigapages;
 use tairix_arch_api::mmu::{
     AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
 };
@@ -71,6 +72,9 @@ pub mod flags {
     pub const ACCESSED: u64 = 1 << 6;
     /// Dirty (set eagerly alongside [`WRITE`], same rationale).
     pub const DIRTY: u64 = 1 << 7;
+    /// One of the two bits a leaf leaves to software (RSW), marking a DMA
+    /// buffer ([`PageFlags::DMA`](tairix_arch_api::mmu::PageFlags::DMA)).
+    pub const SW_DMA: u64 = 1 << 8;
 }
 
 /// `true` iff a PTE is a *leaf* — valid and carrying at least one of
@@ -491,6 +495,9 @@ fn sv39_flags(flags: PageFlags) -> u64 {
     if flags.contains(PageFlags::USER) {
         bits |= flags::USER;
     }
+    if flags.contains(PageFlags::DMA) {
+        bits |= flags::SW_DMA;
+    }
     bits
 }
 
@@ -511,6 +518,9 @@ fn page_flags_from_sv39(pte: u64) -> PageFlags {
     }
     if pte & flags::USER != 0 {
         out = out | PageFlags::USER;
+    }
+    if pte & flags::SW_DMA != 0 {
+        out = out | PageFlags::DMA;
     }
     out
 }
@@ -533,7 +543,9 @@ impl MmuAddressSpace for AddressSpace {
         if flags.is_write_exec() {
             return Err(MapError::InvalidFlags);
         }
-        if flags.contains(PageFlags::WRITE_COMBINE) {
+        // Sv39 states no memory type, so neither can be honoured: memory a
+        // device that does not snoop shares would be cached.
+        if flags.contains(PageFlags::WRITE_COMBINE) || flags.contains(PageFlags::DMA_COHERENT) {
             return Err(MapError::Unsupported);
         }
         // Checked ahead of `leaf_present` so the refusal names the reason
@@ -897,6 +909,15 @@ static PHYSMAP_ROOT: [AtomicU64; PHYSMAP_SLOTS] = [const { AtomicU64::new(0) }; 
 /// build with no boot path reaches nothing and fails closed.
 static PHYSMAP_GIGAPAGES: AtomicUsize = AtomicUsize::new(0);
 
+/// Gigapages holding device registers the kernel drives, named by the boot
+/// path before the map is published: each becomes a leaf of the map whether
+/// or not RAM reaches it, so a register window above the identity window
+/// every root carries is reached at [`physmap_virt`] in any root. Sv39
+/// carries no memory type, so the platform's attributes decide how they are
+/// reached, as the identity window's.
+pub static KERNEL_DEVICES: gigapages::KernelDevices =
+    gigapages::KernelDevices::new(MAX_PHYSMAP_GIB);
+
 /// Gigabytes of physical memory the live direct physical map covers.
 #[must_use]
 pub fn physmap_gigapages() -> usize {
@@ -932,7 +953,8 @@ const fn physmap_leaf(gib: usize) -> u64 {
 }
 
 /// Record `gib` gigabytes as the direct map's extent and fill the shared
-/// root entries every later root installs, set-once.
+/// root entries every later root installs, with a leaf for each configured
+/// device gigapage beside them, set-once.
 ///
 /// Split out from [`install_boot_physmap`] because this half is pure
 /// bookkeeping: it is what the host tests drive to observe that every root
@@ -950,9 +972,17 @@ fn publish_physmap(gib: usize) -> bool {
     {
         return false;
     }
-    for (gigabyte, slot) in PHYSMAP_ROOT.iter().enumerate().take(gib) {
-        slot.store(physmap_leaf(gigabyte), Ordering::Release);
+    let mut devices = [0u64; gigapages::MASK_WORDS];
+    for (gigabyte, slot) in PHYSMAP_ROOT.iter().enumerate() {
+        let device = KERNEL_DEVICES.named(gigabyte);
+        if device {
+            devices[gigabyte / 64] |= 1 << (gigabyte % 64);
+        }
+        if gigabyte < gib || device {
+            slot.store(physmap_leaf(gigabyte), Ordering::Release);
+        }
     }
+    KERNEL_DEVICES.publish(devices);
     true
 }
 

@@ -280,7 +280,12 @@ fn derives_a_bus_window_bar_and_translated_dma_aperture() {
     // plus extent.
     let resources = [
         HwResource::bus_window(0x6_0000_0000, 0x9310, 0xC000_0000),
-        HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0xC000_0000),
+        HwResource::dma_translated(
+            0xC000_0000,
+            0x4000_0000,
+            0xC000_0000,
+            tairix_abi::DmaCoherence::Snooped,
+        ),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()),
@@ -298,7 +303,12 @@ fn a_translated_aperture_starting_at_bus_zero_is_still_translated() {
     // top is the extent, not the CPU-side ceiling.
     let resources = [
         HwResource::bus_window(0x6_0000_0000, 0x9310, 0xC000_0000),
-        HwResource::dma_translated(0x1_4000_0000, 0x4000_0000, 0),
+        HwResource::dma_translated(
+            0x1_4000_0000,
+            0x4000_0000,
+            0,
+            tairix_abi::DmaCoherence::Snooped,
+        ),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()).map(|r| r.dma_aperture_top),
@@ -313,7 +323,7 @@ fn derives_an_mmio_bar_and_untranslated_dma_aperture() {
     // aperture top directly.
     let resources = [
         HwResource::mmio(0xA00_0000, 0x1000),
-        HwResource::dma(0x4000_0000, 0x10_0000),
+        HwResource::dma(0x4000_0000, 0x10_0000, tairix_abi::DmaCoherence::Snooped),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()),
@@ -332,7 +342,7 @@ fn ignores_an_irq_grant_when_deriving() {
     let resources = [
         HwResource::mmio(0xA00_0000, 0x1000),
         HwResource::irq(33, 1),
-        HwResource::dma(0x4000_0000, 0x10_0000),
+        HwResource::dma(0x4000_0000, 0x10_0000, tairix_abi::DmaCoherence::Snooped),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()).map(|r| r.bar_len),
@@ -342,7 +352,11 @@ fn ignores_an_irq_grant_when_deriving() {
 
 #[test]
 fn rejects_a_missing_register_window() {
-    let resources = [HwResource::dma(0x4000_0000, 0x10_0000)];
+    let resources = [HwResource::dma(
+        0x4000_0000,
+        0x10_0000,
+        tairix_abi::DmaCoherence::Snooped,
+    )];
     assert_eq!(
         derive_controller_resources(resources.iter()).err(),
         Some(DriverError::NotFound)
@@ -363,7 +377,7 @@ fn rejects_an_ambiguous_double_register_window() {
     let resources = [
         HwResource::mmio(0xA00_0000, 0x1000),
         HwResource::mmio(0xB00_0000, 0x1000),
-        HwResource::dma(0x4000_0000, 0x10_0000),
+        HwResource::dma(0x4000_0000, 0x10_0000, tairix_abi::DmaCoherence::Snooped),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()).err(),
@@ -375,8 +389,8 @@ fn rejects_an_ambiguous_double_register_window() {
 fn rejects_an_ambiguous_double_dma_constraint() {
     let resources = [
         HwResource::mmio(0xA00_0000, 0x1000),
-        HwResource::dma(0x4000_0000, 0x10_0000),
-        HwResource::dma(0x8000_0000, 0x10_0000),
+        HwResource::dma(0x4000_0000, 0x10_0000, tairix_abi::DmaCoherence::Snooped),
+        HwResource::dma(0x8000_0000, 0x10_0000, tairix_abi::DmaCoherence::Snooped),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()).err(),
@@ -388,7 +402,7 @@ fn rejects_an_ambiguous_double_dma_constraint() {
 fn rejects_a_zero_length_register_window() {
     let resources = [
         HwResource::mmio(0xA00_0000, 0),
-        HwResource::dma(0x4000_0000, 0x10_0000),
+        HwResource::dma(0x4000_0000, 0x10_0000, tairix_abi::DmaCoherence::Snooped),
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()).err(),

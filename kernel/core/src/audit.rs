@@ -583,6 +583,20 @@ pub enum AuditEvent {
     /// Carries the refused owner's `node` and `generation`, the `group`, and
     /// the `holder` node.
     DmaGroupRefused,
+    /// No task confirms freed carves in batches, so every free waits for an
+    /// invalidation of its own.
+    ///
+    /// Carries the `cause`: `no_room` for the batch, `not_admitted`, or
+    /// `cannot_park`.
+    DmaFreesUnbatched,
+    /// The firmware table describing the DMA translation units is
+    /// malformed, so no unit translates: the PCI functions it would have
+    /// described were withheld, or, by the administrator's choice, published
+    /// with their DMA unconfined.
+    ///
+    /// Carries the `family` the table describes units of, and the `outcome`:
+    /// `withheld` or `unconfined`.
+    DmaUnitsMalformed,
     /// The port routed the interrupt sources it set up at boot.
     ///
     /// `outcome` is `remapped`, where every source raises only the entry the
@@ -812,6 +826,8 @@ impl AuditEvent {
             Self::DmaTranslationUnconfirmed => 4095,
             Self::DmaBusMaster => 4147,
             Self::DmaGroupRefused => 4148,
+            Self::DmaFreesUnbatched => 4250,
+            Self::DmaUnitsMalformed => 4104,
             Self::PortIoRefused => 4158,
             Self::InterruptRemapping => 4159,
             Self::FsNodeMutated => 4100,
@@ -897,6 +913,8 @@ impl AuditEvent {
             Self::DmaTranslationUnconfirmed => "dma translation end unconfirmed",
             Self::DmaBusMaster => "bus mastering changed",
             Self::DmaGroupRefused => "dma carve refused: isolation group held",
+            Self::DmaFreesUnbatched => "dma frees confirmed one at a time",
+            Self::DmaUnitsMalformed => "dma translation units' firmware table malformed",
             Self::PortIoRefused => "port access refused: kernel-owned port",
             Self::InterruptRemapping => "interrupt sources routed",
             Self::FsNodeMutated => "filesystem node mutated",
@@ -1002,6 +1020,8 @@ mod tests {
         AuditEvent::DmaTranslationUnconfirmed,
         AuditEvent::DmaBusMaster,
         AuditEvent::DmaGroupRefused,
+        AuditEvent::DmaFreesUnbatched,
+        AuditEvent::DmaUnitsMalformed,
         AuditEvent::PortIoRefused,
         AuditEvent::InterruptRemapping,
         AuditEvent::FsNodeMutated,
@@ -1025,7 +1045,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 76, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 78, "a new event belongs in `ALL`");
     }
 
     #[test]

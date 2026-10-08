@@ -465,15 +465,20 @@ impl SyscallNumber {
     /// Arguments: `handle: u64` — an unforgeable, kernel-issued
     /// device-resource grant handle the driver received for the matched
     /// hardware-tree node it binds (a [`crate::hwtree::HwResourceKind::Dma`]
-    /// constraint); `len: usize` — the number of bytes to allocate; and
-    /// `device_out: *mut u64` — a user pointer the kernel writes the
-    /// buffer's **device-visible** base address to on success. The kernel
-    /// resolves the handle **against the calling task** (rejecting forgery
-    /// exactly as [`SyscallNumber::MMIO_MAP`] does),
-    /// confirms it names a DMA constraint, carves a physically contiguous,
-    /// zeroed, coherent (caching-disabled) region whose physical extent lies
-    /// within the grant's addressing limit (a device never
-    /// reaches memory the kernel did not grant it), maps it `RW`,
+    /// constraint); `len: usize` — the number of bytes to allocate; `reach:
+    /// u32` — the address bits the driver's device drives, 1 to 64
+    /// ([`crate::driver::dma::DmaReach`]), which narrows the grant's limit and
+    /// never widens it; and `device_out: *mut u64` — a user pointer the
+    /// kernel writes the buffer's **device-visible** base address to on
+    /// success. The kernel resolves the handle **against the calling task**
+    /// (rejecting forgery exactly as [`SyscallNumber::MMIO_MAP`] does),
+    /// confirms it names a DMA constraint, carves a zeroed region the device
+    /// reaches within that limit (a device never reaches memory the kernel
+    /// did not grant it), mapped as ordinary memory for a device the grant
+    /// says snoops the CPU's caches and uncached for one that does not — one
+    /// physically contiguous block for an untranslated device, its pages
+    /// wherever frames are free, mapped end to end into its domain, for one
+    /// a translation unit confines — maps it `RW`,
     /// non-executable, guard-bracketed into the caller's own address space,
     /// writes the device-visible base to `device_out`, and returns the base
     /// **user virtual address** the driver's CPU accesses go through. For a
@@ -487,13 +492,20 @@ impl SyscallNumber {
     /// Gated by [`crate::CapabilityId::MEM_DMA`]. Returns `-errno`:
     /// [`Errno::NotFound`] for a handle the caller does not hold, which is
     /// what a grant revoked by its node's removal answers;
-    /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a length past its
-    /// extent or past the largest contiguous block, a limit no RAM lies
-    /// below, or a block a translating window cannot name;
+    /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a reach of no
+    /// bits or more than 64, a length past its extent or, untranslated, past
+    /// the largest contiguous block, a limit no RAM lies below, or a block a
+    /// translating window cannot name;
     /// [`Errno::LengthOutOfRange`] for a zero length;
     /// [`Errno::PermissionDenied`] for a caller not loaded for a node;
     /// [`Errno::DeviceOffline`] for a node that left the tree while its grant
     /// was still being revoked;
+    /// [`Errno::Busy`] for a node a kernel driver owns, or whose isolation
+    /// group another node's driver holds;
+    /// [`Errno::DeviceFault`] for a carve the node's translation unit refused
+    /// to map, or could not confirm it took back;
+    /// [`Errno::NotSupported`] where the port cannot map memory uncached for
+    /// a device that does not snoop;
     /// [`Errno::OutOfMemory`] when no free block lies below the limit, the
     /// caller's DMA window has no free slot, or the quarantine cannot make
     /// room for the block; [`Errno::BadAddress`] for a page-table or
@@ -2563,18 +2575,23 @@ impl SyscallNumber {
     pub const DMA_QUIESCED: Self = Self(126);
 
     /// Create a shared region a DMA master may reach (`plans/SOUND.md`
-    /// SND5b): one physically contiguous, zeroed block carved under a DMA
-    /// grant's addressing constraint and mapped coherent in every process
-    /// that maps it, so no mapping can hold a line the device never sees.
+    /// SND5b): zeroed memory carved under a DMA grant's addressing constraint
+    /// — one physically contiguous block for an untranslated device, its
+    /// pages mapped end to end into its domain for a translated one — and
+    /// mapped coherent in every process that maps it, so no mapping can hold
+    /// a line the device never sees.
     ///
     /// Arguments: the handle of the caller's `Dma` grant, the byte length,
-    /// then the user pointers the region id and the block's device address —
-    /// translated through the grant's bus window — are written to. Returns
-    /// the base virtual address of the caller's mapping, or `-errno`:
+    /// the address bits its device drives (as [`SyscallNumber::DMA_ALLOC`]'s
+    /// `reach`), then the user pointers the region id and the region's
+    /// device address — translated through the grant's bus window — are
+    /// written to. Returns the base virtual address of the caller's mapping,
+    /// or `-errno`:
     /// [`Errno::NotFound`] for a handle the caller does not hold, which is
     /// what a grant revoked by its node's removal answers,
-    /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a length past its
-    /// extent, or a block the device could not reach, and
+    /// [`Errno::OutOfRange`] for a grant that is not `Dma`, a reach of no
+    /// bits or more than 64, a length past its extent, or a block the device
+    /// could not reach, and
     /// [`Errno::PermissionDenied`] for a caller not loaded for a node or
     /// lacking `CAP_SHM`, and [`Errno::DeviceOffline`] for a node that left the
     /// tree while its grant was still being revoked. The region reserves room in the caller's node quarantine

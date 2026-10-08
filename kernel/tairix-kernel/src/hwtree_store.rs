@@ -356,14 +356,18 @@ impl HwTreeStore {
     /// one-shot snapshot froze. The root sentinel
     /// is never a load target (a driver is bound to a discovered device, never
     /// the tree root), so it is excluded here, and neither is a DMA
-    /// translation unit: whoever programs one can point any device at any
-    /// memory, so only the kernel drives it.
+    /// translation unit or a node the kernel drives itself: whoever programs
+    /// one can point any device at any memory, or any interrupt anywhere.
     #[must_use]
     pub fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {
         let inner = self.inner.lock();
         let resources = inner
             .node(node_id)
-            .filter(|node| !node.is_root() && node.class() != Some(HwDeviceClass::Iommu))?
+            .filter(|node| {
+                !node.is_root()
+                    && node.class() != Some(HwDeviceClass::Iommu)
+                    && !node.is_kernel_driven()
+            })?
             .resources();
         let mut grants = Vec::new();
         grants.try_reserve_exact(resources.len()).ok()?;
@@ -619,6 +623,31 @@ mod tests {
         store.seed(tree).expect("a fresh store seeds");
         assert_eq!(store.resolve_resources(3), None);
         assert_eq!(store.resolve_resources(2), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_node_the_kernel_drives_is_never_a_load_target() {
+        let store = HwTreeStore::new();
+        let mut gic = HwNode::new(3, 1, HwDeviceClass::InterruptController);
+        gic.push_resource(HwResource::property(
+            tairix_abi::HwProperty::KernelDriven,
+            1,
+        ))
+        .expect("resource fits");
+        gic.push_resource(HwResource::mmio(0x0800_0000, 0x1_0000))
+            .expect("resource fits");
+        let mut gpio = HwNode::new(4, 1, HwDeviceClass::InterruptController);
+        gpio.push_resource(HwResource::mmio(0xFE20_0000, 0x1000))
+            .expect("resource fits");
+        let mut tree = seed_tree();
+        tree.extend([gic, gpio]);
+        store.seed(tree).expect("a fresh store seeds");
+        assert_eq!(store.resolve_resources(3), None);
+        // An interrupt controller a driver serves, a GPIO block, stays one.
+        assert_eq!(
+            store.resolve_resources(4),
+            Some(alloc::vec![HwResource::mmio(0xFE20_0000, 0x1000)])
+        );
     }
 
     #[test]

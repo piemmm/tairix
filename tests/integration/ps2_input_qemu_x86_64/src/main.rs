@@ -10,7 +10,8 @@
 //! hook point, the rest of the kernel is production code.
 //!
 //! "Use the device" is **interrupt-driven**, not polled: the test binds
-//! the keyboard line (ISA IRQ-1 → GSI 1) in the production
+//! the keyboard line (ISA IRQ-1 → GSI 1), activated through the published
+//! composite controller as `irq_bind` activates one, in the production
 //! `tairix_kernel_irq::IrqTable`, enables the i8042's keyboard-interrupt
 //! config bit, masks the legacy 8259 PIC, and unmasks GSI 1 through the
 //! published `IoApicController`. It then makes a keypress deterministic
@@ -67,10 +68,11 @@ mod kernel {
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
     use tairix_kernel::x86_64::ioapic_controller::published_typed;
+    use tairix_kernel::x86_64::msi::published_composite;
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use tairix_kernel_irq::WaitStep;
+    use tairix_kernel_irq::{IrqController, WaitStep};
     use tairix_kernel_sec::ProcessId;
     use tairix_log::{Event, EventId, Sink};
 
@@ -340,15 +342,13 @@ mod kernel {
     /// legacy PIC, and enable the controller's keyboard-interrupt bit.
     ///
     /// Returns the minted [`IrqHandle`] on success, or `None` on any
-    /// environment defect (no published table/controller, GSI 1 not
-    /// programmed, bind rejected, or a wedged controller) — the caller
+    /// environment defect (no published table/controller, GSI 1 left
+    /// inactive, bind rejected, or a wedged controller) — the caller
     /// fails closed.
     fn setup_keyboard_irq() -> Option<IrqHandle> {
         let table = published_irq_table()?;
-        // The controller must be published, and GSI 1 must carry a vector
-        // the boot pipeline allocated; a `None` here means QEMU advertised
-        // an MADT without the expected IO-APIC pin, an environment defect.
         published_typed()?;
+        published_composite()?.activate(KEYBOARD_GSI).ok()?;
         arch_irq::global_routing().vector_for_gsi(KEYBOARD_GSI)?;
 
         let outcome = table.bind(KEYBOARD_GSI, ProcessId(IRQ_OWNER.0)).ok()?;
@@ -366,9 +366,8 @@ mod kernel {
     /// `Ps2Keyboard`, confirming exactly one `Key` event with the
     /// expected `code`/`value`.
     ///
-    /// The boot pipeline (and `IrqTable::fire`'s mask-before-wake step)
-    /// leave GSI 1 masked, so each call re-unmasks it before arming the
-    /// pulse.
+    /// Activation (and `IrqTable::fire`'s mask-before-wake step) leave GSI 1
+    /// masked, so each call re-unmasks it before arming the pulse.
     fn await_keypress_and_expect(handle: IrqHandle, scancode: u8, code: u16, value: i32) -> bool {
         let Some(table) = published_irq_table() else {
             return false;
@@ -447,8 +446,6 @@ mod kernel {
             spawner: &spawner,
             sink: &SerialSink::new(),
             // The PS/2 driver consumes no virtio transport.
-            virtio_host_factory: None,
-            mmio_mapper: None,
         };
         let mut host = Host::new(cfg);
 

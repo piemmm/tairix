@@ -47,9 +47,10 @@ pull in exactly what they need, plus an umbrella that includes them all:
   (`TAIRIX_PROCESS_START_MAGIC`), the size limits (`TAIRIX_PROCESS_START_MAX_*`), and
   the packed `*_WIRE_LEN` sizes.
 - `tairix/tairix_sysinfo.h` — the System Information API wire types
-  (`tairix_sysinfo_request_header_t`, `tairix_process_list_request_t`,
-  `tairix_process_record_t`, `tairix_kernel_memory_stats_t`, `tairix_uptime_t`,
-  `tairix_system_identity_t`, `tairix_mount_list_request_t`, `tairix_mount_record_t`),
+  (`tairix_sysinfo_request_header_t`, the `tairix_page_request_t` every list
+  query's payload begins with, and the process, kernel-memory, uptime,
+  load-average, identity, mount, resource-limit, account and DMA-translation
+  records),
   the framing / query-id / registry constants (`TAIRIX_SYSINFO_*`), the
   process-state discriminants (`TAIRIX_PROCESS_STATE_*`), the inline-buffer caps
   (`TAIRIX_PROCESS_NAME_MAX`, `TAIRIX_MACHINE_ID_LEN`, `TAIRIX_HOSTNAME_MAX`,

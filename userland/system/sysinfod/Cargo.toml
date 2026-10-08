@@ -39,6 +39,12 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # structured audit log: every cross-principal invocation and every
 # capability denial is recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The walks part way through: an LRU of callers keyed by the kernel-assigned
+# process id, each caller's few walks held inline. The test audit sink records
+# into the same fixed-capacity vector.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime: `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the
@@ -51,8 +57,3 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-
-[dev-dependencies]
-# The shared fixed-capacity vector the test audit sink records into, so the
-# fixture needs no allocator and no hand-rolled container.
-tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }

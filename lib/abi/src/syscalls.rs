@@ -786,12 +786,14 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::DMA_ALLOC,
         name: "dma_alloc",
-        arg_count: 3,
+        arg_count: 4,
         args: [
+            // The `Dma` grant handle, the byte length, the address bits the
+            // device drives, then the out pointer for the device address.
             AbiType::Handle,
             AbiType::Len,
+            AbiType::U32,
             AbiType::UserPtr,
-            AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -803,7 +805,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Carving a driver a DMA-coherent buffer the hardware reads/writes
         // is privileged, never ambient: only a driver
         // granted the matched node's DMA constraint holds `CAP_MEM_DMA`, and
-        // the kernel bounds the carve by that unforgeable grant. It
+        // the kernel bounds the carve by that unforgeable grant, narrowed to
+        // the reach the driver states for its device and never widened. It
         // IS audited per call — handing a principal a
         // region the hardware can touch is a security-relevant grant and is
         // low-volume (once per buffer at driver init), so the record cannot
@@ -3143,15 +3146,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::SHM_CREATE_DMA,
         name: "shm_create_dma",
-        arg_count: 4,
+        arg_count: 5,
         args: [
-            // The `Dma` grant handle, the byte length, then the out pointers
-            // for the region id and the device address.
+            // The `Dma` grant handle, the byte length, the address bits the
+            // device drives, then the out pointers for the region id and the
+            // device address.
             AbiType::Handle,
             AbiType::Len,
+            AbiType::U32,
             AbiType::UserPtr,
             AbiType::UserPtr,
-            AbiType::Unit,
             AbiType::Unit,
         ],
         // The base virtual address of the caller's mapping, or `-errno`.

@@ -1196,21 +1196,35 @@ pub extern "C" fn sys_port_write(handle: u64, port: u16, width: u8, value: u32) 
 /// `handle` is an unforgeable, kernel-issued device-resource grant the driver
 /// received for the hardware-tree node it binds — never a raw physical
 /// address. The kernel resolves it against the calling task, confirms it
-/// names a DMA constraint, carves a physically-contiguous, zeroed, coherent
-/// region of `len` bytes whose physical extent lies within the grant's
-/// addressing limit, and maps it `RW`, non-executable, into the caller's own
-/// address space; a forged/non-owned handle, a wrong-kind grant, an
-/// over-limit request, or a build with no DMA facility wired fails closed. Gated kernel-side on `TAIRIX_CAP_MEM_DMA`.
+/// names a DMA constraint, carves a zeroed, coherent region of `len` bytes
+/// the device reaches at contiguous addresses within the grant's addressing
+/// limit and the `reach` address bits the device drives (`64` for all of
+/// them), and maps it `RW`, non-executable, into the caller's own address
+/// space; a forged/non-owned handle, a wrong-kind grant, an over-limit
+/// request, a reach of no bits or more than 64, or a build with no DMA
+/// facility wired fails closed. Gated kernel-side on `TAIRIX_CAP_MEM_DMA`.
 #[must_use]
 #[export_name = "tairix_sys_dma_alloc"]
-pub extern "C" fn sys_dma_alloc(handle: u64, len: usize, device_out: *mut c_void) -> u64 {
+pub extern "C" fn sys_dma_alloc(
+    handle: u64,
+    len: usize,
+    reach: u32,
+    device_out: *mut c_void,
+) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `device_out`
     // pointer against the caller's address space before writing the
     // device-visible base to it.
     unsafe {
         raw_syscall(
             NUM_DMA_ALLOC,
-            [handle, len as u64, ptr_arg(device_out), 0, 0, 0],
+            [
+                handle,
+                len as u64,
+                u64::from(reach),
+                ptr_arg(device_out),
+                0,
+                0,
+            ],
         )
     }
 }
@@ -2503,18 +2517,20 @@ pub extern "C" fn sys_call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> u
     unsafe { raw_syscall(NUM_CALL_PEER_SEAT, [endpoint, ticket, seat, 0, 0, 0]) }
 }
 
-/// `shm_create_dma`: carve a shared region a DMA master may reach under the
-/// caller's `Dma` grant `handle` (`SyscallNumber::SHM_CREATE_DMA`). Returns the
-/// base **user virtual address** of the caller's coherent mapping, or a
-/// `TAIRIX_E_*` code reinterpreted into the result. The region id and the
-/// block's device address are written to `id_out` and `device_out`, both
-/// untouched on failure. Gated kernel-side on `TAIRIX_CAP_MEM_DMA` and
-/// `TAIRIX_CAP_SHM`, for a caller loaded for a node.
+/// `shm_create_dma`: carve a shared region a DMA master driving `reach`
+/// address bits may reach under the caller's `Dma` grant `handle`
+/// (`SyscallNumber::SHM_CREATE_DMA`). Returns the base **user virtual
+/// address** of the caller's coherent mapping, or a `TAIRIX_E_*` code
+/// reinterpreted into the result. The region id and the region's device
+/// address are written to `id_out` and `device_out`, both untouched on
+/// failure. Gated kernel-side on `TAIRIX_CAP_MEM_DMA` and `TAIRIX_CAP_SHM`,
+/// for a caller loaded for a node.
 #[must_use]
 #[export_name = "tairix_sys_shm_create_dma"]
 pub extern "C" fn sys_shm_create_dma(
     handle: u64,
     len: usize,
+    reach: u32,
     id_out: *mut c_void,
     device_out: *mut c_void,
 ) -> u64 {
@@ -2526,9 +2542,9 @@ pub extern "C" fn sys_shm_create_dma(
             [
                 handle,
                 len as u64,
+                u64::from(reach),
                 ptr_arg(id_out),
                 ptr_arg(device_out),
-                0,
                 0,
             ],
         )
@@ -3541,10 +3557,10 @@ mod tests {
         (NUM_MMIO_MAP, "mmio_map", 3),
         (NUM_PORT_READ, "port_read", 3),
         (NUM_PORT_WRITE, "port_write", 4),
-        (NUM_DMA_ALLOC, "dma_alloc", 3),
+        (NUM_DMA_ALLOC, "dma_alloc", 4),
         (NUM_DMA_FREE, "dma_free", 2),
         (NUM_DMA_QUIESCED, "dma_quiesced", 0),
-        (NUM_SHM_CREATE_DMA, "shm_create_dma", 4),
+        (NUM_SHM_CREATE_DMA, "shm_create_dma", 5),
         (NUM_SHM_GRANT_PEER, "shm_grant_peer", 3),
         (NUM_CALL_PEER_HOLDS, "call_peer_holds", 3),
         (NUM_CALL_PEER_NODE, "call_peer_node", 4),
@@ -3893,17 +3909,16 @@ mod tests {
     }
 
     #[test]
-    fn dma_alloc_marshals_handle_len_and_device_out_pointer() {
+    fn dma_alloc_marshals_handle_len_reach_and_device_out_pointer() {
         let mut device = 0u64;
         let ptr = core::ptr::addr_of_mut!(device).cast::<c_void>();
         let (number, args) = capture(0xD000_2000, || {
-            assert_eq!(sys_dma_alloc(0x2A, 0x2000, ptr), 0xD000_2000);
+            assert_eq!(sys_dma_alloc(0x2A, 0x2000, 32, ptr), 0xD000_2000);
         });
         assert_eq!(number, NUM_DMA_ALLOC);
-        assert_eq!(args[0], 0x2A);
-        assert_eq!(args[1], 0x2000);
-        assert_eq!(args[2], ptr as usize as u64);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(&args[..3], &[0x2A, 0x2000, 32]);
+        assert_eq!(args[3], ptr as usize as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
@@ -4532,19 +4547,22 @@ mod tests {
     }
 
     #[test]
-    fn shm_create_dma_marshals_the_grant_length_and_both_out_pointers() {
+    fn shm_create_dma_marshals_the_grant_length_reach_and_both_out_pointers() {
         let mut id = 0u64;
         let mut device = 0u64;
         let id_ptr = core::ptr::addr_of_mut!(id).cast::<c_void>();
         let device_ptr = core::ptr::addr_of_mut!(device).cast::<c_void>();
         let (number, args) = capture(0x7000, || {
-            assert_eq!(sys_shm_create_dma(3, 0x2000, id_ptr, device_ptr), 0x7000);
+            assert_eq!(
+                sys_shm_create_dma(3, 0x2000, 32, id_ptr, device_ptr),
+                0x7000
+            );
         });
         assert_eq!(number, NUM_SHM_CREATE_DMA);
-        assert_eq!(&args[..2], &[3, 0x2000]);
-        assert_eq!(args[2], id_ptr as usize as u64);
-        assert_eq!(args[3], device_ptr as usize as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(&args[..3], &[3, 0x2000, 32]);
+        assert_eq!(args[3], id_ptr as usize as u64);
+        assert_eq!(args[4], device_ptr as usize as u64);
+        assert_eq!(args[5], 0);
     }
 
     #[test]

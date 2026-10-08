@@ -13,5 +13,9 @@ mod vertical;
 #[cfg(itest_x86_64)]
 const DIRECTION_RECORDED: bool = true;
 
+/// The unit records the address a refused access named.
+#[cfg(itest_x86_64)]
+const ADDRESS_RECORDED: bool = true;
+
 #[cfg(not(itest_x86_64))]
 fn main() {}

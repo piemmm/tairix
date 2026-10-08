@@ -37,12 +37,14 @@
 //!   processes report about themselves: the cache ledgers only they can see,
 //!   and the compositor frame accounting only a desktop can count.
 //! * [`service`] — the [`serve`] entry point and its request pipeline.
+//! * [`walks`] — [`Walks`], the lists walks are part way through, so every
+//!   page of one walk is answered from one reading of its list.
+//! * [`lists`] — reading a list whole from the kernel or a peer service.
 //!
 //! # Layering
 //!
-//! The crate is `no_std` and depends only on the audited
-//! `lib/*` crates `tairix-abi` and `tairix-log`, so a userland service never
-//! links a kernel or driver crate.
+//! The crate is `no_std` and depends only on `lib/*` crates, so a userland
+//! service never links a kernel or driver crate.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -51,9 +53,11 @@
 extern crate alloc;
 
 pub mod events;
+pub mod lists;
 pub mod reporters;
 pub mod service;
 pub mod source;
+pub mod walks;
 
 #[cfg(test)]
 mod testing;
@@ -61,3 +65,4 @@ mod testing;
 pub use reporters::SelfReports;
 pub use service::serve;
 pub use source::{Caller, ProcessScope, SysinfoSource};
+pub use walks::{list_budget, Walks};

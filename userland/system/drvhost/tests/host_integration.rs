@@ -72,8 +72,6 @@ fn happy_path_load_unload_reload() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
 
@@ -348,8 +346,6 @@ fn in_kernel_kind_with_cap_drv_kernel_succeeds() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let caller = full_caps(); // includes CAP_DRV_KERNEL
@@ -390,8 +386,6 @@ fn unknown_driver_refused_by_spawner() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -417,8 +411,6 @@ fn driver_register_failure_refused() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -445,8 +437,6 @@ fn source_read_failure_propagates() {
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let err = host
@@ -484,8 +474,6 @@ fn drive(
         source: &source,
         spawner: &spawner,
         sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
     };
     let mut host = Host::new(cfg);
     let result = host.load("/d/img", &caller_caps);
@@ -512,283 +500,5 @@ fn run_negative(
     assert!(
         ids.contains(&want_event_id),
         "missing audit id {want_event_id}: {ids:?}"
-    );
-}
-
-// -- Stage 4.D Item 0-tail: VirtioHostFactory wiring tests ----------
-
-// Observation latches used by the `register()` fns below. The two
-// virtio-factory tests share this translation unit and `cargo test`
-// runs them in parallel, so each test owns a *disjoint* latch: a
-// single shared latch would race (one test's reset/observation
-// clobbering the other's) and make the suite flaky.
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
-/// Set by `register_uses_virtio_host` when the some-factory test
-/// observes a virtio host. Owned solely by that test.
-static VIRTIO_SEEN: AtomicBool = AtomicBool::new(false);
-static VIRTIO_ALLOC_LEN: AtomicUsize = AtomicUsize::new(0);
-/// Set by `register_expects_no_virtio` to record whether the
-/// none-factory test saw a virtio host. Owned solely by that test,
-/// disjoint from `VIRTIO_SEEN` so the two tests never share state.
-static NONE_FACTORY_SAW_VIRTIO: AtomicBool = AtomicBool::new(false);
-
-/// `register` fn used by `virtio_host_factory_default_none_yields_none`:
-/// asserts that the host reports no virtio host and records the
-/// observation. Returns the canonical mock handle.
-fn register_expects_no_virtio(
-    host: &dyn tairix_abi::DriverHost,
-) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
-    let seen = host.virtio_host().is_some();
-    NONE_FACTORY_SAW_VIRTIO.store(seen, AtomicOrdering::SeqCst);
-    tairix_abi::DriverHandle::from_raw(0xD00D)
-}
-
-/// `register` fn used by `virtio_host_factory_some_yields_virtio_host`:
-/// retrieves the per-driver virtio host through the new accessor,
-/// exercises `alloc_dma_zeroed` to prove the wiring is real, and
-/// records the length on success.
-fn register_uses_virtio_host(
-    host: &dyn tairix_abi::DriverHost,
-) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
-    let Some(vh) = host.virtio_host() else {
-        return Err(tairix_abi::DriverError::Unsupported);
-    };
-    let slab = vh.alloc_dma_zeroed(64)?;
-    VIRTIO_ALLOC_LEN.store(slab.len(), AtomicOrdering::SeqCst);
-    VIRTIO_SEEN.store(true, AtomicOrdering::SeqCst);
-    // The slab is dropped here; for the `MockHost` seam this is a
-    // no-op, but the `KernelVirtioHost` seam would reach back into
-    // the free shim. Either way the host returns Ok with a fresh
-    // handle (the host crate's freshly-minted one wins anyway).
-    drop(slab);
-    tairix_abi::DriverHandle::from_raw(0xBEEF)
-}
-
-/// Spawner that registers every manifest in-process through a
-/// caller-supplied entry. A bespoke type is necessary because the
-/// existing `SingleSpawner` hard-codes `mock_register`.
-struct PinnedSpawner(tairix_drvhost::DriverEntry);
-impl tairix_drvhost::DriverSpawner for PinnedSpawner {
-    fn spawn_and_register(
-        &self,
-        ctx: &tairix_drvhost::SpawnContext<'_>,
-    ) -> Result<tairix_abi::DriverHandle, tairix_drvhost::SpawnRegisterError> {
-        (self.0)(ctx.host).map_err(tairix_drvhost::SpawnRegisterError::Register)
-    }
-}
-
-/// `MockHost`-backed [`VirtioHostFactory`]. Always mints a fresh
-/// `MockHost` (the production seam mints a `KernelVirtioHost`
-/// instead; see `kernel_host.rs`).
-struct MockVirtioFactory;
-impl tairix_virtio::VirtioHostFactory for MockVirtioFactory {
-    fn mint<'r>(
-        &'r self,
-        _granted: &dyn tairix_abi::CapabilityQuery,
-    ) -> Option<Box<dyn tairix_abi::driver::VirtioHost + 'r>> {
-        Some(Box::new(tairix_virtio::MockHost::new()))
-    }
-}
-
-#[test]
-fn virtio_host_factory_default_none_yields_none() {
-    // Sanity: with the default `virtio_host_factory: None` slot, the
-    // driver-visible `DriverHost::virtio_host()` accessor reports
-    // `None`. This is the source-compatibility contract for every
-    // existing host shipped before Stage 4.D Item 0-tail.
-    NONE_FACTORY_SAW_VIRTIO.store(false, AtomicOrdering::SeqCst);
-    let sk = test_signing_key();
-    let trusted = [pubkey_of(&sk)];
-    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
-    let mut source = MemSource::new();
-    source.images.insert("/d/probe".into(), img);
-    let spawner = PinnedSpawner(register_expects_no_virtio as tairix_drvhost::DriverEntry);
-    let sink = RecordingSink::new();
-    let cfg = HostConfig {
-        trusted_signers: &trusted,
-        syscall_table_hash: SYS_HASH,
-        accepted_abi_version: ABI_VERSION_CURRENT,
-        source: &source,
-        spawner: &spawner,
-        sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
-    };
-    let mut host = Host::new(cfg);
-    host.load("/d/probe", &full_caps()).expect("load ok");
-    assert!(
-        !NONE_FACTORY_SAW_VIRTIO.load(AtomicOrdering::SeqCst),
-        "register() saw a virtio host where none was configured"
-    );
-}
-
-#[test]
-fn virtio_host_factory_some_yields_virtio_host() {
-    // With a `VirtioHostFactory` that mints a `MockHost`, the driver
-    // observes `Some(&dyn VirtioHost)` from `DriverHost::virtio_host`
-    // and successfully exercises `alloc_dma_zeroed`. This proves the
-    // factory → boxed-host → `LoadedHostView` → trait-method wiring
-    // end-to-end. The kernel build wires a `KernelVirtioHost`-backed
-    // factory in the same slot (Stage 4.D Item 0-tail PLAN.md entry).
-    VIRTIO_SEEN.store(false, AtomicOrdering::SeqCst);
-    VIRTIO_ALLOC_LEN.store(0, AtomicOrdering::SeqCst);
-    let sk = test_signing_key();
-    let trusted = [pubkey_of(&sk)];
-    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
-    let mut source = MemSource::new();
-    source.images.insert("/d/virtio".into(), img);
-    let spawner = PinnedSpawner(register_uses_virtio_host as tairix_drvhost::DriverEntry);
-    let sink = RecordingSink::new();
-    let factory = MockVirtioFactory;
-    let cfg = HostConfig {
-        trusted_signers: &trusted,
-        syscall_table_hash: SYS_HASH,
-        accepted_abi_version: ABI_VERSION_CURRENT,
-        source: &source,
-        spawner: &spawner,
-        sink: &sink,
-        virtio_host_factory: Some(&factory),
-        mmio_mapper: None,
-    };
-    let mut host = Host::new(cfg);
-    host.load("/d/virtio", &full_caps()).expect("load ok");
-    assert!(
-        VIRTIO_SEEN.load(AtomicOrdering::SeqCst),
-        "register() did not observe the virtio host"
-    );
-    assert_eq!(
-        VIRTIO_ALLOC_LEN.load(AtomicOrdering::SeqCst),
-        64,
-        "alloc_dma_zeroed reported the wrong length back to register()"
-    );
-}
-
-// -- MMIO-mapper accessor wiring tests ------------------------------
-
-/// Set by `register_probes_mmio_mapper` to record whether the
-/// none-mapper test saw an MMIO mapper. Disjoint from the some-mapper
-/// latches so the parallel tests never share state.
-static NONE_MAPPER_SAW_MMIO: AtomicBool = AtomicBool::new(false);
-/// Set by `register_uses_mmio_mapper` when the some-mapper test
-/// observes a mapper and reaches it.
-static MMIO_SEEN: AtomicBool = AtomicBool::new(false);
-/// Records the sentinel `phys_base` the host-provided mapper observed,
-/// proving the driver reached the *configured* mapper rather than some
-/// other instance.
-static MMIO_OBSERVED_PHYS: AtomicU64 = AtomicU64::new(0);
-
-/// Recording [`MmioMapper`]: every `map_window` call latches its
-/// `phys_base` and fails closed with a recognisable sentinel error so
-/// no backing memory has to be conjured in a unit test. The driver's
-/// `register()` asserts it both *saw* the mapper and *reached* it.
-struct MockMapper;
-impl tairix_abi::MmioMapper for MockMapper {
-    fn map_window(
-        &self,
-        phys_base: u64,
-        _len: usize,
-    ) -> Result<tairix_abi::RegisterWindow, tairix_abi::MmioMapError> {
-        MMIO_OBSERVED_PHYS.store(phys_base, AtomicOrdering::SeqCst);
-        // A unit test cannot mint a real `RegisterWindow` without
-        // backing memory; the recognisable refusal proves the call
-        // reached this mapper (the production `KernelMmioMapper`
-        // returns a real window).
-        Err(tairix_abi::MmioMapError::InvalidRegion)
-    }
-}
-
-/// `register` fn for `mmio_mapper_default_none_yields_none`: records
-/// whether the host reports a mapper.
-fn register_probes_mmio_mapper(
-    host: &dyn tairix_abi::DriverHost,
-) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
-    NONE_MAPPER_SAW_MMIO.store(host.mmio_mapper().is_some(), AtomicOrdering::SeqCst);
-    tairix_abi::DriverHandle::from_raw(0xD0E5)
-}
-
-/// `register` fn for `mmio_mapper_some_yields_mapper`: retrieves the
-/// mapper through the accessor and exercises `map_window` to prove the
-/// wiring is real.
-fn register_uses_mmio_mapper(
-    host: &dyn tairix_abi::DriverHost,
-) -> Result<tairix_abi::DriverHandle, tairix_abi::DriverError> {
-    let Some(mapper) = host.mmio_mapper() else {
-        return Err(tairix_abi::DriverError::Unsupported);
-    };
-    MMIO_SEEN.store(true, AtomicOrdering::SeqCst);
-    // The sentinel refusal is expected; the latch above and the
-    // observed `phys_base` are the proof of reach.
-    let _ = mapper.map_window(0xFEBD_0000, 0x1000);
-    tairix_abi::DriverHandle::from_raw(0xF00D)
-}
-
-#[test]
-fn mmio_mapper_default_none_yields_none() {
-    // With the default `mmio_mapper: None` slot, the driver-visible
-    // `DriverHost::mmio_mapper()` accessor reports `None`.
-    NONE_MAPPER_SAW_MMIO.store(true, AtomicOrdering::SeqCst);
-    let sk = test_signing_key();
-    let trusted = [pubkey_of(&sk)];
-    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
-    let mut source = MemSource::new();
-    source.images.insert("/d/nomap".into(), img);
-    let spawner = PinnedSpawner(register_probes_mmio_mapper as tairix_drvhost::DriverEntry);
-    let sink = RecordingSink::new();
-    let cfg = HostConfig {
-        trusted_signers: &trusted,
-        syscall_table_hash: SYS_HASH,
-        accepted_abi_version: ABI_VERSION_CURRENT,
-        source: &source,
-        spawner: &spawner,
-        sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: None,
-    };
-    let mut host = Host::new(cfg);
-    host.load("/d/nomap", &full_caps()).expect("load ok");
-    assert!(
-        !NONE_MAPPER_SAW_MMIO.load(AtomicOrdering::SeqCst),
-        "register() saw an MMIO mapper where none was configured"
-    );
-}
-
-#[test]
-fn mmio_mapper_some_yields_mapper() {
-    // With an MMIO mapper wired into `HostConfig`, the driver observes
-    // `Some(&dyn MmioMapper)` from `DriverHost::mmio_mapper` and
-    // reaches the *configured* mapper. This proves the
-    // config → `LoadedHostView` → trait-method wiring the VL805/PCIe
-    // composition (`drivers/bus/pcie_brcm`, `drivers/bus/usb`) needs;
-    // the kernel build wires a `KernelMmioMapper` in the same slot.
-    MMIO_SEEN.store(false, AtomicOrdering::SeqCst);
-    MMIO_OBSERVED_PHYS.store(0, AtomicOrdering::SeqCst);
-    let sk = test_signing_key();
-    let trusted = [pubkey_of(&sk)];
-    let img = build_signed_image(&sk, DriverKind::UserSpace, SYS_HASH, &[], b"payload");
-    let mut source = MemSource::new();
-    source.images.insert("/d/map".into(), img);
-    let spawner = PinnedSpawner(register_uses_mmio_mapper as tairix_drvhost::DriverEntry);
-    let sink = RecordingSink::new();
-    let mapper = MockMapper;
-    let cfg = HostConfig {
-        trusted_signers: &trusted,
-        syscall_table_hash: SYS_HASH,
-        accepted_abi_version: ABI_VERSION_CURRENT,
-        source: &source,
-        spawner: &spawner,
-        sink: &sink,
-        virtio_host_factory: None,
-        mmio_mapper: Some(&mapper),
-    };
-    let mut host = Host::new(cfg);
-    host.load("/d/map", &full_caps()).expect("load ok");
-    assert!(
-        MMIO_SEEN.load(AtomicOrdering::SeqCst),
-        "register() did not observe the MMIO mapper"
-    );
-    assert_eq!(
-        MMIO_OBSERVED_PHYS.load(AtomicOrdering::SeqCst),
-        0xFEBD_0000u64,
-        "the configured mapper did not observe the driver's map_window call"
     );
 }

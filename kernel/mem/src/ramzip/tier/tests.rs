@@ -405,24 +405,30 @@ fn unmapped_page_is_refused() {
     );
 }
 
+/// A device's mapping is refused by its flags as well as its classification:
+/// an uncached one, and a DMA buffer a snooping master shares, which is
+/// ordinary cacheable RAM but for its mark.
 #[test]
 fn device_flagged_mapping_is_refused_in_depth() {
-    let mut env = env!();
-    let mut ramzip = tier(&env);
-    let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
-    let page = page_at(14);
-    env.space
-        .map(
-            page,
-            frame,
-            MapFlags::READ | MapFlags::WRITE | MapFlags::DMA_COHERENT,
-        )
-        .expect("map");
-    env.press_to(PressureBand::Moderate);
-    assert_eq!(
-        try_compress(&mut env, &mut ramzip, page, TASK),
-        Err(CompressRefusal::ForbiddenMapping)
-    );
+    for (at, attribute) in [
+        (14, MapFlags::DMA | MapFlags::DMA_COHERENT),
+        (15, MapFlags::DMA),
+        (16, MapFlags::NO_CACHE),
+    ] {
+        let mut env = env!();
+        let mut ramzip = tier(&env);
+        let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
+        let page = page_at(at);
+        env.space
+            .map(page, frame, MapFlags::READ | MapFlags::WRITE | attribute)
+            .expect("map");
+        env.press_to(PressureBand::Moderate);
+        assert_eq!(
+            try_compress(&mut env, &mut ramzip, page, TASK),
+            Err(CompressRefusal::ForbiddenMapping),
+            "{attribute:?}"
+        );
+    }
 }
 
 #[test]

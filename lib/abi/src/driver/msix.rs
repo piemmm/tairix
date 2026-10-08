@@ -98,6 +98,27 @@ pub trait MsixBus: Bus {
         message: MsiMessage,
         mapper: &dyn MmioMapper,
     ) -> Result<(), DriverError>;
+
+    /// How many entries function `bdf`'s MSI-X table holds: what a function
+    /// can raise as a message at all, read from its capability.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for a function advertising no MSI-X
+    /// capability (or no capability list at all); the capability-list walk's
+    /// [`DriverError::BufferTooSmall`] or [`DriverError::DeviceFault`].
+    fn msix_entries(&self, bdf: u64) -> Result<u16, DriverError>;
+
+    /// Set or clear function `bdf`'s MSI-X function mask. While it is set the
+    /// function raises no MSI-X message, each entry's pending bit recording
+    /// what it would have; [`Self::route_msix`] clears it.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for a function advertising no MSI-X
+    /// capability; [`DriverError::DeviceFault`] where the mask does not read
+    /// back as written; the capability-list walk's errors.
+    fn mask_msix(&self, bdf: u64, masked: bool) -> Result<(), DriverError>;
 }
 
 #[cfg(test)]
@@ -191,6 +212,14 @@ mod tests {
                 .write_u32(12, 0)
                 .map_err(WindowError::as_driver_error)?;
             Ok(())
+        }
+
+        fn msix_entries(&self, _bdf: u64) -> Result<u16, DriverError> {
+            Ok(self.table_size)
+        }
+
+        fn mask_msix(&self, _bdf: u64, _masked: bool) -> Result<(), DriverError> {
+            Err(DriverError::NotFound)
         }
     }
 

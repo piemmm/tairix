@@ -19,7 +19,7 @@ rules, it points to them.
 
 ## How long `cargo xtask ci` takes, and how to run it under a tool cap
 
-Budget **about 25 minutes** on a warm `target/` and a two-dozen-core host —
+Budget **about 36 minutes** on a warm `target/` and a two-dozen-core host —
 the sum of the stage costs below — and substantially longer on a cold one,
 where `-Z build-std` recompiles `core`/`alloc` per target and every image
 profile links from scratch.
@@ -41,13 +41,13 @@ turns it into a kill. A measured warm run:
 | `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
 | `image` gate | 193 s over 319 spawns | sequential |
-| `clippy` host + 11 target passes | 330 s | sequential |
-| `test --qemu` (host matrix + 168 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, and `kernel/mem`) | 383 s | one process per crate, concurrent; `kernel/mem`, `lib/abi` and `lib/rt` dealt across the host's cores |
+| `clippy` host + 17 target passes | 330 s | sequential |
+| `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 840 s | one process per crate, concurrent; `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 port, the RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host
-has. `kernel/mem`'s 465 of them therefore came to twenty minutes in a single
+has. `kernel/mem`'s five hundred and more therefore came to twenty minutes in a single
 single-core process — most of the stage, against a forty-five-minute per-job
 budget it eventually overran on a slower runner, while the rest of the machine
 idled. That target is now `Spread::PerCore`: the stage enumerates it through
@@ -61,12 +61,15 @@ is a volatile write per byte, and the same `dma` test costs 716 s under Stacked
 Borrows, 208 s under Tree Borrows and 44 s with the model off. Stacked Borrows
 stands — it is the stricter of the two, and the one intrusive pointer code is
 likeliest to violate — so where the interpreted extent is a sample rather than
-the assertion it is scaled under `cfg(miri)`. Two tests are excluded by name
-instead: a `dma` test whose full-gigabyte window streams thirteen 32-page
-device regions costs four hours interpreted, and the `unsafe` it reaches is
-reached by the rest of its module; and `lib/abi`'s single-byte sweep of the
-2.8 KiB machine report, seventeen thousand decodes through safe code, costs
-half an hour. The registry carries every reason.
+the assertion it is scaled under `cfg(miri)`. Four tests are excluded by name
+instead: two `dma` tests, one streaming thirteen 32-page device regions
+through a full-gigabyte window (four hours interpreted) and one carving a page
+past the largest 32 MiB buddy block (some twenty times that), whose `unsafe`
+the rest of their module reaches; `lib/abi`'s single-byte sweep of the 2.8 KiB
+machine report, seventeen thousand decodes through safe code, costing half an
+hour; and the aarch64 port's redistributor that never wakes, whose assertion is
+the exhaustion of a million-poll budget, also half an hour, through safe code.
+The registry carries every reason.
 
 Figures in this table are wall clock, taken from outside. Miri's own clock is
 virtual: the `finished in …` line a test binary prints under the interpreter is
@@ -152,7 +155,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports, inside a freestanding port one that omits `target_os`, and anywhere but `tools/xtask/` an attribute `cfg` naming `miri` |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
-| `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test]); the host pass starts in a randomised order, seed logged (see below) |
+| `test`        | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |

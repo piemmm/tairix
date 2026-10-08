@@ -180,15 +180,12 @@ trapped back.
 
 ## External-interrupt controller (PLIC) + S-mode trap glue
 
-`kernel/arch/riscv64::plic` and `kernel/arch/riscv64::trap` land the
-external-IRQ foundation the virtio-mmio verticals build on. They are
-implemented and host-tested. RV-P2's production boot installs the trap
-*vector* (`trap::install_trap_vector`) so a synchronous fault / `ecall`
-is taken, but does **not** enable asynchronous interrupts or build a
-`PlicController` — `sie.SEIE`/`sstatus.SIE` stay clear until a consumer
-needs them. The live consumer is the virtio-MMIO QEMU verticals (below),
-which `arm` the device source, install the trap dispatch, and call
-`init_traps` (which re-installs the vector and enables interrupts).
+`kernel/arch/riscv64::plic` and `kernel/arch/riscv64::trap` are the
+external-interrupt foundation. The production boot installs the trap vector
+before `kernel_main`, and in the core's `Irq` phase builds the controller the
+tree describes (`kernel/tairix-kernel/src/riscv64/irq.rs`) — a PLIC, or the AIA
+below — publishes it beside the `IrqTable`, installs its dispatcher and sets
+`sie.SEIE`; `sstatus.SIE` stays the dispatch loop's.
 
 - **PLIC.** `plic::PlicController` wraps a `Plic<M>` register driver
   over the `PlicMmio` access seam (`VolatilePlicMmio` on the
@@ -201,7 +198,7 @@ which `arm` the device source, install the trap dispatch, and call
   32-bit store) followed by a `SeqCst` fence — the riscv64 analogue of
   the x86_64 IO-APIC redirection-entry mask. The arch port owns no
   `kernel/irq` dependency, so the kernel-neutral `IrqController` bridge
-  (`PlicIrqController`, in `tests/integration/riscv64_boot`) is what
+  (`riscv64_plic_irq::PlicIrqController`, in `kernel/tairix-kernel`) is what
   `IrqTable::fire` calls; it forwards to that inherent `mask`. See
   `docs/src/security/irq.md`.
 - **S-mode trap vector.** `trap::init_traps` installs
@@ -212,8 +209,8 @@ which `arm` the device source, install the trap dispatch, and call
   CSRs (`sepc`, `sstatus`, and the interrupted `sp`) into a
   `trap::TrapFrame`, and passes its pointer to the Rust handler, which
   dispatches by `scause`: a U-mode `ecall` goes to the syscall path, a
-  supervisor external interrupt forwards to the one-shot PLIC dispatch
-  callback (claim → `IrqTable::fire` → complete), a supervisor timer
+  supervisor external interrupt forwards to the one-shot dispatch
+  callback the boot installed for its controller, a supervisor timer
   interrupt drives the scheduler tick, and any other synchronous
   exception reaches `trap::fatal_exception`, which charges it to whoever
   caused it. One taken from U-mode goes to the installed
@@ -663,15 +660,16 @@ port, which must not name `kernel/mem` — `AGENTS.md` §17.2 / §5.4.5):
 Both slots are one-shot (`AGENTS.md` §2.1) and the accessors expose no
 writable surface (`AGENTS.md` §2.4). The external-interrupt path is
 **not** a test-only slot: the production boot pipeline builds the
-single-context S-mode `PlicIrqController` from the firmware device tree,
-sizes and publishes the kernel-core `IrqTable` (`max_line == riscv,ndev`),
-installs the S-mode external-interrupt dispatch, and enables `sie.SEIE`
-in its `Irq` phase (leaving `sstatus.SIE` to the task the scheduler
-runs). `riscv64_boot` re-exports the kernel accessors
-(`published_irq_table` / `plic_controller`) so a vertical binds its
-device source into that one published path rather than standing up a
-second controller + table — the trap dispatch is set-once per boot and
-the controller is one-per-boot (`AGENTS.md` §2.2).
+controller the firmware device tree describes — the AIA (an APLIC and the
+hart's IMSIC file) where it has one, else the single-context S-mode PLIC —
+sizes and publishes the kernel-core `IrqTable` to its sources and the
+message lines the boot planned (`irq::routing`), installs the S-mode
+external-interrupt dispatch, and enables `sie.SEIE` in its `Irq` phase
+(leaving `sstatus.SIE` to the task the scheduler runs). `riscv64_boot`
+re-exports the kernel accessors (`published_irq_table` / `controller`) so
+a vertical binds its device source into that one published path rather
+than standing up a second controller and table: the trap dispatch is
+set-once per boot and the controller one per boot.
 
 ## virtio-MMIO QEMU verticals
 
@@ -717,9 +715,10 @@ level-high virtio-mmio source deasserts before the waiter re-arms it —
 the park needs no dispatch-level ACK.
 
 The `kernel/virtio` (`tairix-kernel-virtio`) crate holds the
-architecture-neutral `KernelVirtioFactory` and the PCI/MMIO provisioning
-walks so both the x86_64 (PCI) and riscv64 (MMIO) verticals reuse the
-same code; it depends on no `kernel/arch/*` port (`AGENTS.md` §2.2, §6).
+architecture-neutral kernel virtio host, its register mapper and the
+PCI/MMIO provisioning walks, so the boot floor and the x86_64 (PCI) and
+riscv64 (MMIO) verticals reuse the same code; it depends on no
+`kernel/arch/*` port (`AGENTS.md` §2.2, §6).
 
 ## virtio-input QEMU vertical
 
@@ -857,12 +856,14 @@ device-tree parser now lives once in the shared `lib/fdt` crate (§2.2);
 `kernel/arch/riscv64::fdt` re-exports it so the boot path and the QEMU
 integration tests keep naming `tairix_arch_riscv64::fdt::Fdt`.
 `FdtDiscovery` is the walk every FDT port shares
-(`tairix_arch_api::fdtwalk`), over the PLIC's one-cell interrupt specifier
-and the `riscv,ndev` source count: the same emission the aarch64 port
+(`tairix_arch_api::fdtwalk`), over the tree's controller's specifier — a
+PLIC's one cell, an APLIC's two — and its source count: the same emission the
+aarch64 port
 describes ([Platform discovery](aarch64.md#platform-discovery-hardware-tree)),
 usable nodes only, translation units and their masters' streams included;
-the kernel drives a `riscv,iommu` unit itself (`kernel/iommu/riscv`),
-mapping its registers through the identity map.
+the kernel drives a `riscv,iommu` unit (`kernel/iommu/riscv`) and a
+virtio-iommu (`kernel/iommu/virtio`) itself, mapping their registers through
+the identity map.
 It is host-tested against the shared DTB fixture and exercised by the
 port's `passes_arch_hal_conformance_suite`.
 
@@ -882,11 +883,29 @@ transport and publishes its device for autoload.
 The kernel takes the `virt` board's `pci-host-ecam-generic` host as it
 takes x86_64's ([Constructing the real-hardware
 bus](../drivers/bus.md#constructing-the-real-hardware-bus)): its
-configuration region and both memory windows lie inside the identity
-map's lower 256 GiB, typed by the PMAs, and each function's INTx reaches
-a PLIC source through the host's `interrupt-map`.
+configuration region and 32-bit window lie in the identity window, its
+64-bit window above 4 GiB is reached through the direct map's device leaves
+(see [The direct physical map](#the-direct-physical-map)), so 64-bit BARs —
+a virtio-iommu's registers among them — are placed there, and each
+function's INTx reaches a PLIC or APLIC source through the host's
+`interrupt-map`. `tairix-test-dma-translation-virtio-qemu-riscv64` fails
+unless its unit translates from registers past 4 GiB. On an AIA board a
+function behind a unit that confines messages raises its MSI-X into an
+interrupt file of its own instead (`docs/src/security/iommu.md`).
 `tairix-test-autoload-input-pci-qemu-riscv64` delivers a key from a
-keyboard whose line a mouse shares.
+keyboard whose line a mouse shares, and its `-aia-` sibling the same through
+the APLIC.
+
+### DMA coherence
+
+Whether a master snoops the caches is the tree's: `dma-noncoherent` on it or
+the nearest node above it says it does not, and where nothing says, RISC-V's
+convention holds and it does (`Riscv64Fdt::DEFAULT_DMA_COHERENCE`). Sv39
+states no memory type, so memory a device that does not snoop shares cannot
+be kept out of the caches: the port refuses `PageFlags::DMA_COHERENT`
+(`MapError::Unsupported`), the device's driver is refused DMA
+(`NotSupported`), the virtio floor refuses such a device, and a translation
+unit stating it is never taken over.
 
 ## Per-CPU storage (`tp`)
 
@@ -926,6 +945,31 @@ so the handle carries no CPU ceiling. (The `smp::MAX_HARTS` constant is
 gone: the secondary-stack pool is now a caller-sized
 `smp::SecondaryStackPool<N>` and the per-hart timer slots a caller-sized
 `preempt::PreemptStorage<N>` — see *Secondary-CPU bring-up HAL slice*.)
+
+## External-interrupt controller (AIA)
+
+A tree whose APLIC domain sends its messages to an IMSIC of supervisor-level
+files describes the Advanced Interrupt Architecture, which discovery prefers to
+a PLIC (`fdt::supervisor_aia`): the domain, and the boot hart's file — its page
+and its index among the files, which an APLIC target names. Files in more than
+one group are not driven. Its specifiers are two cells, a source and its sense.
+
+- **APLIC.** `aplic::Aplic` takes the domain over in little-endian MSI delivery
+  mode with every source inactive and disabled, then routes a source by its
+  sense (a high level or a rising edge) to an identity of a hart's file,
+  refusing a source the machine-level domain did not delegate.
+- **IMSIC.** `imsic::Imsic` takes the hart's file over through the
+  `siselect`/`sireg` indirect CSRs — delivery off while every identity is
+  cleared and opened, no threshold, delivery on — so no later change needs the
+  file's own hart; `claim` swaps `stopei`, lowest identity first. `HartFile`
+  masks the hart's interrupts across each selected access.
+- **The bridge.** `riscv64_aia_irq::AiaIrqController` gives a source an
+  identity the first time it is armed, disables it at the APLIC to mask, and
+  re-pends a level source on each re-arm, the domain sending one message per
+  assertion. It also takes the device message files (IOM18.4,
+  `docs/src/security/iommu.md`): lines from 1024 are their vectors, each
+  file's notice an identity of the hart's file. The dispatcher claims every
+  pending identity, one pass at most.
 
 ## Interrupt controller (PLIC)
 
@@ -1062,6 +1106,22 @@ discovered map, with no floor/widen split:
   tables the boot path has already read stay on the identity window, which
   every root it can execute under carries anyway, so the map owes them
   nothing.
+* Registers the kernel drives above that window are the exception.
+  `fdt::kernel_register_windows` names every one — each PCI host's
+  configuration region and memory windows, and every `riscv,iommu`, PLIC,
+  APLIC and IMSIC `reg` — and
+  `paging::KERNEL_DEVICES` (the shared `gigapages::KernelDevices`, which
+  aarch64's kernel-regime Device gigapages use too) makes each gigapage they
+  touch a leaf of the map whether or not RAM reaches it, before the map is
+  published. Roots copy the leaves when they are built, so this is
+  boot-time only. `device_registers` reaches a window inside the identity
+  window by its own address and one the map carries
+  (`KERNEL_DEVICES.covers`) through `physmap_virt`, and refuses any other,
+  so the host, unit or controller owning a window past
+  `KERNEL_DEVICES.reach()` (191 GiB) is not taken. The PCI hosts' reach is the
+  same bound: a memory window past it is not used. Sv39 leaves
+  carry no memory type, so the platform's PMAs type these registers, as
+  they do the identity window's.
 * `paging::install_boot_physmap` publishes the extent and its leaves
   set-once and patches them into the live root, reached through the frame
   source that drew it (`table_at`) rather than by dereferencing a physical
@@ -1074,9 +1134,9 @@ discovered map, with no floor/widen split:
 
 `identity_gigapages()` is the one definition of the 4 GiB window every
 *process* root carries, for the kernel's own identity-linked image, stack,
-leaked state, and board MMIO. That is a bound on where the hardware puts
-those things, not a capacity — and a board whose kernel image ends above it
-is refused at boot (`BootError::KernelAboveIdentityWindow`) rather than
+leaked state, and the board MMIO below 4 GiB. That is a bound on where the
+hardware puts those things, not a capacity — and a board whose kernel image
+ends above it is refused at boot (`BootError::KernelAboveIdentityWindow`) rather than
 faulting on the first switch into a task's root.
 
 RAM above `MAX_PHYSMAP_GIB` (191 GiB) is unreachable by pointer, the

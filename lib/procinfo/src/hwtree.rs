@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader};
 use tairix_abi::sysinfo::{
-    HardwareTreeRequest, SysinfoQueryId, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
+    PageRequest, SysinfoQueryId, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::Errno;
 
@@ -80,10 +80,11 @@ fn fetch_snapshot(transport: &dyn Transport) -> Result<Option<Vec<HwNode>>, Call
     loop {
         let offset =
             u32::try_from(nodes.len()).map_err(|_| CallError::Service(Errno::LengthOutOfRange))?;
-        let request = HardwareTreeRequest {
+        let request = PageRequest {
             offset,
             limit: HW_TREE_PAGE,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let reply = call(
             transport,
@@ -92,7 +93,9 @@ fn fetch_snapshot(transport: &dyn Transport) -> Result<Option<Vec<HwNode>>, Call
         )?;
         let header = HwTreeHeader::from_bytes(&reply).map_err(CallError::Service)?;
         let body = &reply[HwTreeHeader::WIRE_LEN..];
-        if body.len() % HwNode::WIRE_LEN != 0 {
+        if body.len() % HwNode::WIRE_LEN != 0
+            || body.len() / HwNode::WIRE_LEN > usize::from(HW_TREE_PAGE)
+        {
             return Err(CallError::Service(Errno::BadMagic));
         }
         match generation {
@@ -243,12 +246,14 @@ mod tests {
     /// every page repeats the snapshot header (the generation drawn from
     /// `gens`, the last entry repeating) and carries the whole records of
     /// the requested window. `total_override` lets a test claim a total the
-    /// body cannot honour; `ragged` appends a stray byte to every page.
+    /// body cannot honour; `ragged` appends a stray byte to every page, and
+    /// `overlong` answers one node more than each page asks for.
     struct PagedFixture {
         nodes: Vec<HwNode>,
         gens: core::cell::RefCell<Vec<u64>>,
         total_override: Option<u64>,
         ragged: bool,
+        overlong: bool,
     }
 
     impl PagedFixture {
@@ -258,6 +263,7 @@ mod tests {
                 gens: core::cell::RefCell::new(alloc::vec![7]),
                 total_override: None,
                 ragged: false,
+                overlong: false,
             }
         }
 
@@ -276,13 +282,14 @@ mod tests {
             let header = tairix_abi::sysinfo::SysinfoRequestHeader::from_bytes(request)?;
             assert_eq!(header.query, SysinfoQueryId::HARDWARE_TREE);
             let payload = &request[tairix_abi::sysinfo::SysinfoRequestHeader::WIRE_LEN..];
-            let req = HardwareTreeRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let total = self.total_override.unwrap_or(self.nodes.len() as u64);
             let mut reply = Vec::new();
             reply.extend_from_slice(&HwTreeHeader::new(self.generation(), total).to_le_bytes());
             let offset = req.offset as usize;
             if offset < self.nodes.len() {
-                let take = core::cmp::min(self.nodes.len() - offset, req.limit as usize);
+                let asked = req.limit as usize + usize::from(self.overlong);
+                let take = core::cmp::min(self.nodes.len() - offset, asked);
                 for node in &self.nodes[offset..offset + take] {
                     reply.extend_from_slice(&node.to_le_bytes());
                 }
@@ -312,6 +319,20 @@ mod tests {
         let nodes = big_tree();
         let fixture = PagedFixture::new(nodes.clone());
         assert_eq!(fetch_tree(&fixture), Ok(nodes));
+    }
+
+    /// A page holding more nodes than it was asked for is refused, even when
+    /// the snapshot's total would still allow them.
+    #[test]
+    fn fetch_refuses_a_page_longer_than_it_asked_for() {
+        let fixture = PagedFixture {
+            overlong: true,
+            ..PagedFixture::new(big_tree())
+        };
+        assert_eq!(
+            fetch_tree(&fixture),
+            Err(CallError::Service(Errno::BadMagic))
+        );
     }
 
     #[test]

@@ -24,6 +24,13 @@ pub trait TranslationProbe {
     /// marked already translated: the physical address it reaches, or
     /// [`None`] when the unit refuses it and records the fault.
     fn translated(&self, stream: u32, address: u64, write: bool) -> Option<u64>;
+
+    /// Whether a request can reach the unit marked already translated at
+    /// all. A virtio-iommu's transport carries no such mark: every request
+    /// is translated, so there is nothing to refuse.
+    fn carries_translated(&self) -> bool {
+        true
+    }
 }
 
 /// What the suite may use: two streams the unit covers and has blocked, and
@@ -41,6 +48,8 @@ pub fn run_all(unit: &dyn IommuUnit, probe: &dyn TranslationProbe, fixture: &Fix
     a_blocked_stream_reaches_nothing(unit, probe, fixture);
     an_attached_stream_reaches_what_its_domain_maps(unit, probe, fixture);
     a_synced_unmap_leaves_no_cached_translation(unit, probe, fixture);
+    a_range_synced_unmap_keeps_its_neighbour(unit, probe, fixture);
+    a_map_of_many_runs_lands_and_unmaps_whole(unit, probe, fixture);
     a_block_ends_every_translation_at_once(unit, probe, fixture);
     a_refused_access_is_reported_against_its_stream(unit, probe, fixture);
     two_streams_reach_only_their_own_domains(unit, probe, fixture);
@@ -48,6 +57,89 @@ pub fn run_all(unit: &dyn IommuUnit, probe: &dyn TranslationProbe, fixture: &Fix
     a_destroyed_domain_reaches_nothing(unit, probe, fixture);
     a_silenced_stream_reaches_nothing_and_raises_nothing(unit, probe, fixture);
     a_translated_request_is_refused_and_reported(unit, probe, fixture);
+    what_a_unit_claims_for_a_stream_is_a_range_a_domain_keeps_clear(unit, probe, fixture);
+    a_write_only_mapping_is_made_exactly_where_the_unit_says_it_can_be(unit, probe, fixture);
+    drain(unit);
+}
+
+/// A unit maps a write it may not read wherever its profile says its tables
+/// express one, and the device then writes there and reads nothing; anywhere
+/// else the map is refused and leaves nothing mapped. The kernel picks the
+/// access it asks a doorbell for by the profile, so a profile that lies
+/// either strands a device's messages or refuses its domain outright.
+fn a_write_only_mapping_is_made_exactly_where_the_unit_says_it_can_be(
+    unit: &dyn IommuUnit,
+    probe: &dyn TranslationProbe,
+    fixture: &Fixture,
+) {
+    let [stream, _] = fixture.streams;
+    let domain = unit.create_domain().expect("create a domain");
+    let mapped = unit.map(domain, IOVA, fixture.pages[0], IO_PAGE_SIZE, Access::WRITE);
+    assert_eq!(
+        mapped.is_ok(),
+        unit.profile().write_only,
+        "a write-only map disagreed with the profile: {mapped:?}"
+    );
+    unit.attach(stream, domain).expect("attach");
+    let written = probe.access(stream, IOVA, true);
+    if mapped.is_ok() {
+        assert_eq!(
+            written,
+            Some(fixture.pages[0]),
+            "a write-only page refused a write"
+        );
+        assert_eq!(
+            probe.access(stream, IOVA, false),
+            None,
+            "a write-only page was read"
+        );
+    } else {
+        assert_eq!(written, None, "a refused map left the page reachable");
+    }
+    unit.block(stream).expect("block");
+    unit.destroy_domain(domain).expect("destroy");
+    drain(unit);
+}
+
+/// Every IOVA range a unit claims for a stream is page-aligned and holds a
+/// page, so a domain can be made around it, and a domain made around them
+/// hands out no IOVA inside one.
+fn what_a_unit_claims_for_a_stream_is_a_range_a_domain_keeps_clear(
+    unit: &dyn IommuUnit,
+    probe: &dyn TranslationProbe,
+    fixture: &Fixture,
+) {
+    let [stream, _] = fixture.streams;
+    let mut claimed = Vec::new();
+    unit.reserved_iova(stream, &mut |range| claimed.push(range))
+        .expect("the unit names what it claims for a covered stream");
+    for range in &claimed {
+        assert!(
+            range.start < range.end
+                && range.start.is_multiple_of(IO_PAGE_SIZE)
+                && range.end.is_multiple_of(IO_PAGE_SIZE),
+            "a claimed range is no page-aligned range: {range:#x?}"
+        );
+    }
+    let mut domain = Domain::new(unit, &[], &claimed).expect("a domain clear of the claims");
+    domain.attach(stream).expect("attach");
+    let iova = domain
+        .map(
+            &[crate::FrameRun {
+                phys: fixture.pages[0],
+                order: 0,
+            }],
+            0,
+        )
+        .expect("map");
+    assert!(
+        !claimed
+            .iter()
+            .any(|range| range.start < iova + IO_PAGE_SIZE && iova < range.end),
+        "a domain handed out a claimed IOVA"
+    );
+    assert_eq!(probe.access(stream, iova, false), Some(fixture.pages[0]));
+    domain.destroy().expect("destroy");
     drain(unit);
 }
 
@@ -102,6 +194,9 @@ fn a_translated_request_is_refused_and_reported(
     probe: &dyn TranslationProbe,
     fixture: &Fixture,
 ) {
+    if !probe.carries_translated() {
+        return;
+    }
     let [stream, _] = fixture.streams;
     let domain = unit.create_domain().expect("create a domain");
     unit.map(
@@ -228,6 +323,81 @@ fn a_synced_unmap_leaves_no_cached_translation(
     drain(unit);
 }
 
+/// A range sync confirms what an unmap took inside the range, and the
+/// mapping beside it is still reached and still unmapped whole.
+fn a_range_synced_unmap_keeps_its_neighbour(
+    unit: &dyn IommuUnit,
+    probe: &dyn TranslationProbe,
+    fixture: &Fixture,
+) {
+    let [stream, _] = fixture.streams;
+    let domain = unit.create_domain().expect("create a domain");
+    unit.attach(stream, domain).expect("attach");
+    for (at, page) in [
+        (IOVA, fixture.pages[0]),
+        (IOVA + IO_PAGE_SIZE, fixture.pages[1]),
+    ] {
+        unit.map(domain, at, page, IO_PAGE_SIZE, Access::READ_WRITE)
+            .expect("map");
+        assert!(probe.access(stream, at, false).is_some());
+    }
+    unit.unmap(domain, IOVA, IO_PAGE_SIZE)
+        .expect("unmap the first");
+    unit.sync_range(domain, IOVA, IO_PAGE_SIZE)
+        .expect("sync the first");
+    assert_eq!(
+        probe.access(stream, IOVA, false),
+        None,
+        "a translation survived a confirmed range sync"
+    );
+    assert_eq!(
+        probe.access(stream, IOVA + IO_PAGE_SIZE, false),
+        Some(fixture.pages[1]),
+        "a range sync took the mapping beside it"
+    );
+    unit.unmap(domain, IOVA + IO_PAGE_SIZE, IO_PAGE_SIZE)
+        .expect("the neighbour still unmaps whole");
+    unit.sync_range(domain, IOVA + IO_PAGE_SIZE, IO_PAGE_SIZE)
+        .expect("sync the second");
+    assert_eq!(probe.access(stream, IOVA + IO_PAGE_SIZE, false), None);
+    unit.block(stream).expect("block");
+    unit.destroy_domain(domain).expect("destroy");
+    drain(unit);
+}
+
+/// The runs of one map land back to back, and the map unmaps whole.
+fn a_map_of_many_runs_lands_and_unmaps_whole(
+    unit: &dyn IommuUnit,
+    probe: &dyn TranslationProbe,
+    fixture: &Fixture,
+) {
+    let [stream, _] = fixture.streams;
+    let domain = unit.create_domain().expect("create a domain");
+    unit.attach(stream, domain).expect("attach");
+    let runs = fixture.pages.map(|phys| crate::FrameRun { phys, order: 0 });
+    unit.map_runs(domain, IOVA, &runs, Access::READ_WRITE)
+        .expect("map the runs");
+    for (at, page) in [
+        (IOVA, fixture.pages[0]),
+        (IOVA + IO_PAGE_SIZE, fixture.pages[1]),
+    ] {
+        assert_eq!(
+            probe.access(stream, at + 0x10, true),
+            Some(page + 0x10),
+            "a run did not land where it was placed"
+        );
+    }
+    unit.unmap(domain, IOVA, 2 * IO_PAGE_SIZE)
+        .expect("unmap the map whole");
+    unit.sync_range(domain, IOVA, 2 * IO_PAGE_SIZE)
+        .expect("sync");
+    assert_eq!(probe.access(stream, IOVA, false), None);
+    assert_eq!(probe.access(stream, IOVA + IO_PAGE_SIZE, false), None);
+    unit.block(stream).expect("block");
+    unit.destroy_domain(domain).expect("destroy");
+    drain(unit);
+}
+
 fn a_block_ends_every_translation_at_once(
     unit: &dyn IommuUnit,
     probe: &dyn TranslationProbe,
@@ -284,13 +454,27 @@ fn two_streams_reach_only_their_own_domains(
     fixture: &Fixture,
 ) {
     let [first, second] = fixture.streams;
-    let mut one = Domain::new(unit, &[]).expect("create the first domain");
-    let mut two = Domain::new(unit, &[]).expect("create the second domain");
+    let mut one = Domain::new(unit, &[], &[]).expect("create the first domain");
+    let mut two = Domain::new(unit, &[], &[]).expect("create the second domain");
     one.attach(first).expect("attach the first stream");
     two.attach(second).expect("attach the second stream");
-    let at_one = one.map(fixture.pages[0], 0, 0).expect("map into the first");
+    let at_one = one
+        .map(
+            &[crate::FrameRun {
+                phys: fixture.pages[0],
+                order: 0,
+            }],
+            0,
+        )
+        .expect("map into the first");
     let at_two = two
-        .map(fixture.pages[1], 0, 0)
+        .map(
+            &[crate::FrameRun {
+                phys: fixture.pages[1],
+                order: 0,
+            }],
+            0,
+        )
         .expect("map into the second");
     assert_eq!(probe.access(first, at_one, true), Some(fixture.pages[0]));
     assert_eq!(probe.access(second, at_two, true), Some(fixture.pages[1]));
@@ -348,9 +532,17 @@ fn a_destroyed_domain_reaches_nothing(
     fixture: &Fixture,
 ) {
     let [stream, _] = fixture.streams;
-    let mut domain = Domain::new(unit, &[]).expect("create a domain");
+    let mut domain = Domain::new(unit, &[], &[]).expect("create a domain");
     domain.attach(stream).expect("attach");
-    let iova = domain.map(fixture.pages[0], 0, 0).expect("map");
+    let iova = domain
+        .map(
+            &[crate::FrameRun {
+                phys: fixture.pages[0],
+                order: 0,
+            }],
+            0,
+        )
+        .expect("map");
     assert!(probe.access(stream, iova, false).is_some());
     domain.destroy().expect("destroy");
     assert_eq!(

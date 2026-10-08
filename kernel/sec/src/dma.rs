@@ -11,7 +11,7 @@
 //! a user-space driver that wants to talk to a bus-master device:
 //!
 //! 1. Verify that `caller` holds [`CapabilityId::MEM_DMA`]. Refused
-//!    callers receive [`Errno::PermissionDenied`] and the audit log
+//!    callers receive [`DmaGateError::CapabilityMissing`] and the audit log
 //!    records an [`AuditEvent::DmaAllocDenied`] event with the
 //!    refusing `TaskId` and `UserId`.
 //! 2. Delegate to the pool's `alloc` / `free`.
@@ -22,8 +22,8 @@
 //!
 //! No `unsafe`, no `unwrap`, no `panic!`:.
 
-use tairix_abi::{CapabilityId, Errno};
-use tairix_kernel_mem::{DmaBuffer, DmaError, DmaPool, PageTable};
+use tairix_abi::{CapabilityId, DriverError};
+use tairix_kernel_mem::{AllocError, DmaBuffer, DmaError, DmaPool, PageTable};
 use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
@@ -33,8 +33,7 @@ use crate::identity::{format_hex_u64, format_usize};
 /// Failure modes of the capability-gated DMA entry points.
 ///
 /// Distinct from the bare [`DmaError`] because a capability refusal is
-/// a security event, not an allocator failure, and callers (and the
-/// future syscall wrapper) often want to surface them differently.
+/// a security event, not an allocator failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DmaGateError {
@@ -46,35 +45,23 @@ pub enum DmaGateError {
 }
 
 impl DmaGateError {
-    /// Map this gate error to the stable [`Errno`] surface used by the
-    /// (future) `dma_alloc` syscall.
-    ///
-    /// `abi-v1` does not yet ship a dedicated `OutOfMemory` errno;
-    /// allocator exhaustion and over-large requests therefore both
-    /// surface as [`Errno::LengthOutOfRange`], which is the closest
-    /// stable variant ("a length, count, or offset field exceeds its
-    /// ABI-mandated maximum"). A future `abi-v2` may split these.
-    ///
-    /// * [`Self::CapabilityMissing`] → [`Errno::PermissionDenied`].
-    /// * [`Self::Pool`]`(`[`DmaError::Alloc`]`)` →
-    ///   [`Errno::LengthOutOfRange`].
-    /// * [`Self::Pool`]`(`[`DmaError::SizeUnsupported`]`)` →
-    ///   [`Errno::LengthOutOfRange`].
-    /// * [`Self::Pool`]`(`[`DmaError::ZeroSize`]`)` →
-    ///   [`Errno::BufferTooSmall`].
-    /// * [`Self::Pool`]`(`[`DmaError::UnknownBuffer`]`)` →
-    ///   [`Errno::OutOfRange`].
-    /// * Other internal pool failures (page-table errors, guard
-    ///   violations, invalid pool config) collapse to
-    ///   [`Errno::OutOfRange`] — these are kernel-side bugs and the
-    ///   caller has no recovery action beyond reporting them.
+    /// The refusal as the driver the carve was for reads it, so every
+    /// in-kernel host reports one refusal alike: a missing capability, memory
+    /// exhausted, a carve too large to make or of nothing, each as itself.
+    /// No RAM the device reaches, and a pool fault the driver can do nothing
+    /// about, fail closed as [`DriverError::OutOfRange`].
     #[must_use]
-    pub fn as_errno(self) -> Errno {
+    pub const fn as_driver_error(self) -> DriverError {
         match self {
-            Self::CapabilityMissing => Errno::PermissionDenied,
-            Self::Pool(DmaError::Alloc(_) | DmaError::SizeUnsupported) => Errno::LengthOutOfRange,
-            Self::Pool(DmaError::ZeroSize) => Errno::BufferTooSmall,
-            Self::Pool(_) => Errno::OutOfRange,
+            Self::CapabilityMissing => DriverError::PermissionDenied,
+            Self::Pool(DmaError::Alloc(AllocError::OutOfMemory)) => DriverError::OutOfMemory,
+            Self::Pool(DmaError::ZeroSize | DmaError::Alloc(AllocError::ZeroSize)) => {
+                DriverError::BufferTooSmall
+            }
+            Self::Pool(
+                DmaError::SizeUnsupported | DmaError::Alloc(AllocError::SizeUnsupported),
+            ) => DriverError::LengthOutOfRange,
+            Self::Pool(_) => DriverError::OutOfRange,
         }
     }
 }

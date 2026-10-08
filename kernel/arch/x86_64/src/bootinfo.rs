@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::{acpi, multiboot2, pvh};
+use crate::{acpi, multiboot2, paging, pvh};
 
 /// Which loader entered the kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +166,42 @@ impl BootData<'static> {
     }
 }
 
+impl<'a> BootData<'a> {
+    /// The kernel command line the loader passed, if it passed one that is
+    /// UTF-8 and, from a PVH loader, ends within [`pvh::COMMAND_LINE_MAX`]
+    /// bytes of RAM the loader's own memory map reports, inside the identity
+    /// window.
+    ///
+    /// The text lies in loader memory the frame allocator later reuses, so a
+    /// caller that keeps it keeps a copy.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`BootData::load`].
+    #[must_use]
+    pub unsafe fn command_line(&self) -> Option<&'a str> {
+        match self {
+            BootData::Multiboot2(info) => info.command_line(),
+            BootData::Pvh { start_info, memmap } => {
+                let start = start_info.cmdline_paddr;
+                if start == 0 {
+                    return None;
+                }
+                let end = memmap
+                    .ram_end(start)?
+                    .min(paging::BOOT_IDENTITY_END)
+                    .min(start.saturating_add(pvh::COMMAND_LINE_MAX as u64));
+                let len = usize::try_from(end.checked_sub(start)?).ok()?;
+                // SAFETY: the `len` bytes from `start` are RAM the loader's
+                // own map reports, inside the identity-mapped window the
+                // function contract names, so reading them touches no device.
+                let bytes = unsafe { core::slice::from_raw_parts(start as *const u8, len) };
+                pvh::command_line(bytes)
+            }
+        }
+    }
+}
+
 impl BootData<'_> {
     /// Locate and validate the ACPI RSDP, whichever protocol delivered
     /// it. A PVH loader that publishes no usable `rsdp_paddr` (QEMU's
@@ -223,6 +259,25 @@ impl BootData<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PVH command line outside the RAM the loader's map reports is never
+    /// read: no RAM entry holds this address.
+    #[test]
+    fn a_pvh_command_line_outside_ram_is_not_read() {
+        let memmap = [0u8; pvh::MEMMAP_ENTRY_LEN];
+        let boot = BootData::Pvh {
+            start_info: pvh::StartInfo {
+                version: 1,
+                cmdline_paddr: 0x9_F000,
+                rsdp_paddr: 0,
+                memmap_paddr: 0x9_E000,
+                memmap_entries: 1,
+            },
+            memmap: pvh::MemoryMap::parse(&memmap, 1).unwrap(),
+        };
+        // SAFETY: the map reports no RAM, so no byte is read.
+        assert_eq!(unsafe { boot.command_line() }, None);
+    }
 
     #[test]
     fn record_is_set_once_and_readable() {

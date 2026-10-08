@@ -1,12 +1,15 @@
 //! Interrupt remapping on the x86_64 port (`plans/IOMMU.md` IOM11).
 //!
-//! The boot sets every IO-APIC pin up masked, in compatibility format, and
-//! routes each interrupt-driven PCI function's MSI-X in compatibility format
-//! while the function cannot master. Once the translation units are up, and
-//! before any interrupt is taken, [`plan`] gives every one of those sources an
-//! entry on the unit that sees its messages and turns remapping on; the port
-//! then rewrites each source with its entry. A machine that cannot remap every
-//! source keeps compatibility delivery, as Linux does.
+//! The boot masks every IO-APIC pin, activates the few it takes itself in
+//! compatibility format, and routes each interrupt-driven PCI function's MSI-X
+//! in compatibility format while the function cannot master. Once the
+//! translation units are up, and before any interrupt is taken, [`plan`] gives
+//! every one of those sources an entry on the unit that sees its messages and
+//! turns remapping on; the port then rewrites each source with its entry, and a
+//! pin activated later takes its entry as it is activated
+//! ([`PinRemapping`](crate::x86_64::ioapic_controller::PinRemapping)). A
+//! machine that cannot remap every source keeps compatibility delivery, as
+//! Linux does.
 
 use alloc::vec::Vec;
 
@@ -122,21 +125,30 @@ pub fn message_for(
 /// and turn remapping on; or say why the machine keeps compatibility
 /// delivery, leaving every source as it is.
 ///
-/// `functions` pairs each pending route with the function the probe
-/// published for its node. Remapping is the whole machine's or no one's: an
-/// I/O APIC no unit's scope names, or one whose unit cannot remap, keeps it
-/// off. A function a unit sees whose requester ids are unknown, or that its
-/// unit refuses an entry, is left unrouted and counted.
+/// `pins` are those activated so far on the IO-APICs whose APIC ids are
+/// `ioapic_ids`, and `functions` pairs each pending route with the function the
+/// probe published for its node. Remapping is the whole machine's or no
+/// one's: an IO-APIC no unit's scope names, or one whose unit cannot remap,
+/// keeps it off, active pins or not, since a pin activated on it later would
+/// have nothing to raise. A function a unit sees whose requester ids are
+/// unknown, or that its unit refuses an entry, is left unrouted and counted.
 #[must_use]
 pub fn plan(
     remapper: &Translation,
     pins: &[ProgrammedPin],
+    ioapic_ids: &[u8],
     ioapics: &[IoApicSource],
     functions: &[(PendingRoute, Option<Published>)],
     extended: bool,
     entries: u32,
 ) -> (InterruptRouting, Plan) {
     let unremapped = (InterruptRouting::Unremapped, Plan::default());
+    if !ioapic_ids
+        .iter()
+        .all(|&id| ioapics.iter().any(|ioapic| ioapic.id == id))
+    {
+        return unremapped;
+    }
     // Every record is had before a unit is touched, so running short of
     // memory leaves the machine as it was.
     let mut sources = Vec::new();
@@ -213,12 +225,7 @@ pub fn plan(
         release(remapper, plan.routes.into_iter().map(|(_, _, entry)| entry));
         return (InterruptRouting::Refused(refused), Plan::default());
     }
-    let routing = if unrouted == 0 {
-        InterruptRouting::Remapped
-    } else {
-        InterruptRouting::Unrouted(unrouted)
-    };
-    (routing, plan)
+    (InterruptRouting::with_unrouted(unrouted), plan)
 }
 
 fn release(remapper: &Translation, entries: impl Iterator<Item = RemapEntry>) {
@@ -229,20 +236,24 @@ fn release(remapper: &Translation, entries: impl Iterator<Item = RemapEntry>) {
 
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use live::{
-    boot_sources, publish_boot_sources, publish_remapper, remapper, route, route_function,
+    boot_sources, publish_boot_sources, publish_remapper, remapper, route, route_function, Routed,
+    LIVE_PIN_REMAPPING,
 };
 
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 mod live {
     use alloc::vec::Vec;
 
-    use tairix_kernel_core::iommu::{InterruptRouting, Translation};
+    use tairix_kernel_core::iommu::{
+        InterruptRouting, InterruptSource, InterruptTarget, RemapEntry, Translation,
+    };
+    use tairix_kernel_irq::ActivationError;
     use tairix_log::{Level, Sink};
     use tairix_sync::once::OnceCell;
 
     use super::{plan, BootSources, PendingRoute};
-    use crate::pci_host::Published;
-    use crate::x86_64::msi::MSIX_ENTRY;
+    use crate::pci_host::{Published, MSIX_ENTRY};
+    use crate::x86_64::ioapic_controller::PinRemapping;
     use crate::x86_64::registers::KernelRegisters;
 
     static BOOT_SOURCES: OnceCell<BootSources> = OnceCell::new();
@@ -271,37 +282,94 @@ mod live {
         REMAPPER.get().ok().flatten().copied()
     }
 
+    /// Interrupt remapping as a pin activated after boot meets it: an entry on
+    /// the unit that sees the pin's IO-APIC once [`route`] has turned it on,
+    /// which it does before any task runs, so no activation races it.
+    pub struct LivePinRemapping;
+
+    impl PinRemapping for LivePinRemapping {
+        fn entry(
+            &self,
+            ioapic: u8,
+            target: InterruptTarget,
+        ) -> Result<Option<u64>, ActivationError> {
+            let Some(remapper) = remapper() else {
+                return Ok(None);
+            };
+            let source = boot_sources()
+                .and_then(|sources| sources.ioapics.iter().find(|source| source.id == ioapic))
+                .ok_or(ActivationError::Unroutable)?;
+            // The pin keeps its vector, and so its entry, for the boot.
+            remapper
+                .remap(
+                    source.unit,
+                    InterruptSource::Requester(source.requester),
+                    target,
+                )
+                .map(|entry| Some(entry.remapped.redirection))
+                .map_err(|_| ActivationError::Unroutable)
+        }
+    }
+
+    /// The one [`LivePinRemapping`] the composite controller activates pins through.
+    pub static LIVE_PIN_REMAPPING: LivePinRemapping = LivePinRemapping;
+
+    /// A function's MSI-X entry routed to a vector of its own: the vector,
+    /// and the remapping entry made for it, given back together.
+    #[must_use = "a route dropped unreleased keeps its vector for the boot"]
+    pub struct Routed {
+        /// The vector the function's message raises.
+        pub vector: crate::x86_64::msi::MsiVector,
+        entry: Option<RemapEntry>,
+    }
+
+    impl Routed {
+        /// Give the vector and its entry back, for a function that has not
+        /// mastered since it was routed, and so never raised them.
+        pub fn release(self) {
+            if let (Some(remapper), Some(entry)) = (remapper(), self.entry) {
+                remapper.release(entry);
+            }
+            crate::x86_64::msi::release(self.vector.line);
+        }
+    }
+
     /// Route MSI-X entry [`MSIX_ENTRY`] of the function the probe recorded
-    /// as `function` to a vector of its own, raised by its unit's entry once
-    /// remapping is on, else by a compatibility message.
+    /// as `function`, which must not yet master, to a vector of its own,
+    /// raised by its unit's entry once remapping is on, else by a
+    /// compatibility message.
     ///
     /// # Errors
     ///
-    /// The step that failed; an entry made for it is let go.
+    /// The step that failed; the vector and any entry made for it are let
+    /// go, as a function that does not master cannot raise them.
     pub fn route_function(
         host: &crate::pci_host::PciHost,
         function: &Published,
-    ) -> Result<crate::x86_64::msi::MsiVector, &'static str> {
+    ) -> Result<Routed, &'static str> {
         let vector = crate::x86_64::msi::allocate().map_err(|_| "no free MSI vector")?;
         let remapper = remapper();
-        let (message, entry) = super::message_for(
+        let Ok((message, entry)) = super::message_for(
             remapper,
             vector,
             function,
             crate::x86_64::msi::compatibility_message(vector),
-        )
-        .map_err(|_| "device interrupt unroutable")?;
+        ) else {
+            crate::x86_64::msi::release(vector.line);
+            return Err("device interrupt unroutable");
+        };
         let routed = host
             .with(function.segment, |bus| {
                 bus.route_msix(function.address, MSIX_ENTRY, message, &KernelRegisters)
             })
             .is_some_and(|result| result.is_ok());
         if routed {
-            return Ok(vector);
+            return Ok(Routed { vector, entry });
         }
         if let (Some(remapper), Some(entry)) = (remapper, entry) {
             remapper.release(entry);
         }
+        crate::x86_64::msi::release(vector.line);
         Err("MSI-X entry unwritable")
     }
 
@@ -330,6 +398,11 @@ mod live {
                 pins.push(pin);
             }
         });
+        let mut ioapic_ids = Vec::new();
+        gathered &= ioapic_ids
+            .try_reserve_exact(controller.block_count())
+            .is_ok();
+        ioapic_ids.extend(controller.ioapic_ids());
         let host = crate::pci_host::published();
         let mut functions: Vec<(PendingRoute, Option<Published>)> = Vec::new();
         if !gathered || functions.try_reserve_exact(sources.routes.len()).is_err() {
@@ -353,6 +426,7 @@ mod live {
         let (mut routing, plan) = plan(
             remapper,
             &pins,
+            &ioapic_ids,
             &sources.ioapics,
             &functions,
             extended,

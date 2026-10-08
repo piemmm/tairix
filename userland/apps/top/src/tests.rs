@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::sysinfo::{
-    CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, ProcessListRequest,
-    ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader, Uptime,
+    CpuTimeRecord, KernelMemoryStats, LoadAverage, PageRequest, ProcessRecord, ProcessState,
+    SysinfoQueryId, SysinfoRequestHeader, Uptime,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, MEMORY_CLASS_COUNT};
 use tairix_curses::{Event, Screen, Size, Tty};
@@ -18,7 +18,7 @@ use tairix_termcap::TermType;
 
 use crate::app::{list_capacity, render, run};
 use crate::error::TopError;
-use crate::model::{Action, CpuSplit, Model, Scope, ALL_DENIED_NOTICE};
+use crate::model::{Action, CpuSplit, Model, Scope, ALL_DENIED_NOTICE, INTERRUPTED_NOTICE};
 
 // ---- Fixtures --------------------------------------------------------------
 
@@ -37,12 +37,16 @@ struct FakeService {
     /// (the degraded default — most tests exercise other figures).
     cpu_times: RefCell<Option<Vec<CpuTimeRecord>>>,
     seen: RefCell<Vec<SysinfoQueryId>>,
+    /// Answer the process list `Interrupted`, as a service that let the
+    /// walk go.
+    interrupt: core::cell::Cell<bool>,
 }
 
 impl FakeService {
     fn new(records: Vec<ProcessRecord>) -> Self {
         Self {
             records: RefCell::new(records),
+            interrupt: core::cell::Cell::new(false),
             deny_global: false,
             uptime_ns: RefCell::new(Some(1_000_000_000)),
             load: None,
@@ -105,7 +109,7 @@ impl Transport for FakeService {
             };
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = CpuTimeListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= records.len() {
                 return Ok(Vec::new());
@@ -117,9 +121,12 @@ impl Transport for FakeService {
             }
             return Ok(out);
         }
+        if self.interrupt.get() {
+            return Err(Errno::Interrupted);
+        }
         let payload = &request[SysinfoRequestHeader::WIRE_LEN
             ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-        let req = ProcessListRequest::from_bytes(payload)?;
+        let req = PageRequest::from_bytes(payload)?;
         let records = self.records.borrow();
         let offset = req.offset as usize;
         if offset >= records.len() {
@@ -230,6 +237,26 @@ fn refresh_populates_and_selects_the_first_row() {
         .seen
         .borrow()
         .contains(&SysinfoQueryId::GLOBAL_PROCESS_LIST));
+}
+
+/// A refresh whose walk the service let go keeps the last listing under a
+/// notice, and the next refresh to read the list takes the notice down.
+#[test]
+fn an_interrupted_refresh_keeps_the_last_listing() {
+    let service = FakeService::new(vec![record(1, b"init"), record(2, b"shell")]);
+    let mut model = Model::new(Scope::Own);
+    model.refresh(&service).expect("ok");
+    let pids =
+        |model: &Model| -> Vec<u64> { model.rows().iter().map(|row| row.record.pid).collect() };
+    service.tick(2_000_000_000, vec![record(3, b"editor")]);
+    service.interrupt.set(true);
+    assert_eq!(model.refresh(&service), Ok(()));
+    assert_eq!(model.notice(), Some(INTERRUPTED_NOTICE));
+    assert_eq!(pids(&model), [1, 2]);
+    service.interrupt.set(false);
+    model.refresh(&service).expect("ok");
+    assert_eq!(model.notice(), None);
+    assert_eq!(pids(&model), [3]);
 }
 
 #[test]

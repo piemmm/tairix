@@ -14,7 +14,7 @@ use tairix_hash::BuildFastHash;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::{OnceCell, RwLock};
 
-use crate::error::{IrqError, MaskError};
+use crate::error::{ActivationError, IrqError, MaskError};
 
 /// One row in [`IrqTable`].
 ///
@@ -81,6 +81,20 @@ pub trait IrqController {
     ///   controller wired in this build.
     /// * [`MaskError::OutOfRange`] if `line` exceeds the controller's range.
     fn rearm(&self, line: u32) -> Result<(), MaskError> {
+        let _ = line;
+        Ok(())
+    }
+
+    /// Give `line` what it needs to deliver before it is first bound: on a
+    /// vectored controller, a vector of its own. Idempotent, and the default
+    /// for a controller whose every line is routed already.
+    ///
+    /// # Errors
+    ///
+    /// * [`ActivationError::OutOfRange`] if `line` exceeds the controller's range.
+    /// * [`ActivationError::Exhausted`] if no vector is left to give it.
+    /// * [`ActivationError::Unroutable`] if nothing it raises could reach a CPU.
+    fn activate(&self, line: u32) -> Result<(), ActivationError> {
         let _ = line;
         Ok(())
     }
@@ -964,6 +978,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::alloc::{GlobalAlloc, Layout};
     use core::cell::{Cell, RefCell};
+    use tairix_abi::Errno;
 
     extern crate std;
 
@@ -1034,6 +1049,19 @@ mod tests {
             Err(IrqError::LineAlreadyBound),
             "and a service takes no line another binds"
         );
+    }
+
+    #[test]
+    fn a_controller_routing_every_line_already_activates_each_as_it_is() {
+        assert_eq!(UnsupportedController.activate(4), Ok(()));
+        assert_eq!(UnsupportedController.activate(4), Ok(()));
+    }
+
+    #[test]
+    fn an_activation_refused_for_want_of_a_vector_reads_as_an_exhausted_vector_space() {
+        assert_eq!(ActivationError::Exhausted.to_errno(), Errno::OutOfRange);
+        assert_eq!(ActivationError::OutOfRange.to_errno(), Errno::OutOfRange);
+        assert_eq!(ActivationError::Unroutable.to_errno(), Errno::NotSupported);
     }
 
     #[test]

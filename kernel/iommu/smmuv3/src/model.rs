@@ -34,7 +34,9 @@ pub(crate) mod op {
     pub const CFGI_CD: u8 = 0x05;
     pub const CFGI_CD_ALL: u8 = 0x06;
     pub const TLBI_NH_ASID: u8 = 0x11;
+    pub const TLBI_NH_VA: u8 = 0x12;
     pub const TLBI_S12_VMALL: u8 = 0x28;
+    pub const TLBI_S2_IPA: u8 = 0x2A;
     pub const TLBI_NSNH_ALL: u8 = 0x30;
     pub const SYNC: u8 = 0x46;
 }
@@ -109,6 +111,8 @@ pub(crate) struct Quirks {
     pub stall_syncs: bool,
     /// Complete this many more `CMD_SYNC`s, then stall at the next.
     pub syncs_before_stall: Option<usize>,
+    /// Abort the next `CMD_SYNC`'s completion message.
+    pub abort_sync_message: bool,
 }
 
 /// A cached translation: the physical page, and whether it may be read and
@@ -227,6 +231,12 @@ impl<'f> Model<'f> {
         state.gerror ^ state.gerrorn
     }
 
+    /// Whether the TLB holds the translation of the page at `iova` under
+    /// `tag`: an ASID with bit 16 set, or a VMID.
+    pub(crate) fn caches(&self, tag: u32, iova: u64) -> bool {
+        self.state.lock().tlb.contains_key(&(tag, iova & !0xFFF))
+    }
+
     pub(crate) fn processed(&self, opcode: u8) -> usize {
         self.state
             .lock()
@@ -336,6 +346,15 @@ impl<'f> Model<'f> {
                     let tag = ((low >> 32) & 0xFFFF) as u32;
                     state.tlb.retain(|&(at, _), _| at != tag);
                 }
+                op::TLBI_NH_VA | op::TLBI_S2_IPA => {
+                    let tag = if opcode == op::TLBI_NH_VA {
+                        0x1_0000 | (low >> 48) as u32
+                    } else {
+                        ((low >> 32) & 0xFFFF) as u32
+                    };
+                    let page = high & !0xFFF;
+                    state.tlb.remove(&(tag, page));
+                }
                 op::TLBI_NSNH_ALL => state.tlb.clear(),
                 op::SYNC
                     if state.quirks.stall_syncs || state.quirks.syncs_before_stall == Some(0) =>
@@ -347,7 +366,11 @@ impl<'f> Model<'f> {
                         *left -= 1;
                     }
                     if (low >> 12) & 0b11 == 0b01 && self.features.msi {
-                        self.frames.store_word(high & ADDRESS_51_2, low >> 32);
+                        if core::mem::take(&mut state.quirks.abort_sync_message) {
+                            state.gerror ^= regs::GERROR_MSI_CMDQ_ABT;
+                        } else {
+                            self.frames.store_word(high & ADDRESS_51_2, low >> 32);
+                        }
                     }
                 }
                 _ => {

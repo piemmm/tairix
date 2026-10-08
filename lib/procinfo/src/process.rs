@@ -9,11 +9,10 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
-use tairix_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
+use tairix_abi::sysinfo::{ProcessRecord, ProcessState, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{field_lossy, walk_pages, ListError, WalkStep};
-use crate::request::CallError;
+use crate::list::{field_lossy, walk_records, ListError, WalkStep};
 use crate::transport::{Output, Transport};
 
 /// Number of [`ProcessRecord`]s requested per process-list page: the most one
@@ -58,32 +57,20 @@ pub const PROCESS_HEADER: &str = "  PID  PPID   UID   GID S CPU NAME";
 pub fn for_each_process(
     transport: &dyn Transport,
     all: bool,
-    mut sink: impl FnMut(&ProcessRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&ProcessRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
     let query = if all {
         SysinfoQueryId::GLOBAL_PROCESS_LIST
     } else {
         SysinfoQueryId::SELF_PROCESS_LIST
     };
-    walk_pages(
+    walk_records(
         transport,
         query,
         ProcessRecord::WIRE_LEN,
         PROCESS_PAGE,
-        |offset, limit| {
-            ProcessListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = ProcessRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        ProcessRecord::from_bytes,
+        sink,
     )
 }
 
@@ -183,7 +170,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
+        PageRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
     use tairix_abi::{Errno, ProcId, SchedPriority};
 
@@ -219,7 +206,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = ProcessListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

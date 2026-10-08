@@ -62,7 +62,10 @@ bus driver's `register()` consumes:
   here rather than in the architecture-neutral PCI walk.
 - **`VirtioHost`** — `alloc_dma_zeroed(size)` carves the device-shared DMA
   region with `dma_alloc` against the DMA grant and returns a `DmaSlab` whose
-  `phys()` is the device-visible base the controller programs, and
+  `phys()` is the device-visible base the controller programs; every carve
+  states the narrowest reach the driver declared through `narrow_dma_reach`
+  (all 64 bits until it does), so a controller that drives fewer address bits
+  is never handed memory past them; and
   `device_quiesced()` issues `dma_quiesced` for a driver holding
   `CAP_MEM_DMA`, releasing what a dead predecessor left in its node's DMA
   quarantine. A non-coherent
@@ -79,8 +82,9 @@ here rather than inventing one. Both report `None` when the node granted none,
 so a driver refuses rather than guessing.
 
 - **`DriverHost`** — reports the load-time capability set
-  (`has_capability`), `DriverKind::UserSpace`, and hands its own `MmioMapper` /
-  `VirtioHost` back through `mmio_mapper()` / `virtio_host()`. Its `emit_node`
+  (`has_capability`), `DriverKind::UserSpace`, and hands its own `MmioMapper`
+  back through `mmio_mapper()`; a virtio driver takes the host itself as its
+  `VirtioHost`. Its `emit_node`
   forwards to the `hw_emit_node` syscall, so a user-space **bus** driver
   publishes each device it enumerates into the live hardware tree and the
   device manager autoloads the matching driver in turn (recursive,

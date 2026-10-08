@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::{HwNode, IommuGroup, IommuReservedWindow};
+use tairix_abi::{DmaCoherence, HwNode, IommuGroup, IommuReservedWindow};
 use tairix_arch_api::fdtwalk::{FdtDiscovery, FdtPlatform};
 use tairix_arch_api::PlatformDiscovery;
 use tairix_fdt::fixture::DtbBuilder;
@@ -16,7 +16,11 @@ use crate::test_support::NullSink;
 struct Bare;
 
 impl FdtPlatform for Bare {
-    const INTERRUPT_CELLS: usize = 1;
+    const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+    fn interrupt_cells(&self) -> usize {
+        1
+    }
 
     fn from_tree(_fdt: &Fdt<'_>) -> Self {
         Self
@@ -460,7 +464,11 @@ fn a_master_left_without_dma_authority_is_audited() {
 struct Gic;
 
 impl FdtPlatform for Gic {
-    const INTERRUPT_CELLS: usize = 3;
+    const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+    fn interrupt_cells(&self) -> usize {
+        3
+    }
 
     fn from_tree(_fdt: &Fdt<'_>) -> Self {
         Self
@@ -526,7 +534,11 @@ fn an_smmu_s_node_states_the_line_it_raises_its_faults_on() {
 struct Plic;
 
 impl FdtPlatform for Plic {
-    const INTERRUPT_CELLS: usize = 1;
+    const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+    fn interrupt_cells(&self) -> usize {
+        1
+    }
 
     fn from_tree(_fdt: &Fdt<'_>) -> Self {
         Self
@@ -577,5 +589,139 @@ fn a_riscv_iommu_raises_its_faults_on_the_first_line_its_node_names() {
             trigger: tairix_kernel_irq::Trigger::Level,
             place: 0,
         })
+    );
+}
+
+/// A `virtio,mmio` slot at `base`, naming `iommus` where given.
+fn slot(b: &mut DtbBuilder, base: u32, iommus: Option<&[u32]>) {
+    b.begin_node(&format!("virtio_mmio@{base:x}"));
+    b.prop_str("compatible", "virtio,mmio");
+    b.prop("reg", &cells(&[0, base, 0, 0x200]));
+    if let Some(iommus) = iommus {
+        b.prop("iommus", &cells(iommus));
+    }
+    b.end_node();
+}
+
+/// The device a probe finds in a slot masters DMA as the walk described the
+/// slot: through its streams, around every unit, or — the walk refusing to
+/// describe it — not at all; and it joins its slot's group.
+#[test]
+fn a_slots_device_masters_dma_as_the_slot_is_described() {
+    let blob = tree(|b| {
+        smmu(b, "smmuv3@9050000", SMMU, None);
+        slot(b, 0x0A00_0000, Some(&[SMMU, 0x20, SMMU, 0x21]));
+        slot(b, 0x0A00_0200, Some(&[0x99, 1]));
+        slot(b, 0x0A00_0400, None);
+    });
+    let fdt = Fdt::new(&blob).unwrap();
+    let mut sink = CollectingHwNodeSink::new();
+    FdtDiscovery::<Bare>::new(Fdt::new(&blob).unwrap())
+        .discover(&mut sink)
+        .unwrap();
+    let unit = by_compatible(sink.nodes(), b"arm,smmu-v3").id();
+    let dma = SlotDma::read(&fdt, sink.nodes(), DmaCoherence::Snooped);
+    let translated: Vec<IommuStreams> = dma.streams(0x0A00_0000).unwrap().collect();
+    assert_eq!(translated, [IommuStreams::new(unit, 0x20, 2).unwrap()]);
+    assert_eq!(dma.streams(0x0A00_0200).err(), Some(Undescribed));
+    assert_eq!(dma.streams(0x0A00_0400).unwrap().count(), 0);
+    assert_eq!(dma.streams(0x0B00_0000).unwrap().count(), 0, "no slot");
+
+    let mut child = HwNode::new(
+        0x8000_1000,
+        tairix_abi::HW_NODE_ROOT_ID,
+        tairix_abi::HwDeviceClass::Input,
+    );
+    for range in translated {
+        child
+            .push_resource(HwResource::iommu_stream(range))
+            .unwrap();
+    }
+    sink.emit(child).unwrap();
+    let _ = FdtUnits::read(&fdt, &mut sink, &NullSink);
+    let nodes = sink.into_vec();
+    let child = nodes.iter().find(|node| node.id() == 0x8000_1000).unwrap();
+    let group = group_of(child);
+    assert!(group.is_some());
+    assert_eq!(group, group_of(by_compatible(&nodes, b"virtio,mmio")));
+}
+
+/// Slots that cannot be recorded leave every slot's device undescribed.
+#[test]
+fn unrecorded_slots_describe_no_device() {
+    let dma = SlotDma {
+        streams: Vec::new(),
+        undescribed: None,
+        coherence: SlotCoherence::Listed(Vec::new()),
+    };
+    assert_eq!(dma.streams(0x0A00_0400).err(), Some(Undescribed));
+    assert_eq!(dma.coherence(0x0A00_0400), None, "nor states its coherence");
+}
+
+/// A virtio-iommu in a slot raises its faults on the slot's one line.
+#[test]
+fn a_slot_unit_raises_its_faults_on_its_line() {
+    let blob = tree(|b| {
+        b.prop_u32("interrupt-parent", 1);
+        b.begin_node("plic@c000000");
+        b.prop_str("compatible", "riscv,plic0");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", 1);
+        b.end_node();
+        b.begin_node("virtio_mmio@10008000");
+        b.prop_str("compatible", "virtio,mmio");
+        b.prop("reg", &cells(&[0, 0x1000_8000, 0, 0x1000]));
+        b.prop("interrupts", &cells(&[8]));
+        b.prop_u32("#iommu-cells", 1);
+        b.prop_u32("phandle", SMMU);
+        b.end_node();
+    });
+    let fdt = Fdt::new(&blob).unwrap();
+    let mut sink = CollectingHwNodeSink::new();
+    FdtDiscovery::<Plic>::new(Fdt::new(&blob).unwrap())
+        .discover(&mut sink)
+        .unwrap();
+    let _ = FdtUnits::read(&fdt, &mut sink, &NullSink);
+    let nodes = sink.into_vec();
+    let unit = by_compatible(&nodes, b"virtio,mmio");
+    assert_eq!(
+        tairix_kernel_core::iommu::WiredFaults::of(unit),
+        Some(tairix_kernel_core::iommu::WiredFaults {
+            line: 8,
+            trigger: tairix_kernel_irq::Trigger::Level,
+            place: tairix_kernel_iommu_virtio::FAULT_INTERRUPT,
+        })
+    );
+}
+
+/// Records the message of every event.
+#[derive(Default)]
+struct Messages(RefCell<Vec<alloc::string::String>>);
+
+impl Sink for Messages {
+    fn write_event(&self, event: &Event<'_>) {
+        self.0.borrow_mut().push(event.message.into());
+    }
+}
+
+/// A unit's node with no room left for its fault line says so, rather than
+/// leave its faults raising nothing unremarked.
+#[test]
+fn a_fault_line_a_unit_s_node_cannot_hold_is_reported() {
+    let log = Messages::default();
+    let mut room = HwNode::new(3, 0, tairix_abi::HwDeviceClass::Iommu);
+    record_fault_place(&mut room, 1, &log);
+    assert_eq!(room.resources().len(), 1);
+    assert!(log.0.borrow().is_empty());
+    let mut full = HwNode::new(4, 0, tairix_abi::HwDeviceClass::Iommu);
+    while full
+        .push_resource(HwResource::property(HwProperty::FaultInterrupt, 0))
+        .is_ok()
+    {}
+    record_fault_place(&mut full, 1, &log);
+    assert_eq!(
+        *log.0.borrow(),
+        ["a translation unit's fault line unrecorded; its faults raise nothing"]
     );
 }

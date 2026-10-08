@@ -623,9 +623,11 @@ that *owes* progress is judged — fail closed). See `plans/WATCHDOG.md`.
   **liveness** heartbeat and runs a **cross-CPU scan** (`on_watchdog_tick`); a
   buddy whose liveness is stale past `DEFAULT_HARD_LOCKUP_THRESHOLD_NS` (10 s)
   while Active is reported hard-locked. On aarch64 the cadence is the virtual
-  generic timer (`CNTV`, PPI 27) delivered as an ordinary IRQ — the correct
-  cross-CPU *buddy* detector for a GICv2 non-secure kernel, where FIQ (the
-  secure pseudo-NMI) is unavailable.
+  generic timer (`CNTV`, PPI 27) delivered as an ordinary IRQ, the cross-CPU
+  *buddy* detector, which is complete where Group 0 (FIQ) is the Secure
+  world's, as on the Pi 4's GIC-400. The debug image also delivers it as a
+  Group 0 FIQ wherever a boot probe proves Group 0 reaches the kernel: a GICv2
+  or GICv3 with one Security state, as on QEMU `virt`.
 
 Each cadence sample records what its CPU interrupted (PC, processor state,
 kernel-vs-user), so a detected lockup carries fresh "why" context: the locked

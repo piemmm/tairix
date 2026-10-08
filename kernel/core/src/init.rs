@@ -168,6 +168,8 @@ pub enum InitError {
     /// The translation units the hardware tree names could not be taken
     /// over or recorded, so no device could be confined.
     DmaTranslation,
+    /// The interrupt controller refused to come up; the reason names why.
+    InterruptController(&'static str),
 }
 
 impl InitError {
@@ -185,7 +187,7 @@ impl InitError {
             | InitError::CpuStateZeroCpus
             | InitError::CpuStateAllocationFailed
             | InitError::CpuStateAlreadyInstalled => Phase::Sched,
-            InitError::DmaTranslation => Phase::Irq,
+            InitError::DmaTranslation | InitError::InterruptController(_) => Phase::Irq,
             InitError::DispatcherAlreadyInstalled(_) => Phase::Syscall,
         }
     }
@@ -209,6 +211,7 @@ impl InitError {
             InitError::CpuStateAlreadyInstalled => "sched_cpu_state_already_installed",
             InitError::DispatcherAlreadyInstalled(_) => "syscall_dispatcher_already_installed",
             InitError::DmaTranslation => "dma_translation_unbuilt",
+            InitError::InterruptController(reason) => reason,
         }
     }
 }
@@ -1458,15 +1461,10 @@ mod dispatch_loop_tests {
         );
     }
 
-    /// The CPU the bracket test drives. Every other dispatch-loop test drives
-    /// CPU 0 and they run in parallel, so this one takes a slot of its own
-    /// rather than racing them for the per-CPU frequency accounting.
-    const BRACKET_CPU: tairix_kernel_sched_api::CpuId = 3;
-
-    /// A scheduler over [`BRACKET_CPU`] and its lower siblings, with no
-    /// threads, so the loop's first step decides everything.
-    fn bracket_cpus() -> (Arc<TestArch>, Scheduler<TestArch>) {
-        let cpus = BRACKET_CPU + 1;
+    /// A scheduler over `cpu` and its lower siblings, with no threads, so the
+    /// loop's first step decides everything.
+    fn bracket_cpus(cpu: tairix_kernel_sched_api::CpuId) -> (Arc<TestArch>, Scheduler<TestArch>) {
+        let cpus = cpu + 1;
         let arch = Arc::new(TestArch::with_cpus(cpus));
         let scheduler = Scheduler::new(
             SchedulerConfig {
@@ -1503,13 +1501,16 @@ mod dispatch_loop_tests {
         // Never read except to prove it changed, so the sentinel is a value no
         // real stamp can be.
         const UNSEEN: u64 = u64::MAX;
+        // A slot of its own: any other test's dispatch on this CPU while the
+        // mechanism is bound would stamp the span this test reads.
+        let cpu = crate::test_boot::claim_cpu();
         let limits =
             CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000).expect("a real range");
         let in_body = Arc::new(AtomicU64::new(UNSEEN));
         let at_gate = Arc::new(AtomicU64::new(UNSEEN));
 
         crate::cpufreq::with_bound_mechanism(ProcessId(0x0C_D0), limits, 0, |_handle| {
-            let (arch, scheduler) = bracket_cpus();
+            let (arch, scheduler) = bracket_cpus(cpu);
             let scheduler = Arc::new(scheduler);
 
             // Runs twice: the second dispatch reads the span the first one
@@ -1517,11 +1518,11 @@ mod dispatch_loop_tests {
             let runs = AtomicU64::new(0);
             let body_in_body = in_body.clone();
             let sentinel = scheduler
-                .spawn(BRACKET_CPU, Priority::Normal, move |_| {
+                .spawn(cpu, Priority::Normal, move |_| {
                     if runs.fetch_add(1, Ordering::Relaxed) == 0 {
                         return TaskAction::Yield;
                     }
-                    let state = crate::cpu_state::get(BRACKET_CPU).expect("a test CPU");
+                    let state = crate::cpu_state::get(cpu).expect("a test CPU");
                     body_in_body.store(
                         state.cpu_active_since.load(Ordering::Relaxed),
                         Ordering::Release,
@@ -1538,7 +1539,7 @@ mod dispatch_loop_tests {
                 while !gate_arch.idle_mask_gate_entered() {
                     thread::yield_now();
                 }
-                let state = crate::cpu_state::get(BRACKET_CPU).expect("a test CPU");
+                let state = crate::cpu_state::get(cpu).expect("a test CPU");
                 gate_at_gate.store(
                     state.cpu_active_since.load(Ordering::Relaxed),
                     Ordering::Release,
@@ -1552,12 +1553,7 @@ mod dispatch_loop_tests {
                 gate_arch.release_idle_mask_gate();
             });
 
-            run_dispatch_loop(
-                scheduler.as_ref(),
-                arch.as_ref(),
-                BRACKET_CPU,
-                DispatchRole::Boot,
-            );
+            run_dispatch_loop(scheduler.as_ref(), arch.as_ref(), cpu, DispatchRole::Boot);
             observer.join().expect("the observer thread completes");
         });
 
@@ -2171,6 +2167,7 @@ fn run_phases<A: KernelArch>(
         spawn_identity,
         heap,
         installed_memory_bytes,
+        malformed_units,
         ..
     } = boot;
 
@@ -2313,8 +2310,9 @@ fn run_phases<A: KernelArch>(
         audit_sink,
         mastering,
     )?;
-    let routing = arch.route_interrupts(dma_translation, scheduler_config.cpus, log_sink);
-    audit_interrupt_routing(audit_sink, routing);
+    if let Some(units) = malformed_units {
+        units.audit(audit_sink);
+    }
 
     // Assemble `KernelState` and lift it to `'static` so the
     // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
@@ -2372,7 +2370,17 @@ fn run_phases<A: KernelArch>(
     // [`KernelArch::install_irq_dispatch`] is a no-op; real arch
     // ports (x86_64) override it to publish the reference into the
     // arch crate's dispatcher slot (set-once per boot).
-    state.arch.install_irq_dispatch(&state.irq);
+    state
+        .arch
+        .install_irq_dispatch(&state.irq)
+        .map_err(InitError::InterruptController)?;
+    let routing = state.arch.route_interrupts(
+        state.dma_translation,
+        scheduler_config.cpus,
+        frame_allocator,
+        log_sink,
+    );
+    audit_interrupt_routing(audit_sink, routing);
 
     // Seed the kernel CSPRNG output reserve from the platform entropy source
     // now that the arch handle is live. Until this point the reserve is the
@@ -2732,6 +2740,10 @@ fn run_phases<A: KernelArch>(
         None => hook,
     }
     .with_mastering(state.mastering);
+    let hook = match malformed_units {
+        Some(units) => hook.with_malformed_units(units),
+        None => hook,
+    };
     // Install the on-disk application store when the boot path provided one
     // (`plans/APPS.md` deliverable 8): the `spawn` syscall then verifies and
     // launches `…/<Name>.app/Run` bundles from the mounted volume. With none
@@ -2939,32 +2951,44 @@ fn build_dma_translation<A: KernelArch + 'static>(
             for node in &nodes {
                 match crate::iommu::take_over(node, &env) {
                     Ok(unit) => taken.push(unit),
-                    Err(refusal) => refused.push((node.id(), refusal)),
+                    Err(refusal) => refused.push(crate::iommu::Stranded::of(node, refusal)),
                 }
             }
         }
         None => refused.extend(
             nodes
                 .iter()
-                .map(|node| (node.id(), crate::iommu::Refusal::NoRegisters)),
+                .map(|node| crate::iommu::Stranded::of(node, crate::iommu::Refusal::NoRegisters)),
         ),
+    }
+    let mut peers = alloc::vec::Vec::new();
+    let mut held = true;
+    arch.pci_windows(&mut |window| {
+        held &= peers.try_reserve(1).is_ok();
+        if held {
+            peers.push(window);
+        }
+    });
+    if !held {
+        return Err(InitError::DmaTranslation);
     }
     let translation = crate::iommu::Translation::start(
         taken,
-        &refused,
+        refused,
         guarded,
         tree,
         audit,
         mastering,
         &mut |node, outcome| match outcome {
-            crate::iommu::UnitOutcome::Translating(quiesced, stage) => {
-                audit_unit_translating(audit, node, quiesced, stage);
+            crate::iommu::UnitOutcome::Translating(quiesced, tables) => {
+                audit_unit_translating(audit, node, quiesced, tables);
             }
             crate::iommu::UnitOutcome::Stranded(refusal, quiesced) => {
                 audit_unit_stranded(audit, node, refusal_outcome(refusal), quiesced);
             }
         },
-    );
+    )
+    .avoiding(peers);
     let translation: &'static crate::iommu::Translation = Box::leak(Box::new(translation));
     Ok(Some(translation))
 }
@@ -3001,6 +3025,38 @@ fn start_kernel_services<A: KernelArch + 'static>(
         );
     }
     serve_dma_faults(state, audit_sink);
+    serve_deferred_frees(state);
+}
+
+/// Confirm translated carves' frees in batches, on a task of their own.
+fn serve_deferred_frees<A: KernelArch + 'static>(state: &'static KernelState<A>) {
+    let Some(translation) = state.dma_translation else {
+        return;
+    };
+    // Translation is only ever built over a direct map.
+    let Some(phys) = state.arch.direct_phys_map() else {
+        return;
+    };
+    let frames = state.frame_allocator;
+    let release: &'static crate::iommu::Release<'static> = Box::leak(Box::new(
+        move |blocks: &[tairix_kernel_mem::FrameBlock]| {
+            // A block that cannot be scrubbed is never reused.
+            if tairix_kernel_mem::scrub_blocks(phys, blocks).is_ok() {
+                let _ = tairix_kernel_mem::free_blocks(frames, blocks);
+            }
+        },
+    ));
+    let memory = frames
+        .usable_frames()
+        .saturating_mul(tairix_kernel_mem::PAGE_SIZE) as u64;
+    translation.serve_frees(
+        crate::iommu::Translation::batch_budget(memory),
+        release,
+        |body| {
+            let cpu = SchedulerArch::current_cpu(state.arch.as_ref());
+            crate::kthread::spawn_service(&state.scheduler, state.arch.context_switch(), cpu, body)
+        },
+    );
 }
 
 /// Serve every translating unit's faults, each on a task of its own.
@@ -3015,10 +3071,7 @@ fn serve_dma_faults<A: KernelArch + 'static>(
     let env = crate::iommu::FaultEnv {
         table: &state.irq,
         controller: state.irq_controller,
-        msi: state
-            .arch
-            .kernel_msi_facility()
-            .unwrap_or(&crate::devres::NULL_MSI_ALLOC_FACILITY),
+        msi: state.arch.kernel_msi_facility(),
         audit,
         clock,
     };
@@ -3070,6 +3123,7 @@ fn refusal_outcome(refusal: crate::iommu::Refusal) -> &'static str {
     match refusal {
         crate::iommu::Refusal::Unmatched => "unmatched",
         crate::iommu::Refusal::NoRegisters => "no_registers",
+        crate::iommu::Refusal::Unsnooped => "unsnooped",
         crate::iommu::Refusal::Unit(err) => unit_refusal(err),
     }
 }
@@ -3128,7 +3182,7 @@ fn audit_unit_translating(
     audit: &(dyn Sink + Sync),
     node: u32,
     quiesced: crate::iommu::Quiesced,
-    stage: tairix_kernel_iommu_api::Stage,
+    tables: tairix_kernel_iommu_api::Tables,
 ) {
     let count = |count: usize| tairix_log::FieldValue::UnsignedInt(count as u64);
     emit(
@@ -3150,7 +3204,7 @@ fn audit_unit_translating(
             },
             Field {
                 key: "stage",
-                value: tairix_log::FieldValue::Str(stage.name()),
+                value: tairix_log::FieldValue::Str(tables.name()),
             },
             Field {
                 key: "stopped",

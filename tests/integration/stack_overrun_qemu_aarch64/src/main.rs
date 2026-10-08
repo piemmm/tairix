@@ -284,7 +284,7 @@ mod kernel {
         // SAFETY: called once on the boot core with a stack established and
         // the vectors installed.
         unsafe {
-            gic::init();
+            tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
         }
 
         // Build the live scheduler over the arch port, then install the

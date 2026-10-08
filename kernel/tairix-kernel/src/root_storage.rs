@@ -240,6 +240,7 @@ mod tests {
     use crate::driver_catalog::EMMC2_PATH;
     use crate::hwdiscovery::observe_virtio_mmio_block_devices;
     use crate::hwtree_node_ids::VIRTIO_BLOCK_PROBE_NODE_BASE_ID;
+    use crate::iommu_fdt::SlotDma;
 
     /// Captures every audited event so a test can assert the bind decision
     /// was logged with the right id and level. Host
@@ -432,8 +433,12 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
-            .expect("enumerate");
+        observe_virtio_mmio_block_devices(
+            &bus,
+            &SlotDma::UNTRANSLATED,
+            &mut SelectionSink(&mut selection),
+        )
+        .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
         assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
         assert_eq!(binding.node.id(), VIRTIO_BLOCK_PROBE_NODE_BASE_ID);
@@ -448,8 +453,12 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[1]);
-        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
-            .expect("enumerate");
+        observe_virtio_mmio_block_devices(
+            &bus,
+            &SlotDma::UNTRANSLATED,
+            &mut SelectionSink(&mut selection),
+        )
+        .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Info);
     }
@@ -461,8 +470,12 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[1, VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
-            .expect("enumerate");
+        observe_virtio_mmio_block_devices(
+            &bus,
+            &SlotDma::UNTRANSLATED,
+            &mut SelectionSink(&mut selection),
+        )
+        .expect("enumerate");
         let binding = selection.finish(&audit).expect("virtio-blk binds");
         assert_eq!(binding.driver_path, VIRTIO_BLK_PATH);
     }
@@ -474,8 +487,12 @@ mod tests {
         let audit = RecordingSink::default();
         let mut selection = RootBlockSelection::new();
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
-            .expect("enumerate");
+        observe_virtio_mmio_block_devices(
+            &bus,
+            &SlotDma::UNTRANSLATED,
+            &mut SelectionSink(&mut selection),
+        )
+        .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Error);
     }
@@ -489,7 +506,11 @@ mod tests {
         let devices = alloc::vec![VIRTIO_BLK_DEVICE_ID; MAX_SLOTS + 1];
         let bus = FakeBus::with(&devices);
         assert_eq!(
-            observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection)),
+            observe_virtio_mmio_block_devices(
+                &bus,
+                &SlotDma::UNTRANSLATED,
+                &mut SelectionSink(&mut selection)
+            ),
             Err(DriverError::BufferTooSmall)
         );
     }
@@ -504,8 +525,12 @@ mod tests {
         let mut selection = RootBlockSelection::new();
         selection.observe(&virtio_blk_node(3));
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
-        observe_virtio_mmio_block_devices(&bus, &mut SelectionSink(&mut selection))
-            .expect("enumerate");
+        observe_virtio_mmio_block_devices(
+            &bus,
+            &SlotDma::UNTRANSLATED,
+            &mut SelectionSink(&mut selection),
+        )
+        .expect("enumerate");
         assert!(selection.finish(&audit).is_none());
         assert_eq!(audit.only().1, Level::Error);
     }

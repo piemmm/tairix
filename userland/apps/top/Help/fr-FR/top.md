@@ -14,7 +14,10 @@ démarre sur les processus de l'appelant ; la vue système n'est accordée
 par le service qu'à un appelant détenant `CAP_SYSINFO_GLOBAL`.
 
 L'affichage se rafraîchit de lui-même à chaque intervalle (3,0 secondes
-sauf si `-d` le change), et `r` le rafraîchit immédiatement.
+sauf si `-d` le change), et `r` le rafraîchit immédiatement. Un
+rafraîchissement que le service d'information système n'a pu terminer sous
+charge garde la dernière liste, la ligne d'état le signale, et le
+rafraîchissement suivant relit la liste.
 
 Le visualiseur ne prend aucun opérande : il se pilote avec des touches
 pressées dans la session.

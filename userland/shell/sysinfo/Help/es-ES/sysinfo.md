@@ -64,6 +64,17 @@ Las consultas:
   pertenece (un guion para un candidato no afiliado), su ranura, su papel
   (candidate/held/in-sync/resyncing/faulted), su tamaño y la generación
   de metadatos que porta (necesita `CAP_SYSINFO_HW`).
+- `dma`, `iommu` — las unidades de traducción DMA: una fila por unidad — su
+  nodo en el árbol de hardware, su familia, si traduce o por qué no, cómo
+  señala sus fallos, dónde residen sus traducciones, los propietarios y
+  flujos del firmware que mantiene, y sus fallos registrados y descartados,
+  y los flujos que una tormenta silenció, desde el arranque — después una
+  fila por grupo de aislamiento que tiene un propietario — su unidad, el
+  nodo y la generación del titular y en qué estado está ese propietario —
+  después una fila por nodo que una unidad traduce para un propietario — su
+  unidad y su grupo, la generación y el estado de su propietario, sus
+  flujos, y las correspondencias de su dominio y los bytes que abarcan
+  (requiere `CAP_SYSINFO_HW`).
 - `show <resource-ref>` — lee una referencia de recurso
   `info:`/`state:`/`stats:` e imprime su valor. Esos espacios de nombres
   sirven valores con tipo a través de esta API, nunca flujos de bytes: `cat`

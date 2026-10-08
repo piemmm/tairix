@@ -10,16 +10,11 @@ use crate::transport::{ChainView, Direction, MockTransport, Status, Transport, V
 use alloc::boxed::Box;
 use tairix_abi::driver::BufferClass;
 
-/// Build a `'static` reference to a freshly-leaked `MockHost` —
-/// the unit tests hand this to `SplitQueue::new`.
-fn static_host() -> &'static MockHost {
-    Box::leak(Box::new(MockHost::new()))
-}
-
 #[test]
 fn split_queue_initialises_free_list_and_programs_transport() {
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("setup");
     assert_eq!(q.index(), 0);
     assert_eq!(q.size(), 8);
@@ -29,7 +24,8 @@ fn split_queue_initialises_free_list_and_programs_transport() {
 #[test]
 fn split_queue_rejects_non_power_of_two() {
     let mut t = MockTransport::new(1, 16, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     assert_eq!(
         SplitQueue::new(&mut t, host, 0, 7, 1).map(|_| ()),
         Err(VirtioError::QueueSizeTooLarge)
@@ -43,10 +39,41 @@ fn a_non_conformant_device_maximum_is_rounded_not_refused() {
     // cap binds a conformant request, take the largest conformant size
     // below it: refusing would leave the device with no queue at all.
     let mut t = MockTransport::new(1, 6, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("setup");
     assert_eq!(q.size(), 4);
     assert_eq!(q.free_count(), 4);
+}
+
+/// A queue whose rings cannot be had is the host's exhaustion, never the
+/// device's fault, and reaches the driver as exhaustion; the host's other
+/// refusals reach it as themselves.
+#[test]
+fn a_queue_without_memory_for_its_rings_is_out_of_memory() {
+    use tairix_abi::DriverError;
+    let mut t = MockTransport::new(1, 8, 0, 0);
+    let host = MockHost::exhausted();
+    t.reach(&host);
+    assert_eq!(
+        SplitQueue::new(&mut t, &host, 0, 8, 2).map(|_| ()),
+        Err(VirtioError::OutOfMemory)
+    );
+    assert_eq!(
+        PackedQueue::new(&mut t, &host, 0, 8, 2).map(|_| ()),
+        Err(VirtioError::OutOfMemory)
+    );
+    assert_eq!(
+        VirtioError::OutOfMemory.as_driver_error(),
+        DriverError::OutOfMemory
+    );
+    let denied = VirtioError::host_refused(DriverError::PermissionDenied);
+    assert_eq!(denied, VirtioError::Host(DriverError::PermissionDenied));
+    assert_eq!(denied.as_driver_error(), DriverError::PermissionDenied);
+    assert_eq!(
+        VirtioError::host_refused(DriverError::OutOfMemory),
+        VirtioError::OutOfMemory
+    );
 }
 
 #[test]
@@ -55,6 +82,7 @@ fn a_queue_too_shallow_for_what_the_driver_needs_is_refused_before_it_is_program
     // the driver had begun it.
     let mut t = MockTransport::new(1, 2, 0, 0);
     let host = MockHost::new();
+    t.reach(&host);
     assert_eq!(
         SplitQueue::new(&mut t, &host, 0, 8, 3).map(|_| ()),
         Err(VirtioError::QueueTooShallow)
@@ -76,7 +104,8 @@ fn a_queue_too_shallow_for_what_the_driver_needs_is_refused_before_it_is_program
 #[test]
 fn add_chain_consumes_descriptors_and_publishes_avail() {
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 8, 1).unwrap();
     let mut slab: DmaSlab = host.alloc_dma_zeroed(64).unwrap();
     let device = slab.device_addr();
@@ -97,7 +126,8 @@ fn add_chain_consumes_descriptors_and_publishes_avail() {
 #[test]
 fn a_cpu_pointer_handed_to_the_device_reaches_nothing() {
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 8, 1).unwrap();
     let input: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
     assert_ne!(
@@ -120,7 +150,8 @@ fn a_cpu_pointer_handed_to_the_device_reaches_nothing() {
 fn descriptor_chain_round_trip_through_mock_peer() {
     // Two-segment chain: device-read input + device-write output.
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 8, 1).unwrap();
     let mut input: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
     input.as_bytes_mut()[..4].copy_from_slice(b"PING");
@@ -165,7 +196,8 @@ fn descriptor_chain_round_trip_through_mock_peer() {
 #[test]
 fn add_chain_rejects_empty_and_too_long() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     assert_eq!(q.add_chain(&[]), Err(VirtioError::DescriptorTableOverflow));
     // Build segments larger than queue_size = 4.
@@ -184,7 +216,8 @@ fn add_chain_rejects_empty_and_too_long() {
 #[test]
 fn add_chain_exhausts_free_pool() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
     // Four 1-descriptor chains: should succeed.
@@ -211,7 +244,8 @@ fn add_chain_exhausts_free_pool() {
 #[test]
 fn used_ring_wraps_with_reclaim() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let in_region = host.alloc_dma_zeroed(4).unwrap();
     let out_region = host.alloc_dma_zeroed(4).unwrap();
@@ -256,7 +290,8 @@ fn used_ring_wraps_with_reclaim() {
 #[test]
 fn poll_used_returns_no_completion_when_empty() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     assert_eq!(q.poll_used(), Err(VirtioError::NoCompletion));
 }
@@ -285,7 +320,8 @@ fn poll_used_rejects_a_device_head_outside_the_descriptor_table() {
     // driver must reject it fail-closed, never walk a
     // descriptor outside the region.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let region = host.alloc_dma_zeroed(4).unwrap();
     let head = two_segment_chain(&mut q, &region);
@@ -304,7 +340,8 @@ fn a_completion_for_anything_but_a_chain_the_device_holds_is_refused() {
     // it has already returned; reclaiming any of those would hand one
     // descriptor to two chains.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let region = host.alloc_dma_zeroed(4).unwrap();
     let head = two_segment_chain(&mut q, &region);
@@ -329,7 +366,8 @@ fn a_device_writing_over_the_descriptor_table_cannot_corrupt_the_free_list() {
     // The free list and chain links live in driver memory; a device
     // scribbling on the table it reads is never trusted for them.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let region = host.alloc_dma_zeroed(4).unwrap();
     let head = two_segment_chain(&mut q, &region);
@@ -355,7 +393,8 @@ fn the_peer_refuses_a_chain_that_leaves_the_table_or_loops() {
     // Followed blindly, a `next` past the table reads memory the table does
     // not own.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 2).unwrap();
     let region = host.alloc_dma_zeroed(4).unwrap();
     let head = two_segment_chain(&mut q, &region);
@@ -404,15 +443,11 @@ fn transport_setup_records_status_progression() {
 fn bounce_buffer_zeroises_on_sensitive_path() {
     let host = MockHost::new();
     let slab = host.alloc_dma_zeroed(16).unwrap();
+    let slot = slab.slot();
     let mut bb = BounceBuffer::new(slab, BufferClass::Sensitive);
     bb.stage(b"top-secret-data!").unwrap();
-    let bytes = bb.full_region_mut().as_ptr();
     drop(bb);
-    // SAFETY: the host leaks the box, so the bytes at `bytes` stay
-    // allocated for the rest of the test process. After the
-    // sensitive-class drop they must be zero.
-    let view: &[u8] = unsafe { core::slice::from_raw_parts(bytes, 16) };
-    assert!(view.iter().all(|b| *b == 0));
+    assert!(host.released_zeroed(slot));
 }
 
 // --- Packed virtqueue (virtio 1.1 §2.7) ------------------------------
@@ -420,7 +455,8 @@ fn bounce_buffer_zeroises_on_sensitive_path() {
 #[test]
 fn packed_queue_initialises_and_programs_transport() {
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let q = PackedQueue::new(&mut t, host, 0, 8, 1).expect("setup");
     assert_eq!(q.index(), 0);
     assert_eq!(q.size(), 8);
@@ -433,7 +469,8 @@ fn packed_queue_initialises_and_programs_transport() {
 #[test]
 fn packed_queue_rejects_non_power_of_two() {
     let mut t = MockTransport::new(1, 16, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     assert_eq!(
         PackedQueue::new(&mut t, host, 0, 7, 1).map(|_| ()),
         Err(VirtioError::QueueSizeTooLarge)
@@ -443,7 +480,8 @@ fn packed_queue_rejects_non_power_of_two() {
 #[test]
 fn packed_add_chain_consumes_slots() {
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = PackedQueue::new(&mut t, host, 0, 8, 1).unwrap();
     let device = host.alloc_dma_zeroed(8).unwrap().device_addr();
     let id = q
@@ -467,7 +505,8 @@ fn packed_add_chain_consumes_slots() {
 #[test]
 fn packed_chain_round_trip_through_mock_peer() {
     let mut t = MockTransport::new(1, 8, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = PackedQueue::new(&mut t, host, 0, 8, 1).unwrap();
     let mut input: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
     input.as_bytes_mut()[..4].copy_from_slice(b"PING");
@@ -511,7 +550,8 @@ fn packed_chain_round_trip_through_mock_peer() {
 #[test]
 fn packed_add_chain_rejects_empty_and_too_long() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
     assert_eq!(q.add_chain(&[]), Err(VirtioError::DescriptorTableOverflow));
     let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
@@ -529,7 +569,8 @@ fn packed_add_chain_rejects_empty_and_too_long() {
 #[test]
 fn packed_add_chain_exhausts_free_pool() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
     for _ in 0..4 {
@@ -558,7 +599,8 @@ fn packed_ring_wraps_with_reclaim() {
     // counters; reclamation must recycle slots so we never see
     // QueueFull and the in-band AVAIL/USED flags must stay coherent.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let in_region = host.alloc_dma_zeroed(4).unwrap();
     let out_region = host.alloc_dma_zeroed(4).unwrap();
@@ -600,7 +642,8 @@ fn packed_ring_wraps_with_reclaim() {
 #[test]
 fn packed_poll_used_returns_no_completion_when_empty() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
     assert_eq!(q.poll_used(), Err(VirtioError::NoCompletion));
 }
@@ -608,22 +651,16 @@ fn packed_poll_used_returns_no_completion_when_empty() {
 #[test]
 fn packed_drain_is_noop_without_available_chain() {
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let _q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
     t.install_shim(0, Box::new(|_chain: &mut ChainView<'_>| Ok(0)));
     assert_eq!(t.drain_packed_queue(0).unwrap(), 0);
 }
 
-fn silent_host() -> &'static MockHost {
-    Box::leak(Box::new(MockHost::silent()))
-}
-
 /// A request queue over a device that answers each chain by writing `tag`
 /// into its one device-write segment.
-fn tagging_queue(
-    t: &mut MockTransport,
-    host: &'static dyn crate::host::VirtioHost,
-) -> RequestQueue {
+fn tagging_queue(t: &mut MockTransport, host: &dyn crate::host::VirtioHost) -> RequestQueue {
     t.install_shim(
         0,
         Box::new(|chain: &mut ChainView<'_>| {
@@ -656,7 +693,8 @@ fn request(input: &DmaSlab, output: &DmaSlab) -> [ChainSegment; 2] {
 fn a_request_answered_in_time_returns_its_own_completion() {
     let mut t = MockTransport::new(1, 4, 0, 0);
     t.set_synchronous_notify(true);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let mut input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -674,8 +712,9 @@ fn a_request_answered_in_time_returns_its_own_completion() {
 fn a_late_completion_is_never_taken_for_a_later_request() {
     // The device answers the first chain only after its deadline passed; the
     // late completion must retire that chain, never pose as the second's.
-    let host = silent_host();
+    let host = &MockHost::silent();
     let mut t = MockTransport::new(1, 4, 0, 0);
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let mut input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -719,7 +758,8 @@ fn a_late_completion_is_never_taken_for_a_later_request() {
 fn a_wake_storm_with_no_completion_fails_closed_and_abandons_the_chain() {
     // `MockHost` wakes every wait at once and never answers.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -740,7 +780,8 @@ fn a_repeated_completion_is_refused_before_anything_is_published_over_it() {
     // next request's, it would hand that caller the last request's bytes.
     let mut t = MockTransport::new(1, 4, 0, 0);
     t.set_synchronous_notify(true);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let mut input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -765,9 +806,10 @@ fn a_repeated_completion_is_refused_before_anything_is_published_over_it() {
 fn a_request_waits_no_longer_than_its_budget_however_often_it_is_woken() {
     // Each wake restarting the wait would stretch a 20 ns budget to
     // `MAX_COMPLETION_WAKES` wakes of up to 20 ns each.
-    let host = silent_host();
+    let host = &MockHost::silent();
     host.script_waits([MockWait::Spurious { after_ns: 9 }; 8]);
     let mut t = MockTransport::new(1, 4, 0, 0);
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -783,7 +825,7 @@ fn a_request_waits_no_longer_than_its_budget_however_often_it_is_woken() {
 fn a_request_answered_on_its_first_wake_reads_the_clock_once() {
     // The deadline needs one reading; a request that needed no second wait
     // must not pay for another.
-    let host: &'static MockHost = Box::leak(Box::new(MockHost::new()));
+    let host = &MockHost::new();
     let mut t = MockTransport::new(1, 4, 0, 0);
     let mut q = tagging_queue(&mut t, host);
     let device = t.into_shared();
@@ -800,8 +842,9 @@ fn a_request_answered_on_its_first_wake_reads_the_clock_once() {
 #[test]
 fn an_abandoned_chain_is_notified_again_while_it_is_out() {
     // A notify the device missed is one reason a chain never came back.
-    let host = silent_host();
+    let host = &MockHost::silent();
     let mut t = MockTransport::new(1, 4, 0, 0);
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -821,8 +864,9 @@ fn an_abandoned_chain_is_notified_again_while_it_is_out() {
 fn an_abandoned_chain_is_notified_again_at_most_once_per_budget() {
     // A caller retrying in a loop would otherwise ring the doorbell on every
     // try.
-    let host = silent_host();
+    let host = &MockHost::silent();
     let mut t = MockTransport::new(1, 4, 0, 0);
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -855,9 +899,10 @@ fn an_abandoned_chain_is_notified_again_at_most_once_per_budget() {
 fn a_wait_that_cannot_be_made_fails_the_request_offline_at_once() {
     // A revoked or refused interrupt binding times every wait out at once;
     // waiting again would spin through the wake bound and misreport a fault.
-    let host = static_host();
+    let host = &MockHost::new();
     host.script_waits([MockWait::Refused, MockWait::Refused]);
     let mut t = MockTransport::new(1, 4, 0, 0);
+    t.reach(host);
     let mut q = tagging_queue(&mut t, host);
     let input = host.alloc_dma_zeroed(1).unwrap();
     let output = host.alloc_dma_zeroed(1).unwrap();
@@ -871,7 +916,7 @@ fn a_wait_that_cannot_be_made_fails_the_request_offline_at_once() {
 
 #[test]
 fn a_completion_whose_interrupt_was_lost_is_taken_when_its_wait_times_out() {
-    let host = silent_host();
+    let host = &MockHost::silent();
     host.script_waits([MockWait::Lost]);
     let mut t = MockTransport::new(1, 4, 0, 0);
     let mut q = tagging_queue(&mut t, host);
@@ -892,7 +937,8 @@ fn a_returned_chains_descriptors_are_reissued_last() {
     // Reissued at once, a returned chain's head would make the device's
     // repeat of that completion pose as the new chain's.
     let mut t = MockTransport::new(1, 4, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     let region = host.alloc_dma_zeroed(4).unwrap();
     let first = two_segment_chain(&mut q, &region);
@@ -911,6 +957,7 @@ fn a_returned_chains_descriptors_are_reissued_last() {
 fn a_withheld_queue_returns_nothing_to_its_pool() {
     let mut t = MockTransport::new(1, 4, 0, 0);
     let host = MockHost::new();
+    t.reach(&host);
     let mut q = RequestQueue::new(SplitQueue::new(&mut t, &host, 0, 4, 1).unwrap());
     let held = host.slabs_outstanding();
     q.withhold();

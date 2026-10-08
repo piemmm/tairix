@@ -50,8 +50,8 @@ type Translation = (u64, bool, bool);
 /// Ways the model can be told to misbehave.
 #[derive(Copy, Clone, Default)]
 pub(crate) struct Quirks {
-    /// Reject the next page invalidation as an illegal command.
-    pub reject_next_pages: bool,
+    /// Reject the next command of this opcode as illegal.
+    pub reject_next: Option<u64>,
     /// Never store a completion wait's token.
     pub ignore_waits: bool,
     /// Lose every device table entry invalidation, keeping what was cached.
@@ -125,6 +125,15 @@ impl<'f> Model<'f> {
 
     pub(crate) fn quirk(&self, quirks: Quirks) {
         self.state.lock().quirks = quirks;
+    }
+
+    /// Whether the IOTLB holds `domain`'s translation of the page at `iova`.
+    pub(crate) fn caches(&self, domain: u16, iova: u64) -> bool {
+        self.state
+            .lock()
+            .iotlb
+            .get(&(domain, iova & !(PAGE - 1)))
+            .is_some_and(Option::is_some)
     }
 
     /// Leave the model as firmware might: translating through a device table
@@ -273,6 +282,11 @@ impl<'f> Model<'f> {
             let low = self.frames.word(at).unwrap_or(0);
             let high = self.frames.word(at + 8).unwrap_or(0);
             let opcode = low >> 60;
+            if state.quirks.reject_next == Some(opcode) {
+                state.quirks.reject_next = None;
+                self.halt(state, at);
+                return;
+            }
             match opcode {
                 1 => {
                     if low & 1 != 0 && !state.quirks.ignore_waits {
@@ -286,10 +300,6 @@ impl<'f> Model<'f> {
                     }
                 }
                 OPCODE_PAGES => {
-                    if core::mem::take(&mut state.quirks.reject_next_pages) {
-                        self.halt(state, at);
-                        return;
-                    }
                     let domain = low16(low >> 32);
                     let (base, size) = if high & 1 == 0 {
                         (high & ADDRESS, PAGE)

@@ -405,22 +405,15 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     /// never confirms its reset or clears [`Status::FEATURES_OK`] after
     /// negotiation, and any [`DriverError`] from the DMA-buffer allocation.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, DriverError> {
-        transport.reset().map_err(VirtioError::as_driver_error)?;
-        host.device_quiesced();
-        let mut status = Status::default().with(Status::ACKNOWLEDGE);
-        transport.set_status(status);
-        status = status.with(Status::DRIVER);
-        transport.set_status(status);
         // QEMU's non-transitional virtio-input makes the posted eventq
         // buffers visible only once the modern interface is acked. No
         // device-specific feature is negotiated.
-        let driver_features = transport.device_features() & TRANSPORT_FEATURES;
-        transport.set_driver_features(driver_features);
-        status = status.with(Status::FEATURES_OK);
-        transport.set_status(status);
-        if !transport.status().contains(Status::FEATURES_OK) {
-            return Err(VirtioError::FeaturesRejected.as_driver_error());
-        }
+        let negotiated = tairix_virtio::negotiate::<_, DriverError>(
+            &mut transport,
+            || host.device_quiesced(),
+            |offered| Ok(offered & TRANSPORT_FEATURES),
+        )?;
+        let mut status = negotiated.status;
         let wheels = Wheels::reported_by(&mut transport);
         let touch = touch::MultiTouch::reported_by(&mut transport);
         // Program the deepest event queue the device supports, up to the

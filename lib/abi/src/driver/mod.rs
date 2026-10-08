@@ -74,7 +74,7 @@ pub mod virtio;
 pub mod virtio_mmio;
 pub mod virtio_pci;
 
-pub use dma::{DmaHost, DmaSlab, PoolId, SlabFreeFn};
+pub use dma::{DmaHost, DmaReach, DmaSlab, PoolId, SlabEnd, SlabFreeFn};
 pub use i2c::{I2cAddress, I2cPort};
 pub use mailbox::MailboxChannel;
 pub use mmio::{MmioMapError, MmioMapper, RegisterBlock, RegisterWindow, WindowError};
@@ -462,6 +462,13 @@ pub enum DriverError {
     /// move lawful. `abi-v1` has no dedicated `EINVAL`, so it maps to
     /// [`Errno::OutOfRange`] like every other malformed-argument refusal.
     DirectoryCycle = 21,
+    /// The memory the operation needs cannot be had: the host's frames, its
+    /// DMA budget, or the driver's own bookkeeping are exhausted.
+    ///
+    /// Distinct from [`DeviceFault`](Self::DeviceFault): the device is
+    /// healthy and the machine is short of memory, so freeing memory can
+    /// clear it. Maps to [`Errno::OutOfMemory`].
+    OutOfMemory = 22,
 }
 
 impl DriverError {
@@ -504,6 +511,7 @@ impl DriverError {
             19 => Ok(Self::AlreadyExists),
             20 => Ok(Self::DirectoryNotEmpty),
             21 => Ok(Self::DirectoryCycle),
+            22 => Ok(Self::OutOfMemory),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -534,6 +542,7 @@ impl DriverError {
             Self::TooManyLinks => Errno::TooManyLinks,
             Self::AlreadyExists => Errno::AlreadyExists,
             Self::DirectoryNotEmpty => Errno::NotEmpty,
+            Self::OutOfMemory => Errno::OutOfMemory,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -572,6 +581,7 @@ impl DriverError {
             Errno::OutOfRange => Self::OutOfRange,
             Errno::PermissionDenied => Self::PermissionDenied,
             Errno::NoSpace => Self::NoSpace,
+            Errno::OutOfMemory => Self::OutOfMemory,
             Errno::MediumError => Self::MediumError,
             Errno::DeviceOffline => Self::DeviceOffline,
             Errno::WouldBlock | Errno::EndpointStalled => Self::Busy,
@@ -1045,46 +1055,6 @@ pub trait DriverHost {
     /// None.
     fn kind(&self) -> DriverKind;
 
-    /// Returns the per-driver virtio host, if the driver host has
-    /// minted one for this driver module.
-    ///
-    /// Drivers that consume virtio transports (`virtio_blk`,
-    /// `virtio_net`, future virtio-class drivers) call this once at
-    /// `register()` time to obtain a [`VirtioHost`] handle the
-    /// driver retains (typically inside its driver struct) for the
-    /// lifetime of the load. The default implementation returns
-    /// `None`, which is the correct shape for every host that does
-    /// not (yet) ship virtio-class plumbing — for example a
-    /// unit-test seam that drives a non-virtio driver, or the
-    /// kernel host before the `kernel-host` feature is enabled on
-    /// `tairix-drv-bus-virtio`.
-    ///
-    /// The signature takes `&self` (not `&mut self`) so it composes
-    /// with the frozen driver-load entry point
-    /// `pub fn register(host: &dyn DriverHost) -> Result<DriverHandle,
-    /// DriverError>`. The returned [`VirtioHost`]
-    /// uses interior mutability for its own per-allocation
-    /// bookkeeping (see [`VirtioHost`]'s `&self`-based method
-    /// signatures), so passing it through an immutable reference is
-    /// sound.
-    ///
-    /// This method is an `abi-v1` *internal* addition (i.e., it
-    /// extends the host trait observed by in-tree drivers; the
-    /// public driver entry point above is unchanged). The default
-    /// body keeps every existing host impl source-compatible.
-    ///
-    /// # Errors
-    ///
-    /// Never fails; absence of a virtio host is reported as `None`.
-    ///
-    /// # Capabilities
-    ///
-    /// None at the call site; the underlying host enforces capability
-    /// checks at each [`VirtioHost`] method.
-    fn virtio_host(&self) -> Option<&dyn VirtioHost> {
-        None
-    }
-
     /// Returns the per-driver MMIO-map facility, if the driver host
     /// has minted one for this driver module.
     ///
@@ -1123,11 +1093,10 @@ pub trait DriverHost {
     /// a bus driver that has to hand the hardware a physically-addressable
     /// buffer (an xHCI device-context array, event/command/transfer rings, a
     /// scratchpad) obtains a [`DmaSlab`] through the returned [`DmaHost`]. A
-    /// virtio driver still uses [`virtio_host`](Self::virtio_host), which
-    /// extends [`DmaHost`]; this accessor exists so a *non*-virtio driver
-    /// never has to reach through a virtio-shaped trait to allocate DMA
-    /// (the allocation contract is defined once, in
-    /// [`DmaHost`]).
+    /// virtio driver is handed a [`VirtioHost`], which
+    /// extends [`DmaHost`]; this accessor serves a *non*-virtio driver, which
+    /// never has to reach through a virtio-shaped trait to allocate DMA (the
+    /// allocation contract is defined once, in [`DmaHost`]).
     ///
     /// The default implementation returns `None`, the correct shape for a
     /// host that ships no DMA facility (a unit-test seam for a driver that
@@ -1349,6 +1318,7 @@ mod tests {
         assert_eq!(DriverError::AlreadyExists.as_i32(), 19);
         assert_eq!(DriverError::DirectoryNotEmpty.as_i32(), 20);
         assert_eq!(DriverError::DirectoryCycle.as_i32(), 21);
+        assert_eq!(DriverError::OutOfMemory.as_i32(), 22);
     }
 
     #[test]
@@ -1375,6 +1345,7 @@ mod tests {
         assert_eq!(DriverError::AlreadyExists.as_errno(), Errno::AlreadyExists);
         assert_eq!(DriverError::DirectoryNotEmpty.as_errno(), Errno::NotEmpty);
         assert_eq!(DriverError::DirectoryCycle.as_errno(), Errno::OutOfRange);
+        assert_eq!(DriverError::OutOfMemory.as_errno(), Errno::OutOfMemory);
     }
 
     #[test]
@@ -1401,12 +1372,13 @@ mod tests {
             DriverError::AlreadyExists,
             DriverError::DirectoryNotEmpty,
             DriverError::DirectoryCycle,
+            DriverError::OutOfMemory,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(22), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(23), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 
@@ -1453,6 +1425,11 @@ mod tests {
         assert_eq!(
             DriverError::from_errno(Errno::NoSpace),
             DriverError::NoSpace
+        );
+        assert_eq!(
+            DriverError::from_errno(Errno::OutOfMemory),
+            DriverError::OutOfMemory,
+            "a service short of memory is no faulted device"
         );
         // Fails closed: a timed-out or vanished endpoint, a cancelled call,
         // and anything unrecognised are a device fault, never mistaken for a
@@ -1620,7 +1597,6 @@ mod tests {
         // A host that wires no facilities reports each optional accessor as
         // absent, never as an error or a synthesised handle (a missing facility is silent; the bus driver fails closed).
         let host = StubHost;
-        assert!(host.virtio_host().is_none());
         assert!(host.mmio_mapper().is_none());
         assert!(host.dma_host().is_none());
         assert!(host.mailbox().is_none());
@@ -1656,7 +1632,7 @@ mod tests {
             if size == 0 {
                 return Err(DriverError::BufferTooSmall);
             }
-            Err(DriverError::LengthOutOfRange)
+            Err(DriverError::OutOfMemory)
         }
 
         fn device_quiesced(&self) {}
@@ -1710,8 +1686,23 @@ mod tests {
         ));
         assert!(matches!(
             dma.alloc_dma_zeroed(4096),
-            Err(DriverError::LengthOutOfRange)
+            Err(DriverError::OutOfMemory)
         ));
+    }
+
+    #[test]
+    fn a_dma_reach_is_one_to_64_bits_and_a_host_that_cannot_bound_refuses_less() {
+        assert_eq!(DmaReach::new(0), None);
+        assert_eq!(DmaReach::new(65), None);
+        let narrow = DmaReach::new(32).expect("a 32-bit master");
+        assert_eq!(narrow, DmaReach::of::<32>());
+        assert_eq!(narrow.bits(), 32);
+        assert_eq!(narrow.end(), Some(1 << 32));
+        assert_eq!(DmaReach::new(64), Some(DmaReach::FULL));
+        assert_eq!(DmaReach::FULL.end(), None);
+        let host = FacilityHost::new();
+        assert_eq!(host.narrow_dma_reach(DmaReach::FULL), Ok(()));
+        assert_eq!(host.narrow_dma_reach(narrow), Err(DriverError::Unsupported));
     }
 
     #[test]
@@ -1829,7 +1820,7 @@ mod tests {
     #[test]
     fn sole_register_window_resolves_an_mmio_window_by_its_cpu_base() {
         let grants = [
-            HwResource::dma(0x8000_0000, 0),
+            HwResource::dma(0x8000_0000, 0, crate::DmaCoherence::Snooped),
             HwResource::mmio(0x1000_0000, 0x1000),
             HwResource::irq(33, 1),
         ];
@@ -1854,7 +1845,14 @@ mod tests {
     fn sole_register_window_fails_closed() {
         // No window grant.
         assert_eq!(
-            sole_register_window([HwResource::dma(0x8000_0000, 0)].iter()),
+            sole_register_window(
+                [HwResource::dma(
+                    0x8000_0000,
+                    0,
+                    crate::DmaCoherence::Snooped
+                )]
+                .iter()
+            ),
             Err(DriverError::NotFound)
         );
         // Two window grants — ambiguous, refused rather than guessed.
@@ -1896,7 +1894,14 @@ mod tests {
     #[test]
     fn sole_port_range_fails_closed() {
         assert_eq!(
-            sole_port_range([HwResource::dma(0x8000_0000, 0)].iter()),
+            sole_port_range(
+                [HwResource::dma(
+                    0x8000_0000,
+                    0,
+                    crate::DmaCoherence::Snooped
+                )]
+                .iter()
+            ),
             Err(DriverError::NotFound)
         );
         let two = [HwResource::port(0x70, 2), HwResource::port(0x3F8, 8)];

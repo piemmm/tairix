@@ -46,8 +46,8 @@ use tairix_abi::driver::dmaengine::{
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
 use tairix_abi::{
-    HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuStreams, HW_NODE_MAX_RESOURCES,
-    HW_NODE_ROOT, HW_NODE_ROOT_ID,
+    DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource, IommuStreams,
+    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID,
 };
 use tairix_fdt::iommu::{iommu_cells, stream_id};
 use tairix_fdt::{
@@ -65,15 +65,16 @@ const FIRST_EMITTED_ID: u32 = HW_NODE_ROOT_ID + 1;
 
 /// The per-port half of the device-tree walk.
 pub trait FdtPlatform {
-    /// Cells in one `interrupts` specifier on this platform's interrupt
-    /// parent (three for a GIC, one for a PLIC).
-    const INTERRUPT_CELLS: usize;
+    /// Cells in one `interrupts` specifier on the root interrupt controller
+    /// the tree describes (three for a GIC, one for a PLIC, two for an
+    /// APLIC).
+    fn interrupt_cells(&self) -> usize;
 
     /// Read whatever tree-wide facts the interrupt mapping needs, once,
     /// before the walk starts.
     fn from_tree(fdt: &Fdt<'_>) -> Self;
 
-    /// Map one whole specifier — exactly `INTERRUPT_CELLS` cells — to the
+    /// Map one whole specifier — exactly [`Self::interrupt_cells`] cells — to the
     /// line number a granted driver binds, or `None` for a specifier this
     /// port cannot represent or its controller cannot raise.
     ///
@@ -111,9 +112,28 @@ pub trait FdtPlatform {
     }
 
     /// Push any resource only this platform's tree can describe onto a node
-    /// the walk has already built. Ports with no board augmentation leave
-    /// the default.
-    fn augment(&self, _node: &Node<'_>, _depth: usize, _levels: &[BusLevel<'_>], _hw: &mut HwNode) {
+    /// the walk has already built, whose DMA is `coherence` wherever it
+    /// masters any. Ports with no board augmentation leave the default.
+    fn augment(
+        &self,
+        _node: &Node<'_>,
+        _depth: usize,
+        _levels: &[BusLevel<'_>],
+        _coherence: DmaCoherence,
+        _hw: &mut HwNode,
+    ) {
+    }
+
+    /// How a master's DMA meets the CPU's caches where neither it nor any
+    /// node above it says: the architecture's devicetree convention.
+    const DEFAULT_DMA_COHERENCE: DmaCoherence;
+
+    /// Whether the kernel drives `node`'s device itself — the port's
+    /// interrupt controllers — so the walk marks it
+    /// [`HwProperty::KernelDriven`] and no driver is loaded for it. The walk
+    /// marks a generic ECAM PCI host so on every port.
+    fn kernel_driven(&self, _node: &Node<'_>) -> bool {
+        false
     }
 }
 
@@ -173,6 +193,7 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
         let mut children_seen = [0usize; MAX_WALK_DEPTH];
         // The interrupt parent the children of the node at each depth inherit.
         let mut interrupt_parents = [None; MAX_WALK_DEPTH];
+        let mut stated = StatedCoherence::new();
 
         let mut nodes = self.fdt.operational_nodes();
         while let Some(node) = nodes.next() {
@@ -196,15 +217,24 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
                 children_seen[0] = 0;
                 interrupt_parents[0] =
                     children_interrupt_parent(&node, own_interrupt_parent(&node, None));
+                stated.reach(&node, 0);
                 continue;
             }
 
             let interrupt_parent = own_interrupt_parent(&node, interrupt_parents[depth - 1]);
+            let coherence = stated
+                .reach(&node, depth)
+                .unwrap_or(P::DEFAULT_DMA_COHERENCE);
             let mut ancestor = ancestors[depth - 1];
             let mut accepted = 0;
-            if let Some(mut emitted) =
-                self.build_node(&node, depth, &levels, ancestor, next_id, interrupt_parent)
-            {
+            let placed = Placement {
+                depth,
+                parent: ancestor,
+                id: next_id,
+                interrupt_parent,
+                coherence,
+            };
+            if let Some(mut emitted) = self.build_node(&node, &levels, placed) {
                 // A child of an addressed, non-enumerable bus carries the
                 // *authority* half of its existence: an endpoint grant
                 // naming the id its bus driver will serve it on. The index
@@ -251,17 +281,32 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
     fn build_node(
         &self,
         node: &Node<'_>,
-        depth: usize,
         levels: &[BusLevel<'_>],
-        parent: u32,
-        id: u32,
-        interrupt_parent: Option<u32>,
+        placed: Placement,
     ) -> Option<HwNode> {
+        let Placement {
+            depth,
+            parent,
+            id,
+            interrupt_parent,
+            coherence,
+        } = placed;
         if !is_emitted(node) {
             return None;
         }
         let class = classify(node);
         let mut hw = HwNode::new(id, parent, class);
+        // Stated first, so the node always has room for it: one the kernel
+        // drives that could not say so would be a load target. A generic ECAM
+        // host is the kernel's on every port: it enumerates the functions
+        // below and owns their configuration space.
+        if (self.platform.kernel_driven(node) || node.is_compatible(tairix_fdt::pci::ECAM_HOST))
+            && hw
+                .push_resource(HwResource::property(HwProperty::KernelDriven, 1))
+                .is_err()
+        {
+            return None;
+        }
 
         if let Some(compat) = node.property("compatible") {
             for s in compat.iter_strings() {
@@ -301,19 +346,70 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
             translation => translation,
         };
         let mut masters = translation.names_a_master();
+        if class == HwDeviceClass::Iommu {
+            // A unit masters memory itself, for its tables, queues and
+            // records, which the kernel places with no regard to its bus.
+            let _ = hw.push_resource(HwResource::dma(0, 0, coherence));
+        }
         if class == HwDeviceClass::Dma {
             let channels = self.platform.dma_channel_mask(node, depth, levels);
             masters = DmaControllerDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(id), channels)
                 .is_ok_and(|duty| hw.push_resource(HwResource::dma_controller(&duty)).is_ok());
         }
         if masters && translation != MasterTranslation::Refused {
-            push_dma_windows(depth, levels, &mut hw);
+            push_dma_windows(depth, levels, coherence, &mut hw);
         }
         push_dma_requests(&self.fdt, node, &mut hw);
 
-        self.platform.augment(node, depth, levels, &mut hw);
+        self.platform
+            .augment(node, depth, levels, coherence, &mut hw);
 
         Some(hw)
+    }
+}
+
+/// Where the walk reached a node: its depth, the id of the emitted node it
+/// hangs from, the id it would take, and what it inherits.
+#[derive(Copy, Clone)]
+struct Placement {
+    depth: usize,
+    parent: u32,
+    id: u32,
+    interrupt_parent: Option<u32>,
+    coherence: DmaCoherence,
+}
+
+/// What `node` itself says of its DMA's coherence, by the Devicetree Spec's
+/// `dma-coherent` and `dma-noncoherent`: [`None`] for neither, and unsnooped
+/// for both, which claims nothing it could be trusted for.
+fn own_dma_coherence(node: &Node<'_>) -> Option<DmaCoherence> {
+    match (
+        node.property("dma-coherent").is_some(),
+        node.property("dma-noncoherent").is_some(),
+    ) {
+        (true, false) => Some(DmaCoherence::Snooped),
+        (false, false) => None,
+        (_, true) => Some(DmaCoherence::Unsnooped),
+    }
+}
+
+/// The coherence each depth's node states, or inherits from the nearest node
+/// above it that does, as a walk reaches nodes in tree order.
+#[derive(Clone)]
+struct StatedCoherence([Option<DmaCoherence>; MAX_WALK_DEPTH]);
+
+impl StatedCoherence {
+    const fn new() -> Self {
+        Self([None; MAX_WALK_DEPTH])
+    }
+
+    /// What `node`, reached at `depth` below [`MAX_WALK_DEPTH`], states or
+    /// inherits; [`None`] where no node on its path says.
+    fn reach(&mut self, node: &Node<'_>, depth: usize) -> Option<DmaCoherence> {
+        let inherited = depth.checked_sub(1).and_then(|above| self.0[above]);
+        let coherence = own_dma_coherence(node).or(inherited);
+        self.0[depth] = coherence;
+        coherence
     }
 }
 
@@ -342,13 +438,18 @@ fn children_interrupt_parent(node: &Node<'_>, own: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Push the windows a bus master at `depth` — a DMA controller, or a device
-/// its port knows masters DMA itself — reaches memory through, each composed
-/// through every bus between it and the root and carrying the bus address it
-/// starts at. With nothing on the way that translates, it reaches memory
-/// untranslated: one unconstrained window. A bus that maps nothing leaves it
-/// no window.
-pub fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+/// Push the windows a bus master at `depth` — a DMA controller, a unit, or a
+/// device its port knows masters DMA itself — reaches memory through, each
+/// composed through every bus between it and the root, carrying the bus
+/// address it starts at and the master's `coherence`. With nothing on the
+/// way that translates, it reaches memory untranslated: one unconstrained
+/// window. A bus that maps nothing leaves it no window.
+pub fn push_dma_windows(
+    depth: usize,
+    levels: &[BusLevel<'_>],
+    coherence: DmaCoherence,
+    hw: &mut HwNode,
+) {
     if depth == 0 {
         return;
     }
@@ -357,7 +458,7 @@ pub fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) 
     };
     match reach.windows() {
         None => {
-            let _ = hw.push_resource(HwResource::dma(0, 0));
+            let _ = hw.push_resource(HwResource::dma(0, 0, coherence));
         }
         Some(windows) => {
             for window in windows {
@@ -365,7 +466,12 @@ pub fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) 
                     continue;
                 };
                 if hw
-                    .push_resource(HwResource::dma_translated(top, window.size, window.bus))
+                    .push_resource(HwResource::dma_translated(
+                        top,
+                        window.size,
+                        window.bus,
+                        coherence,
+                    ))
                     .is_err()
                 {
                     return;
@@ -630,14 +736,16 @@ pub fn provider<'a>(fdt: &Fdt<'a>, phandle: u32) -> Option<Provider<'a>> {
     None
 }
 
-/// Every node the walk emits with the id it gives it, in emission order: the
+/// Every node the walk emits with the id it gives it, in emission order — the
 /// walk's own numbering, which a pass reading the tree after the walk names
-/// nodes by.
+/// nodes by — and the DMA coherence it states or inherits, [`None`] where the
+/// architecture's convention holds.
 #[must_use]
 pub fn emitted<'a>(fdt: &Fdt<'a>) -> Emitted<'a> {
     Emitted {
         nodes: fdt.operational_nodes(),
         next_id: Some(FIRST_EMITTED_ID),
+        stated: StatedCoherence::new(),
     }
 }
 
@@ -647,10 +755,11 @@ pub fn emitted<'a>(fdt: &Fdt<'a>) -> Emitted<'a> {
 pub struct Emitted<'a> {
     nodes: OperationalNodes<'a>,
     next_id: Option<u32>,
+    stated: StatedCoherence,
 }
 
 impl<'a> Iterator for Emitted<'a> {
-    type Item = (u32, Node<'a>);
+    type Item = (u32, Node<'a>, Option<DmaCoherence>);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -664,9 +773,10 @@ impl<'a> Iterator for Emitted<'a> {
                 self.next_id = None;
                 return None;
             }
+            let coherence = self.stated.reach(&node, depth);
             if depth > 0 && is_emitted(&node) {
                 self.next_id = id.checked_add(1);
-                return Some((id, node));
+                return Some((id, node, coherence));
             }
         }
     }
@@ -810,7 +920,7 @@ fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], h
 /// would invent a line. A single specifier the port cannot represent is
 /// skipped and the rest still emitted, each at its own position.
 fn push_irq_resources<P: FdtPlatform>(platform: &P, node: &Node<'_>, hw: &mut HwNode) {
-    let specifier_len = P::INTERRUPT_CELLS * CELL_BYTES;
+    let specifier_len = platform.interrupt_cells() * CELL_BYTES;
     let Some(interrupts) = node.property("interrupts") else {
         return;
     };
@@ -918,7 +1028,8 @@ mod tests {
     };
     use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
     use tairix_abi::{
-        HwDeviceClass, HwNode, HwResource, HwResourceKind, IommuStreams, HW_NODE_MAX_RESOURCES,
+        DmaCoherence, HwDeviceClass, HwNode, HwResource, HwResourceKind, IommuStreams,
+        HW_NODE_MAX_RESOURCES,
     };
     use tairix_fdt::fixture::DtbBuilder;
     use tairix_fdt::{BusLevel, Fdt, Node};
@@ -931,7 +1042,11 @@ mod tests {
     struct BarePlatform;
 
     impl FdtPlatform for BarePlatform {
-        const INTERRUPT_CELLS: usize = 1;
+        const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+        fn interrupt_cells(&self) -> usize {
+            1
+        }
 
         fn from_tree(_fdt: &Fdt<'_>) -> Self {
             Self
@@ -979,7 +1094,11 @@ mod tests {
     struct GappedPlatform;
 
     impl FdtPlatform for GappedPlatform {
-        const INTERRUPT_CELLS: usize = 1;
+        const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+        fn interrupt_cells(&self) -> usize {
+            1
+        }
 
         fn from_tree(_fdt: &Fdt<'_>) -> Self {
             Self
@@ -1586,8 +1705,18 @@ mod tests {
         assert_eq!(
             windows,
             std::vec![
-                HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xc000_0000),
-                HwResource::dma_translated(0xff80_0000, 0x0380_0000, 0x7c00_0000),
+                HwResource::dma_translated(
+                    0x4000_0000,
+                    0x4000_0000,
+                    0xc000_0000,
+                    tairix_abi::DmaCoherence::Snooped
+                ),
+                HwResource::dma_translated(
+                    0xff80_0000,
+                    0x0380_0000,
+                    0x7c00_0000,
+                    tairix_abi::DmaCoherence::Snooped
+                ),
             ]
         );
         // Every line fits: the window, eleven lines, the duty and two windows.
@@ -1662,7 +1791,8 @@ mod tests {
             std::vec![HwResource::dma_translated(
                 0x4000_0000,
                 0x4000_0000,
-                0xc000_0000
+                0xc000_0000,
+                tairix_abi::DmaCoherence::Snooped
             )]
         );
     }
@@ -1711,6 +1841,148 @@ mod tests {
         assert_eq!(wide.class(), Some(HwDeviceClass::Dma));
     }
 
+    /// [`BarePlatform`] on an architecture whose masters do not snoop unless
+    /// their tree says so.
+    struct UnsnoopedPlatform;
+
+    impl FdtPlatform for UnsnoopedPlatform {
+        const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Unsnooped;
+
+        fn interrupt_cells(&self) -> usize {
+            1
+        }
+
+        fn from_tree(_fdt: &Fdt<'_>) -> Self {
+            Self
+        }
+
+        fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
+            BarePlatform.interrupt_line(specifier)
+        }
+
+        fn root_interrupt_controller(&self) -> Option<u32> {
+            Some(ROOT_INTC)
+        }
+    }
+
+    /// A DMA controller `name` whose own node states `statements`.
+    fn stating_controller(b: &mut DtbBuilder, name: &str, statements: &[&str]) {
+        b.begin_node(name);
+        b.prop_str("compatible", &std::format!("test,{name}"));
+        b.prop_u32("#dma-cells", 1);
+        for statement in statements {
+            b.prop(statement, &[]);
+        }
+        b.end_node();
+    }
+
+    /// A tree stating coherence at every level a master inherits it from,
+    /// the root stating `root`.
+    fn coherence_tree(root: &[&str]) -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        for statement in root {
+            b.prop(statement, &[]);
+        }
+        stating_controller(&mut b, "unstated", &[]);
+        for (bus, statement) in [
+            ("unsnooped-bus", "dma-noncoherent"),
+            ("snooped-bus", "dma-coherent"),
+        ] {
+            b.begin_node(bus);
+            b.prop_str("compatible", "simple-bus");
+            b.prop("ranges", &[]);
+            b.prop("dma-ranges", &[]);
+            b.prop(statement, &[]);
+            stating_controller(&mut b, &std::format!("{bus}-child"), &[]);
+            stating_controller(&mut b, &std::format!("{bus}-snooper"), &["dma-coherent"]);
+            stating_controller(
+                &mut b,
+                &std::format!("{bus}-both"),
+                &["dma-coherent", "dma-noncoherent"],
+            );
+            b.begin_node(&std::format!("{bus}-unit"));
+            b.prop_str("compatible", &std::format!("test,{bus}-unit"));
+            b.prop_u32("#iommu-cells", 1);
+            b.end_node();
+            b.end_node();
+        }
+        b.end_node();
+        b.build()
+    }
+
+    /// The coherence each DMA window of the node `compatible` names states.
+    fn coherence_of(nodes: &[HwNode], compatible: &str) -> Vec<Option<DmaCoherence>> {
+        by_key(nodes, compatible.as_bytes())
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+            .map(HwResource::dma_coherence)
+            .collect()
+    }
+
+    #[test]
+    fn a_master_s_dma_is_as_coherent_as_the_nearest_node_stating_it() {
+        let nodes = discover(&coherence_tree(&[]));
+        let (snooped, unsnooped) = (Some(DmaCoherence::Snooped), Some(DmaCoherence::Unsnooped));
+        for (master, coherence) in [
+            ("test,unstated", snooped),
+            ("test,unsnooped-bus-child", unsnooped),
+            ("test,unsnooped-bus-snooper", snooped),
+            ("test,snooped-bus-child", snooped),
+            ("test,snooped-bus-snooper", snooped),
+            // Both statements at once claim nothing a master is trusted for.
+            ("test,unsnooped-bus-both", unsnooped),
+            ("test,snooped-bus-both", unsnooped),
+            // A unit's own DMA is its tables', queues' and records'.
+            ("test,unsnooped-bus-unit", unsnooped),
+            ("test,snooped-bus-unit", snooped),
+        ] {
+            assert_eq!(
+                coherence_of(&nodes, master),
+                std::vec![coherence],
+                "{master}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pass_after_the_walk_reads_each_node_s_stated_coherence() {
+        let blob = coherence_tree(&[]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let stated = |wanted: &str| {
+            super::emitted(&fdt)
+                .find(|(_, node, _)| node.name() == wanted.as_bytes())
+                .map(|(_, _, coherence)| coherence)
+                .expect("emitted")
+        };
+        assert_eq!(stated("unstated"), None, "the convention is the caller's");
+        assert_eq!(stated("unsnooped-bus-child"), Some(DmaCoherence::Unsnooped));
+        assert_eq!(stated("unsnooped-bus-snooper"), Some(DmaCoherence::Snooped));
+        assert_eq!(stated("snooped-bus-both"), Some(DmaCoherence::Unsnooped));
+    }
+
+    #[test]
+    fn where_no_node_states_it_the_architecture_s_convention_holds() {
+        let unsnooped = discover_on::<UnsnoopedPlatform>(&coherence_tree(&[]));
+        assert_eq!(
+            coherence_of(&unsnooped, "test,unstated"),
+            std::vec![Some(DmaCoherence::Unsnooped)]
+        );
+        assert_eq!(
+            coherence_of(&unsnooped, "test,snooped-bus-child"),
+            std::vec![Some(DmaCoherence::Snooped)]
+        );
+        let stated = discover_on::<UnsnoopedPlatform>(&coherence_tree(&["dma-coherent"]));
+        assert_eq!(
+            coherence_of(&stated, "test,unstated"),
+            std::vec![Some(DmaCoherence::Snooped)],
+            "the root's own statement is inherited"
+        );
+    }
+
     #[test]
     fn a_controller_off_any_translating_bus_reaches_memory_untranslated() {
         let mut b = DtbBuilder::new();
@@ -1748,10 +2020,13 @@ mod tests {
                 .filter(|r| r.kind() == Some(HwResourceKind::Dma))
                 .collect()
         };
-        assert_eq!(windows(b"test,top-dma"), std::vec![HwResource::dma(0, 0)]);
+        assert_eq!(
+            windows(b"test,top-dma"),
+            std::vec![HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped)]
+        );
         assert_eq!(
             windows(b"test,identity-dma"),
-            std::vec![HwResource::dma(0, 0)]
+            std::vec![HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped)]
         );
         // A bus with no `dma-ranges` maps nothing for its children.
         assert!(windows(b"test,opaque-dma").is_empty());
@@ -2070,7 +2345,7 @@ mod tests {
         );
         // The numbering a later pass reads the tree by is the walk's own.
         let fdt = Fdt::new(&blob).expect("valid fdt");
-        let numbered: Vec<u32> = super::emitted(&fdt).map(|(id, _)| id).collect();
+        let numbered: Vec<u32> = super::emitted(&fdt).map(|(id, _, _)| id).collect();
         let walked: Vec<u32> = nodes.iter().skip(1).map(HwNode::id).collect();
         assert_eq!(numbered, walked);
     }
@@ -2136,7 +2411,11 @@ mod tests {
     struct TriggeredPlatform;
 
     impl FdtPlatform for TriggeredPlatform {
-        const INTERRUPT_CELLS: usize = 2;
+        const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
+        fn interrupt_cells(&self) -> usize {
+            2
+        }
 
         fn from_tree(_fdt: &Fdt<'_>) -> Self {
             Self

@@ -424,16 +424,36 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
             Err(_) => line.push_str("DMA isolation group (malformed)"),
         },
         Some(HwResourceKind::IommuReserved) => describe_iommu_reserved(resource, line),
-        Some(HwResourceKind::Property) => match resource.property_value() {
-            Ok((HwProperty::UsbInterface, number)) => {
-                let _ = write!(line, "USB interface {number}");
-            }
-            Ok((HwProperty::FaultInterrupt, place)) => {
-                let _ = write!(line, "Faults raised on interrupt {place} of the node");
-            }
-            Err(_) => line.push_str("Property (malformed)"),
-        },
+        Some(HwResourceKind::MsiDoorbell) => describe_doorbell(resource, line),
+        Some(HwResourceKind::Property) => describe_property(resource, line),
         None => line.push_str("resource (unknown kind)"),
+    }
+}
+
+fn describe_doorbell(resource: &HwResource, line: &mut String) {
+    match resource.doorbell_window() {
+        Ok(window) => {
+            let _ = write!(
+                line,
+                "MSI doorbell at 0x{:x} [size=0x{:x}]",
+                window.start,
+                window.end - window.start
+            );
+        }
+        Err(_) => line.push_str("MSI doorbell (malformed)"),
+    }
+}
+
+fn describe_property(resource: &HwResource, line: &mut String) {
+    match resource.property_value() {
+        Ok((HwProperty::UsbInterface, number)) => {
+            let _ = write!(line, "USB interface {number}");
+        }
+        Ok((HwProperty::FaultInterrupt, place)) => {
+            let _ = write!(line, "Faults raised on interrupt {place} of the node");
+        }
+        Ok((HwProperty::KernelDriven, _)) => line.push_str("Driven by the kernel"),
+        Err(_) => line.push_str("Property (malformed)"),
     }
 }
 
@@ -817,7 +837,12 @@ C 02  Network controller
             .push_match_key(HwMatchKey::pci(0x8086, 0x3483, 0x08_01_00))
             .expect("key fits");
         for resource in [
-            HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xc000_0000),
+            HwResource::dma_translated(
+                0x4000_0000,
+                0x4000_0000,
+                0xc000_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
             HwResource::dma_controller(
                 &DmaControllerDuty::new(endpoint, Some(0x7f5)).expect("valid"),
             ),
@@ -912,6 +937,37 @@ C 02  Network controller
         assert_eq!(
             out.lines()[1..],
             ["  Faults raised on interrupt 1 of the node"]
+        );
+    }
+
+    #[test]
+    fn verbose_says_the_kernel_drives_an_interrupt_controller() {
+        let mut gic = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::InterruptController);
+        gic.push_match_key(HwMatchKey::pci(0x1af4, 0x1000, 0x08_00_00))
+            .expect("key fits");
+        gic.push_resource(HwResource::property(HwProperty::KernelDriven, 1))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&gic.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(out.lines()[1..], ["  Driven by the kernel"]);
+    }
+
+    #[test]
+    fn verbose_shows_where_a_function_s_messages_are_written() {
+        let mut nic = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Network);
+        nic.push_match_key(HwMatchKey::pci(0x1af4, 0x1041, 0x02_00_00))
+            .expect("key fits");
+        nic.push_resource(HwResource::msi_doorbell(0x0809_0000, 0x1000).expect("a page"))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&nic.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines()[1..],
+            ["  MSI doorbell at 0x8090000 [size=0x1000]"]
         );
     }
 

@@ -28,7 +28,9 @@ use tairix_abi::{
 };
 use tairix_fdt::Fdt;
 
-use crate::enumerate::{Mmio, VIRTIO_MMIO_DEFAULT_VENDOR, VIRTIO_MMIO_MAGIC};
+use tairix_virtio::transport_mmio::regs::MAGIC_VALUE as VIRTIO_MMIO_MAGIC;
+
+use crate::enumerate::{Mmio, VIRTIO_MMIO_DEFAULT_VENDOR};
 use crate::transport::MmioRead;
 
 // ---- Mock MMIO mapper ----------------------------------------------------
@@ -510,4 +512,77 @@ fn virtio_mmio_bus_from_dtb_reports_not_found_without_slots() {
         .err()
         .expect("no slots → error");
     assert_eq!(err, DriverError::NotFound);
+}
+
+/// Two populated slots, the second's node disabled.
+fn one_slot_disabled() -> Vec<u8> {
+    let mut b = tairix_fdt::fixture::DtbBuilder::new();
+    b.begin_node("");
+    for (base, status) in [(0x0A00_0000u64, "okay"), (0x0A00_0200, "disabled")] {
+        b.begin_node(&alloc::format!("virtio_mmio@{base:x}"));
+        b.prop_str("compatible", "virtio,mmio");
+        b.prop_str("status", status);
+        let mut reg = Vec::new();
+        reg.extend_from_slice(&base.to_be_bytes());
+        reg.extend_from_slice(&0x200u64.to_be_bytes());
+        b.prop("reg", &reg);
+        b.end_node();
+    }
+    b.end_node();
+    b.build()
+}
+
+/// A slot whose node is not operational holds no device a consumer may
+/// use, whatever answers at its base: it is neither enumerated, sized nor
+/// covered.
+#[test]
+fn a_disabled_slot_is_not_a_slot() {
+    let blob = one_slot_disabled();
+    let dtb = Fdt::new(&blob).expect("DTB parses");
+    let mut regs: Vec<(u64, u32)> = Vec::new();
+    regs.extend_from_slice(&slot(0x0A00_0000, 1, 0x554D_4551, 2));
+    regs.extend_from_slice(&slot(0x0A00_0200, 2, 0x554D_4551, 2));
+    let bus = Mmio::new(dtb, FakeMmio { regs });
+    let mut out = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; 4];
+    let n = (&bus as &dyn Bus).enumerate(&mut out).expect("enum ok");
+    assert_eq!(n, 1);
+    assert_eq!(out[0].address, 0x0A00_0000);
+    assert_eq!(bus.slot_window_len(0x0A00_0200), Err(DriverError::NotFound));
+    let dtb = Fdt::new(&blob).expect("DTB parses");
+    assert_eq!(
+        crate::virtio_mmio_aperture(&dtb).expect("aperture ok"),
+        Some((0x0A00_0000, 0x200))
+    );
+}
+
+/// A slot whose identifier registers would run past the address space is
+/// refused, never read at a wrapped address.
+#[test]
+fn a_slot_at_the_top_of_the_address_space_is_malformed() {
+    let base = u64::MAX - 4;
+    let blob = build_virt_dtb_at(&[base], 0);
+    let dtb = Fdt::new(&blob).expect("DTB parses");
+    let bus = Mmio::new(
+        dtb,
+        FakeMmio {
+            regs: vec![(base, VIRTIO_MMIO_MAGIC)],
+        },
+    );
+    let mut out = [BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    }; 1];
+    assert_eq!(
+        (&bus as &dyn Bus).enumerate(&mut out),
+        Err(DriverError::DeviceFault)
+    );
 }

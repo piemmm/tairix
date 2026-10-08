@@ -349,11 +349,18 @@ status) without ever re-borrowing the pool.
 The in-process `MockHost` mints slabs with `PoolId::MOCK`, a
 monotonic `slot` counter, and a free shim that records the release
 (`slabs_outstanding`) and whether the slab came back zeroed
-(`released_zeroed`). It is the one test host every virtio driver's tests
-run on: each wait plays a scripted `MockWait` (the device answers, a wake
-with nothing done, silence for the whole budget, a wait refused at once, or
-a completion whose interrupt is lost) and advances the host's clock by what
-that wait would have taken, and an attached shared
+(`released_zeroed`). It owns the memory it mints and frees it once it,
+and every device reaching it, is dropped — so, as a production pool must,
+it outlives every slab — and a withheld slab is still the host's to free.
+A `MockTransport` reaches that memory once `reach`ed or attached, and only
+by device address: each address resolves through the slab's own pointer,
+keeping the provenance strict-provenance miri checks, and an extent
+running past its slab is a `DeviceFault`, as a device confined by a
+translation unit finds nothing there. It is the one test host every virtio
+driver's tests run on: each wait plays a scripted `MockWait` (the device
+answers, a wake with nothing done, silence for the whole budget, a wait
+refused at once, or a completion whose interrupt is lost) and advances the
+host's clock by what that wait would have taken, and an attached shared
 `MockTransport` (`MockTransport::into_shared`) is drained on the waited
 queue, as a device completing on its interrupt would.
 
@@ -374,12 +381,9 @@ pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + ?Sized> {
 }
 ```
 
-The host **owns** its `DmaPool` (the `'a` lifetime now bounds only
-the pool's `FrameAllocator` borrow, not the pool itself). Ownership
-is what lets `kernel/virtio`'s `KernelVirtioFactory` mint a fresh
-per-driver host from behind a shared `&self` borrow — a
-borrowed-`&mut` pool could not be handed out that way (see
-[Kernel-binary factory](#kernel-binary-factory-kernelvirtiofactory)).
+The host **owns** its `DmaPool` (the `'a` lifetime bounds only the
+pool's `FrameAllocator` borrow, not the pool itself), so the floor
+bring-up that mints one hands it out whole.
 
 `alloc_dma_zeroed` routes every request through
 `kernel/sec::dma::alloc_dma`, which performs the
@@ -420,37 +424,12 @@ re-publishing the same staging could have an abandoned request complete into
 the next one's buffers. Reissue policy belongs to the consumer above, which
 knows whether the request is safe to repeat.
 
-### Kernel-binary factory (`KernelVirtioFactory`)
-
-Stage 4.D Item 2-tail.4 wires the host into the userland driver
-host. The `VirtioHostFactory` trait
-(`mint(&self, granted: &dyn CapabilityQuery) -> Option<Box<dyn VirtioHost>>`)
-lives in the bus-agnostic `lib/virtio` host seam; the userland
-`drvhost` calls it just before a driver's `register()`, and
-`kernel/virtio` supplies the concrete implementation,
-`KernelVirtioFactory`, in `kernel/virtio/src/virtio_factory.rs`.
-Hosting the trait in `lib/virtio` lets both sides depend on `lib/*`
-instead of on each other (`AGENTS.md` §17.4): `drvhost` stays free
-of every `kernel/*` dependency and `kernel/virtio` stays free of
-every `userland/*` dependency. `kernel/virtio` links
-`kernel/{mem,sec,irq}` for the concrete host, while the bus driver
-and device drivers stay on `lib/*` only. `mint` gates on the
-driver's granted capabilities through `&dyn tairix_abi::CapabilityQuery`,
-so the seam never names `lib/caps`.
-
-Each `mint` call builds a brand-new `AddressSpace` (via a
-`make_table` closure) and `DmaPool`, then hands ownership to a fresh
-`KernelVirtioHost`, so every loaded driver gets its own per-process
-heap (`AGENTS.md` §4). A driver whose granted capability set lacks
-`CAP_MEM_DMA` is refused a host outright (`mint` returns `None`),
-failing closed before any pool is allocated.
-
-Capability refusals surface as `DriverError::PermissionDenied`;
-allocator failures (oversize requests, OOM, internal pool config
-errors) collapse to `DriverError::LengthOutOfRange` — the same
-shape the `MockHost` uses when its 64 MiB cap is hit, so a driver
-consumer sees a single failure surface regardless of which host
-minted it.
+A refusal reaches the driver through `DmaGateError::as_driver_error`, the
+one mapping every in-kernel host shares: a missing capability is
+`DriverError::PermissionDenied`, exhausted memory `OutOfMemory`, a carve too
+large to make `LengthOutOfRange`, and a pool fault `OutOfRange`. `MockHost`
+answers its 64 MiB cap as exhaustion too, so a driver sees one shape
+whichever host minted its memory.
 
 ## Capability model
 
@@ -526,8 +505,8 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   MMIO mapper: zero-initialisation + audit emit, drop routes through
   `free_dma`, `CapabilityId::MEM_DMA` refusal returns
   `PermissionDenied`, zero-size short-circuit, two simultaneous
-  disjoint slabs, the `notify_wait` IRQ-park paths, and oversize
-  collapsing to `LengthOutOfRange`.
+  disjoint slabs, the `notify_wait` IRQ-park paths, and a carve the pool
+  cannot back reaching the driver as `OutOfMemory`.
 
 Coverage of each crate's public surface is comfortably above the 75%
 Stage 4 bar (`AGENTS.md` §7).

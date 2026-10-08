@@ -62,6 +62,17 @@ Die Abfragen:
   Bindestrich für einen ungebundenen Kandidaten), sein Steckplatz, seine
   Rolle (candidate/held/in-sync/resyncing/faulted), seine Größe und die
   Metadaten-Generation, die es trägt (benötigt `CAP_SYSINFO_HW`).
+- `dma`, `iommu` — die DMA-Übersetzungseinheiten: eine Zeile je Einheit —
+  ihr Knoten im Hardwarebaum, ihre Familie, ob sie übersetzt oder warum
+  nicht, wie sie ihre Fehler meldet, wo ihre Übersetzungen liegen, die
+  Eigentümer und Firmware-Streams, die sie hält, und ihre seit dem Start
+  aufgezeichneten und verworfenen Fehler sowie die Streams, die ein
+  Fehlersturm stummgeschaltet hat — dann eine Zeile je Isolationsgruppe, die
+  ein Eigentümer hält — ihre Einheit, Knoten und Generation des Halters und
+  dessen Stand — dann eine Zeile je Knoten, den eine Einheit für einen
+  Eigentümer übersetzt — Einheit und Gruppe, Generation und Stand des
+  Eigentümers, seine Streams sowie die Zuordnungen seiner Domäne und deren
+  Bytes (benötigt `CAP_SYSINFO_HW`).
 - `show <resource-ref>` — liest eine `info:`/`state:`/`stats:`-Ressourcen­referenz
   und gibt ihren Wert aus. Diese Namensräume liefern typisierte Werte über
   diese API, niemals Byteströme — `cat` kann sie nicht öffnen. Eine

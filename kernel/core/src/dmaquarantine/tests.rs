@@ -4,7 +4,7 @@ use crate::hwtree::HwNodeLiveness;
 use crate::test_alloc::{opt_in_current_thread, opt_out_current_thread, LiveBytes};
 use alloc::vec::Vec;
 use tairix_kernel_mem::{
-    BootMemoryMap, DmaBlock, DmaCustody, DmaError, Frame, FrameAllocator, MemoryClass,
+    BootMemoryMap, DmaCustody, DmaError, Frame, FrameAllocator, FrameBlock, MemoryClass,
     MemoryRegion, PhysAddr, PhysMap, RegionKind, SimPhysMap, PAGE_SIZE,
 };
 use tairix_sync::{Once, SpinLock};
@@ -115,22 +115,22 @@ macro_rules! fixture {
 
 /// Carve a block for `node` the way a driver's space does — room reserved
 /// first — and fill it, so a scrub is observable.
-fn carve_for(f: &Fixture, node: u32, order: u32) -> DmaBlock {
+fn carve_for(f: &Fixture, node: u32, order: u32) -> FrameBlock {
     f.quarantine.reserve(node).expect("custody reserved");
     let frame = f
         .frames
         .alloc_order(MemoryClass::Dma, order)
         .expect("a free block");
-    let block = DmaBlock { frame, order };
+    let block = FrameBlock { frame, order };
     fill(f.sim, block, 0x5A);
     block
 }
 
-fn carve(f: &Fixture, order: u32) -> DmaBlock {
+fn carve(f: &Fixture, order: u32) -> FrameBlock {
     carve_for(f, NODE, order)
 }
 
-fn fill(sim: &SimPhysMap, block: DmaBlock, byte: u8) {
+fn fill(sim: &SimPhysMap, block: FrameBlock, byte: u8) {
     let ptr = sim
         .translate(block.frame.start(), block.len())
         .expect("in the window");
@@ -139,7 +139,7 @@ fn fill(sim: &SimPhysMap, block: DmaBlock, byte: u8) {
     unsafe { core::ptr::write_bytes(ptr.as_ptr(), byte, block.len()) };
 }
 
-fn is_zero(sim: &SimPhysMap, block: DmaBlock) -> bool {
+fn is_zero(sim: &SimPhysMap, block: FrameBlock) -> bool {
     let ptr = sim
         .translate(block.frame.start(), block.len())
         .expect("in the window");
@@ -420,7 +420,7 @@ fn only_the_bytes_actually_freed_are_counted() {
     // frames, so it must not be reported as released.
     let f = fixture!();
     let before = f.frames.free_frames();
-    let beyond_the_map = DmaBlock {
+    let beyond_the_map = FrameBlock {
         frame: Frame(BASE_FRAME + PAGES + 8),
         order: 0,
     };
@@ -430,7 +430,7 @@ fn only_the_bytes_actually_freed_are_counted() {
             .alloc_order(MemoryClass::Dma, 0)
             .expect("a free block");
         f.frames.free_order(frame, 0).expect("a live block frees");
-        DmaBlock { frame, order: 0 }
+        FrameBlock { frame, order: 0 }
     };
     for block in [beyond_the_map, already_free] {
         f.quarantine.reserve(NODE).expect("custody reserved");
@@ -448,7 +448,7 @@ fn a_block_no_reservation_stands_behind_stays_allocated_for_good() {
         .frames
         .alloc_order(MemoryClass::Dma, 0)
         .expect("a free block");
-    f.quarantine.hold(NODE, 1, DmaBlock { frame, order: 0 });
+    f.quarantine.hold(NODE, 1, FrameBlock { frame, order: 0 });
     assert_eq!(f.frames.free_frames(), before - 1, "never returned");
     assert_eq!(
         f.quarantine.release(NODE, u64::MAX),
@@ -474,7 +474,7 @@ fn a_surrender_never_allocates() {
     // made when the block was carved.
     static COUNTER: LiveBytes = LiveBytes::new();
     let f = fixture!();
-    let blocks: Vec<DmaBlock> = (0..8).map(|_| carve(&f, 0)).collect();
+    let blocks: Vec<FrameBlock> = (0..8).map(|_| carve(&f, 0)).collect();
     opt_in_current_thread(&COUNTER);
     for &block in &blocks {
         f.quarantine.hold(NODE, 1, block);
@@ -511,12 +511,8 @@ fn a_dead_space_surrenders_to_the_quarantine_and_its_successor_frees_it() {
 
     let f = fixture!();
     let before = f.frames.free_frames();
-    let custodian = DmaCustodian {
-        node: NODE,
-        generation: 3,
-        custody: f.quarantine,
-        translation: None,
-    };
+    let custodian =
+        DmaCustodian::untranslated(NODE, 3, f.quarantine, tairix_abi::DmaCoherence::Snooped);
     {
         let mut live = LiveSpace::new(
             AddressSpace::new(HostPageTable::new()),

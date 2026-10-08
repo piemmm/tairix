@@ -131,11 +131,11 @@ pub use fs::{
     FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
 };
 pub use hwtree::{
-    snapshot_nodes, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty, HwRemoveFlags,
-    HwResource, HwResourceKind, HwTreeHeader, HwTreeNodes, IommuGroup, IommuReservedWindow,
-    IommuStreams, MsiAllocation, ReservedAccess, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
-    HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE, SIMPLE_FRAMEBUFFER_COMPATIBLE,
+    snapshot_nodes, DmaCoherence, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty,
+    HwRemoveFlags, HwResource, HwResourceKind, HwTreeHeader, HwTreeNodes, IommuGroup,
+    IommuReservedWindow, IommuStreams, MsiAllocation, ReservedAccess, HWTREE_VERSION_V1,
+    HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
+    HW_NODE_ROOT, HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
 pub use input::{
     KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
@@ -229,11 +229,10 @@ pub use syscalls::{
 pub use sysinfo::{
     decode_reply as decode_sysinfo_reply, encode_reply_err as encode_sysinfo_reply_err,
     encode_reply_ok as encode_sysinfo_reply_ok, encoded_query_table, reply_page,
-    spec_for as sysinfo_spec_for, CpuTimeListRequest, CpuTimeRecord, GroupDirectoryRecord,
-    GroupDirectoryRequest, IntrospectDomain, KernelMemoryStats, LoadAverage, MountAvailability,
-    MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, ProcessState,
-    ResourceLimitRecord, SelfAccountRecord, SelfAccountText, SysinfoQueryId, SysinfoQuerySpec,
-    SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+    spec_for as sysinfo_spec_for, CpuTimeRecord, GroupDirectoryRecord, IntrospectDomain,
+    KernelMemoryStats, LoadAverage, MountAvailability, MountRecord, PageRequest, ProcessRecord,
+    ProcessState, ResourceLimitRecord, SelfAccountRecord, SelfAccountText, SysinfoQueryId,
+    SysinfoQuerySpec, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
     ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN,
     MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN, PROCESS_CPU_NONE,
     PROCESS_FLAGS_ALL, PROCESS_FLAG_SANDBOXED, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN,

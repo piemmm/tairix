@@ -49,6 +49,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+use tairix_abi::driver::DmaReach;
 use tairix_abi::{DriverError, RegisterBlock};
 
 pub mod bank;
@@ -554,11 +555,15 @@ impl<H: RegisterBlock> Xhci<H> {
         self.page_size
     }
 
-    /// `true` if the controller addresses 64-bit DMA (`HCCPARAMS1`
-    /// AC64).
+    /// The address bits the controller drives: all 64 with `HCCPARAMS1`
+    /// AC64, else 32 (xHCI 5.3.6).
     #[must_use]
-    pub const fn ac64(&self) -> bool {
-        self.ac64
+    pub const fn dma_reach(&self) -> DmaReach {
+        if self.ac64 {
+            DmaReach::FULL
+        } else {
+            DmaReach::of::<32>()
+        }
     }
 
     /// `true` if device contexts are 64 bytes (`HCCPARAMS1` CSZ).

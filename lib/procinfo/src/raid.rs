@@ -9,14 +9,11 @@
 //! Both walks are the generic [`walk_pages`](crate::list) loop the process
 //! and mount lists use, so only the per-record decode lives here.
 
-use alloc::vec::Vec;
-
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord, RAID_LIST_LIMIT_MAX};
-use tairix_abi::sysinfo::{RaidListRequest, SysinfoQueryId};
+use tairix_abi::sysinfo::SysinfoQueryId;
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError, WalkStep};
-use crate::request::CallError;
+use crate::list::{walk_records, ListError, WalkStep};
 use crate::transport::Transport;
 
 /// Records requested per RAID list page.
@@ -54,19 +51,15 @@ pub const RAID_PAGE: u16 = RAID_LIST_LIMIT_MAX;
 ///   walk stops at that record.
 pub fn for_each_raid_array(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&RaidArrayRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&RaidArrayRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::RAID_ARRAYS,
         RaidArrayRecord::WIRE_LEN,
         RAID_PAGE,
-        page_request,
-        |chunk| {
-            let record = RaidArrayRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        RaidArrayRecord::from_bytes,
+        sink,
     )
 }
 
@@ -92,42 +85,28 @@ pub fn for_each_raid_array(
 ///   walk stops at that record.
 pub fn for_each_raid_member(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&RaidMemberRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&RaidMemberRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::RAID_MEMBERS,
         RaidMemberRecord::WIRE_LEN,
         RAID_PAGE,
-        page_request,
-        |chunk| {
-            let record = RaidMemberRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        RaidMemberRecord::from_bytes,
+        sink,
     )
-}
-
-/// Encode one page request; both RAID lists take the identical payload, so
-/// the two walks share this encoder.
-fn page_request(offset: u32, limit: u16) -> Vec<u8> {
-    RaidListRequest {
-        offset,
-        limit,
-        flags: 0,
-    }
-    .to_le_bytes()
-    .to_vec()
 }
 
 /// Flatten a walk failure onto the frozen [`Errno`] vocabulary.
 ///
 /// The `Vec`-returning fetches below answer with an [`Errno`] because their
 /// callers are whole command apps that report a single diagnosis; the
-/// distinction [`CallError`] draws is only useful to a caller that renders a
-/// different line per case, which the paging walks above still expose.
+/// distinction [`CallError`](crate::CallError) draws is only useful to a
+/// caller that renders a different line per case, which the paging walks
+/// above still expose.
 #[cfg(all(freestanding, feature = "program"))]
 fn flatten(error: ListError) -> Errno {
+    use crate::CallError;
     match error {
         ListError::Call(CallError::PermissionDenied) => Errno::PermissionDenied,
         ListError::Call(CallError::Service(errno)) | ListError::Sink(errno) => errno,
@@ -148,8 +127,8 @@ fn flatten(error: ListError) -> Errno {
 /// structurally invalid. It is never an empty list standing in for a
 /// failure.
 #[cfg(all(freestanding, feature = "program"))]
-pub fn raid_arrays() -> Result<Vec<RaidArrayRecord>, Errno> {
-    let mut records = Vec::new();
+pub fn raid_arrays() -> Result<alloc::vec::Vec<RaidArrayRecord>, Errno> {
+    let mut records = alloc::vec::Vec::new();
     for_each_raid_array(&crate::client::IpcTransport, |record| {
         records.push(*record);
         Ok(WalkStep::Continue)
@@ -171,8 +150,8 @@ pub fn raid_arrays() -> Result<Vec<RaidArrayRecord>, Errno> {
 /// structurally invalid. It is never an empty list standing in for a
 /// failure.
 #[cfg(all(freestanding, feature = "program"))]
-pub fn raid_members() -> Result<Vec<RaidMemberRecord>, Errno> {
-    let mut records = Vec::new();
+pub fn raid_members() -> Result<alloc::vec::Vec<RaidMemberRecord>, Errno> {
+    let mut records = alloc::vec::Vec::new();
     for_each_raid_member(&crate::client::IpcTransport, |record| {
         records.push(*record);
         Ok(WalkStep::Continue)
@@ -193,7 +172,7 @@ mod tests {
     use tairix_abi::raid_admin::{
         RaidArrayRecord, RaidMemberDisposition, RaidMemberRecord, RAID_SLOT_NONE,
     };
-    use tairix_abi::sysinfo::{RaidListRequest, SysinfoQueryId, SysinfoRequestHeader};
+    use tairix_abi::sysinfo::{PageRequest, SysinfoQueryId, SysinfoRequestHeader};
     use tairix_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in answering both RAID list queries from
@@ -224,7 +203,7 @@ mod tests {
             records: &[T],
             encode: impl Fn(&T) -> Vec<u8>,
         ) -> Result<Vec<u8>, Errno> {
-            let request = RaidListRequest::from_bytes(payload)?;
+            let request = PageRequest::from_bytes(payload)?;
             let offset = request.offset as usize;
             if offset >= records.len() {
                 return Ok(Vec::new());

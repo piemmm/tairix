@@ -13,25 +13,31 @@
 //!
 //! A single global descriptor (`SHOOTDOWN`) serialises shootdowns behind a
 //! spin-acquired flag, so the (rare) page-table-teardown path never races
-//! itself across CPUs. The initiator:
+//! itself across CPUs. Each CPU is asked through a slot of its own in the
+//! caller-sized per-CPU state the arch handle publishes (`install`), keyed
+//! by its dense id, so a CPU's APIC id may be any width and the machine any
+//! size. The initiator:
 //!
-//! 1. builds the set of CPUs to interrupt as a bitmap of LAPIC ids, minus
-//!    its own bit (`target_map`),
-//! 2. spin-acquires the descriptor lock,
-//! 3. stores the target range and the outstanding-acknowledge count, then
-//!    publishes the bitmap **last** — the bitmap is the "go" signal,
-//! 4. raises a [`TLB_SHOOTDOWN_VECTOR`] IPI at each CPU in the bitmap,
+//! 1. finds its first target other than itself that has an APIC id, and
+//!    only then spin-acquires the descriptor lock,
+//! 2. stores the target range,
+//! 3. asks each distinct CPU but itself (`ask`): counts it into the
+//!    outstanding-acknowledge count, then publishes its slot as owing —
+//!    the slot is the "go" signal, and the count is never below the slots
+//!    owing,
+//! 4. raises a [`TLB_SHOOTDOWN_VECTOR`] IPI at each CPU it asked, in one
+//!    batch the local APIC orders after every slot it published,
 //! 5. invalidates the range on *itself* with `invlpg` — unless it asked for
 //!    the remote half only (`shootdown_remote`, a user unmap that already
 //!    flushed each page as it cleared it),
 //! 6. spins until every target has acknowledged (the count reaches zero),
 //!    then releases the lock.
 //!
-//! With no target at all — the single-CPU case — there is nothing to publish
-//! and nobody to wait for, so the call is just the local `invlpg` sweep (or
-//! nothing, for the remote half) and never touches the descriptor. A range
-//! past `SINGLE_PAGE_FLUSH_CEILING` pages reloads `CR3` instead of issuing an
-//! `invlpg` per page, on the initiator and on every target alike.
+//! With no target at all — the single-CPU case — there is nobody to ask or
+//! wait for, so the call is just the local `invlpg` sweep (or nothing, for
+//! the remote half). A range past `SINGLE_PAGE_FLUSH_CEILING` pages reloads
+//! `CR3` instead of issuing an `invlpg` per page, on the initiator and on
+//! every target alike.
 //!
 //! The spin in step 6 is a genuine, bounded synchronisation, not a "retry
 //! until it works" bring-up hack: under-invalidating (returning before a CPU
@@ -53,21 +59,21 @@
 //! Serving from a spin means a target could otherwise acknowledge twice —
 //! once from the spin, once when the deferred IPI is finally delivered —
 //! double-decrementing the count and returning the *next* initiator early,
-//! i.e. under-invalidating. The bitmap forecloses it: a target claims by
-//! clearing its own bit, so the prior value that `fetch_and` returns is both
-//! the claim and the "am I a target?" test, and exactly one caller can win
-//! it. A CPU whose bit is already clear — a stale delivery, a CPU that was
-//! never asked, the initiator itself — invalidates nothing and decrements
-//! nothing. The ISR still writes its LAPIC EOI unconditionally: the
-//! in-service bit is set whether or not there was work to do.
+//! i.e. under-invalidating. The slot forecloses it: a target claims by
+//! clearing its own owing bit, so the prior value that `fetch_and` returns is
+//! both the claim and the "am I a target?" test, and exactly one caller can
+//! win it. A CPU not owing — a stale delivery, a CPU that was never asked,
+//! the initiator itself — invalidates nothing and decrements nothing. The
+//! ISR still writes its LAPIC EOI unconditionally: the in-service bit is set
+//! whether or not there was work to do.
 //!
 //! # Host build
 //!
 //! The descriptor, the ISR, and the install helper are gated to
 //! `target_os = "none"`: they reach LAPIC MMIO and the per-CPU IDT. The
-//! bitmap bookkeeping is not, so the decisions the protocol rests on — who
-//! is asked, who is excluded, how many acknowledges are owed — are
-//! host-tested below. The host `X86_64Arch` shootdown impl is a vacuous
+//! slot bookkeeping is not, so the decisions the protocol rests on — who
+//! is asked, who is excluded, how many acknowledges are owed, who may claim
+//! one — are host-tested below. The host `X86_64Arch` shootdown impl is a vacuous
 //! no-op (there is no second CPU and no TLB) and the conformance vertical
 //! asserts only that the call is total and panic-free; the real cross-CPU
 //! round-trip, including the masked-spin acknowledge, is proven by the
@@ -75,7 +81,9 @@
 //!
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64};
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::interrupts::SavedRegs;
@@ -88,54 +96,126 @@ use crate::interrupts::SavedRegs;
 /// slot it installs.
 pub const TLB_SHOOTDOWN_VECTOR: u8 = 0x21;
 
-/// Bytes in the target bitmap: one bit per xAPIC id.
-///
-/// An xAPIC id is 8 bits wide (Intel SDM Vol 3A §11.4.6), the same width
-/// every LAPIC-id-taking path on this port carries, so 32 bytes covers the id
-/// space exactly and no id can fall outside the map. That is an architectural
-/// width, not a CPU-count ceiling: it neither shrinks on a small machine nor
-/// needs raising on a large one.
-#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-const TARGET_BYTES: usize = 32;
+/// A CPU's slot owing nothing.
+#[cfg(any(test, feature = "sched-arch"))]
+pub(crate) const IDLE: u8 = 0;
 
-/// The bitmap byte and bit mask a LAPIC id occupies.
+/// The slot's owing bit, which the CPU clears as its claim.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-const fn target_slot(lapic_id: u8) -> (usize, u8) {
-    ((lapic_id >> 3) as usize, 1u8 << (lapic_id & 7))
-}
+const OWED: u8 = 1 << 0;
 
-/// The target bitmap for `targets`, excluding `own`, and the number of
-/// acknowledges it owes.
-///
-/// Excluding the caller here rather than trusting it to exclude itself is
-/// what makes the acknowledge wait unable to wait on the initiator, and
-/// collapsing duplicates is what stops a repeated id inflating the count into
-/// a wait that never ends.
+/// The slot's asked bit: the initiator's own mark of the CPUs it is to
+/// interrupt, which no target reads.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-fn target_map(targets: impl Iterator<Item = u8>, own: u8) -> ([u8; TARGET_BYTES], usize) {
-    let mut map = [0u8; TARGET_BYTES];
-    for id in targets {
-        let (byte, bit) = target_slot(id);
-        map[byte] |= bit;
+const ASKED: u8 = 1 << 1;
+
+/// Ask each distinct CPU `targets` yields, but `own` and any `apic` names no
+/// APIC for, to acknowledge: count it into `pending`, then publish its slot
+/// in `owed` as owing. `take` runs once, before the first CPU is asked, to
+/// take the descriptor, so a set of no CPU but the caller's costs no lock;
+/// the answer is whether it ran, the caller then owing the release.
+///
+/// Counting before publishing keeps `pending` from ever falling below the
+/// slots owing, and skipping a slot already asked is what stops a repeated
+/// CPU inflating the count into a wait that never ends; excluding the caller
+/// is what makes the wait unable to wait on itself. A slot's asked mark is
+/// only read once the descriptor is held, since another initiator's marks
+/// stand until it has raised its IPIs.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn ask(
+    owed: &[AtomicU8],
+    apic: &[AtomicU32],
+    pending: &AtomicUsize,
+    targets: impl Iterator<Item = u32>,
+    own: u32,
+    mut take: impl FnMut(),
+) -> bool {
+    let mut taken = false;
+    for cpu in targets.filter(|&cpu| cpu != own) {
+        let Some((slot, lapic)) = usize::try_from(cpu)
+            .ok()
+            .and_then(|index| Some((owed.get(index)?, apic.get(index)?)))
+        else {
+            continue;
+        };
+        if lapic.load(Ordering::Relaxed) == crate::cpumap::NO_LAPIC {
+            continue;
+        }
+        if !taken {
+            take();
+            taken = true;
+        }
+        if slot.load(Ordering::Relaxed) & ASKED != 0 {
+            continue;
+        }
+        pending.fetch_add(1, Ordering::Relaxed);
+        // `Release`: the target that claims it reads the range and the count
+        // stored before.
+        slot.fetch_or(ASKED | OWED, Ordering::Release);
     }
-    let (own_byte, own_bit) = target_slot(own);
-    map[own_byte] &= !own_bit;
-    let owed = map.iter().map(|bits| bits.count_ones() as usize).sum();
-    (map, owed)
+    taken
 }
 
-/// Every LAPIC id set in `map`, ascending.
+/// The APIC id of each CPU [`ask`] asked, its mark cleared: the IPIs the
+/// shootdown raises, once every slot is published.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-fn ids_in(map: &[u8; TARGET_BYTES]) -> impl Iterator<Item = u8> + '_ {
-    // The map's 32 bytes cover the 8-bit id space exactly, one byte per
-    // eight ids.
-    map.iter()
-        .zip((0..=u8::MAX).step_by(8))
-        .flat_map(|(&bits, base)| {
-            (0..8u8)
-                .filter(move |shift| bits & (1 << shift) != 0)
-                .map(move |shift| base | shift)
+fn asked<'s>(owed: &'s [AtomicU8], apic: &'s [AtomicU32]) -> impl Iterator<Item = u32> + 's {
+    owed.iter()
+        .zip(apic)
+        .filter(|(slot, _)| slot.load(Ordering::Relaxed) & ASKED != 0)
+        .map(|(slot, lapic)| {
+            // An RMW, as the target may be clearing its owing bit.
+            slot.fetch_and(!ASKED, Ordering::Relaxed);
+            lapic.load(Ordering::Relaxed)
         })
+}
+
+/// Claim `cpu`'s acknowledge, if its slot in `owed` owes one: exactly one
+/// caller can.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn claim(owed: &[AtomicU8], cpu: u32) -> bool {
+    usize::try_from(cpu)
+        .ok()
+        .and_then(|index| owed.get(index))
+        // Read first: a spinning CPU that owes nothing leaves the line its
+        // neighbours' slots share unwritten. `AcqRel` on the claim, so the
+        // range read after cannot be hoisted above it and the claim
+        // synchronises-with the slot's publication.
+        .is_some_and(|slot| {
+            slot.load(Ordering::Relaxed) & OWED != 0
+                && slot.fetch_and(!OWED, Ordering::AcqRel) & OWED != 0
+        })
+}
+
+/// The per-CPU state the arch handle publishes: each CPU's slot, and its
+/// APIC id, both by dense id.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[derive(Clone, Copy)]
+struct PerCpu {
+    owed: &'static [AtomicU8],
+    apic: &'static [AtomicU32],
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static PER_CPU: tairix_sync::once::OnceCell<PerCpu> = tairix_sync::once::OnceCell::new();
+
+/// Publish each CPU's slot `owed` and APIC id `apic`, by dense id: once per
+/// boot, by the arch handle, before any other CPU starts.
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
+pub(crate) fn install(owed: &'static [AtomicU8], apic: &'static [AtomicU32]) {
+    let _ = PER_CPU.set(PerCpu { owed, apic });
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn per_cpu() -> Option<PerCpu> {
+    PER_CPU.get().ok().flatten().copied()
+}
+
+/// The calling CPU's dense id, [`u32::MAX`] where it has none, which no
+/// target is.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn own_cpu() -> u32 {
+    crate::preempt::cpu_id_for_lapic(crate::apic::local_apic_id())
 }
 
 /// Global, lock-serialised shootdown descriptor.
@@ -152,13 +232,11 @@ struct ShootdownMailbox {
     pages: AtomicUsize,
     /// Outstanding acknowledges; the initiator waits for this to reach 0.
     ///
-    /// Never below the number of bits still set in `targets`, because a
-    /// target clears its bit before it decrements. So `pending == 0` proves
-    /// no bit is set, which is what lets [`serve_pending`] gate on one load.
+    /// Never below the number of slots still owing, because a CPU is
+    /// counted before its slot is published and clears its slot before it
+    /// decrements. So `pending == 0` proves no slot owes, which is what lets
+    /// [`serve_pending`] gate on one load.
     pending: AtomicUsize,
-    /// One bit per LAPIC id still owing an acknowledge: published last, and
-    /// cleared by the owning CPU as its claim.
-    targets: [AtomicU8; TARGET_BYTES],
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -167,21 +245,20 @@ static SHOOTDOWN: ShootdownMailbox = ShootdownMailbox {
     vaddr: AtomicU64::new(0),
     pages: AtomicUsize::new(0),
     pending: AtomicUsize::new(0),
-    targets: [const { AtomicU8::new(0) }; TARGET_BYTES],
 };
 
 /// Invalidate `pages` consecutive 4 KiB pages from the page containing
-/// `vaddr` on the calling CPU and on every CPU whose LAPIC ID `targets`
+/// `vaddr` on the calling CPU and on every CPU whose dense id `targets`
 /// yields, returning once all of them have acknowledged.
 ///
-/// `targets` may yield the calling CPU's own id and may repeat one: the
-/// bitmap excludes the caller and collapses duplicates (`target_map`). A
-/// zero page count is a no-op, and an empty target set degrades to a purely
-/// local `invlpg` sweep that never touches the descriptor.
+/// `targets` may yield the calling CPU's own id and may repeat one: asking
+/// excludes the caller and collapses duplicates (`ask`). A zero page count
+/// is a no-op, and an empty target set degrades to a purely local `invlpg`
+/// sweep.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn shootdown<I>(vaddr: u64, pages: usize, targets: I)
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = u32>,
 {
     run(vaddr, pages, targets, true);
 }
@@ -192,68 +269,57 @@ where
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn shootdown_remote<I>(vaddr: u64, pages: usize, targets: I)
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = u32>,
 {
     run(vaddr, pages, targets, false);
-}
-
-/// The calling CPU's APIC id as the target bitmap keys it. Every CPU the
-/// kernel brings up has an id xAPIC can name; were one past it, it would
-/// name the broadcast id, which no CPU has, and so be asked nothing.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn own_slot_id() -> u8 {
-    u8::try_from(crate::apic::local_apic_id()).unwrap_or(crate::apic::XAPIC_BROADCAST)
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn run<I>(vaddr: u64, pages: usize, targets: I, flush_self: bool)
 where
-    I: Iterator<Item = u8>,
+    I: Iterator<Item = u32>,
 {
     if pages == 0 {
         return;
     }
-
-    // Built before the descriptor is touched, so the lock is held for the
-    // round-trip alone.
-    let (map, owed) = target_map(targets, own_slot_id());
-    if owed == 0 {
+    // Before the arch handle publishes its CPUs there is only the boot CPU.
+    let Some(PerCpu { owed, apic }) = per_cpu() else {
+        if flush_self {
+            invlpg_range(vaddr, pages);
+        }
+        return;
+    };
+    let own = own_cpu();
+    let take = || {
+        // Acquire the descriptor, serving any request already in flight: this
+        // spin is reached with interrupts masked (the kernel-heap teardown is
+        // such a caller), so waiting without serving would leave the CPU
+        // holding the descriptor waiting on an acknowledge this CPU cannot
+        // send.
+        while SHOOTDOWN
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            serve_pending();
+            core::hint::spin_loop();
+        }
+        // The range goes out before any slot is published as owing: a target
+        // that claims its slot reads it at once.
+        SHOOTDOWN.vaddr.store(vaddr, Ordering::Relaxed);
+        SHOOTDOWN.pages.store(pages, Ordering::Relaxed);
+    };
+    if !ask(owed, apic, &SHOOTDOWN.pending, targets, own, take) {
         if flush_self {
             invlpg_range(vaddr, pages);
         }
         return;
     }
-
-    // Acquire the descriptor, serving any request already in flight: this
-    // spin is reached with interrupts masked (the kernel-heap teardown is
-    // such a caller), so waiting without serving would leave the CPU holding
-    // the descriptor waiting on an acknowledge this CPU cannot send.
-    while SHOOTDOWN
-        .lock
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        serve_pending();
-        core::hint::spin_loop();
-    }
-
-    // The range and the count go out *before* the bitmap: a target that wins
-    // its bit decrements `pending` at once, so storing `pending` after the
-    // bitmap could overwrite that decrement.
-    SHOOTDOWN.vaddr.store(vaddr, Ordering::Relaxed);
-    SHOOTDOWN.pages.store(pages, Ordering::Relaxed);
-    SHOOTDOWN.pending.store(owed, Ordering::Relaxed);
-    for (slot, bits) in SHOOTDOWN.targets.iter().zip(map) {
-        // `Release` on every byte, not just the last: a target reads only
-        // the byte its own id lies in, so each must carry the range with it.
-        slot.store(bits, Ordering::Release);
-    }
-
+    // Raised only now, after every slot is published, so no target can take
+    // its IPI before its slot owes and miss the request.
     let mut lapic = crate::apic::Lapic::new(crate::apic::LocalApic);
-    // Raised from the local copy, never from the published bitmap the targets
-    // are concurrently clearing, so the set asked is exactly the set counted.
     lapic.send_ipis(
-        ids_in(&map).map(u32::from),
+        asked(owed, apic),
         crate::apic::DeliveryMode::Fixed,
         TLB_SHOOTDOWN_VECTOR,
     );
@@ -265,9 +331,8 @@ where
 
     // Wait for every interrupted CPU to acknowledge. `Acquire` pairs with the
     // acknowledge's `Release` decrement so the remote `invlpg`s are ordered
-    // before this call returns. Serving here would be dead work: this CPU's
-    // own bit was masked out above, so it can never be a target of its own
-    // request.
+    // before this call returns. Serving here would be dead work: this CPU
+    // never asks itself, so it can never be a target of its own request.
     while SHOOTDOWN.pending.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }
@@ -285,17 +350,15 @@ where
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn serve_pending() {
     // Nothing in flight is the overwhelmingly common case and must cost one
-    // load rather than a LAPIC MMIO read. Sound because `pending` is never
-    // below the number of bits still set.
+    // load rather than a LAPIC read. Sound because `pending` is never below
+    // the number of slots owing.
     if SHOOTDOWN.pending.load(Ordering::Acquire) == 0 {
         return;
     }
-
-    let (byte, bit) = target_slot(own_slot_id());
-    // The claim. `AcqRel` so the range read below cannot be hoisted above it,
-    // and so it synchronises-with the initiator's `Release` publish of this
-    // byte.
-    if SHOOTDOWN.targets[byte].fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+    let Some(PerCpu { owed, .. }) = per_cpu() else {
+        return;
+    };
+    if !claim(owed, own_cpu()) {
         return;
     }
 
@@ -418,69 +481,115 @@ pub unsafe fn init_local_tlb_shootdown(cpu_index: usize) -> Result<(), crate::pe
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
+    use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+    use std::vec::Vec;
+
     use super::{
-        flushes_whole_tlb, ids_in, target_map, target_slot, SINGLE_PAGE_FLUSH_CEILING,
-        TARGET_BYTES, TLB_SHOOTDOWN_VECTOR,
+        ask, asked, claim, flushes_whole_tlb, ASKED, IDLE, OWED, SINGLE_PAGE_FLUSH_CEILING,
+        TLB_SHOOTDOWN_VECTOR,
     };
+    use crate::cpumap::NO_LAPIC;
 
-    /// Every LAPIC id lands in the map, and no two share a bit.
-    #[test]
-    fn the_bitmap_covers_the_whole_xapic_id_space_one_bit_each() {
-        let mut seen = [false; 256];
-        for id in 0..=u8::MAX {
-            let (byte, bit) = target_slot(id);
-            assert!(byte < TARGET_BYTES, "id {id} outside the map");
-            let index = byte * 8 + bit.trailing_zeros() as usize;
-            assert!(!seen[index], "id {id} shares a bit");
-            seen[index] = true;
-        }
-        assert!(seen.iter().all(|hit| *hit));
+    /// A machine of five CPUs, the fourth with no APIC id, the first past
+    /// the eight bits xAPIC names.
+    fn machine() -> ([AtomicU8; 5], [AtomicU32; 5]) {
+        (
+            [const { AtomicU8::new(IDLE) }; 5],
+            [0x100, 1, 2, NO_LAPIC, 0xFFFF_FFFE].map(AtomicU32::new),
+        )
+    }
+
+    fn owing(owed: &[AtomicU8]) -> [bool; 5] {
+        core::array::from_fn(|cpu| owed[cpu].load(Ordering::Relaxed) & OWED != 0)
     }
 
     #[test]
-    fn the_map_excludes_the_caller_so_it_cannot_wait_on_itself() {
+    fn the_caller_is_never_asked_so_it_cannot_wait_on_itself() {
+        let ((owed, apic), pending) = (machine(), AtomicUsize::new(0));
         // The caller is listed anyway, exactly as a careless caller would.
-        let (map, owed) = target_map([0u8, 1, 2].into_iter(), 1);
-        assert_eq!(owed, 2, "the caller's own id owes no acknowledge");
-        let (byte, bit) = target_slot(1);
-        assert_eq!(map[byte] & bit, 0);
-        let mut asked = [false; 256];
-        for id in ids_in(&map) {
-            asked[id as usize] = true;
-        }
-        assert!(asked[0] && asked[2] && !asked[1]);
+        assert!(ask(&owed, &apic, &pending, [0, 1, 2].into_iter(), 1, || {}));
+        assert_eq!(pending.load(Ordering::Relaxed), 2);
+        assert_eq!(owing(&owed), [true, false, true, false, false]);
     }
 
     #[test]
-    fn a_repeated_id_owes_one_acknowledge_not_two() {
+    fn a_repeated_cpu_owes_one_acknowledge_not_two() {
         // A duplicate that inflated the count would leave the initiator
         // waiting for an acknowledge no CPU owes it.
-        let (map, owed) = target_map([7u8, 7, 7, 200, 200].into_iter(), 0);
-        assert_eq!(owed, 2);
-        assert_eq!(ids_in(&map).count(), 2, "one IPI per distinct target");
+        let ((owed, apic), pending) = (machine(), AtomicUsize::new(0));
+        assert!(ask(
+            &owed,
+            &apic,
+            &pending,
+            [4, 4, 4, 2, 2].into_iter(),
+            0,
+            || {}
+        ));
+        assert_eq!(pending.load(Ordering::Relaxed), 2);
+        let ipis: Vec<u32> = asked(&owed, &apic).collect();
+        assert_eq!(ipis, [2, 0xFFFF_FFFE], "one IPI per distinct target");
     }
 
     #[test]
-    fn an_empty_or_self_only_target_set_owes_nothing() {
-        assert_eq!(target_map(core::iter::empty(), 3).1, 0);
-        assert_eq!(target_map(core::iter::once(3), 3).1, 0);
+    fn a_cpu_with_no_apic_id_or_past_the_machine_is_never_asked() {
+        let ((owed, apic), pending) = (machine(), AtomicUsize::new(0));
+        assert!(!ask(
+            &owed,
+            &apic,
+            &pending,
+            [3, 5, u32::MAX].into_iter(),
+            0,
+            || {}
+        ));
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+        assert_eq!(asked(&owed, &apic).count(), 0);
     }
 
-    /// The map and the ids it yields are inverses across the whole id space,
-    /// including the top byte whose walk ends on the wrapping step.
     #[test]
-    fn every_asked_id_is_yielded_back_exactly_once() {
-        let ids: [u8; 6] = [0, 8, 63, 64, 254, 255];
-        let (map, owed) = target_map(ids.into_iter(), 1);
-        assert_eq!(owed, ids.len());
-        let mut yielded = [0usize; 256];
-        for id in ids_in(&map) {
-            yielded[id as usize] += 1;
-        }
-        for id in ids {
-            assert_eq!(yielded[id as usize], 1, "id {id} not yielded once");
-        }
-        assert_eq!(yielded.iter().sum::<usize>(), owed);
+    fn an_empty_or_self_only_target_set_asks_nothing() {
+        let ((owed, apic), pending) = (machine(), AtomicUsize::new(0));
+        let taken = core::cell::Cell::new(0);
+        let take = || taken.set(taken.get() + 1);
+        assert!(!ask(&owed, &apic, &pending, core::iter::empty(), 2, take));
+        assert!(!ask(&owed, &apic, &pending, [2, 3].into_iter(), 2, take));
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+        assert_eq!(taken.get(), 0, "no descriptor taken for nobody to ask");
+        assert!(ask(&owed, &apic, &pending, [2, 0, 1].into_iter(), 2, take));
+        assert_eq!(taken.get(), 1, "taken once, before the first is asked");
+    }
+
+    /// Each CPU asked is raised by its APIC id whatever its width, once, and
+    /// its mark is gone after, while it still owes until it claims.
+    #[test]
+    fn every_asked_cpu_is_raised_once_by_its_apic_id() {
+        let ((owed, apic), pending) = (machine(), AtomicUsize::new(0));
+        assert!(ask(&owed, &apic, &pending, [0, 2, 4].into_iter(), 1, || {}));
+        let ipis: Vec<u32> = asked(&owed, &apic).collect();
+        assert_eq!(ipis, [0x100, 2, 0xFFFF_FFFE]);
+        assert_eq!(asked(&owed, &apic).count(), 0, "raised once");
+        assert!(owed
+            .iter()
+            .all(|slot| slot.load(Ordering::Relaxed) & ASKED == 0));
+        assert_eq!(owing(&owed), [true, false, true, false, true]);
+    }
+
+    /// A CPU claims its acknowledge exactly once, a CPU not asked never, and
+    /// a round leaves every slot idle once each target has claimed.
+    #[test]
+    fn an_acknowledge_is_claimed_once_and_a_round_ends_idle() {
+        let ((owed, apic), pending) = (machine(), AtomicUsize::new(0));
+        assert!(!claim(&owed, 0), "nothing owed before the round");
+        assert!(ask(&owed, &apic, &pending, [0, 4].into_iter(), 2, || {}));
+        assert!(claim(&owed, 0));
+        assert!(!claim(&owed, 0), "a second delivery claims nothing");
+        assert!(!claim(&owed, 1), "never asked");
+        assert!(!claim(&owed, 99), "past the machine");
+        // A target may claim before the initiator raises it.
+        assert_eq!(asked(&owed, &apic).count(), 2);
+        assert!(claim(&owed, 4));
+        assert!(owed.iter().all(|slot| slot.load(Ordering::Relaxed) == IDLE));
     }
 
     #[test]

@@ -15,12 +15,11 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{
-    GroupDirectoryRecord, GroupDirectoryRequest, SelfAccountRecord, SysinfoQueryId,
-    UserDirectoryRecord, UserDirectoryRequest,
+    GroupDirectoryRecord, SelfAccountRecord, SysinfoQueryId, UserDirectoryRecord,
 };
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError, WalkStep};
+use crate::list::{walk_records, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::Transport;
 
@@ -56,27 +55,15 @@ pub const USER_DIRECTORY_PAGE: u16 = 64;
 ///   walk stops at that record.
 pub fn for_each_user(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&UserDirectoryRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&UserDirectoryRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::USER_DIRECTORY,
         UserDirectoryRecord::WIRE_LEN,
         USER_DIRECTORY_PAGE,
-        |offset, limit| {
-            UserDirectoryRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = UserDirectoryRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        UserDirectoryRecord::from_bytes,
+        sink,
     )
 }
 
@@ -157,27 +144,15 @@ pub const GROUP_DIRECTORY_PAGE: u16 = USER_DIRECTORY_PAGE;
 ///   walk stops at that record.
 pub fn for_each_group(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&GroupDirectoryRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&GroupDirectoryRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::GROUP_DIRECTORY,
         GroupDirectoryRecord::WIRE_LEN,
         GROUP_DIRECTORY_PAGE,
-        |offset, limit| {
-            GroupDirectoryRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = GroupDirectoryRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        GroupDirectoryRecord::from_bytes,
+        sink,
     )
 }
 
@@ -240,8 +215,8 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        GroupDirectoryRecord, GroupDirectoryRequest, SelfAccountRecord, SysinfoQueryId,
-        SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
+        GroupDirectoryRecord, PageRequest, SelfAccountRecord, SysinfoQueryId, SysinfoRequestHeader,
+        UserDirectoryRecord,
     };
     use tairix_abi::Errno;
 
@@ -273,7 +248,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = UserDirectoryRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());
@@ -375,7 +350,7 @@ mod tests {
                     .unwrap_or_default());
             }
             assert_eq!(header.query, SysinfoQueryId::GROUP_DIRECTORY);
-            let req = GroupDirectoryRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.groups.len() {
                 return Ok(Vec::new());

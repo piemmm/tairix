@@ -256,6 +256,14 @@ impl<C: ConfigSpace> MsixBus for Pci<C> {
     ) -> Result<(), DriverError> {
         Pci::route_msix(self, bdf, entry, message, mapper)
     }
+
+    fn msix_entries(&self, bdf: u64) -> Result<u16, DriverError> {
+        self.find_msix(bdf).map(|(_, entries, _, _)| entries)
+    }
+
+    fn mask_msix(&self, bdf: u64, masked: bool) -> Result<(), DriverError> {
+        Pci::mask_msix(self, bdf, masked)
+    }
 }
 
 // The `abi-v1` generic-PCI transport seam: the surface
@@ -302,6 +310,10 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
 
     fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, DriverError> {
         Ok(Pci::read_config(self, bdf, offset))
+    }
+
+    fn capability_header(&self, bdf: u64, id: u8) -> Result<u32, DriverError> {
+        Pci::capability_header(self, bdf, id)
     }
 
     fn describe_function(&self, bdf: u64) -> Result<HwNode, DriverError> {

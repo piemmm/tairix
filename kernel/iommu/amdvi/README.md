@@ -3,8 +3,9 @@
 One AMD I/O virtualization unit: a device table over all 65536 device ids,
 each entry blocking until a domain is attached; four-level v1 host page tables
 with 2 MiB and 1 GiB leaves; the command buffer with bounded, fail-closed
-completion waits, and every map flushed over the smallest aligned span holding
-it; the event log drained in batches outside the unit's lock, restarted after
+completion waits, a map flushed over the smallest aligned span holding it only
+where the unit's capability header leaves `NpCache` set or cannot be read, and
+an attach flushing the device's entry alone; the event log drained in batches outside the unit's lock, restarted after
 an overflow, a record the unit has not landed waited for and then skipped;
 faults raised through the unit's own PCI function's MSI; and interrupt
 remapping: a table per source, every requester id the source's interrupts can
@@ -35,7 +36,7 @@ device. Guest translation, ATS, PPR and the guest virtual APIC are not used.
 Host tests against a register-level model of the unit (device table, v1 walk,
 the command buffer and its caches, the event log, interrupt remapping),
 including the shared conformance and interrupt suites, with and without
-whole-unit invalidation, a unit caching misses, and one running commands only
-once translating. On QEMU, `tairix-test-dma-translation-amd-qemu-x86-64` and
+whole-unit invalidation, a unit caching misses and one whose capability header
+says it caches none, and one running commands only once translating. On QEMU, `tairix-test-dma-translation-amd-qemu-x86-64` and
 `tairix-test-dma-fault-amd-qemu-x86-64` run the production kernel behind an
 `amd-iommu` with `dma-remap=on`, remapping interrupts in extended mode.

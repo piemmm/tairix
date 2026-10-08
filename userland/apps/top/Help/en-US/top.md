@@ -14,7 +14,9 @@ caller's own processes; the system-wide view is granted by the service
 only to a caller holding `CAP_SYSINFO_GLOBAL`.
 
 The display refreshes itself every delay interval (3.0 seconds unless
-`-d` changes it), and `r` refreshes it immediately.
+`-d` changes it), and `r` refreshes it immediately. A refresh the system
+information service could not finish under load keeps the last listing,
+the status line saying so, and the next refresh reads the list again.
 
 The viewer takes no operands: it is controlled with keys pressed inside
 the session.

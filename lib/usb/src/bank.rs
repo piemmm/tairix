@@ -20,7 +20,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::dma::{DmaHost, DmaSlab};
+use tairix_abi::driver::dma::{DmaHost, DmaReach, DmaSlab};
 use tairix_abi::DriverError;
 
 use crate::device::{DmaBank, DMA_CHUNK_ALIGN};
@@ -118,7 +118,7 @@ impl DmaBank for SlabBank<'_> {
         // stranded by a failed push (deterministic OOM either way).
         self.chunks
             .try_reserve(1)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
+            .map_err(|_| DriverError::OutOfMemory)?;
         let slab = self.host.alloc_dma_zeroed(len)?;
         // The xHCI structures require 64-byte alignment at minimum; the
         // hosts mint page-aligned slabs, so this only refuses a broken
@@ -229,5 +229,14 @@ impl DmaBank for SlabBank<'_> {
 
     fn device_quiesced(&self) {
         self.host.device_quiesced();
+    }
+
+    fn narrow_reach(&mut self, reach: DmaReach) -> Result<(), DriverError> {
+        self.host.narrow_dma_reach(reach)?;
+        // A chunk the host places past the reach anyway is refused at grow.
+        if let Some(end) = reach.end() {
+            self.aperture_top = Some(self.aperture_top.map_or(end, |top| top.min(end)));
+        }
+        Ok(())
     }
 }

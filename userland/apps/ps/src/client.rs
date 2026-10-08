@@ -104,7 +104,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
+        PageRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
     };
     use tairix_abi::{Errno, ProcId, SchedPriority};
     use tairix_help::{HelpSource, SourceError};
@@ -175,7 +175,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = ProcessListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

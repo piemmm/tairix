@@ -16,18 +16,19 @@
 //! P6c-2).
 //!
 //! The aarch64 port wires the [`KernelArch`] interrupt-routing surface to
-//! the GICv2 through [`crate::aarch64::gic_irq`]: `irq_routing` returns the
-//! GICv2-backed [`tairix_kernel_core::IrqRouting`] (freestanding) and
+//! the discovered GIC through [`crate::aarch64::gic_irq`]: `irq_routing`
+//! returns the GIC-backed [`tairix_kernel_core::IrqRouting`] (freestanding) and
 //! `install_irq_dispatch` publishes the kernel `IrqTable` into the arch
 //! crate's EL1 IRQ-vector seam, so a discovered device SPI can be bound and
 //! a parked task is woken when the line fires (`plans/PI.md` P11 Chunk B-2
 //! INCREMENT (1)). On a non-freestanding host build the routing stays the
 //! conservative fail-closed [`tairix_kernel_core::IrqRouting::unsupported`]
-//! default (no `VolatileGicMmio` exists off the bare-metal target).
+//! default (no GIC driver exists off the bare-metal target).
 
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
 use tairix_arch_aarch64::entropy::PlatformRng as Aarch64PlatformEntropy;
 use tairix_arch_aarch64::fdt::PsciMethod;
+use tairix_arch_aarch64::gicv3::RedistributorRegion;
 use tairix_arch_aarch64::{halt_current_cpu, psci, serial, Aarch64Arch};
 use tairix_arch_api::{CpuId, PlatformEntropy, SchedulerArch, SecondaryBringup};
 use tairix_kernel_core::{ConsoleRead, ConsoleWrite, IrqRouting, KernelArch, SeatRegistry};
@@ -52,6 +53,10 @@ pub struct Aarch64BinArch {
     /// through the discovered conduit rather than assuming one. `None` leaves
     /// both fail-safe unsupported (they return).
     psci: Option<PsciMethod>,
+    /// A GICv3's redistributor regions and the stride between redistributors
+    /// where the firmware names one; empty on a GICv2.
+    gic_redistributors: &'static [RedistributorRegion],
+    gic_redistributor_stride: Option<u64>,
 }
 
 impl Aarch64BinArch {
@@ -63,7 +68,25 @@ impl Aarch64BinArch {
     /// (unsupported → they return).
     #[must_use]
     pub const fn new(arch: Aarch64Arch) -> Self {
-        Self { arch, psci: None }
+        Self {
+            arch,
+            psci: None,
+            gic_redistributors: &[],
+            gic_redistributor_stride: None,
+        }
+    }
+
+    /// Hand the GIC bring-up a GICv3's redistributor regions, discovered
+    /// from the firmware tree, and their stride where it names one.
+    #[must_use]
+    pub const fn with_gic_redistributors(
+        mut self,
+        regions: &'static [RedistributorRegion],
+        stride: Option<u64>,
+    ) -> Self {
+        self.gic_redistributors = regions;
+        self.gic_redistributor_stride = stride;
+        self
     }
 
     /// Install the firmware power-control conduit the boot path discovered
@@ -167,6 +190,10 @@ impl KernelArch for Aarch64BinArch {
 
     fn unit_function(&self) -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
         crate::pci_host::unit_function()
+    }
+
+    fn pci_windows(&self, sink: &mut dyn FnMut(core::ops::Range<u64>)) {
+        crate::pci_host::decoded_windows(sink);
     }
 
     fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
@@ -309,7 +336,7 @@ impl KernelArch for Aarch64BinArch {
         {
             use tairix_arch_aarch64::exceptions;
             // SAFETY: `enable_irq`/`mask_irq` only toggle `DAIF.I`; the
-            // vector table + GICv2 are installed by the time the dispatch
+            // vector table + GIC are installed by the time the dispatch
             // loop runs (`install_irq_dispatch` ran in the boot `irq`
             // phase), so a taken interrupt dispatches through a valid EL1
             // handler. A device IRQ taken in EL1 services its source and
@@ -330,9 +357,9 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn irq_routing(&self) -> IrqRouting {
-        // The GICv2-backed routing the kernel core builds the `IrqTable`
+        // The GIC-backed routing the kernel core builds the `IrqTable`
         // against. On the bare-metal target this names the `'static`
-        // `GIC_IRQ_CONTROLLER` over the discovered GICv2 windows; on a host
+        // `GIC_IRQ_CONTROLLER` over the discovered GIC; on a host
         // build there is no `VolatileGicMmio`, so the routing stays the
         // conservative fail-closed default.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
@@ -430,14 +457,35 @@ impl KernelArch for Aarch64BinArch {
         Some((tairix_kernel_mem::PhysAddr::new(base), len))
     }
 
-    fn install_irq_dispatch(&self, table: &'static IrqTable) {
-        // Publish the freshly built `IrqTable` and register the production
-        // device-IRQ dispatcher with the arch crate's EL1 IRQ-vector seam,
-        // so an acknowledged non-timer GIC INTID is translated into an
-        // `IrqTable::fire` (mask-before-wake, `docs/src/security/irq.md`).
-        crate::aarch64::gic_irq::install_device_irq_dispatch(table);
+    fn route_interrupts(
+        &self,
+        _remapper: Option<&'static tairix_kernel_core::iommu::Translation>,
+        _cpus: u32,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
+        log: &dyn tairix_log::Sink,
+    ) -> tairix_kernel_core::iommu::InterruptRouting {
+        // A translation unit remaps nothing here: the ITS confines each
+        // function's messages to the LPIs its routes were given.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            crate::aarch64_messages::route(frames, log)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            let _ = (frames, log);
+            tairix_kernel_core::iommu::InterruptRouting::Native
+        }
+    }
 
-        // Arm timer-driven preemption now that the GICv2 is up (P-1,
+    fn install_irq_dispatch(&self, table: &'static IrqTable) -> Result<(), &'static str> {
+        crate::aarch64::gic_irq::install_device_irq_dispatch(
+            table,
+            self.arch.cpu_count(),
+            self.gic_redistributors,
+            self.gic_redistributor_stride,
+        )?;
+
+        // Arm timer-driven preemption now that the GIC is up (P-1,
         // `plans/PI.md` D2b-2b-A): register the per-CPU preempt storage
         // (sized to the discovered core count), install the
         // EL0-preemption + IPI callbacks, and enable this core's timer
@@ -447,6 +495,7 @@ impl KernelArch for Aarch64BinArch {
         // kernel); a tick taken in EL0 round-robin-preempts the running
         // user task back to the scheduler.
         crate::aarch64::gic_irq::arm_preemption(self.arch.cpu_count());
+        Ok(())
     }
 
     fn cpu_features(&self) -> Option<&dyn tairix_arch_api::CpuFeatures> {
@@ -484,7 +533,7 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn watchdog_recovery(&self) -> Option<&'static (dyn tairix_arch_api::WatchdogArch + Sync)> {
-        // The GICv2 directed-SGI recovery handle: `kernel/core` drives it
+        // The GIC directed-SGI recovery handle: `kernel/core` drives it
         // when the cross-CPU lockup scan detects a wedged CPU (a reschedule
         // for a soft lockup, a best-effort attention SGI for a hard one).
         // Only meaningful on the freestanding target where the GIC MMIO is

@@ -12,7 +12,6 @@ the universal `CAP_DRV_LOAD`.
 
 ```rust
 use tairix_drvhost::{Host, HostConfig, HostError, ImageSource, DriverSpawner};
-use tairix_virtio::VirtioHostFactory; // the host's virtio seam lives in lib/virtio
 
 fn drive_one_module(deps: &ServiceDeps) -> Result<(), HostError> {
     let cfg = HostConfig {
@@ -22,8 +21,6 @@ fn drive_one_module(deps: &ServiceDeps) -> Result<(), HostError> {
         source: &deps.source,   // impl ImageSource
         spawner: &deps.spawner, // impl DriverSpawner
         sink: &deps.audit_sink, // impl tairix_log::Sink
-        virtio_host_factory: None, // or Some(&dyn VirtioHostFactory)
-        mmio_mapper: None,         // or Some(&dyn tairix_abi::MmioMapper)
     };
     let mut host = Host::new(cfg);
 
@@ -35,8 +32,9 @@ fn drive_one_module(deps: &ServiceDeps) -> Result<(), HostError> {
 }
 ```
 
-The seven types above are the entire public surface; everything else
-(envelope splitter, signature primitive, audit emitter) is internal and
+The types above, with the loaded-driver snapshot, the parsed image, the
+spawn context and the signed-store scan, are the public surface; everything
+else (envelope splitter, signature primitive, audit emitter) is internal and
 covered by unit tests in the crate itself.
 
 ### Trust anchor
@@ -139,72 +137,15 @@ decode of every
 entry — a malformed table never reaches the device manager
 (`AGENTS.md` §18.3).
 
-### Virtio host factory
+### What a registering driver is handed
 
-`HostConfig::virtio_host_factory: Option<&dyn VirtioHostFactory>` is
-the seam at which the host supplies a per-driver
-`tairix_abi::driver::VirtioHost` for the duration of a single
-`register()` call. The `VirtioHostFactory` trait itself lives in the
-bus-agnostic `lib/virtio` host seam, so both the userland host and any
-kernel-side implementation depend on `lib/*` rather than on each other
-(`AGENTS.md` §17.4); its `mint` is handed the driver's granted
-capabilities as a `&dyn tairix_abi::CapabilityQuery` so the seam need
-not name `lib/caps`. The driver retrieves the host through the new
-`DriverHost::virtio_host(&self) -> Option<&dyn VirtioHost>` accessor
-(an `abi-v1` internal addition; the public `register(host: &dyn
-DriverHost) -> Result<DriverHandle, DriverError>` entry point per
-`AGENTS.md` §8 is unchanged) and stashes it inside its own driver
-struct.
-
-A factory that returns `None` is indistinguishable from leaving
-`virtio_host_factory` unset; both shapes cause `host.virtio_host()`
-to report `None`, and a virtio-class driver's `register()` should
-then refuse to load (it has no transport). The concrete production
-factory is `KernelVirtioFactory`
-(`kernel/virtio/src/virtio_factory.rs`, Stage 4.D Item
-2-tail.4): it mints a `KernelVirtioHost` (`kernel/virtio`) backed by
-a freshly-carved per-driver `DmaPool` and the calling task's
-`TaskCapabilities`. The concrete factory lives in `kernel/virtio`,
-not in `drvhost`, so the host crate stays free of every `kernel/*`
-dependency; and because the `VirtioHostFactory` trait it implements
-lives in `lib/virtio`, the kernel crate in turn never depends on the
-userland host (`AGENTS.md` §3 / §17.4). The mock factory
-used in unit tests mints a `MockHost` whose allocations leak for the
-duration of the test process.
-
-The factory is consulted **after** every other verification gate
-has cleared and **before** `register()` is called, so a driver
-load that is going to be refused never reaches the factory and a
-factory that refuses (returns `None`) never widens the host's
-authority. The boxed virtio host lives on the
-`verify_and_bind` stack frame and is dropped immediately after
-`register()` returns; the caller's per-driver `DmaPool` slots are
-reclaimed at that drop. The host that calls `register()` is the
-sole owner of the box — drivers must not retain `&dyn VirtioHost`
-references across the `register()` boundary (the lifetime in the
-trait signature prevents this at compile time).
-
-### MMIO mapper
-
-`HostConfig::mmio_mapper: Option<&dyn tairix_abi::MmioMapper>` is the
-seam at which the host supplies a bus driver the means to map a
-device's register window. A driver retrieves it through the
-`DriverHost::mmio_mapper(&self) -> Option<&dyn MmioMapper>` accessor
-(an `abi-v1` internal addition alongside `virtio_host`; the public
-`register` entry point is unchanged) and maps each window through the
-capability-gated `MmioMapper::map_window` — never a pointer the driver
-synthesises (`AGENTS.md` §4). A host that leaves the slot unset reports
-`None`, and a bus driver's `register()` must then refuse to load
-(`AGENTS.md` §5.4).
-
-The concrete production mapper is `KernelMmioMapper` (`kernel/virtio`),
-which routes every request through the capability-gated
-`tairix_kernel_sec::map_mmio` path; it lives in `kernel/virtio`, not in
-`drvhost`, so the host crate stays free of every `kernel/*` dependency
-and the `MmioMapper` trait it implements lives in `lib/abi` (`AGENTS.md`
-§17.4). Unlike the per-load boxed virtio host, the mapper is borrowed
-for the host's lifetime and lent unchanged to every driver load — its
-own window bitmap is the per-load state.
+The host's driver view carries the driver's granted capabilities and its
+kind, and nothing else: it lends no DMA host and no register mapper. A
+driver that drives hardware does so from its own process, where `lib/drvrt`'s
+`RtDriverHost` lends it the capability-gated DMA and `MmioMapper` seams
+(`DriverHost::mmio_mapper`), and the in-kernel floor drivers are handed
+theirs by the floor bring-up that drives their device (`root_unlock`), so a
+load through this gate never widens what a driver can reach.
 
 ### In-kernel floor admission
 

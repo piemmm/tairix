@@ -63,6 +63,9 @@ pub const ENTRIES_PER_TABLE: usize = 512;
 /// window's cost no longer scales with the installed RAM.
 pub const BOOT_IDENTITY_GIB: usize = 4;
 
+/// The first physical address past the identity window.
+pub const BOOT_IDENTITY_END: u64 = (BOOT_IDENTITY_GIB as u64) << 30;
+
 /// Sign-extend a PML4 slot's base to its canonical higher-half virtual
 /// address: bit 47 of any slot at or above 256 is set, so bits 63:48
 /// are ones.
@@ -282,9 +285,13 @@ pub mod flags {
     /// have enabled NXE first. Used to mark writable user data and
     /// read-only user data non-executable (W^X).
     pub const NO_EXECUTE: u64 = 1 << 63;
+    /// One of the bits a leaf leaves to software, marking a DMA buffer
+    /// ([`PageFlags::DMA`](tairix_arch_api::mmu::PageFlags::DMA)).
+    pub const SW_DMA: u64 = 1 << 9;
 }
 
-/// Leaf permissions and memory attributes one 4 KiB mapping walk applies.
+/// Leaf permissions, memory type and software marks one 4 KiB mapping walk
+/// applies.
 ///
 /// Grouped into a named value so the walk is steered by labelled fields
 /// rather than a row of positional booleans at each call site.
@@ -293,7 +300,7 @@ struct LeafPolicy {
     writable: bool,
     user: bool,
     no_execute: bool,
-    memory_attrs: u64,
+    attrs: u64,
 }
 
 impl LeafPolicy {
@@ -309,7 +316,7 @@ impl LeafPolicy {
         if self.no_execute {
             bits |= flags::NO_EXECUTE;
         }
-        bits | self.memory_attrs
+        bits | self.attrs
     }
 }
 
@@ -729,7 +736,7 @@ impl AddressSpace {
                 writable,
                 user: false,
                 no_execute: false,
-                memory_attrs: 0,
+                attrs: 0,
             },
         )
     }
@@ -758,7 +765,7 @@ impl AddressSpace {
                 writable,
                 user: true,
                 no_execute: false,
-                memory_attrs: 0,
+                attrs: 0,
             },
         )
     }
@@ -792,7 +799,7 @@ impl AddressSpace {
                 writable,
                 user: true,
                 no_execute: !executable,
-                memory_attrs: 0,
+                attrs: 0,
             },
         )
     }
@@ -987,7 +994,7 @@ pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
     let writable_through_identity = tables & (PAGE_SIZE as u64 - 1) == 0
         && tables
             .checked_add(bytes)
-            .is_some_and(|end| end <= (BOOT_IDENTITY_GIB as u64) << 30);
+            .is_some_and(|end| end <= BOOT_IDENTITY_END);
     if !writable_through_identity {
         return false;
     }
@@ -1377,7 +1384,9 @@ impl MmuAddressSpace for AddressSpace {
         if flags.is_write_exec() {
             return Err(MapError::InvalidFlags);
         }
-        if flags.contains(PageFlags::WRITE_COMBINE) {
+        // Every x86 DMA master snoops; RAM mapped uncached beside the direct
+        // map's write-back alias would be a mismatched memory type.
+        if flags.contains(PageFlags::WRITE_COMBINE) || flags.contains(PageFlags::DMA_COHERENT) {
             return Err(MapError::Unsupported);
         }
         if self.leaf_present(vaddr) {
@@ -1387,11 +1396,13 @@ impl MmuAddressSpace for AddressSpace {
         let writable = flags.contains(PageFlags::WRITE);
         let user = flags.contains(PageFlags::USER);
         let executable = flags.contains(PageFlags::EXEC);
-        let memory_attrs = if flags.contains(PageFlags::DEVICE) {
-            flags::CACHE_DISABLE | flags::WRITE_THROUGH
-        } else {
-            0
-        };
+        let mut attrs = 0;
+        if flags.contains(PageFlags::DEVICE) {
+            attrs |= flags::CACHE_DISABLE | flags::WRITE_THROUGH;
+        }
+        if flags.contains(PageFlags::DMA) {
+            attrs |= flags::SW_DMA;
+        }
         let result = self.map_4k_inner(
             frames,
             vaddr,
@@ -1400,7 +1411,7 @@ impl MmuAddressSpace for AddressSpace {
                 writable,
                 user,
                 no_execute: !executable,
-                memory_attrs,
+                attrs,
             },
         );
         // Alignment and prior-mapping are ruled out, so the only remaining
@@ -1698,6 +1709,9 @@ fn page_flags_from_pte(pte: u64) -> PageFlags {
     }
     if pte & flags::NO_EXECUTE == 0 {
         out = out | PageFlags::EXEC;
+    }
+    if pte & flags::SW_DMA != 0 {
+        out = out | PageFlags::DMA;
     }
     out
 }
@@ -2047,9 +2061,50 @@ mod tests {
         // And it stops at the trampoline's own extent rather than growing
         // with the machine: RAM above it is the direct map's job.
         assert!(
-            mmu::AddressSpace::translate(&boot, (BOOT_IDENTITY_GIB as u64) << 30).is_none(),
+            mmu::AddressSpace::translate(&boot, BOOT_IDENTITY_END).is_none(),
             "the identity window is the trampoline's fixed extent"
         );
+    }
+
+    /// Every x86 DMA master snoops, so memory a non-snooping one would share
+    /// is never asked for, and mapping it uncached beside the direct map's
+    /// write-back alias is refused rather than done.
+    #[test]
+    fn memory_for_a_master_that_does_not_snoop_is_refused() {
+        use tairix_arch_api::mmu::{self, PageFlags};
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a process root");
+        let shared = PageFlags::READ | PageFlags::WRITE | PageFlags::USER;
+        assert_eq!(
+            mmu::AddressSpace::map_page(
+                &mut space,
+                FINE_VA,
+                FINE_PA,
+                shared | PageFlags::DMA_COHERENT
+            ),
+            Err(MapError::Unsupported)
+        );
+        assert_eq!(
+            mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, shared),
+            Ok(())
+        );
+    }
+
+    /// A DMA buffer's mark rides a software bit the walk ignores and decodes
+    /// back; a leaf without it carries none.
+    #[test]
+    fn the_dma_mark_round_trips_through_a_leaf() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a process root");
+        let shared = PageFlags::READ | PageFlags::WRITE | PageFlags::USER;
+        mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, shared | PageFlags::DMA)
+            .expect("maps");
+        let (_, flags) = mmu::AddressSpace::translate(&space, FINE_VA).expect("mapped");
+        assert!(flags.contains(shared | PageFlags::DMA));
+        let plain = FINE_VA + PAGE_SIZE as u64;
+        mmu::AddressSpace::map_page(&mut space, plain, FINE_PA, shared).expect("maps");
+        let (_, flags) = mmu::AddressSpace::translate(&space, plain).expect("mapped");
+        assert!(!flags.contains(PageFlags::DMA));
     }
 
     /// A user leaf in a kernel-half slot would hand ring 3 the direct map,

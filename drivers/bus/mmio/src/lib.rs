@@ -47,7 +47,8 @@ pub(crate) mod transport;
 #[cfg(test)]
 mod tests;
 
-use enumerate::{Mmio, VIRTIO_MMIO_COMPATIBLE};
+use enumerate::Mmio;
+use tairix_virtio::transport_mmio::COMPATIBLE;
 use transport::{MmioRead, VolatileMmioRead};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -103,9 +104,9 @@ impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
 
 // --- `virt`-board construction seam ---------------------------------------
 
-/// The smallest physical span covering every `virtio,mmio` slot the
-/// device tree describes: `(base, length)` from the lowest slot base to
-/// the highest slot end.
+/// The smallest physical span covering every operational `virtio,mmio`
+/// slot the device tree describes: `(base, length)` from the lowest slot
+/// base to the highest slot end.
 ///
 /// Returns `Ok(None)` when the tree advertises no `virtio,mmio` node.
 /// The bring-up scaffold uses the span to size one volatile reader that
@@ -121,9 +122,9 @@ impl<T: MmioRead> VirtioMmioBus for Mmio<'_, T> {
 fn virtio_mmio_aperture(dtb: &Fdt<'_>) -> Result<Option<(u64, u64)>, DriverError> {
     let mut lo: Option<u64> = None;
     let mut hi: Option<u64> = None;
-    for node in dtb.nodes() {
+    for node in dtb.operational_nodes() {
         let node = node.map_err(|_| DriverError::DeviceFault)?;
-        if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+        if !node.is_compatible(COMPATIBLE) {
             continue;
         }
         let reg = node.property("reg").ok_or(DriverError::DeviceFault)?;

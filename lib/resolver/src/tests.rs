@@ -13,7 +13,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr, MAX_RESOLVER_SERVERS};
-use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId, SysinfoRequestHeader};
+use tairix_abi::sysinfo::{PageRequest, SysinfoQueryId, SysinfoRequestHeader};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -66,7 +66,7 @@ impl tairix_procinfo::Transport for SysinfoFake {
         }
         let payload = &request[SysinfoRequestHeader::WIRE_LEN
             ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-        let req = NetInterfaceListRequest::from_bytes(payload)?;
+        let req = PageRequest::from_bytes(payload)?;
         let offset = req.offset as usize;
         if offset >= self.servers.len() {
             return Ok(Vec::new());

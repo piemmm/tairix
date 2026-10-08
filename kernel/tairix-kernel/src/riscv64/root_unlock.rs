@@ -3,98 +3,104 @@
 //!
 //! The freestanding-riscv64 half of the in-kernel root-unlock service, the
 //! cross-port sibling of [`crate::aarch64::root_unlock`]. It lives in the
-//! architecture subtree because it names the riscv64 port directly (the PLIC
+//! architecture subtree because it names the riscv64 port directly (the
 //! external-IRQ dispatch, the Sv39 paging primitives, the firmware device
 //! tree); the device- and architecture-independent two-task tail — the
 //! spawned interactive unlock and the persistent driver-store serve loop —
 //! stays in the shared [`crate::unlock_orchestrate::finish_unlock`].
 //!
 //! It admits the in-kernel unlock kthread at the init seam, brings the
-//! bootstrap virtio-blk root device up over the production PLIC device-IRQ
-//! path ([`crate::riscv64::irq`]), and hands the opened disk to the shared
+//! bootstrap virtio-blk root device up through the shared
+//! [`crate::floor_mmio`] bring-up, and hands the opened disk to the shared
 //! tail. The `virt` board's only floor block driver is virtio-blk (the
 //! aarch64 EMMC2 SD path has no riscv64 analogue), so there is one bring-up.
 
 use core::convert::Infallible;
 
-use tairix_abi::driver::dma::PoolId;
-use tairix_abi::IrqHandle;
-use tairix_arch_riscv64::fdt::{plic_device_source, Fdt};
+use tairix_abi::{HwNode, IrqHandle};
+use tairix_arch_api::fdtwalk::FdtPlatform;
 use tairix_arch_riscv64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
+use tairix_arch_riscv64::platform::Riscv64Fdt;
 use tairix_arch_riscv64::{trap, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
-use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
-use tairix_drv_bus_virtio::MmioTransport;
-use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
-use tairix_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
-};
-use tairix_kernel_irq::{IrqController, IrqTable};
-use tairix_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, MmioMap, VirtAddr};
+use tairix_fdt::{Fdt, Node};
+use tairix_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
+use tairix_kernel_irq::IrqTable;
+use tairix_kernel_mem::{FrameAllocator, PhysMap};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
-use tairix_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Level, Sink};
 use tairix_reclaim::MemoryPressure;
 
 use crate::driver_catalog::VIRTIO_BLK_PATH;
-use crate::driver_loader::KernelDriverLoader;
-use crate::riscv64::irq::{plic_controller, published_irq_table};
+use crate::floor_dma::Confinement;
+use crate::floor_irq::LineHost;
+use crate::floor_mmio::{bring_up_virtio_mmio, MmioFloorPort};
+use crate::riscv64::irq::{controller as irq_controller, published_irq_table};
 use crate::riscv64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use crate::root_storage::RootBlockBinding;
-use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
-use crate::unlock_service::{
-    loader_caps, note, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK,
-};
+use crate::unlock_orchestrate::{finish_virtio_unlock, UnlockConsole, UnlockEnv};
+use crate::unlock_service::{note, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK};
 
-/// Per-device DMA window capacity, in pages, the virtio-blk driver allocates
-/// its request/data buffers from (transient per-request DMA).
-const POOL_PAGES: usize = 64;
-
-/// Capacity, in pages, of the MMIO register-window map.
-const MMIO_CAP_PAGES: usize = 64;
-
-/// Identity extent, in GiB, the throwaway bookkeeping MMIO/DMA Sv39 spaces
-/// map. Their identity coverage is irrelevant to reachability — their tables
-/// are written through the live boot MMU, and device access is via the
-/// kernel's direct physical map — so this need only leave the window bases
-/// (below) above it; 4 GiB comfortably covers the kernel image + low RAM.
+/// Identity extent, in GiB, a bookkeeping space maps: enough for the kernel
+/// image and low RAM, and below both window bases.
 const BOOKKEEPING_GIB: usize = 4;
 
-/// Bookkeeping virtual base of the MMIO register-window map. Above
-/// [`BOOKKEEPING_GIB`] and inside the Sv39 canonical lower half (`< 256 GiB`)
-/// so it never collides with an identity gigapage. Pure bookkeeping — the
-/// driver reaches the window through the direct physical map.
-const MMIO_VBASE: u64 = 64 << 30;
-
-/// Bookkeeping virtual base of the minted per-driver DMA window (see
-/// [`MMIO_VBASE`]).
-const POOL_VBASE: u64 = 128 << 30;
-
-/// The page-table frame pool the two throwaway bookkeeping Sv39 spaces (the
-/// MMIO map and the DMA pool) draw their root + intermediate tables from.
-/// Private to the unlock service so it never contends with the boot/init
-/// pools. The spaces are never made live; the pool only backs the
-/// guard-bracketed window accounting `kernel/mem` performs.
+/// The page-table frames the floor's bookkeeping spaces take their tables
+/// from, apart from the boot and init pools so the unlock never contends them.
 static UNLOCK_PT_POOL: PageTablePool = PageTablePool::new();
 
-/// Race-free hart park for a device wait whose context cannot be
-/// scheduler-parked — the boot kthreads bringing the disk up and serving the
-/// driver store ([`IrqParkWaiter`]'s fallback).
-///
-/// Mask S-mode interrupt *taking* (`sstatus.SIE`), re-check the line's ready
-/// flag, `wfi` only if still not ready, then unmask so the woken completion is
-/// taken by the trap vector and dispatched into `IrqTable::fire`. Masking
-/// makes a completion landing in the check-park window *pending* (not taken)
-/// until `wfi` is entered, so no edge is lost. During the boot root-unlock
-/// everything else is parked waiting on this work, so briefly halting the hart
-/// starves nothing; every steady-state wait comes from a task's syscall
-/// context, which the shared waiter parks off the run queue instead.
+/// The riscv64 half of the floor bring-up.
+struct RiscvFloor;
+
+// SAFETY: the boot identity-maps the tree's virtio-MMIO aperture for the life
+// of the kernel, with the MMU on before `try_boot` and the physical memory
+// attributes making it device memory, and nothing holds a reference into it.
+unsafe impl MmioFloorPort for RiscvFloor {
+    type Platform = Riscv64Fdt;
+    type Space = ArchAddressSpace;
+    // Above the bookkeeping identity extent and inside the Sv39 canonical
+    // lower half, below 256 GiB.
+    const MMIO_VBASE: u64 = 64 << 30;
+    const POOL_VBASE: u64 = 128 << 30;
+
+    fn bookkeeping_space() -> Option<ArchAddressSpace> {
+        ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, BOOKKEEPING_GIB)
+    }
+
+    fn registers() -> &'static dyn PhysMap {
+        &SPAWN_TABLE_PHYSMAP
+    }
+
+    fn frames() -> &'static dyn PhysMap {
+        &SPAWN_TABLE_PHYSMAP
+    }
+
+    fn slot_line(fdt: &Fdt<'_>, slot: &Node<'_>) -> Option<u32> {
+        Riscv64Fdt::from_tree(fdt)
+            .node_line(slot)
+            .map(|line| line.line)
+    }
+
+    fn lines() -> Option<LineHost> {
+        Some(LineHost {
+            table: published_irq_table()?,
+            controller: irq_controller()?,
+            park: wfi_fallback_park,
+        })
+    }
+}
+
+/// The park a device wait takes where the scheduler cannot park it: mask
+/// S-mode interrupt taking, re-check the line's ready flag and `wfi` only if
+/// it is still not ready, so a completion landing in that window stays pending
+/// and wakes the `wfi` rather than being lost.
 fn wfi_fallback_park(table: &IrqTable, handle: IrqHandle) {
-    // SAFETY: the S-mode trap vector is installed (boot `enable_mmu_and_vectors`)
-    // and the production PLIC dispatch is published (`irq::install_dispatch`),
-    // so a woken external interrupt is handled rather than faulting; the calls
-    // only toggle `sstatus.SIE` and issue the `wfi` hint.
+    // SAFETY: the S-mode trap vector is installed (boot
+    // `enable_mmu_and_vectors`) and the production dispatch is published
+    // (`irq::install_dispatch`), so a woken external interrupt is handled
+    // rather than faulting; the calls only toggle `sstatus.SIE` and issue the
+    // `wfi` hint.
     unsafe {
         trap::set_supervisor_interrupts(false);
         if !table.ready_for(handle) {
@@ -269,7 +275,7 @@ pub fn spawn_if_present(ctx: &'static (dyn InitSpawnCtx + Sync)) -> bool {
 /// Bring up the bound virtio-blk root device and run the interactive unlock
 /// policy.
 ///
-/// **On success this never returns:** [`finish_unlock`] logs the outcome,
+/// **On success this never returns:** the shared tail logs the outcome,
 /// releases the console-0 gate, and parks the kthread for life as the
 /// persistent driver-store service, so the [`Infallible`] `Ok` is never
 /// produced. Only an early bring-up failure returns `Err` with a stable stage
@@ -297,22 +303,21 @@ fn run_unlock(
     ));
 
     match binding.driver_path {
-        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, dtb, frames, env),
+        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, &binding.node, dtb, frames, env),
         _ => Err("root-unlock: bound block driver is not a known floor driver"),
     }
 }
 
-/// Bring the virtio-blk root device up over the production PLIC device-IRQ
-/// path and hand it to the shared [`finish_unlock`] tail (the QEMU `virt`
-/// root).
+/// Bring the virtio-blk root device up through the shared floor bring-up and
+/// open it for the unlock (the QEMU `virt` root).
 fn virtio_blk_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
     caller: &'static TaskCapabilities,
+    node: &HwNode,
     dtb: u64,
     frames: &'static FrameAllocator,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
-    let audit = env.audit;
     if dtb == 0 {
         return Err("root-unlock: no device tree; root unbound");
     }
@@ -322,109 +327,24 @@ fn virtio_blk_unlock<'a>(
     // and bounds the blob by its own `totalsize` before any read.
     let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }
         .map_err(|_| "root-unlock: device tree unreadable; root unbound")?;
-    let total = fdt.total_size();
-    // SAFETY: `dtb`/`total` bound the same firmware blob `Fdt::from_ptr`
+    // SAFETY: `dtb` and the size bound the same firmware blob `Fdt::from_ptr`
     // validated; it is identity-mapped, read-only, and outlives the kernel.
-    let dtb_bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
-
-    // Build the `virt`-board virtio-MMIO bus and provision the block transport
-    // through the `CAP_MMIO_MAP`-gated kernel mapper.
-    // SAFETY: the virtio-MMIO aperture the device tree describes is
-    // identity-mapped Device memory the bus alone reads (MMU on — `boot`
-    // enabled it before `try_boot`).
-    let bus =
-        unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }.map_err(|_| "root-unlock: virtio bus")?;
-    // Device registers and DMA frames are reached through the kernel's one
-    // direct physical map, whose extent the boot path sized from the
-    // discovered RAM: the DMA pool's frames come from the allocator and may
-    // sit anywhere in it, well above the process-root identity window.
-    let phys = &SPAWN_TABLE_PHYSMAP;
-    // Two throwaway bookkeeping Sv39 spaces (device access is via `phys`):
-    // one for the MMIO window map, one for the DMA pool. Each identity-maps a
-    // small low extent; the window VAs sit above it so they never collide
-    // with an identity gigapage.
-    let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, BOOKKEEPING_GIB)
-        .ok_or("root-unlock: mmio bookkeeping space")?;
-    let mmio: &'static mut MmioMap<'static, _> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        MmioMap::new(
-            AddressSpace::new(mmio_space),
-            VirtAddr::new(MMIO_VBASE),
-            MMIO_CAP_PAGES,
-            phys,
-        )
-        .map_err(|_| "root-unlock: mmio map")?,
-    ));
-    let (transport, slot_base) = {
-        let mapper = KernelMmioMapper::new(mmio, caller, audit);
-        let prov = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, MmioTransport::new)
-            .map_err(|_| "root-unlock: virtio provisioning")?;
-        (prov.transport, prov.base)
-    };
-
-    // Resolve, bind, and arm the device's PLIC source on the table the kernel
-    // core published (`irq::install_dispatch`, run in the core's `Irq` phase).
-    // The S-mode external-interrupt dispatch is already installed, firing into
-    // this table. `plic_device_source` reads the slot's single `interrupts`
-    // cell — a discovered value, never a board constant.
-    let source =
-        plic_device_source(&fdt, slot_base).ok_or("root-unlock: no device interrupt in DTB")?;
-    let table: &'static IrqTable =
-        published_irq_table().ok_or("root-unlock: no published IRQ table")?;
-    let controller = plic_controller().ok_or("root-unlock: no PLIC controller")?;
-    let bind = table
-        .bind_exclusive(source, UNLOCK_TASK)
-        .map_err(|_| "root-unlock: bind device source")?;
-    let handle: IrqHandle = bind.handle;
-    // Arm the source for the first completion (enable it in the S-mode context
-    // and set its delivering priority); the waiter re-arms it after each
-    // subsequent one through the controller's `rearm`.
-    controller
-        .arm(source)
-        .map_err(|_| "root-unlock: arm PLIC source")?;
-
-    // Mint the per-driver DMA host the driver allocates through, driven by the
-    // shared parking waiter.
-    let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, BOOKKEEPING_GIB)
-        .ok_or("root-unlock: dma bookkeeping space")?;
-    let pool = DmaPool::new(
-        AddressSpace::new(dma_space),
-        VirtAddr::new(POOL_VBASE),
-        POOL_PAGES,
+    let tree: &'static [u8] =
+        unsafe { core::slice::from_raw_parts(dtb as *const u8, fdt.total_size()) };
+    let device = bring_up_virtio_mmio::<RiscvFloor>(
+        env.ctx,
+        node,
+        tree,
+        caller,
+        env.audit,
         frames,
-        phys,
+        Confinement::WhereTranslated,
+    )?;
+    finish_virtio_unlock(
+        device.transport,
+        device.host,
+        coop,
+        env,
+        &RISCV_UNLOCK_CONSOLE,
     )
-    .map_err(|_| "root-unlock: dma pool")?;
-    let controller_dyn: &'static (dyn IrqController + Sync) = controller;
-    let waiter: &'static IrqParkWaiter =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqParkWaiter::new(
-            table,
-            handle,
-            UNLOCK_TASK,
-            controller_dyn,
-            Some(wfi_fallback_park),
-        )));
-    let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(KernelVirtioHost::new(
-            pool,
-            caller,
-            audit,
-            PoolId::fresh(),
-            table,
-            handle,
-            waiter,
-        )));
-
-    // Admit the virtio-blk driver through the signed load gate (Ed25519
-    // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives hardware
-    // — a refusal fails closed.
-    let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
-    loader
-        .admit(VIRTIO_BLK_PATH, &loader_caps())
-        .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
-
-    // Open the whole-disk block device over the provisioned transport. Every
-    // borrowed backing is `'static`, so the opened device is `VirtioBlk<'static>`
-    // and can be shared for life behind the block-sharing layer.
-    let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
-    finish_unlock(blk, coop, env, &RISCV_UNLOCK_CONSOLE)
 }

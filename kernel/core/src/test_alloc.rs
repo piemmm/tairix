@@ -27,8 +27,8 @@ use std::cell::Cell;
 /// One measurement's allocator activity: the net allocated-but-not-freed
 /// byte balance, and how many allocations were made.
 ///
-/// A test leaks one of these (`Box::leak`, the established fixture pattern)
-/// and opts its own threads into it; no other test can touch it. Two
+/// A test owns one of these as a function-local `static`, which leaks
+/// nothing, and opts its own threads into it; no other test can touch it. Two
 /// distinct questions are asked of the host allocator: a leak soak wants the
 /// net balance, while the kernel-heap growth path must prove it makes *no*
 /// allocation at all (its production caller holds the very heap's
@@ -75,6 +75,32 @@ std::thread_local! {
     /// TLS slot could re-enter the allocator); a `Cell` of a `Copy` reference
     /// has no destructor to register either.
     static PARTICIPATING: Cell<Option<&'static LiveBytes>> = const { Cell::new(None) };
+}
+
+std::thread_local! {
+    /// The current thread's allocations are refused, as a full heap refuses
+    /// them.
+    static REFUSING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Refuse every allocation the current thread makes from now on, or stop:
+/// how a test reaches a path only an exhausted heap takes. A panic ends the
+/// refusal.
+pub fn refuse_allocations_on_current_thread(refuse: bool) {
+    REFUSING.with(|slot| slot.set(refuse));
+}
+
+fn refusing() -> bool {
+    // A refused panic payload would abort the whole binary and lose the
+    // message, so a panicking thread is never refused again.
+    REFUSING
+        .try_with(|slot| {
+            if std::thread::panicking() {
+                slot.set(false);
+            }
+            slot.get()
+        })
+        .unwrap_or(false)
 }
 
 /// Feed the current thread's allocations and frees into `counter` from now
@@ -125,11 +151,14 @@ fn size_delta(size: usize) -> isize {
 struct CountingAlloc;
 
 // SAFETY: every method delegates verbatim to `System`, which upholds the
-// `GlobalAlloc` contract; the counting is side bookkeeping that touches no
-// allocator state and never re-enters the allocator (the TLS slot is
-// `const`-initialised).
+// `GlobalAlloc` contract, or refuses with null, which the contract permits;
+// the counting is side bookkeeping that touches no allocator state and never
+// re-enters the allocator (the TLS slots are `const`-initialised).
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if refusing() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: forwarded verbatim; the caller upholds the layout contract.
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
@@ -140,6 +169,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if refusing() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: forwarded verbatim; the caller upholds the layout contract.
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
@@ -156,6 +188,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if refusing() {
+            return core::ptr::null_mut();
+        }
         // SAFETY: forwarded verbatim; the caller upholds the layout contract.
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
@@ -175,15 +210,48 @@ static COUNTING_ALLOC: CountingAlloc = CountingAlloc;
 mod tests {
     use super::*;
 
-    use alloc::boxed::Box;
     use alloc::vec;
+
+    /// A refusing thread's fallible allocations fail as a full heap's would,
+    /// and no other thread's do.
+    #[test]
+    fn a_refusing_thread_is_refused_and_no_other_is() {
+        let refused = std::thread::spawn(|| {
+            refuse_allocations_on_current_thread(true);
+            let mut buffer: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let refused = buffer.try_reserve(64).is_err();
+            refuse_allocations_on_current_thread(false);
+            refused && buffer.try_reserve(64).is_ok()
+        });
+        let mut other: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        assert!(other.try_reserve(64).is_ok());
+        assert!(refused.join().unwrap());
+    }
+
+    /// A thread that panics while refused keeps its panic's message, and is
+    /// refused nothing after it.
+    #[test]
+    fn a_panic_while_refused_keeps_its_message() {
+        let (message, after) = std::thread::spawn(|| {
+            refuse_allocations_on_current_thread(true);
+            let payload = std::panic::catch_unwind(|| panic!("refused")).err();
+            let message = payload.and_then(|payload| payload.downcast_ref::<&str>().copied());
+            let mut buffer: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            (message, buffer.try_reserve(64).is_ok())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(message, Some("refused"));
+        assert!(after);
+    }
 
     /// A thread that never opted in moves no balance; an opted-in thread's
     /// transient allocation balances to zero and a retained one is visible
     /// as at least its size until freed.
     #[test]
     fn balance_tracks_only_opted_in_threads() {
-        let counter: &'static LiveBytes = Box::leak(Box::new(LiveBytes::new()));
+        static COUNTER: LiveBytes = LiveBytes::new();
+        let counter = &COUNTER;
 
         let outside = std::thread::spawn(|| {
             let buffer = vec![0u8; 4096];

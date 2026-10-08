@@ -86,6 +86,8 @@ pub const IRQ_EVENTQ: u32 = 1 << 2;
 pub const GERROR_CMDQ: u32 = 1 << 0;
 /// [`GERROR`]: an event-queue write was aborted.
 pub const GERROR_EVENTQ_ABT: u32 = 1 << 2;
+/// [`GERROR`]: a `CMD_SYNC`'s completion message was aborted.
+pub const GERROR_MSI_CMDQ_ABT: u32 = 1 << 4;
 /// [`GERROR`]: the unit entered service-failure mode and translates nothing.
 pub const GERROR_SFM: u32 = 1 << 8;
 

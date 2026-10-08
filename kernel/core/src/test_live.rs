@@ -240,6 +240,10 @@ impl LiveUserSpace for FakeLive {
         }
     }
 
+    fn shared_room(&self, _pages: u64) -> bool {
+        true
+    }
+
     fn unmap_shared(&mut self, _base_va: u64, _len: usize) -> Result<(), LiveSpaceError> {
         match self.next.take() {
             Some(err) => Err(err),

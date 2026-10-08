@@ -14,7 +14,10 @@ den Prozessen des Aufrufers; die systemweite Sicht gewährt der Dienst
 nur einem Aufrufer mit `CAP_SYSINFO_GLOBAL`.
 
 Die Anzeige frischt sich in jedem Intervall selbst auf (3,0 Sekunden,
-sofern `-d` nichts anderes bestimmt), und `r` frischt sie sofort auf.
+sofern `-d` nichts anderes bestimmt), und `r` frischt sie sofort auf. Eine
+Auffrischung, die der Systeminformationsdienst unter Last nicht beenden
+konnte, behält die letzte Liste, die Statuszeile sagt es, und die nächste
+Auffrischung liest die Liste erneut.
 
 Der Betrachter nimmt keine Operanden an: er wird mit Tasten innerhalb
 der Sitzung gesteuert.

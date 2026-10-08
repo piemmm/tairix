@@ -52,18 +52,16 @@ use tairix_abi::net_ipc::{
     NetInterfaceStateRecord, NetServerAddr, NetSockState, NetStackDefenceCounters,
 };
 use tairix_abi::sysinfo::{
-    CacheLedgerRecord, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-    CpuTimeRecord, CrashRecord, CrashRecordRequest, DeviceStatsRequest, KernelMemoryStats,
-    LoadAverage, MemoryPressureBand, MemoryTotal, MountListRequest, MountRecord,
-    NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord,
-    ProcessState, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatListRequest,
+    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, KernelMemoryStats,
+    LoadAverage, MemoryPressureBand, MemoryTotal, MountRecord, NetInterfaceRatesRequest,
+    PageRequest, ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ResourceLimitRecord,
     SeatRecord, SysinfoQueryId, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoRequest, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
+    VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_procinfo::{
     call, fetch_tree, for_each_cpu_time, for_each_net_socket, for_each_process, memory_pressure,
-    memory_pressure_band, net_stack_defence, ramzip_stats, walk_pages, CallError, CpuTotals,
+    memory_pressure_band, net_stack_defence, ramzip_stats, walk_pages_with, CallError, CpuTotals,
     ListError, Transport, WalkStep,
 };
 
@@ -731,10 +729,11 @@ impl ScopeVerdicts {
 /// the cheapest reading its capability gates.
 #[must_use]
 pub fn probe_scopes(transport: &dyn Transport) -> ScopeVerdicts {
-    let probe_payload = ProcessListRequest {
+    let probe_payload = PageRequest {
         offset: 0,
         limit: 1,
         flags: 0,
+        walk: PageRequest::FRESH,
     }
     .to_le_bytes();
     let global_process_scope = !matches!(
@@ -751,7 +750,7 @@ pub fn probe_scopes(transport: &dyn Transport) -> ScopeVerdicts {
         call(
             transport,
             SysinfoQueryId::NET_INTERFACE_FACTS,
-            &page_payload(0, 1),
+            &probe_payload,
         ),
         Err(CallError::PermissionDenied)
     );
@@ -761,36 +760,6 @@ pub fn probe_scopes(transport: &dyn Transport) -> ScopeVerdicts {
         hardware_scope,
     }
 }
-
-/// Encode the `{offset, limit, reserved}` paging header every paged reading
-/// the sampler issues shares.
-///
-/// `sysinfo-v1` gives the mount, CPU-info, CPU-load, volume-health, seat,
-/// crash-record and network-interface list queries the identical eight-byte
-/// paging payload (each type's own documentation says so), so it is spelled
-/// once here rather than once per query; the assertion below pins that
-/// agreement at compile time, and the rates request is the one that differs
-/// — it appends the averaging window and encodes itself.
-fn page_payload(offset: u32, limit: u16) -> Vec<u8> {
-    MountListRequest {
-        offset,
-        limit,
-        flags: 0,
-    }
-    .to_le_bytes()
-    .to_vec()
-}
-
-const _: () = assert!(
-    MountListRequest::WIRE_LEN == CpuInfoListRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == CpuLoadRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == VolumeIoRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == DeviceStatsRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == SeatListRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == CrashRecordRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == NetInterfaceListRequest::WIRE_LEN,
-    "the paged sysinfo list queries must share one paging-header layout",
-);
 
 /// The share of `part` in `whole`, in permille (`0..=1000`), or `None` when
 /// `whole` is zero — nothing to be a share of is the honest absence, never a
@@ -1246,17 +1215,17 @@ impl Sampler {
     /// (so truncation is deterministic, never an arbitrary subset), and no
     /// further page is requested — which is what bounds the allocation a
     /// hostile or implausibly long list can provoke.
-    fn read_paged<T>(
+    fn read_paged<T, const N: usize>(
         &mut self,
         transport: &dyn Transport,
         spec: PagedRead,
         degradations: &mut Vec<DegradedField>,
-        make_request: impl Fn(u32, u16) -> Vec<u8>,
+        make_request: impl Fn(&PageRequest) -> [u8; N],
         decode: impl Fn(&[u8]) -> Result<T, Errno>,
     ) -> Option<Vec<T>> {
         let page = page_for(spec.record_len);
         let mut records: Vec<T> = Vec::with_capacity(usize::from(page).min(spec.cap));
-        let outcome = walk_pages(
+        let outcome = walk_pages_with(
             transport,
             spec.query,
             spec.record_len,
@@ -1340,7 +1309,7 @@ impl Sampler {
                 cap: CPU_RECORD_CAP,
             },
             degradations,
-            page_payload,
+            PageRequest::to_le_bytes,
             CpuInfoRecord::from_bytes,
         )
     }
@@ -1435,7 +1404,7 @@ impl Sampler {
                 cap: NET_INTERFACE_CAP,
             },
             degradations,
-            page_payload,
+            PageRequest::to_le_bytes,
             NetInterfaceCountersRecord::from_bytes,
         )
     }
@@ -1458,7 +1427,7 @@ impl Sampler {
                 cap: CPU_RECORD_CAP,
             },
             degradations,
-            page_payload,
+            PageRequest::to_le_bytes,
             CpuLoadRecord::from_bytes,
         )
     }
@@ -1481,7 +1450,7 @@ impl Sampler {
                 cap: NET_INTERFACE_CAP,
             },
             degradations,
-            page_payload,
+            PageRequest::to_le_bytes,
             NetInterfaceStateRecord::from_bytes,
         )
     }
@@ -1510,15 +1479,12 @@ impl Sampler {
                 cap: NET_INTERFACE_CAP,
             },
             degradations,
-            move |offset, limit| {
+            move |page| {
                 NetInterfaceRatesRequest {
-                    offset,
-                    limit,
-                    flags: 0,
+                    page: *page,
                     window,
                 }
                 .to_le_bytes()
-                .to_vec()
             },
             NetInterfaceRatesRecord::from_bytes,
         )
@@ -1581,7 +1547,7 @@ impl Sampler {
                     cap: NET_INTERFACE_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 NetInterfaceFactsRecord::from_bytes,
             ) {
                 self.net_facts = Some(records);
@@ -1637,7 +1603,7 @@ impl Sampler {
                     cap: VOLUME_RECORD_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 MountRecord::from_bytes,
             ) {
                 self.mounts = Some(records);
@@ -1653,7 +1619,7 @@ impl Sampler {
                     cap: VOLUME_RECORD_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 VolumeIoHealthRecord::from_bytes,
             ) {
                 self.volume_health = Some(records);
@@ -1669,7 +1635,7 @@ impl Sampler {
                     cap: SEAT_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 SeatRecord::from_bytes,
             ) {
                 self.seats = Some(records);
@@ -1685,7 +1651,7 @@ impl Sampler {
                     cap: CRASH_RECORD_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 CrashRecord::from_bytes,
             ) {
                 self.crashes = Some(records);
@@ -1726,7 +1692,7 @@ impl Sampler {
                     cap: VOLUME_RECORD_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 VolumeIoStatsRecord::from_bytes,
             ) {
                 self.volume_io_stats = Some(records);
@@ -1742,7 +1708,7 @@ impl Sampler {
                     cap: VOLUME_RECORD_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 VolumeIoQueueRecord::from_bytes,
             ) {
                 self.volume_io_queue = Some(records);
@@ -1762,7 +1728,7 @@ impl Sampler {
                     cap: GPU_RECORD_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 DisplayStats::from_bytes,
             ) {
                 self.gpu_stats = Some(records);
@@ -1794,7 +1760,7 @@ impl Sampler {
                     cap: CACHE_ROW_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 ReclaimClassRecord::from_bytes,
             ) {
                 self.reclaim = Some(records);
@@ -1810,7 +1776,7 @@ impl Sampler {
                     cap: CACHE_ROW_CAP,
                 },
                 degradations,
-                page_payload,
+                PageRequest::to_le_bytes,
                 CacheLedgerRecord::from_bytes,
             ) {
                 self.cache_ledgers = Some(records);
@@ -1868,7 +1834,7 @@ impl Sampler {
                 cap: SERVER_RECORD_CAP,
             },
             degradations,
-            page_payload,
+            PageRequest::to_le_bytes,
             NetServerAddr::from_bytes,
         )
     }

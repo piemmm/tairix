@@ -210,6 +210,11 @@ pub trait PciBus: Bus {
     /// DMA translation unit a function masters only once its owner's
     /// domain is attached (`plans/IOMMU.md` IOM7). Nothing else turns it on.
     ///
+    /// A PCI Express function is let master only once its Enable No Snoop is
+    /// clear: a No Snoop request reaches memory past the caches a DMA buffer
+    /// is scrubbed and kept coherent through. One whose bit will not clear is
+    /// left stopped.
+    ///
     /// The status half of the command/status register is RW1C, so the
     /// implementation writes it as zero.
     ///
@@ -285,6 +290,17 @@ pub trait PciBus: Bus {
     /// * [`DriverError::DeviceFault`] if the configuration read cannot
     ///   be completed by the bus transport.
     fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, DriverError>;
+
+    /// The first dword of function `bdf`'s capability `id`: its id, next
+    /// pointer and the capability's own leading bits, as its structure
+    /// defines them.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if the function lists no such capability
+    ///   (or no capability list at all).
+    /// * [`DriverError::DeviceFault`] if the list never ends.
+    fn capability_header(&self, bdf: u64, id: u8) -> Result<u32, DriverError>;
 
     /// Describe the function at `bdf` as a discovered child
     /// [`HwNode`] to attach beneath the bus's own
@@ -525,6 +541,10 @@ mod tests {
                 0x10 => Ok((self.bar_base & 0xFFFF_FFFF) as u32),
                 _ => Ok(0),
             }
+        }
+
+        fn capability_header(&self, _bdf: u64, _id: u8) -> Result<u32, DriverError> {
+            Err(DriverError::NotFound)
         }
 
         fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {

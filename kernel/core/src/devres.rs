@@ -35,9 +35,12 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::DmaReach;
 use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
-use tairix_abi::{Errno, MsiAllocation, PortValue, PortWidth};
-use tairix_kernel_mem::{DmaBlock, DmaCustodian, DmaCustody, DmaError, Retire, SharedMemory};
+use tairix_abi::{DmaCoherence, Errno, MsiAllocation, PortValue, PortWidth};
+use tairix_collections::HashMap;
+use tairix_hash::BuildFastHash;
+use tairix_kernel_mem::{DmaCustodian, DmaCustody, DmaError, FrameBlock, Retire, SharedMemory};
 
 /// The memory type a mapped device window is given.
 ///
@@ -127,7 +130,7 @@ pub struct DmaCarve {
     /// Device-visible base address the driver hands to the hardware.
     pub device_addr: u64,
     /// Backing length in bytes: the request rounded up to a power-of-two
-    /// page count.
+    /// page count, or for a translated device to whole pages.
     pub len: u64,
 }
 
@@ -137,18 +140,20 @@ pub struct DmaCarve {
 /// Implemented by the architecture-port-installed producer, mirroring
 /// [`MmioMapFacility`]: the handler has already resolved + owner-checked the
 /// grant and validated its kind/constraint; this
-/// trait performs only the carve mechanism — a physically-contiguous,
-/// zeroed, coherent block mapped `RW`, non-executable, guard-bracketed into
-/// the **caller's own** address space, bounded by `addr_limit`.
+/// trait performs only the carve mechanism — zeroed, coherent memory mapped
+/// `RW`, non-executable, guard-bracketed into the **caller's own** address
+/// space, bounded by `addr_limit`: one physically contiguous block for a
+/// device that reaches it at its physical address, its pages wherever frames
+/// are free for one a translation unit confines.
 ///
 /// Implementations must be [`Sync`], shared by the per-CPU handlers exactly
 /// like [`MmioMapFacility`].
 pub trait DmaAllocFacility: Sync {
-    /// Carve `len` bytes of physically-contiguous, zeroed, coherent DMA
-    /// memory into the caller's own address space, bounded so the device
-    /// reaches it wholly below `addr_limit` when it is non-zero (the granted
-    /// device addressing constraint; `0` declares no constraint). Return the
-    /// buffer's CPU virtual base and the base its device reaches it at.
+    /// Carve `len` bytes of zeroed, coherent DMA memory into the caller's own
+    /// address space, bounded so the device reaches it wholly below
+    /// `addr_limit` when it is non-zero (the granted device addressing
+    /// constraint; `0` declares no constraint). Return the buffer's CPU
+    /// virtual base and the base its device reaches it at.
     ///
     /// `custodian` is where the caller's space surrenders the buffer if the
     /// caller dies holding it; the carve reserves room in its custody first.
@@ -162,8 +167,9 @@ pub trait DmaAllocFacility: Sync {
     /// Returns a stable [`Errno`] — [`Errno::OutOfMemory`] when no free block
     /// lies below the addressing limit, the DMA window has no free slot, or
     /// the custody cannot make room for the block (deterministic OOM);
-    /// [`Errno::OutOfRange`] when no RAM lies below the limit or the request
-    /// exceeds the maximum contiguous block; [`Errno::DeviceOffline`] once the
+    /// [`Errno::OutOfRange`] when no RAM lies below the limit or an
+    /// untranslated request exceeds the largest contiguous block;
+    /// [`Errno::DeviceOffline`] once the
     /// custodian's node has left the tree; [`Errno::BadAddress`] for a
     /// page-table or direct-map failure; and [`Errno::NotImplemented`] with no
     /// live space or no custody wired. The default producer
@@ -271,7 +277,7 @@ impl DmaCustody for NullDmaQuarantine {
 
     fn unreserve(&self, _node: u32) {}
 
-    fn hold(&self, _node: u32, _generation: u64, _block: DmaBlock) {}
+    fn hold(&self, _node: u32, _generation: u64, _block: FrameBlock) {}
 }
 
 impl DmaQuarantineFacility for NullDmaQuarantine {
@@ -447,6 +453,97 @@ impl MsiAllocFacility for NullMsiAllocFacility {
 /// The shared [`NullMsiAllocFacility`] the syscall handler defaults to.
 pub static NULL_MSI_ALLOC_FACILITY: NullMsiAllocFacility = NullMsiAllocFacility;
 
+/// The producer of the MSI vectors the kernel takes itself and hands to no
+/// process, such as a translation unit's fault interrupt. Unlike a driver's,
+/// a vector the kernel is done with is returned.
+pub trait KernelMsiFacility: Sync {
+    /// Allocate one vector, as [`MsiAllocFacility::allocate`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] when the vector space is exhausted, or another
+    /// stable code the platform reports.
+    fn allocate(&self) -> Result<MsiAllocation, Errno>;
+
+    /// Return `allocation`'s vector for reuse. Only for one nothing can still
+    /// raise: no device was told it, or every one told was stopped.
+    fn release(&self, allocation: &MsiAllocation);
+}
+
+/// The MSI vectors allocated for each node's device. A node keeps its vectors
+/// across its drivers, so a restarted driver claims them back rather than
+/// draining the controller. Node ids are never reused, so a removed node's
+/// vectors are claimed by no one again: its device may still raise them.
+pub struct NodeVectors {
+    by_node: HashMap<u32, Vec<MsiAllocation>, BuildFastHash>,
+}
+
+impl NodeVectors {
+    /// No node holding a vector.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            by_node: HashMap::with_hasher(BuildFastHash::new()),
+        }
+    }
+
+    /// The first of `node`'s vectors its driver does not `hold`, else a new
+    /// one from `facility`, kept as `node`'s.
+    ///
+    /// # Errors
+    ///
+    /// The facility's refusal, or [`Errno::OutOfMemory`] when a new vector
+    /// could not be kept, in which case none is allocated.
+    pub fn claim(
+        &mut self,
+        node: u32,
+        holds: impl Fn(&MsiAllocation) -> bool,
+        facility: &dyn MsiAllocFacility,
+    ) -> Result<MsiAllocation, Errno> {
+        if let Some(kept) = self
+            .by_node
+            .get(&node)
+            .and_then(|vectors| vectors.iter().find(|vector| !holds(vector)))
+        {
+            return Ok(*kept);
+        }
+        if self.by_node.get(&node).is_none() {
+            self.by_node
+                .try_insert(node, Vec::new())
+                .map_err(|_| Errno::OutOfMemory)?;
+        }
+        let vectors = self.by_node.get_mut(&node).ok_or(Errno::OutOfMemory)?;
+        vectors.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        let vector = facility.allocate()?;
+        vectors.push(vector);
+        Ok(vector)
+    }
+}
+
+impl Default for NodeVectors {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Where a DMA region's frames may lie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmaBacking {
+    /// One physically contiguous block wholly below `limit` (`0`: anywhere),
+    /// for a device that reaches frames by their physical address.
+    Contiguous {
+        /// The device's physical reach.
+        limit: u64,
+    },
+    /// Blocks largest first, wherever frames are free below
+    /// `output_limit`, for a device a translation unit lets reach scattered
+    /// frames.
+    Scattered {
+        /// The exclusive physical address the device's unit can name up to.
+        output_limit: u64,
+    },
+}
+
 /// One physically-contiguous block of a shared region's backing.
 ///
 /// A small region is a single chunk; a region larger than the frame
@@ -481,8 +578,8 @@ pub struct SharedChunk {
 ///
 /// * [`alloc_region`](Self::alloc_region) — allocate a **zeroed** chunk-set
 ///   backing of `pages` frames (no cross-process leak);
-/// * [`alloc_dma_region`](Self::alloc_dma_region) — allocate one zeroed,
-///   physically contiguous block a DMA master may reach;
+/// * [`alloc_dma_region`](Self::alloc_dma_region) — allocate a zeroed
+///   backing a DMA master may reach;
 /// * [`map_region`](Self::map_region) — map an existing region into the
 ///   **calling** task's own live space as one contiguous window;
 /// * [`unmap_region`](Self::unmap_region) — release the caller's mapping;
@@ -498,6 +595,20 @@ pub struct SharedChunk {
 /// driver torn down by the device manager). Implementations must be [`Sync`]
 /// like [`MmioMapFacility`].
 pub trait SharedMemFacility: Sync {
+    /// Refuse, before any frame is drawn, a region of `pages` the caller's
+    /// shared window has no free run for. [`Self::map_region`] decides; this
+    /// only spares the draw and scrub of a backing it would then refuse, so
+    /// the default, which refuses nothing, is sound.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`], as [`Self::map_region`] would answer, or
+    /// [`Errno::NotImplemented`] where the caller has no window.
+    fn window_room(&self, pages: u64) -> Result<(), Errno> {
+        let _ = pages;
+        Ok(())
+    }
+
     /// Allocate a **zeroed** backing of `pages` frames the kernel owns as a
     /// set of one or more physically-contiguous chunks (each of order
     /// `≤ MAX_ORDER`), returning the [`SharedChunk`] list the caller must hand
@@ -507,27 +618,32 @@ pub trait SharedMemFacility: Sync {
     /// case — e.g. a USB request buffer); a region larger than the
     /// single-block ceiling spans several chunks, which [`Self::map_region`]
     /// maps into one contiguous virtual window. The region size is therefore
-    /// bounded by available RAM, not a fixed buddy order.
+    /// bounded by what the machine can spare, not a fixed buddy order: a
+    /// region is admitted against the kernel's reserve and every page already
+    /// promised before a frame is drawn.
     ///
     /// # Errors
     ///
-    /// [`Errno::OutOfMemory`] when the backing cannot be allocated
+    /// [`Errno::OutOfMemory`] when the machine cannot spare the backing
     /// (deterministic OOM), [`Errno::LengthOutOfRange`] when `pages` is zero,
+    /// [`Errno::BadAddress`] when the kernel cannot reach a frame to zero it,
     /// or [`Errno::NotImplemented`] for the inert default.
     fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno>;
 
-    /// Allocate one **zeroed**, physically contiguous block of at least
-    /// `pages` frames lying wholly below `addr_limit` (`0` declares no limit),
-    /// cleaned to memory so a coherent mapping and the device read the zeros.
+    /// Allocate a **zeroed** backing of `pages` frames laid out as `backing`
+    /// says, cleaned to memory so a coherent mapping and the device read the
+    /// zeros. A contiguous backing is one block, the request rounded up to a
+    /// buddy order. Admitted as [`Self::alloc_region`] is.
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] for zero pages or a block past the largest
-    /// buddy order, [`Errno::OutOfRange`] when no RAM lies below the limit,
-    /// [`Errno::OutOfMemory`] when no free block does, or
-    /// [`Errno::NotImplemented`] for the inert default.
-    fn alloc_dma_region(&self, pages: u64, addr_limit: u64) -> Result<SharedChunk, Errno> {
-        let _ = (pages, addr_limit);
+    /// [`Errno::LengthOutOfRange`] for zero pages or a contiguous block past
+    /// the largest buddy order, [`Errno::OutOfRange`] when no RAM lies below
+    /// the limit, [`Errno::OutOfMemory`] when the machine cannot spare the
+    /// frames, [`Errno::BadAddress`] when the kernel cannot reach one to zero
+    /// it, or [`Errno::NotImplemented`] for the inert default.
+    fn alloc_dma_region(&self, pages: u64, backing: DmaBacking) -> Result<Vec<SharedChunk>, Errno> {
+        let _ = (pages, backing);
         Err(Errno::NotImplemented)
     }
 
@@ -556,8 +672,9 @@ pub trait SharedMemFacility: Sync {
     /// Zero (zero-on-free) and return every block in `chunks` to the
     /// allocator, cleaning a coherent region's zeros to memory so no dirty
     /// line of the cacheable direct map is written back over the frames'
-    /// next owner. Best-effort: a frame that cannot be reached for scrubbing
-    /// is dropped rather than panicking (the inert default is a no-op).
+    /// next owner. A block that cannot be reached for scrubbing stays
+    /// allocated for good, since what it held may reach no one else (the
+    /// inert default is a no-op).
     fn free_region(&self, chunks: &[SharedChunk], memory: SharedMemory);
 
     /// Zero every block of a DMA region and pass it, frames still allocated,
@@ -722,6 +839,8 @@ pub struct DmaConstraint {
     /// The grant is a translating viewport, whose `max_len` is the window's
     /// extent, rather than an untranslated constraint.
     pub translated: bool,
+    /// How the device's accesses meet the CPU's caches.
+    pub coherence: DmaCoherence,
 }
 
 /// Validate that a granted [`HwResource`] is a DMA constraint `dma_alloc`
@@ -743,17 +862,15 @@ pub struct DmaConstraint {
 /// [`Errno::OutOfRange`] — the resource is not a DMA constraint, or its wire
 /// discriminant is unknown.
 pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
-    match resource.kind() {
-        Some(HwResourceKind::Dma) => {}
-        // A known-but-non-DMA kind, or an unknown discriminant, is the wrong
-        // shape for `dma_alloc`; refuse rather than carving against it.
-        _ => return Err(Errno::OutOfRange),
-    }
+    // A known-but-non-DMA kind, or an unknown discriminant, is the wrong shape
+    // for `dma_alloc`; refuse rather than carving against it.
+    let coherence = resource.dma_coherence().ok_or(Errno::OutOfRange)?;
     Ok(DmaConstraint {
         addr_limit: resource.base(),
         max_len: resource.length(),
         translated_base: resource.translated_base(),
         translated: resource.is_translated_dma_window(),
+        coherence,
     })
 }
 
@@ -799,6 +916,39 @@ pub fn translate_device_addr(constraint: &DmaConstraint, cpu_phys: u64) -> Resul
         1,
     )
     .ok_or(Errno::OutOfRange)
+}
+
+/// The bound a carve under `constraint` is placed below for a device driving
+/// `reach`, `0` answering that none applies: the grant's own, narrowed where
+/// the device reaches less, never widened. The reach bounds the address the
+/// device sees, so across a translating viewport it is brought back to the
+/// CPU window the bus side maps.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for a reach that stops short of a translating
+/// viewport's bus side.
+pub fn carve_limit(constraint: &DmaConstraint, reach: DmaReach) -> Result<u64, Errno> {
+    let Some(device_end) = reach.end() else {
+        return Ok(constraint.addr_limit);
+    };
+    let cpu_end = if constraint.translated {
+        let cpu_base = constraint
+            .addr_limit
+            .checked_sub(constraint.max_len)
+            .ok_or(Errno::OutOfRange)?;
+        let reached = device_end
+            .checked_sub(constraint.translated_base)
+            .filter(|&reached| reached != 0)
+            .ok_or(Errno::OutOfRange)?;
+        cpu_base.saturating_add(reached)
+    } else {
+        device_end
+    };
+    Ok(match constraint.addr_limit {
+        0 => cpu_end,
+        limit => limit.min(cpu_end),
+    })
 }
 
 #[cfg(test)]
@@ -896,7 +1046,11 @@ mod tests {
         // A DMA constraint, an IRQ line, and an x86 port range are not
         // memory windows `mmio_map` can map.
         assert_eq!(
-            mappable_subwindow(&HwResource::dma(0x4000_0000, 0), 0, 0x1000),
+            mappable_subwindow(
+                &HwResource::dma(0x4000_0000, 0, tairix_abi::DmaCoherence::Snooped),
+                0,
+                0x1000
+            ),
             Err(Errno::OutOfRange)
         );
         assert_eq!(
@@ -929,12 +1083,12 @@ mod tests {
     }
 
     fn null_custodian() -> DmaCustodian {
-        DmaCustodian {
-            node: 1,
-            generation: 1,
-            custody: &NULL_DMA_QUARANTINE,
-            translation: None,
-        }
+        DmaCustodian::untranslated(
+            1,
+            1,
+            &NULL_DMA_QUARANTINE,
+            tairix_abi::DmaCoherence::Snooped,
+        )
     }
 
     #[test]
@@ -964,7 +1118,7 @@ mod tests {
     fn dma_constraint_accepts_a_dma_grant() {
         // An untranslated constraint: the limit + extent are recovered and
         // there is no far-side viewport base.
-        let plain = HwResource::dma(0x4000_0000, 0x1_0000);
+        let plain = HwResource::dma(0x4000_0000, 0x1_0000, DmaCoherence::Snooped);
         assert_eq!(
             dma_constraint(&plain),
             Ok(DmaConstraint {
@@ -972,11 +1126,18 @@ mod tests {
                 max_len: 0x1_0000,
                 translated_base: 0,
                 translated: false,
+                coherence: DmaCoherence::Snooped,
             })
         );
 
-        // A translating inbound viewport carries the far-side bus base.
-        let translated = HwResource::dma_translated(0xC000_0000, 0x10_0000, 0x4_0000_0000);
+        // A translating inbound viewport carries the far-side bus base, and a
+        // device that does not snoop says so.
+        let translated = HwResource::dma_translated(
+            0xC000_0000,
+            0x10_0000,
+            0x4_0000_0000,
+            DmaCoherence::Unsnooped,
+        );
         assert_eq!(
             dma_constraint(&translated),
             Ok(DmaConstraint {
@@ -984,6 +1145,7 @@ mod tests {
                 max_len: 0x10_0000,
                 translated_base: 0x4_0000_0000,
                 translated: true,
+                coherence: DmaCoherence::Unsnooped,
             })
         );
     }
@@ -1018,7 +1180,12 @@ mod tests {
     fn translate_device_addr_passes_an_untranslated_constraint_through() {
         // A coherent (untranslated) constraint names the device by the
         // CPU-physical base unchanged.
-        let coherent = dma_constraint(&HwResource::dma(0x4000_0000, 0x1_0000)).unwrap();
+        let coherent = dma_constraint(&HwResource::dma(
+            0x4000_0000,
+            0x1_0000,
+            tairix_abi::DmaCoherence::Snooped,
+        ))
+        .unwrap();
         assert_eq!(translate_device_addr(&coherent, 0x10_0000), Ok(0x10_0000));
         // A zero base passes through too.
         assert_eq!(translate_device_addr(&coherent, 0), Ok(0));
@@ -1034,6 +1201,7 @@ mod tests {
             0x2_0000_0000,
             0x2_0000_0000,
             0x4_0000_0000,
+            tairix_abi::DmaCoherence::Snooped,
         ))
         .unwrap();
         assert_eq!(
@@ -1048,8 +1216,13 @@ mod tests {
     fn translate_device_addr_rebases_a_nonzero_cpu_base_viewport() {
         // A viewport whose CPU window does not start at 0: top 0x3000,
         // extent 0x1000 → cpu_base 0x2000, mapped onto bus base 0x9000_0000.
-        let viewport =
-            dma_constraint(&HwResource::dma_translated(0x3000, 0x1000, 0x9000_0000)).unwrap();
+        let viewport = dma_constraint(&HwResource::dma_translated(
+            0x3000,
+            0x1000,
+            0x9000_0000,
+            tairix_abi::DmaCoherence::Snooped,
+        ))
+        .unwrap();
         assert_eq!(translate_device_addr(&viewport, 0x2000), Ok(0x9000_0000));
         assert_eq!(translate_device_addr(&viewport, 0x2800), Ok(0x9000_0800));
         // A base below the viewport's CPU base fails closed (never wraps).
@@ -1064,6 +1237,54 @@ mod tests {
         );
     }
 
+    fn reach(bits: u32) -> DmaReach {
+        DmaReach::new(bits).unwrap()
+    }
+
+    #[test]
+    fn a_carve_is_bounded_by_the_narrower_of_the_grant_and_the_device() {
+        let unbounded =
+            dma_constraint(&HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped)).unwrap();
+        assert_eq!(carve_limit(&unbounded, DmaReach::FULL), Ok(0));
+        assert_eq!(carve_limit(&unbounded, reach(32)), Ok(1 << 32));
+        let low = dma_constraint(&HwResource::dma(
+            0x4000_0000,
+            0,
+            tairix_abi::DmaCoherence::Snooped,
+        ))
+        .unwrap();
+        assert_eq!(
+            carve_limit(&low, reach(32)),
+            Ok(0x4000_0000),
+            "never widened"
+        );
+        assert_eq!(carve_limit(&low, reach(24)), Ok(1 << 24));
+    }
+
+    #[test]
+    fn a_device_reach_bounds_the_bus_side_of_a_viewport() {
+        // CPU [0x8000_0000, 0x1_8000_0000) seen at bus [0x4000_0000, ..).
+        let viewport = dma_constraint(&HwResource::dma_translated(
+            0x1_8000_0000,
+            0x1_0000_0000,
+            0x4000_0000,
+            tairix_abi::DmaCoherence::Snooped,
+        ))
+        .unwrap();
+        assert_eq!(carve_limit(&viewport, DmaReach::FULL), Ok(0x1_8000_0000));
+        // Bus addresses below 4 GiB are the window's first 3 GiB.
+        assert_eq!(
+            carve_limit(&viewport, reach(32)),
+            Ok(0x8000_0000 + 0xC000_0000)
+        );
+        assert_eq!(
+            translate_device_addr(&viewport, 0x8000_0000 + 0xC000_0000 - 0x1000),
+            Ok(0xFFFF_F000)
+        );
+        // A device whose reach ends at or below the bus base reaches none.
+        assert_eq!(carve_limit(&viewport, reach(30)), Err(Errno::OutOfRange));
+    }
+
     #[test]
     fn translate_device_addr_rebases_a_window_whose_bus_side_starts_at_zero() {
         // `dma-ranges` mapping bus 0 onto CPU 0x8000_0000: the device names a
@@ -1072,6 +1293,7 @@ mod tests {
             0x8000_0000 + 0x4000_0000,
             0x4000_0000,
             0,
+            tairix_abi::DmaCoherence::Snooped,
         ))
         .unwrap();
         assert!(window.translated);

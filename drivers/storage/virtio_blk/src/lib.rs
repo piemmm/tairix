@@ -8,10 +8,10 @@
 //!
 //! # Public surface
 //!
-//! Per the only public *function* is [`register`].
-//! [`VirtioBlk`] is a public *type* re-exported so the driver host
-//! can instantiate it; the host never reaches into the type beyond
-//! the [`Block`] trait.
+//! The only public *function* is [`register`]. [`VirtioBlk`] is a public
+//! *type* so the driver host can instantiate it, reaching into it no further
+//! than the [`Block`] trait, and [`wire`] the device's request format, which
+//! a test driving the device itself reads.
 //!
 //! # Capabilities
 //!
@@ -54,8 +54,8 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
-    scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
-    Transport, UsedToken, VirtioError, VirtioHost, TRANSPORT_FEATURES,
+    scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, Negotiated, RequestQueue, SplitQueue,
+    Status, Transport, UsedToken, VirtioError, VirtioHost, TRANSPORT_FEATURES,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -65,6 +65,11 @@ const REGISTER_HANDLE_MARKER: u64 = 0x564E_4250_0000_0001; // "VBKP"
 /// and the rest of the ring lets descriptors rotate, so a completion the
 /// device repeats names free ones.
 const QUEUE_SIZE: u16 = 8;
+
+/// The class of device a virtio block device is: paravirtual, fast but
+/// bounded, so a wedged host backend never stalls a consumer for a spinning
+/// disk's spin-up budget.
+const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Virtual;
 
 /// The virtio device id of a block device (virtio 1.1 §5.2 — `virtio-blk`
 /// is device type 2). This driver's [`BIND_KEYS`] match key is built from
@@ -112,8 +117,10 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 }
 
 /// Virtio-blk wire protocol constants (virtio 1.1 §5.2.6).
-mod wire {
+pub mod wire {
+    /// Read request type.
     pub const VIRTIO_BLK_T_IN: u32 = 0;
+    /// Write request type.
     pub const VIRTIO_BLK_T_OUT: u32 = 1;
     /// Cache-flush request type (virtio 1.1 §5.2.6, requires
     /// [`VIRTIO_BLK_F_FLUSH`]): commit the device's volatile write cache
@@ -124,10 +131,13 @@ mod wire {
     pub const VIRTIO_BLK_T_DISCARD: u32 = 11;
     /// `struct virtio_blk_req` header size: type(4) + reserved(4) + sector(8).
     pub const HEADER_LEN: usize = 16;
+    /// The status byte a device answers each request with.
     pub const STATUS_LEN: usize = 1;
     /// Descriptors in the longest request chain: header, data, status.
     pub const REQUEST_CHAIN_LEN: u16 = 3;
+    /// The request was carried out.
     pub const STATUS_OK: u8 = 0;
+    /// The device failed the request.
     pub const STATUS_IOERR: u8 = 1;
     /// `VIRTIO_BLK_S_UNSUPP` (virtio 1.1 §5.2.6): the device does not
     /// support this request type (e.g. a flush or discard it never
@@ -173,13 +183,33 @@ mod wire {
     pub const DISCARD_DESCRIPTOR_LEN: usize = 16;
 }
 
+/// Take the block device at `transport` through reset and feature
+/// negotiation to `FEATURES_OK`, accepting only what this driver implements:
+/// the transport's features, discard and flush. Once the reset confirms, the
+/// device is declared quiesced to `host`, so memory an earlier instance left
+/// with it can be released.
+///
+/// # Errors
+///
+/// As [`tairix_virtio::negotiate`].
+fn negotiate<T: Transport>(
+    transport: &mut T,
+    host: &dyn VirtioHost,
+) -> Result<Negotiated, VirtioError> {
+    tairix_virtio::negotiate(
+        transport,
+        || host.device_quiesced(),
+        |offered| {
+            Ok(offered
+                & (TRANSPORT_FEATURES | wire::VIRTIO_BLK_F_DISCARD | wire::VIRTIO_BLK_F_FLUSH))
+        },
+    )
+}
+
 /// Block device backed by a cross-arch virtio transport.
 ///
 /// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
-/// its DMA regions through. The host is *minted per driver load* by
-/// a `VirtioHostFactory` (the seam defined in `lib/virtio`)
-/// and lives only for the duration of that load, so the driver borrows
-/// it for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads).
+/// its DMA regions through, so the driver needs no `'static` host.
 pub struct VirtioBlk<'h, T: Transport> {
     transport: T,
     queue: RequestQueue,
@@ -237,31 +267,9 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     /// [`VirtioError::FeaturesRejected`] if the device clears
     /// [`Status::FEATURES_OK`] after the driver completed negotiation.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, VirtioError> {
-        transport.reset()?;
-        host.device_quiesced();
-        let mut status = Status::default().with(Status::ACKNOWLEDGE);
-        transport.set_status(status);
-        status = status.with(Status::DRIVER);
-        transport.set_status(status);
-        // Accept only the features we implement: the transport's, discard
-        // and flush. Everything else is declined so the driver never claims
-        // behaviour it does not honour.
-        let device_features = transport.device_features();
-        let discard_offered = device_features & wire::VIRTIO_BLK_F_DISCARD != 0;
-        let flush_offered = device_features & wire::VIRTIO_BLK_F_FLUSH != 0;
-        let mut driver_features = device_features & TRANSPORT_FEATURES;
-        if discard_offered {
-            driver_features |= wire::VIRTIO_BLK_F_DISCARD;
-        }
-        if flush_offered {
-            driver_features |= wire::VIRTIO_BLK_F_FLUSH;
-        }
-        transport.set_driver_features(driver_features);
-        status = status.with(Status::FEATURES_OK);
-        transport.set_status(status);
-        if !transport.status().contains(Status::FEATURES_OK) {
-            return Err(VirtioError::FeaturesRejected);
-        }
+        let negotiated = negotiate(&mut transport, host)?;
+        let discard_offered = negotiated.features & wire::VIRTIO_BLK_F_DISCARD != 0;
+        let flush_offered = negotiated.features & wire::VIRTIO_BLK_F_FLUSH != 0;
         // Carve the persistent request staging once. Every request
         // reuses these three buffers, so the block data path never
         // touches the DMA allocator after open. Every fallible step
@@ -269,13 +277,13 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         // was given.
         let header = host
             .alloc_dma_zeroed(wire::HEADER_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let data = host
             .alloc_dma_zeroed(wire::MAX_TRANSFER_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let request_status = host
             .alloc_dma_zeroed(wire::STATUS_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let queue = RequestQueue::new(SplitQueue::new(
             &mut transport,
             host,
@@ -283,25 +291,19 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             QUEUE_SIZE,
             wire::REQUEST_CHAIN_LEN,
         )?);
-        status = status.with(Status::DRIVER_OK);
-        transport.set_status(status);
-        // Read capacity from device-config.
-        let mut cap = [0u8; 8];
-        transport.read_config(wire::CONFIG_CAPACITY_OFFSET, &mut cap);
-        let capacity_sectors = u64::from_le_bytes(cap);
+        transport.set_status(negotiated.status.with(Status::DRIVER_OK));
+        let capacity_sectors = transport.read_config_u64(wire::CONFIG_CAPACITY_OFFSET);
         let discard = if discard_offered {
-            let mut max = [0u8; 4];
-            transport.read_config(wire::CONFIG_MAX_DISCARD_SECTORS_OFFSET, &mut max);
-            let mut align = [0u8; 4];
-            transport.read_config(wire::CONFIG_DISCARD_SECTOR_ALIGNMENT_OFFSET, &mut align);
+            let max = transport.read_config_u32(wire::CONFIG_MAX_DISCARD_SECTORS_OFFSET);
+            let align = transport.read_config_u32(wire::CONFIG_DISCARD_SECTOR_ALIGNMENT_OFFSET);
             // A sector is one logical block here (block_size == 512). An
             // alignment of zero means "no alignment requirement"; the
             // capability granularity is always at least one block.
-            let granularity_blocks = u64::from(u32::from_le_bytes(align)).max(1);
+            let granularity_blocks = u64::from(align).max(1);
             DiscardLimits {
                 supported: true,
                 granularity_blocks,
-                max_blocks_per_request: u64::from(u32::from_le_bytes(max)),
+                max_blocks_per_request: u64::from(max),
             }
         } else {
             DiscardLimits {
@@ -633,10 +635,8 @@ impl Payload<'_> {
 }
 
 impl<T: Transport> Block for VirtioBlk<'_, T> {
-    /// A paravirtual device: fast, but bounded, so a wedged host backend
-    /// never stalls a consumer for a spinning disk's spin-up budget.
     fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::Virtual
+        DEVICE_CLASS
     }
 
     /// The virtio block device, named as its specification names it.

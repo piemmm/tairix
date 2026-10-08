@@ -28,21 +28,22 @@ use alloc::vec::Vec;
 use core::ptr::NonNull;
 
 use tairix_abi::Errno;
-use tairix_collections::HashMap;
+use tairix_collections::{HashMap, SmallVec};
 use tairix_hash::BuildSipHash13;
 use tairix_kernel_mem::{
-    DmaBlock, DmaCustodian, DmaError, Frame, PhysAddr, SharedMemory, PAGE_SIZE,
+    AllocError, DmaCustodian, DmaError, Frame, FrameBlock, PhysAddr, SharedMemory, PAGE_SIZE,
 };
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
-use crate::devres::{SharedChunk, SharedMemFacility};
+use crate::devres::{DmaBacking, SharedChunk, SharedMemFacility};
 
 /// One live shared-memory region.
 struct Region {
-    /// The region's physically-contiguous backing blocks: one for a small
-    /// region, several for one larger than the single-block ceiling. Handed
-    /// to the facility to map (into one contiguous window) and to free.
+    /// The region's backing blocks, each physically contiguous: one for a
+    /// small or untranslated DMA region, several for one past a single block
+    /// or a translated DMA one. Handed to the facility to map (into one
+    /// contiguous window) and to free.
     chunks: Vec<SharedChunk>,
     /// Region size in whole pages (the sum of the chunks' pages).
     pages: u64,
@@ -58,19 +59,16 @@ struct Region {
 
 impl Region {
     fn memory(&self) -> SharedMemory {
-        if self.dma.is_some() {
-            SharedMemory::DmaCoherent
-        } else {
-            SharedMemory::Cacheable
-        }
+        self.dma.as_ref().map_or(SharedMemory::Cacheable, |dma| {
+            SharedMemory::dma(dma.custodian.coherence())
+        })
     }
 }
 
 /// Custody of a region a DMA master may reach (`plans/OPEN-DEFECTS.md` D167).
 ///
-/// The region holds a custody reservation for its one block for its whole
-/// life, so its frames can reach the quarantine however long a grantee
-/// outlives its creator.
+/// The region holds a custody reservation for its whole life, so its frames
+/// can reach the quarantine however long a grantee outlives its creator.
 #[derive(Clone, Copy)]
 struct DmaRegion {
     custodian: DmaCustodian,
@@ -89,26 +87,45 @@ impl DmaRegion {
     /// Whether the device is known to have lost the region, so its frames may
     /// return to the allocator: its translation confirms the unmap, or, with
     /// none, its creator unmapped it and so vouched for the device.
-    fn released(&self, chunk: &SharedChunk) -> bool {
-        match self.custodian.translation {
+    fn released(&self) -> bool {
+        match self.custodian.translation() {
             Some(translation) => translation
                 .unmap(
                     self.custodian.node,
                     self.custodian.generation,
                     self.device_addr,
-                    dma_block(chunk),
                 )
                 .is_ok(),
             None => !self.orphaned,
         }
     }
+
+    /// Hand the region's frames back: to the allocator once the device has
+    /// lost them, else to its node's quarantine.
+    fn release(&self, facility: &dyn SharedMemFacility, chunks: &[SharedChunk]) {
+        if self.released() {
+            facility.free_region(chunks, SharedMemory::dma(self.custodian.coherence()));
+            self.custodian.custody().unreserve(self.custodian.node);
+        } else {
+            facility.surrender_region(chunks, &self.custodian);
+        }
+    }
 }
 
-fn dma_block(chunk: &SharedChunk) -> DmaBlock {
-    DmaBlock {
-        frame: Frame::containing(PhysAddr::new(chunk.phys_base)),
-        order: chunk.order,
+/// `chunks` as the blocks a translation maps, end to end.
+fn dma_blocks(chunks: &[SharedChunk]) -> Result<SmallVec<FrameBlock, 1>, DmaError> {
+    let mut blocks = SmallVec::new();
+    blocks
+        .try_reserve(chunks.len())
+        .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))?;
+    for chunk in chunks {
+        // Room was reserved above.
+        let _ = blocks.try_push(FrameBlock {
+            frame: Frame::containing(PhysAddr::new(chunk.phys_base)),
+            order: chunk.order,
+        });
     }
+    Ok(blocks)
 }
 
 /// The registry state: the next id to mint, the live regions, and each
@@ -183,7 +200,8 @@ fn region_len_bytes(pages: u64) -> usize {
 ///
 /// # Errors
 ///
-/// The facility error (frame exhaustion, oversize, no virtual slot). On a map
+/// The facility error (frame exhaustion, oversize, no virtual slot). A
+/// window with no room refuses before any frame is drawn; on a later map
 /// failure the freshly allocated frames are returned to the allocator, so a
 /// failed create leaks nothing.
 pub fn create(
@@ -191,6 +209,7 @@ pub fn create(
     owner: ProcessId,
     pages: u64,
 ) -> Result<(u64, u64), Errno> {
+    facility.window_room(pages)?;
     let chunks = facility.alloc_region(pages)?;
     let base_va = match facility.map_region(&chunks, SharedMemory::Cacheable) {
         Ok(va) => va,
@@ -202,8 +221,13 @@ pub fn create(
     match record(owner, base_va, chunks, pages, None) {
         Ok(id) => Ok((base_va, id)),
         Err(chunks) => {
-            let _ = facility.unmap_region(base_va, region_len_bytes(pages));
-            facility.free_region(&chunks, SharedMemory::Cacheable);
+            // A page that may still map the frames keeps them out of reuse.
+            if facility
+                .unmap_region(base_va, region_len_bytes(pages))
+                .is_ok()
+            {
+                facility.free_region(&chunks, SharedMemory::Cacheable);
+            }
             Err(Errno::OutOfMemory)
         }
     }
@@ -216,18 +240,20 @@ pub struct DmaRegionCreated {
     pub base_va: u64,
     /// The kernel-minted region id.
     pub id: u64,
-    /// Where the device reaches the region's one contiguous block: its IOVA
-    /// when translated, else its CPU-physical base.
+    /// Where the device reaches the region's first byte, the rest following
+    /// contiguously: its IOVA when translated, else its CPU-physical base.
     pub device_addr: u64,
-    /// Pages the block spans: the request rounded up to one buddy block.
+    /// Pages the region spans: the request, rounded up to one buddy block
+    /// for an untranslated device.
     pub pages: u64,
 }
 
-/// Create a region a DMA master may reach: one physically contiguous block of
-/// at least `pages` pages its device reaches below `addr_limit`, carved for
-/// `custodian`'s device, owned by `owner` and mapped coherent into its live
-/// space. A custodian naming a translation maps the block into its node's
-/// domain.
+/// Create a region a DMA master may reach at contiguous addresses below
+/// `addr_limit`, of at least `pages` pages, carved for `custodian`'s device,
+/// owned by `owner` and mapped coherent into its live space. Untranslated,
+/// it is one physically contiguous block; a custodian naming a translation
+/// has its frames drawn wherever they are free and maps them end to end in
+/// its node's domain.
 ///
 /// The region reserves its node's custody for its life. Untranslated,
 /// `owner`'s own unmap is its word that the device is done with the region;
@@ -237,12 +263,14 @@ pub struct DmaRegionCreated {
 ///
 /// # Errors
 ///
-/// The custody's refusal to reserve room for the region
+/// [`Errno::OutOfMemory`] before anything is drawn when `owner`'s window has
+/// no room for the region, the custody's refusal to reserve room for it
 /// ([`Errno::NotImplemented`] where none is wired, [`Errno::OutOfMemory`]
 /// where it cannot, [`Errno::DeviceOffline`] where the device is gone), the
-/// facility's carve or map error, or the translation's refusal. A failed
-/// create leaves nothing allocated or reserved, bar a block its unit could
-/// not confirm the device lost.
+/// facility's carve or map error ([`Errno::BadAddress`] for an untranslated
+/// backing of more than one block), or the translation's refusal. A failed
+/// create leaves nothing allocated or reserved, bar frames its unit could
+/// not confirm the device lost or a mapping it could not take down.
 pub fn create_dma(
     facility: &dyn SharedMemFacility,
     owner: ProcessId,
@@ -250,37 +278,47 @@ pub fn create_dma(
     pages: u64,
     addr_limit: u64,
 ) -> Result<DmaRegionCreated, Errno> {
+    facility.window_room(pages)?;
+    let memory = SharedMemory::dma(custodian.coherence());
     custodian
-        .custody
+        .custody()
         .reserve(custodian.node)
         .map_err(crate::live_producer::dma_errno)?;
-    let unreserve = || custodian.custody.unreserve(custodian.node);
-    // A translated device reaches any frame through its domain, so the limit
-    // bounds its IOVA instead.
-    let frame_limit = if custodian.translation.is_some() {
-        0
-    } else {
-        addr_limit
+    let unreserve = || custodian.custody().unreserve(custodian.node);
+    // A translated device reaches any frame its unit can name through its
+    // domain, so the limit bounds its IOVA instead.
+    let backing = match custodian.translation() {
+        Some(_) => DmaBacking::Scattered {
+            output_limit: custodian.output_limit(),
+        },
+        None => DmaBacking::Contiguous { limit: addr_limit },
     };
-    let chunk = facility
-        .alloc_dma_region(pages, frame_limit)
+    let chunks = facility
+        .alloc_dma_region(pages, backing)
         .inspect_err(|_| unreserve())?;
-    let device_addr = match custodian.translation {
-        None => chunk.phys_base,
+    let pages = chunks.iter().map(|chunk| chunk.pages).sum();
+    let device_addr = match custodian.translation() {
+        None => {
+            // The device would be told one run spans frames that do not: a
+            // facility breaking its contiguous backing fails closed.
+            let [chunk] = *chunks.as_slice() else {
+                facility.free_region(&chunks, memory);
+                unreserve();
+                return Err(Errno::BadAddress);
+            };
+            chunk.phys_base
+        }
         Some(translation) => {
-            let mapped = translation.map(
-                custodian.node,
-                custodian.generation,
-                dma_block(&chunk),
-                addr_limit,
-            );
+            let mapped = dma_blocks(&chunks).and_then(|blocks| {
+                translation.map(custodian.node, custodian.generation, &blocks, addr_limit)
+            });
             match mapped {
                 Ok(iova) => iova,
                 Err(err) => {
                     if err == DmaError::Unconfirmed {
-                        facility.surrender_region(&[chunk], &custodian);
+                        facility.surrender_region(&chunks, &custodian);
                     } else {
-                        facility.free_region(&[chunk], SharedMemory::DmaCoherent);
+                        facility.free_region(&chunks, memory);
                         unreserve();
                     }
                     return Err(crate::live_producer::dma_errno(err));
@@ -294,33 +332,26 @@ pub fn create_dma(
         orphaned: false,
         device_addr,
     };
-    let abandon = |chunks: &[SharedChunk]| {
-        if dma.released(&chunk) {
-            facility.free_region(chunks, SharedMemory::DmaCoherent);
-            unreserve();
-        } else {
-            facility.surrender_region(chunks, &custodian);
-        }
-    };
-    let chunks = match copy_chunks(&[chunk]) {
-        Ok(chunks) => chunks,
-        Err(err) => {
-            abandon(&[chunk]);
-            return Err(err);
-        }
-    };
-    let base_va = match facility.map_region(&chunks, SharedMemory::DmaCoherent) {
+    let base_va = match facility.map_region(&chunks, memory) {
         Ok(va) => va,
         Err(err) => {
-            abandon(&chunks);
+            dma.release(facility, &chunks);
             return Err(err);
         }
     };
-    let id = match record(owner, base_va, chunks, chunk.pages, Some(dma)) {
+    let id = match record(owner, base_va, chunks, pages, Some(dma)) {
         Ok(id) => id,
         Err(chunks) => {
-            let _ = facility.unmap_region(base_va, region_len_bytes(chunk.pages));
-            abandon(&chunks);
+            // A page that may still map the frames keeps them out of reuse;
+            // the device reaching them then reaches nothing anyone else holds.
+            if facility
+                .unmap_region(base_va, region_len_bytes(pages))
+                .is_ok()
+            {
+                dma.release(facility, &chunks);
+            } else {
+                dma.custodian.custody().unreserve(dma.custodian.node);
+            }
             return Err(Errno::OutOfMemory);
         }
     };
@@ -328,7 +359,7 @@ pub fn create_dma(
         base_va,
         id,
         device_addr,
-        pages: chunk.pages,
+        pages,
     })
 }
 
@@ -413,8 +444,10 @@ pub fn map(
             state.add_mapping(process.0, base_va, id)
         });
     if let Err(err) = recorded {
-        let _ = facility.unmap_region(base_va, len);
-        release_ref(facility, id);
+        // A page that may still map the frames keeps the region alive.
+        if facility.unmap_region(base_va, len).is_ok() {
+            release_ref(facility, id);
+        }
         return Err(err);
     }
     Ok((base_va, len))
@@ -581,18 +614,7 @@ fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
     };
     match region.dma {
         None => facility.free_region(&region.chunks, SharedMemory::Cacheable),
-        Some(dma) => {
-            if region
-                .chunks
-                .first()
-                .is_some_and(|chunk| dma.released(chunk))
-            {
-                facility.free_region(&region.chunks, SharedMemory::DmaCoherent);
-                dma.custodian.custody.unreserve(dma.custodian.node);
-            } else {
-                facility.surrender_region(&region.chunks, &dma.custodian);
-            }
-        }
+        Some(dma) => dma.release(facility, &region.chunks),
     }
 }
 
@@ -766,6 +788,7 @@ pub fn live_regions() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::DmaCoherence;
 
     #[test]
     fn the_registry_hashes_under_the_published_key() {
@@ -777,7 +800,7 @@ mod tests {
     }
 
     extern crate std;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::boxed::Box;
     use std::sync::Mutex;
     use std::vec::Vec;
@@ -798,6 +821,11 @@ mod tests {
         surrendered: Mutex<Vec<(u64, u32, u64)>>,
         fail_dma_alloc: bool,
         fail_map: bool,
+        /// Breaks a contiguous backing into blocks, as no facility may.
+        split_contiguous: bool,
+        /// The largest region the window has a free run for; none is
+        /// unbounded.
+        window_room: Option<u64>,
     }
 
     impl FakeFacility {
@@ -814,14 +842,36 @@ mod tests {
                 surrendered: Mutex::new(Vec::new()),
                 fail_dma_alloc: false,
                 fail_map: false,
+                split_contiguous: false,
+                window_room: None,
             }
         }
         fn va_for(phys: u64) -> u64 {
             0x9000_0000_0000 + phys
         }
+
+        /// `pages` as one block per set bit, largest first, each at a
+        /// distinct base as a fragmented allocator would hand them out.
+        fn scattered(&self, pages: u64) -> Vec<SharedChunk> {
+            (0..u64::BITS)
+                .rev()
+                .filter(|order| pages & (1 << order) != 0)
+                .map(|order| SharedChunk {
+                    phys_base: self.next_phys.fetch_add(0x10_0000, Ordering::Relaxed),
+                    order,
+                    pages: 1 << order,
+                })
+                .collect()
+        }
     }
 
     impl SharedMemFacility for FakeFacility {
+        fn window_room(&self, pages: u64) -> Result<(), Errno> {
+            match self.window_room {
+                Some(room) if pages > room => Err(Errno::OutOfMemory),
+                _ => Ok(()),
+            }
+        }
         fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
             // One chunk covering the whole request (the small, single-block
             // case); `WindowFacility` overrides this to split into several.
@@ -832,20 +882,31 @@ mod tests {
                 pages,
             }])
         }
-        fn alloc_dma_region(&self, pages: u64, addr_limit: u64) -> Result<SharedChunk, Errno> {
+        fn alloc_dma_region(
+            &self,
+            pages: u64,
+            backing: DmaBacking,
+        ) -> Result<Vec<SharedChunk>, Errno> {
             if self.fail_dma_alloc {
                 return Err(Errno::OutOfMemory);
             }
+            let limit = match backing {
+                DmaBacking::Contiguous { .. } if self.split_contiguous => {
+                    return Ok(self.scattered(pages));
+                }
+                DmaBacking::Contiguous { limit } => limit,
+                DmaBacking::Scattered { .. } => return Ok(self.scattered(pages)),
+            };
             let phys = self.next_phys.fetch_add(0x10_0000, Ordering::Relaxed);
-            if addr_limit != 0 && phys >= addr_limit {
+            if limit != 0 && phys >= limit {
                 return Err(Errno::OutOfRange);
             }
             let pages = pages.next_power_of_two();
-            Ok(SharedChunk {
+            Ok(alloc::vec![SharedChunk {
                 phys_base: phys,
                 order: pages.trailing_zeros(),
                 pages,
-            })
+            }])
         }
         fn map_region(&self, chunks: &[SharedChunk], memory: SharedMemory) -> Result<u64, Errno> {
             if self.fail_map {
@@ -874,10 +935,10 @@ mod tests {
         }
         fn surrender_region(&self, chunks: &[SharedChunk], custodian: &DmaCustodian) {
             for c in chunks {
-                custodian.custody.hold(
+                custodian.custody().hold(
                     custodian.node,
                     custodian.generation,
-                    tairix_kernel_mem::DmaBlock {
+                    tairix_kernel_mem::FrameBlock {
                         frame: tairix_kernel_mem::Frame::containing(
                             tairix_kernel_mem::PhysAddr::new(c.phys_base),
                         ),
@@ -936,6 +997,93 @@ mod tests {
             fac.unmaps.lock().unwrap().len(),
             2,
             "both mappings torn down"
+        );
+    }
+
+    /// Maps, then leaves the registry no room to record the mapping and
+    /// cannot take it down again: a full heap and a failed unmap together.
+    struct Unrecordable {
+        inner: FakeFacility,
+        stuck: AtomicBool,
+    }
+
+    impl SharedMemFacility for Unrecordable {
+        fn alloc_region(&self, pages: u64) -> Result<Vec<SharedChunk>, Errno> {
+            self.inner.alloc_region(pages)
+        }
+        fn alloc_dma_region(
+            &self,
+            pages: u64,
+            backing: DmaBacking,
+        ) -> Result<Vec<SharedChunk>, Errno> {
+            self.inner.alloc_dma_region(pages, backing)
+        }
+        fn map_region(&self, chunks: &[SharedChunk], memory: SharedMemory) -> Result<u64, Errno> {
+            let va = self.inner.map_region(chunks, memory)?;
+            if self.stuck.load(Ordering::Relaxed) {
+                crate::test_alloc::refuse_allocations_on_current_thread(true);
+            }
+            Ok(va)
+        }
+        fn unmap_region(&self, base: u64, len: usize) -> Result<(), Errno> {
+            crate::test_alloc::refuse_allocations_on_current_thread(false);
+            if self.stuck.load(Ordering::Relaxed) {
+                return Err(Errno::BadAddress);
+            }
+            self.inner.unmap_region(base, len)
+        }
+        fn free_region(&self, chunks: &[SharedChunk], memory: SharedMemory) {
+            self.inner.free_region(chunks, memory);
+        }
+        fn surrender_region(&self, chunks: &[SharedChunk], custodian: &DmaCustodian) {
+            self.inner.surrender_region(chunks, custodian);
+        }
+    }
+
+    fn unrecordable(stuck: bool) -> Unrecordable {
+        Unrecordable {
+            inner: FakeFacility::new(),
+            stuck: AtomicBool::new(stuck),
+        }
+    }
+
+    /// A mapping that could not be recorded nor taken down still reaches the
+    /// frames, so they are never handed back.
+    #[test]
+    fn a_region_an_unmap_could_not_take_down_keeps_its_frames() {
+        let fac = unrecordable(true);
+        assert_eq!(
+            create(&fac, ProcessId(0x5_0201), 2),
+            Err(Errno::OutOfMemory)
+        );
+        assert!(fac.inner.frees.lock().unwrap().is_empty());
+
+        let custody = leaked_custody();
+        let made = create_dma(&fac, ProcessId(0x5_0202), custodian(custody), 1, 0);
+        assert_eq!(made.err(), Some(Errno::OutOfMemory));
+        assert!(fac.inner.frees.lock().unwrap().is_empty());
+        assert!(fac.inner.surrendered.lock().unwrap().is_empty());
+        assert_eq!(
+            *custody.unreserves.lock().unwrap(),
+            [7],
+            "its quarantine room goes back"
+        );
+    }
+
+    /// A second mapping that could not be recorded nor taken down holds the
+    /// region alive past its creator's own release.
+    #[test]
+    fn a_mapping_an_unmap_could_not_take_down_keeps_its_region_alive() {
+        let fac = unrecordable(false);
+        let creator = ProcessId(0x5_0203);
+        let (creator_va, id) = create(&fac, creator, 1).expect("created");
+        fac.stuck.store(true, Ordering::Relaxed);
+        assert_eq!(map(&fac, ProcessId(0x5_0204), id), Err(Errno::OutOfMemory));
+        fac.stuck.store(false, Ordering::Relaxed);
+        drop(unmap(&fac, creator, creator_va).expect("creator unmaps"));
+        assert!(
+            fac.inner.frees.lock().unwrap().is_empty(),
+            "a page may map it still"
         );
     }
 
@@ -1159,8 +1307,12 @@ mod tests {
         fn free_region(&self, chunks: &[SharedChunk], memory: SharedMemory) {
             self.inner.free_region(chunks, memory);
         }
-        fn alloc_dma_region(&self, pages: u64, addr_limit: u64) -> Result<SharedChunk, Errno> {
-            self.inner.alloc_dma_region(pages, addr_limit)
+        fn alloc_dma_region(
+            &self,
+            pages: u64,
+            backing: DmaBacking,
+        ) -> Result<Vec<SharedChunk>, Errno> {
+            self.inner.alloc_dma_region(pages, backing)
         }
         fn kernel_window(&self, chunks: &[SharedChunk], len: usize) -> Option<NonNull<u8>> {
             // Only a single-chunk (physically contiguous) region is reachable
@@ -1260,7 +1412,7 @@ mod tests {
         fn unreserve(&self, node: u32) {
             self.unreserves.lock().unwrap().push(node);
         }
-        fn hold(&self, node: u32, generation: u64, block: tairix_kernel_mem::DmaBlock) {
+        fn hold(&self, node: u32, generation: u64, block: tairix_kernel_mem::FrameBlock) {
             self.held
                 .lock()
                 .unwrap()
@@ -1269,12 +1421,11 @@ mod tests {
     }
 
     fn custodian(custody: &'static FakeCustody) -> DmaCustodian {
-        DmaCustodian {
-            node: 7,
-            generation: 3,
-            custody,
-            translation: None,
-        }
+        custodian_of(custody, DmaCoherence::Snooped)
+    }
+
+    fn custodian_of(custody: &'static FakeCustody, coherence: DmaCoherence) -> DmaCustodian {
+        DmaCustodian::untranslated(7, 3, custody, coherence)
     }
 
     fn leaked_custody() -> &'static FakeCustody {
@@ -1282,34 +1433,60 @@ mod tests {
     }
 
     #[test]
-    fn a_dma_region_is_coherent_everywhere_and_frees_once_its_creator_let_go() {
-        let fac = FakeFacility::new();
+    fn a_window_with_no_room_is_refused_before_anything_is_drawn() {
+        let fac = FakeFacility {
+            window_room: Some(1),
+            ..FakeFacility::new()
+        };
         let custody = leaked_custody();
-        let creator = ProcessId(0x5_0101);
-        let consumer = ProcessId(0x5_0102);
-        let made = create_dma(&fac, creator, custodian(custody), 3, 0).expect("carves");
-        // Three pages round up to the four-page block the carve holds.
-        assert_eq!(fac.maps.lock().unwrap()[0], (made.device_addr, 4));
-        let (consumer_va, len) = map(&fac, consumer, made.id).expect("consumer maps");
-        assert_eq!(len, 4 * PAGE_SIZE);
+        let drawn = || fac.next_phys.load(Ordering::Relaxed);
+        let before = drawn();
         assert_eq!(
-            *fac.map_memory.lock().unwrap(),
-            [SharedMemory::DmaCoherent, SharedMemory::DmaCoherent]
+            create(&fac, ProcessId(0x5_0111), 2),
+            Err(Errno::OutOfMemory)
         );
-        assert_eq!(*custody.reserves.lock().unwrap(), [7]);
+        assert_eq!(
+            create_dma(&fac, ProcessId(0x5_0112), custodian(custody), 2, 0).err(),
+            Some(Errno::OutOfMemory)
+        );
+        assert_eq!(drawn(), before, "no backing was drawn");
+        assert!(
+            custody.reserves.lock().unwrap().is_empty(),
+            "nor custody reserved"
+        );
+        assert!(fac.maps.lock().unwrap().is_empty());
+    }
 
-        // The creator releases its own mapping while alive — its claim that
-        // the device is stopped — so the last release frees normally.
-        drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
-        assert!(fac.frees.lock().unwrap().is_empty());
-        drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
-        assert_eq!(*fac.frees.lock().unwrap(), [(made.device_addr, 2, 4)]);
-        assert_eq!(
-            *fac.free_memory.lock().unwrap(),
-            [SharedMemory::DmaCoherent]
-        );
-        assert!(fac.surrendered.lock().unwrap().is_empty());
-        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
+    #[test]
+    fn a_dma_region_is_mapped_as_its_device_snoops_everywhere_and_frees_once_its_creator_let_go() {
+        for (coherence, memory) in [
+            (DmaCoherence::Unsnooped, SharedMemory::DmaCoherent),
+            (DmaCoherence::Snooped, SharedMemory::DmaSnooped),
+        ] {
+            let fac = FakeFacility::new();
+            let custody = leaked_custody();
+            let creator = ProcessId(0x5_0101);
+            let consumer = ProcessId(0x5_0102);
+            let made =
+                create_dma(&fac, creator, custodian_of(custody, coherence), 3, 0).expect("carves");
+            // Three pages round up to the four-page block the carve holds.
+            assert_eq!(fac.maps.lock().unwrap()[0], (made.device_addr, 4));
+            let (consumer_va, len) = map(&fac, consumer, made.id).expect("consumer maps");
+            assert_eq!(len, 4 * PAGE_SIZE);
+            assert_eq!(*fac.map_memory.lock().unwrap(), [memory, memory]);
+            assert_eq!(*custody.reserves.lock().unwrap(), [7]);
+
+            // The creator releases its own mapping while alive — its claim
+            // that the device is stopped — so the last release frees
+            // normally.
+            drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
+            assert!(fac.frees.lock().unwrap().is_empty());
+            drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
+            assert_eq!(*fac.frees.lock().unwrap(), [(made.device_addr, 2, 4)]);
+            assert_eq!(*fac.free_memory.lock().unwrap(), [memory]);
+            assert!(fac.surrendered.lock().unwrap().is_empty());
+            assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
+        }
     }
 
     #[test]
@@ -1428,14 +1605,31 @@ mod tests {
 
     const IOVA: u64 = 0x7F_FFF0_0000;
 
-    /// A translation recording each map's frame and limit and each unmap,
+    /// One recorded map: each block's `(physical base, order)`, and the limit.
+    type MapCall = (Vec<(u64, u32)>, u64);
+
+    /// A translation recording each map's blocks and limit and each unmap,
     /// confirming unmaps unless told not to.
     #[derive(Default)]
     struct FakeTranslation {
-        maps: Mutex<Vec<(u64, u64)>>,
+        maps: Mutex<Vec<MapCall>>,
         unmaps: Mutex<Vec<u64>>,
         unconfirmed: bool,
         refuse: Option<tairix_kernel_mem::DmaError>,
+        /// What it keeps as the custody of its device's carves.
+        custody: FakeCustody,
+    }
+
+    impl tairix_kernel_mem::DmaCustody for FakeTranslation {
+        fn reserve(&self, node: u32) -> Result<(), tairix_kernel_mem::DmaError> {
+            self.custody.reserve(node)
+        }
+        fn unreserve(&self, node: u32) {
+            self.custody.unreserve(node);
+        }
+        fn hold(&self, node: u32, generation: u64, block: tairix_kernel_mem::FrameBlock) {
+            self.custody.hold(node, generation, block);
+        }
     }
 
     impl tairix_kernel_mem::DeviceTranslation for FakeTranslation {
@@ -1443,16 +1637,17 @@ mod tests {
             &self,
             _node: u32,
             _generation: u64,
-            block: tairix_kernel_mem::DmaBlock,
+            blocks: &[FrameBlock],
             limit: u64,
         ) -> Result<u64, tairix_kernel_mem::DmaError> {
             if let Some(err) = self.refuse {
                 return Err(err);
             }
-            self.maps
-                .lock()
-                .unwrap()
-                .push((block.frame.start().as_u64(), limit));
+            let blocks = blocks
+                .iter()
+                .map(|block| (block.frame.start().as_u64(), block.order))
+                .collect();
+            self.maps.lock().unwrap().push((blocks, limit));
             Ok(IOVA)
         }
 
@@ -1461,7 +1656,6 @@ mod tests {
             _node: u32,
             _generation: u64,
             iova: u64,
-            _block: tairix_kernel_mem::DmaBlock,
         ) -> Result<(), tairix_kernel_mem::DmaError> {
             self.unmaps.lock().unwrap().push(iova);
             if self.unconfirmed {
@@ -1474,28 +1668,31 @@ mod tests {
         fn end(&self, _node: u32, _generation: u64) {}
     }
 
-    fn translated(
-        custody: &'static FakeCustody,
-        translation: &'static FakeTranslation,
-    ) -> DmaCustodian {
-        DmaCustodian {
-            translation: Some(translation),
-            ..custodian(custody)
-        }
+    fn translated(translation: &'static FakeTranslation) -> DmaCustodian {
+        DmaCustodian::translated(
+            7,
+            3,
+            translation,
+            u64::MAX,
+            tairix_abi::DmaCoherence::Snooped,
+        )
     }
 
     #[test]
     fn a_translated_dma_region_hands_out_its_iova_and_frees_once_unmapped() {
         let fac = FakeFacility::new();
-        let custody = leaked_custody();
         let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let custody = &translation.custody;
         let creator = ProcessId(0x5_0111);
         let consumer = ProcessId(0x5_0112);
-        let made = create_dma(&fac, creator, translated(custody, translation), 1, 0x1000)
+        let made = create_dma(&fac, creator, translated(translation), 1, 0x1000)
             .expect("the limit bounds the IOVA, not the frame");
         assert_eq!(made.device_addr, IOVA);
         let phys = fac.maps.lock().unwrap()[0].0;
-        assert_eq!(*translation.maps.lock().unwrap(), [(phys, 0x1000)]);
+        assert_eq!(
+            *translation.maps.lock().unwrap(),
+            [(std::vec![(phys, 0)], 0x1000)]
+        );
         let (consumer_va, _) = map(&fac, consumer, made.id).expect("consumer maps");
 
         // The creator dies still mapping it, but its device's reach goes with
@@ -1509,42 +1706,71 @@ mod tests {
     }
 
     #[test]
+    fn a_translated_dma_region_is_its_pages_wherever_they_lie_mapped_end_to_end() {
+        let fac = FakeFacility::new();
+        let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let custody = &translation.custody;
+        let creator = ProcessId(0x5_0116);
+        let made = create_dma(&fac, creator, translated(translation), 3, 0).expect("carves");
+        assert_eq!(made.pages, 3, "nothing rounded up to a buddy block");
+        let (first, total) = fac.maps.lock().unwrap()[0];
+        assert_eq!(total, 3);
+        let mapped = translation.maps.lock().unwrap()[0].0.clone();
+        assert_eq!(mapped, [(first, 1), (first + 0x10_0000, 0)]);
+        drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
+        assert_eq!(*translation.unmaps.lock().unwrap(), [IOVA]);
+        assert_eq!(
+            *fac.frees.lock().unwrap(),
+            [(first, 1, 2), (first + 0x10_0000, 0, 1)]
+        );
+        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
+    }
+
+    #[test]
     fn a_translated_dma_region_its_unit_cannot_confirm_gone_is_never_freed() {
         let fac = FakeFacility::new();
-        let custody = leaked_custody();
         let translation: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
             unconfirmed: true,
             ..FakeTranslation::default()
         }));
+        let custody = &translation.custody;
         let creator = ProcessId(0x5_0113);
-        let made =
-            create_dma(&fac, creator, translated(custody, translation), 1, 0).expect("carves");
+        let made = create_dma(&fac, creator, translated(translation), 1, 0).expect("carves");
         let phys = fac.maps.lock().unwrap()[0].0;
         drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
         assert!(fac.frees.lock().unwrap().is_empty());
         assert_eq!(*custody.held.lock().unwrap(), [(7, 3, phys)]);
     }
 
+    /// A translated region whose mapping could be neither recorded nor taken
+    /// down keeps its frames and the device's reach to them alike: a page may
+    /// still map them, so nothing it could reach is handed back.
+    #[test]
+    fn a_translated_region_an_unmap_could_not_take_down_keeps_its_frames_and_reach() {
+        let fac = unrecordable(true);
+        let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let made = create_dma(&fac, ProcessId(0x5_0115), translated(translation), 1, 0);
+        assert_eq!(made.err(), Some(Errno::OutOfMemory));
+        assert_eq!(translation.maps.lock().unwrap().len(), 1);
+        assert!(translation.unmaps.lock().unwrap().is_empty());
+        assert!(fac.inner.frees.lock().unwrap().is_empty());
+        assert!(fac.inner.surrendered.lock().unwrap().is_empty());
+        assert_eq!(*translation.custody.unreserves.lock().unwrap(), [7]);
+    }
+
     #[test]
     fn a_refused_translation_frees_the_block_unless_it_is_unconfirmed() {
-        let custody = leaked_custody();
         let refusing: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
             refuse: Some(tairix_kernel_mem::DmaError::Translation),
             ..FakeTranslation::default()
         }));
         let fac = FakeFacility::new();
         assert_eq!(
-            create_dma(
-                &fac,
-                ProcessId(0x5_0114),
-                translated(custody, refusing),
-                1,
-                0
-            ),
+            create_dma(&fac, ProcessId(0x5_0114), translated(refusing), 1, 0),
             Err(Errno::DeviceFault)
         );
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
-        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
+        assert_eq!(*refusing.custody.unreserves.lock().unwrap(), [7]);
 
         let unconfirmed: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
             refuse: Some(tairix_kernel_mem::DmaError::Unconfirmed),
@@ -1552,17 +1778,30 @@ mod tests {
         }));
         let fac = FakeFacility::new();
         assert_eq!(
-            create_dma(
-                &fac,
-                ProcessId(0x5_0115),
-                translated(custody, unconfirmed),
-                1,
-                0
-            ),
+            create_dma(&fac, ProcessId(0x5_0115), translated(unconfirmed), 1, 0),
             Err(Errno::DeviceFault)
         );
         assert!(fac.frees.lock().unwrap().is_empty());
-        assert_eq!(custody.held.lock().unwrap().len(), 1);
+        assert_eq!(unconfirmed.custody.held.lock().unwrap().len(), 1);
+        assert!(unconfirmed.custody.unreserves.lock().unwrap().is_empty());
+    }
+
+    /// A facility breaking a contiguous backing into blocks fails the create
+    /// closed: the device would be told one run spans frames that do not.
+    #[test]
+    fn a_contiguous_backing_of_several_blocks_fails_closed() {
+        let fac = FakeFacility {
+            split_contiguous: true,
+            ..FakeFacility::new()
+        };
+        let custody = leaked_custody();
+        assert_eq!(
+            create_dma(&fac, ProcessId(0x5_0117), custodian(custody), 3, 0).err(),
+            Some(Errno::BadAddress)
+        );
+        assert_eq!(fac.frees.lock().unwrap().len(), 2, "both blocks went back");
+        assert!(fac.maps.lock().unwrap().is_empty(), "nothing was mapped");
+        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
     }
 
     #[test]

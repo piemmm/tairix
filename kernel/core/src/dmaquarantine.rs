@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
-use tairix_kernel_mem::{AllocError, DmaBlock, DmaCustody, DmaError, FrameAllocator, PhysMap};
+use tairix_kernel_mem::{AllocError, DmaCustody, DmaError, FrameAllocator, FrameBlock, PhysMap};
 use tairix_sync::SpinLock;
 
 use crate::devres::DmaQuarantineFacility;
@@ -40,7 +40,7 @@ use crate::hwtree::HwNodeLiveness;
 #[derive(Clone, Copy)]
 struct Held {
     generation: u64,
-    block: DmaBlock,
+    block: FrameBlock,
 }
 
 /// Where a node stands in the hardware tree. Only ever advances.
@@ -138,7 +138,7 @@ impl DmaQuarantine {
     /// went back. A block the direct map cannot reach, or the allocator
     /// refuses, stays allocated: nothing unscrubbed is ever freed, and frames
     /// kept from reuse are as safe as held ones.
-    fn free(&self, block: DmaBlock) -> bool {
+    fn free(&self, block: FrameBlock) -> bool {
         let len = block.len();
         let start = block.frame.start();
         let Some(ptr) = self.physmap.translate(start, len) else {
@@ -234,7 +234,7 @@ impl DmaCustody for DmaQuarantine {
         }
     }
 
-    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
+    fn hold(&self, node: u32, generation: u64, block: FrameBlock) {
         let freeable = {
             let mut nodes = self.nodes.lock();
             // A block no reservation stands behind is a broken invariant, and

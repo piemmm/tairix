@@ -100,7 +100,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FIX-STALLTRACE | Stack-traced interactive frame overruns (`plans/FIX-STALLTRACE.md`) | done |
 | FIX-RANDOMNESS | The RNG tier split and the fast-key-erasure generator (`plans/FIX-RANDOMNESS.md`) | done |
 | FIX-PROTECTION | Stack canaries, the shadow stack, MTE, the protection-fault fix-up (`plans/FIX-PROTECTION.md`) | planned |
-| IOMMU | DMA translation units: every device reaches only what its driver was given (`plans/IOMMU.md`) | in progress |
+| IOMMU | DMA translation units: every device reaches only what its driver was given (`plans/IOMMU.md`) | done |
 | FIX-HARDWARE-FEATURES | CPU feature detection and `lib/cpuops` routine selection (`plans/FIX-HARDWARE-FEATURES.md`) | in progress |
 | CPUFREQ | CPU frequency scaling on the Raspberry Pi (`plans/CPUFREQ.md`) | done |
 | COLLECTIONS | The shared container and hashing libraries (`plans/COLLECTIONS.md`) | in progress |
@@ -171,7 +171,7 @@ plan's ledger. A `blocked` row names its blocker.
 | CURSES | `lib/vt`, `lib/termcap` and `lib/curses` (`plans/CURSES.md`) | in progress |
 | PTY | Pseudo-terminals and the shared line discipline (`plans/PTY.md`) | done |
 | IO | The userland I/O library (`plans/IO.md`) | in progress |
-| CCOMPAT | The C-callable ABI: headers, stubs, crt0 (`plans/CCOMPAT.md`) | done |
+| CCOMPAT | The C-callable ABI: headers, stubs, crt0 (`plans/CCOMPAT.md`) | in progress: CC1.1 |
 | VIM | The `vim` command app (`plans/VIM.md`) | in progress |
 | STRESSTEST | `sysmon`, `stress` and the observability they need (`plans/STRESSTEST.md`) | in progress |
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |

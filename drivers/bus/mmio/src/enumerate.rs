@@ -19,14 +19,9 @@
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
 use tairix_fdt::Fdt;
+use tairix_virtio::transport_mmio::{regs, COMPATIBLE};
 
 use crate::transport::MmioRead;
-
-/// The string the walker matches against `compatible`.
-pub const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
-
-/// `MagicValue` byte sequence — `"virt"` as a little-endian word.
-pub const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
 
 /// Vendor field used in [`BusDevice::vendor`] for virtio-MMIO
 /// transports. Virtio over MMIO does not carry a PCI-style vendor
@@ -36,11 +31,6 @@ pub const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
 /// well-known fallback below — matching what `virtio-mmio.c` in
 /// QEMU writes when no upper driver has attached.
 pub const VIRTIO_MMIO_DEFAULT_VENDOR: u32 = 0x554D_4551; // "QEMU"
-
-const REG_MAGIC: u64 = 0x000;
-const REG_VERSION: u64 = 0x004;
-const REG_DEVICE_ID: u64 = 0x008;
-const REG_VENDOR_ID: u64 = 0x00C;
 
 /// The MMIO bus driver instance.
 ///
@@ -59,22 +49,24 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
         Self { dtb, reader }
     }
 
-    /// Enumerate every populated virtio-MMIO slot into `out`.
+    /// Enumerate every populated virtio-MMIO slot into `out`: a slot whose
+    /// node, or an ancestor, is not operational holds no device a consumer
+    /// may use.
     ///
     /// # Errors
     ///
     /// * [`DriverError::BufferTooSmall`] if `out` cannot hold every
     ///   discovered slot.
     /// * [`DriverError::DeviceFault`] if the DTB walk encounters a
-    ///   malformed `compatible` or `reg` property; the walker fails
-    ///   closed so a hostile blob cannot cause silent
-    ///   under-enumeration.
+    ///   malformed `compatible` or `reg` property, or a slot whose identifier
+    ///   registers run past the address space; the walker fails closed so a
+    ///   hostile blob cannot cause silent under-enumeration.
     pub fn enumerate_into(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
         let mut count = 0usize;
         let mut overflow = false;
-        for node in self.dtb.nodes() {
+        for node in self.dtb.operational_nodes() {
             let node = node.map_err(|_| DriverError::DeviceFault)?;
-            if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+            if !node.is_compatible(COMPATIBLE) {
                 continue;
             }
             // `reg` carries one `<base, length>` pair for `virt`-style
@@ -84,17 +76,21 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
             // length is read but not currently propagated; the size
             // field on `BusDevice` is the bus-defined `class` slot.
             let _length = reg.read_be_u64(8).map_err(|_| DriverError::DeviceFault)?;
+            // A slot whose identifier registers run past the address space
+            // makes the tree malformed, not merely empty there.
+            base.checked_add((regs::VENDOR_ID + 4) as u64)
+                .ok_or(DriverError::DeviceFault)?;
+            let read = |offset: usize| self.reader.read32(base + offset as u64);
 
-            let magic = self.reader.read32(base + REG_MAGIC);
-            if magic != VIRTIO_MMIO_MAGIC {
+            if read(regs::MAGIC) != regs::MAGIC_VALUE {
                 continue;
             }
-            let device_id = self.reader.read32(base + REG_DEVICE_ID);
+            let device_id = read(regs::DEVICE_ID);
             if device_id == 0 {
                 continue;
             }
-            let version = self.reader.read32(base + REG_VERSION);
-            let vendor_raw = self.reader.read32(base + REG_VENDOR_ID);
+            let version = read(regs::VERSION);
+            let vendor_raw = read(regs::VENDOR_ID);
             let vendor = if vendor_raw == 0 {
                 VIRTIO_MMIO_DEFAULT_VENDOR
             } else {
@@ -188,9 +184,9 @@ impl<'dtb, T: MmioRead> Mmio<'dtb, T> {
     ///   property is malformed (fails closed, like
     ///   [`Self::enumerate_into`]).
     pub fn slot_window_len(&self, base: u64) -> Result<u64, DriverError> {
-        for node in self.dtb.nodes() {
+        for node in self.dtb.operational_nodes() {
             let node = node.map_err(|_| DriverError::DeviceFault)?;
-            if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+            if !node.is_compatible(COMPATIBLE) {
                 continue;
             }
             let reg = node.property("reg").ok_or(DriverError::DeviceFault)?;

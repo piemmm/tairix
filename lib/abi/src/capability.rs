@@ -891,11 +891,11 @@ impl CapabilityId {
 /// Read-only membership test over a principal's granted capabilities.
 ///
 /// The set's concrete representation (`CapabilitySet` and its 256-bit
-/// bitmap) lives in `lib/caps`, which depends on this crate. ABI-level
-/// host seams — for example `VirtioHostFactory` in `lib/virtio` — must
-/// gate on a granted capability without naming `lib/caps`, because the reverse
-/// edge `lib/abi -> lib/caps` would invert the `lib/*` layering. They therefore accept `&dyn CapabilityQuery`;
-/// `lib/caps` implements this for its `CapabilitySet`.
+/// bitmap) lives in `lib/caps`, which depends on this crate. A seam that must
+/// gate on a granted capability without naming `lib/caps` — the bundle reads
+/// app spawn makes, a process origin's summary — accepts `&dyn
+/// CapabilityQuery`, since the reverse edge `lib/abi -> lib/caps` would invert
+/// the `lib/*` layering; `lib/caps` implements this for its `CapabilitySet`.
 ///
 /// The trait is object-safe so a seam can hold a `&dyn CapabilityQuery`
 /// without monomorphising over the caller's set type.

@@ -33,8 +33,7 @@ use tairix_itest_harness::pie::PieArch;
 const ARCH: PieArch = PieArch::Aarch64;
 
 fn main() {
-    tairix_itest_harness::emit_target_cfg();
-    println!("cargo:rerun-if-changed=build.rs");
+    tairix_itest_harness::aarch64_virt_guest_build_without_tree();
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
@@ -44,12 +43,6 @@ fn main() {
 
     let target = env::var("TARGET").unwrap_or_default();
     if target == ARCH.target_triple() {
-        // Hand the aarch64 `virt` linker script to the test kernel itself
-        // (the single per-arch script the architecture port owns).
-        let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
-        println!("cargo:rerun-if-changed={linker}");
-        println!("cargo:rustc-link-arg=-T{linker}");
-
         let rxe = tairix_itest_harness::program_fixture::GuestBuild {
             manifest_dir,
             out_dir: &out_dir,

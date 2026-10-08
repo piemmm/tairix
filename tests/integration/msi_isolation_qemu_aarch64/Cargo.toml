@@ -1,0 +1,30 @@
+[package]
+name = "tairix-test-msi-isolation-qemu-aarch64"
+description = "plans/IOMMU.md IOM18.2 QEMU integration test: on a GICv3 virt board, the ITS drops a device's MSI for an event it was not given, though the LPI that event raises for another device is live."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-msi-isolation-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-itest-gic = { path = "../gic_topology", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

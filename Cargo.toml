@@ -18,6 +18,7 @@ members = [
     "kernel/iommu/amdvi",
     "kernel/iommu/smmuv3",
     "kernel/iommu/riscv",
+    "kernel/iommu/virtio",
 
     # Kernel — architecture HAL (the trait surface every port
     # implements; the boundary between arch-neutral kernel and ports)
@@ -341,6 +342,7 @@ members = [
     "tests/integration/bootguard_qemu_riscv64",
     "tests/integration/bootguard_qemu_x86_64",
     "tests/integration/audio_program",
+    "tests/integration/gic_topology",
     "tests/integration/harness",
     "tests/integration/finisher",
     "tests/integration/translation_witness",
@@ -550,6 +552,8 @@ members = [
     "tests/integration/timer_preempt_qemu_riscv64",
     "tests/integration/ipi_smp_qemu_riscv64",
     "tests/integration/ipi_smp_qemu_aarch64",
+    "tests/integration/msi_isolation_qemu_aarch64",
+    "tests/integration/msi_isolation_qemu_riscv64",
     "tests/integration/sched_drive_qemu_riscv64",
     "tests/integration/sched_drive_qemu_aarch64",
     "tests/integration/kthread_switch_qemu_aarch64",

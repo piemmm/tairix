@@ -73,6 +73,9 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `VOLUME_IO_STATS`       | none                   | no      |
 | `VOLUME_IO_QUEUE`       | `CAP_SYSINFO_KERNEL`   | yes     |
 | `GPU_DEVICE_STATS`      | `CAP_SYSINFO_HW`       | yes     |
+| `DMA_UNITS`             | `CAP_SYSINFO_HW`       | yes     |
+| `DMA_GROUPS`            | `CAP_SYSINFO_HW`       | yes     |
+| `DMA_NODES`             | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -124,27 +127,26 @@ unknown record rather than as a failure.
 
 `CPU_TIME_STATS` is ungated like `LOAD_AVERAGE`: each `CpuTimeRecord`
 carries one CPU's cumulative busy nanoseconds (accounted on the
-scheduler's dispatch bracket) and the idle remainder of the same
-monotonic sample — the `top`-class busy/idle utilisation figure, which
-exposes strictly less than the load-average census. A consumer derives
-a utilisation percentage from the deltas of two samples; TAIRiX
-accounts busy and idle time only, never a fabricated
-user/system/nice/iowait split. The list is paged by a
-`CpuTimeListRequest` exactly like the mount list. `SEAT_LIST` is gated
-like `HARDWARE_TREE` and audited: each `SeatRecord` names which task owns
-a physical display — cross-principal surface topology, not a self-scoped
-observer. `MEMORY_PRESSURE_BAND` is ungated and unaudited like
-`LOAD_AVERAGE`: its `MemoryPressureBand` response is a single band index
-into `PRESSURE_BAND_NAMES` and nothing else — no byte figure, no
-watermark, no per-task or per-user attribution — and it is *read-only of
-the already-published state*, taking no fresh reading, so an unprivileged
-caller cannot use it to drive a free-memory sample on demand. It is
-strictly coarser than `LOAD_AVERAGE`'s run-queue census, and withholding
-it would not protect anything: it would only leave an unprivileged
-cooperative reclaimer (`plans/SMARTRAM.md` SMART5) with no way to learn
-when to give memory back. The gated, audited `MEMORY_PRESSURE` view below
-(free/total bytes, every watermark, the transition history) is unchanged
-and is the one query privileged monitoring reads.
+scheduler's dispatch bracket) and the idle remainder of the same monotonic
+sample — the `top`-class busy/idle utilisation figure, which exposes
+strictly less than the load-average census. A consumer derives a
+utilisation percentage from the deltas of two samples; TAIRiX accounts
+busy and idle time only, never a fabricated user/system/nice/iowait split.
+`SEAT_LIST` is gated like `HARDWARE_TREE` and audited: each `SeatRecord`
+names which task owns a physical display — cross-principal surface
+topology, not a self-scoped observer. `MEMORY_PRESSURE_BAND` is ungated
+and unaudited like `LOAD_AVERAGE`: its `MemoryPressureBand` response is a
+single band index into `PRESSURE_BAND_NAMES` and nothing else — no byte
+figure, no watermark, no per-task or per-user attribution — and it is
+*read-only of the already-published state*, taking no fresh reading, so an
+unprivileged caller cannot use it to drive a free-memory sample on demand.
+It is strictly coarser than `LOAD_AVERAGE`'s run-queue census, and
+withholding it would not protect anything: it would only leave an
+unprivileged cooperative reclaimer (`plans/SMARTRAM.md` SMART5) with no
+way to learn when to give memory back. The gated, audited
+`MEMORY_PRESSURE` view below (free/total bytes, every watermark, the
+transition history) is unchanged and is the one query privileged
+monitoring reads.
 
 `MEMORY_TOTAL` is ungated and unaudited for the same reason, and on even
 weaker grounds: its `MemoryTotal` response is one `u64` — the machine's
@@ -244,16 +246,16 @@ kernel-wide operational state:
   free/total/reserve readings, the derived per-band enter/exit
   watermarks actually in force (reported, never promised), and the
   per-band transition counters since boot.
-- `RECLAIM_STATS` — one `ReclaimClassRecord` per reclaim class (paged by
-  a `ReclaimListRequest`): live payload/metadata byte and entry gauges
-  plus the monotonic refusal/shrink/teardown/failure counters,
-  aggregated across every registered live cache, kernel-measured and
-  self-reported alike, with `self_reported_bytes` naming how much of the
-  resident total came from the latter. The class ids and the stable names
-  in `RECLAIM_CLASS_NAMES` are the shared vocabulary the
-  `stats:mem/reclaim/<class>` selectors resolve through.
-- `CACHE_LEDGERS` — one `CacheLedgerRecord` per *cache* (paged by a
-  `CacheLedgerListRequest`): the breakdown behind those class totals. See
+- `RECLAIM_STATS` — one `ReclaimClassRecord` per reclaim class: live
+  payload/metadata byte and entry gauges plus the monotonic
+  refusal/shrink/teardown/failure counters, aggregated across every
+  registered live cache, kernel-measured and self-reported alike, with
+  `self_reported_bytes` naming how much of the resident total came from
+  the latter. The class ids and the stable names in `RECLAIM_CLASS_NAMES`
+  are the shared vocabulary the `stats:mem/reclaim/<class>` selectors
+  resolve through.
+- `CACHE_LEDGERS` — one `CacheLedgerRecord` per *cache*: the breakdown
+  behind those class totals. See
   [Cache ledgers](#cache-ledgers-and-the-one-submission) below.
 - `RAMZIP_STATS` — a single `RamzipStats`: the compressed anonymous-
   memory tier's byte/entry gauges, derived min/soft/hard caps, every
@@ -264,23 +266,23 @@ kernel-wide operational state:
   running. Counters only — never page contents or key material; a build
   whose tier is not yet driven truthfully reports an idle tier (all
   zeros) rather than refusing or fabricating.
-- `CPU_LOAD` — one `CpuLoadRecord` per online CPU (paged by a
-  `CpuLoadRequest`): the run-queue depth sample plus the context-switch
-  and preemption counters. The cumulative busy/idle time split stays in
-  `CPU_TIME_STATS`, so the same figure is never served twice. The
-  run-queue depth and context-switch counters are scheduler internals;
-  the preemption counter is the kernel **preemption mechanism**'s own
-  per-CPU count of real involuntary preemptions (the return-to-user
-  preempt point suspending a running task), not a scheduler-policy tick
-  observation — so it moves under load even on the tickless default
-  policy (EEVDF), which takes no periodic scheduler tick. All are kernel
-  internals, hence the gate the utilisation split does not carry.
+- `CPU_LOAD` — one `CpuLoadRecord` per online CPU: the run-queue depth
+  sample plus the context-switch and preemption counters. The cumulative
+  busy/idle time split stays in `CPU_TIME_STATS`, so the same figure is
+  never served twice. The run-queue depth and context-switch counters are
+  scheduler internals; the preemption counter is the kernel **preemption
+  mechanism**'s own per-CPU count of real involuntary preemptions (the
+  return-to-user preempt point suspending a running task), not a
+  scheduler-policy tick observation — so it moves under load even on the
+  tickless default policy (EEVDF), which takes no periodic scheduler tick.
+  All are kernel internals, hence the gate the utilisation split does not
+  carry.
 - `VOLUME_IO_STATS` — one `VolumeIoStatsRecord` per fault-aware
-  block-backed volume the kernel serves (paged by a `VolumeIoRequest`):
-  the volume's durable id, the identity and name of the device serving
-  it, and the cumulative `blkio::BlkIoCounters` the kernel folds from
-  every attempt — `read_bytes`/`write_bytes`, `read_ops`/`write_ops`,
-  `busy_ns`, and `read_wait_ns`/`write_wait_ns`.
+  block-backed volume the kernel serves: the volume's durable id, the
+  identity and name of the device serving it, and the cumulative
+  `blkio::BlkIoCounters` the kernel folds from every attempt —
+  `read_bytes`/`write_bytes`, `read_ops`/`write_ops`, `busy_ns`, and
+  `read_wait_ns`/`write_wait_ns`.
 
   The device's identity is its block-service call-endpoint id where a
   user-space driver serves it, and its
@@ -317,64 +319,61 @@ kernel-wide operational state:
   byte tallies count only what a completion actually moved. A data-less
   operation (geometry, flush) belongs to neither direction.
 - `VOLUME_IO_QUEUE` — one `VolumeIoQueueRecord` per fault-aware
-  block-backed volume (paged by the same `VolumeIoRequest`, keyed and
-  ordered identically so a client joins the three per-volume lists by
-  `volume_id`): the live `in_flight` count, the `queue_depth_sum` /
-  `queue_samples` accumulators a *mean* depth is a delta ratio of, and
-  the `budget_depth` / `budget_deadline_ns` of the `IoBudget` in force.
-  The exact analogue of `CPU_LOAD` and gated for the same reason: a
-  queue depth is a driver and scheduler internal, not the utilisation
-  split every user may see above. The budget travels with the depth
-  because a depth alone does not say whether a device is saturated —
+  block-backed volume (keyed and ordered identically so a client joins the
+  three per-volume lists by `volume_id`): the live `in_flight` count, the
+  `queue_depth_sum` / `queue_samples` accumulators a *mean* depth is a
+  delta ratio of, and the `budget_depth` / `budget_deadline_ns` of the
+  `IoBudget` in force. The exact analogue of `CPU_LOAD` and gated for the
+  same reason: a queue depth is a driver and scheduler internal, not the
+  utilisation split every user may see above. The budget travels with the
+  depth because a depth alone does not say whether a device is saturated —
   the reading is `in_flight` against the ceiling its discovered
   `BlkDeviceClass` permits, never a global constant.
 - `GPU_DEVICE_STATS` — one packed `display_ipc::DisplayStats` per graphics
-  device a display service drives (paged by a `DeviceStatsRequest`): the
-  cumulative `busy_ns` / `idle_ns` the service measured around its own
-  present calls, the `mem_resident_bytes` / `mem_total_bytes` the driver
-  reports the device owns, the `AccelCaps` of its hardware compositor (or
-  their absence, where it has none), and the `DisplayMode` it scans out.
-  The record is the display service's own reply type rather than a second
-  spelling of it, exactly as `RAID_ARRAYS` serves the composer's own
+  device a display service drives: the cumulative `busy_ns` / `idle_ns`
+  the service measured around its own present calls, the
+  `mem_resident_bytes` / `mem_total_bytes` the driver reports the device
+  owns, the `AccelCaps` of its hardware compositor (or their absence,
+  where it has none), and the `DisplayMode` it scans out. The record is
+  the display service's own reply type rather than a second spelling of
+  it, exactly as `RAID_ARRAYS` serves the composer's own
   `RaidArrayRecord`: the service that measures a reading defines it once.
-  Gated with `HARDWARE_TREE` and audited with it, because it details a node
-  that inventory already names. **Nothing is served pre-derived**:
+  Gated with `HARDWARE_TREE` and audited with it, because it details a
+  node that inventory already names. **Nothing is served pre-derived**:
   utilisation is a `busy_ns` delta over the reader's own interval, so a
   first sample yields no share and a service lifetime's average never
   masquerades as a live one. `mem_total_bytes == 0` states that the device
   has **no memory of its own** — a firmware framebuffer scanning out of
-  system RAM — which is a different statement from none being free.
-  A **per-engine** split is deliberately absent: no display driver in the
+  system RAM — which is a different statement from none being free. A
+  **per-engine** split is deliberately absent: no display driver in the
   tree reports its engines separately, so publishing a per-engine record
-  would be an interface with no producer, and the Switchboard's
-  Decode / encode engines row states that absence instead.
+  would be an interface with no producer, and the Switchboard's Decode /
+  encode engines row states that absence instead.
 - `VOLUME_IO_HEALTH` — one `VolumeIoHealthRecord` per fault-aware
-  block-backed volume the kernel serves (paged by the same
-  `VolumeIoRequest`): the volume's durable id, the serving
-  block-service endpoint, its current `MountAvailability` (the same live
-  reading the mount table overlays), and the cumulative
+  block-backed volume the kernel serves: the volume's durable id, the
+  serving block-service endpoint, its current `MountAvailability` (the
+  same live reading the mount table overlays), and the cumulative
   `BlkHealthCounters` the kernel filesystem client folds from every
   completion — the per-status outcome tallies (`ok`, `degraded`,
-  `transient`, `timeouts`, `resets`, `medium_errors`, `offline`,
-  `faults`) plus the consumer `reissues` count. The per-status buckets
-  partition every folded completion exactly once. Monotonic since the
-  volume was attached, these tallies are the storage analogue of the
-  per-line `IRQ_LIST` counters and the surface a failing or flapping
-  disk becomes visible on; they are kernel-wide storage operational
-  state, hence the gate the ungated `MOUNT_LIST` does not carry.
+  `transient`, `timeouts`, `resets`, `medium_errors`, `offline`, `faults`)
+  plus the consumer `reissues` count. The per-status buckets partition
+  every folded completion exactly once. Monotonic since the volume was
+  attached, these tallies are the storage analogue of the per-line
+  `IRQ_LIST` counters and the surface a failing or flapping disk becomes
+  visible on; they are kernel-wide storage operational state, hence the
+  gate the ungated `MOUNT_LIST` does not carry.
 - `RAID_ARRAYS` — one `RaidArrayRecord` per array the RAID composer
-  serves (paged by a `RaidListRequest`): the array's 128-bit identity,
-  its `RaidLevel`, its `ArrayHealth`, the in-flight scrub/resync flags,
-  its in-sync and defined member tallies, its logical block size and
-  stripe unit, its block count, the block-service endpoint it is served
-  on, the hardware-tree node it is published as, the scrub and resync
-  cursors, and its metadata generation.
-- `RAID_MEMBERS` — one `RaidMemberRecord` per device the composer holds
-  (paged by the same `RaidListRequest`): the array it belongs to (all
-  zero for an unaffiliated candidate), its `RaidMemberDisposition`, the
-  array slot it occupies (`RAID_SLOT_NONE` for none), the hardware-tree
-  node it was offered under, its block-service endpoint, its size, and
-  the metadata generation its own superblock carries.
+  serves: the array's 128-bit identity, its `RaidLevel`, its
+  `ArrayHealth`, the in-flight scrub/resync flags, its in-sync and defined
+  member tallies, its logical block size and stripe unit, its block count,
+  the block-service endpoint it is served on, the hardware-tree node it is
+  published as, the scrub and resync cursors, and its metadata generation.
+- `RAID_MEMBERS` — one `RaidMemberRecord` per device the composer holds:
+  the array it belongs to (all zero for an unaffiliated candidate), its
+  `RaidMemberDisposition`, the array slot it occupies (`RAID_SLOT_NONE`
+  for none), the hardware-tree node it was offered under, its
+  block-service endpoint, its size, and the metadata generation its own
+  superblock carries.
 
 The two RAID queries are sourced from the composer, not the kernel: the
 broker forwards each read to the composer's reserved control endpoint and
@@ -387,22 +386,45 @@ be side-stepped. A machine with no running composer fails closed with the
 transport's own error, never a fabricated empty table: "no arrays" and
 "nothing answered" are different answers.
 
+`DMA_UNITS`, `DMA_GROUPS` and `DMA_NODES` are the kernel's DMA translation
+state, gated and audited like `IRQ_LIST`, since which devices a unit
+confines and how often they fault is hardware topology. `DMA_UNITS` answers
+one `DmaUnitRecord` per discovered unit, those translating in discovery
+order and then those stranded with why (unmatched, no registers, failed, or
+unsnooped — its node does not say it snoops the CPU's caches, through which
+its tables are kept):
+its family, how it raises its faults, where its translations live, the
+owners and firmware streams it holds, and its faults recorded, dropped past
+its budget, and the streams a storm silenced, all since boot. A malformed
+firmware table of units answers one record of its family under the tree's
+root: `withheld` when no PCI function it would have described was published,
+or `unconfined` when the administrator booted with
+`iommu.malformed=unconfined` and they were published untranslated.
+`DMA_GROUPS` answers one `DmaGroupRecord` per isolation group an owner has
+taken, ascending by unit and group: the holding node, its generation and
+where that owner stands (live, unadopted, ended, or unconfirmed — kept out of
+reuse for good). `DMA_NODES` answers one `DmaNodeRecord` per
+node a unit translates for an owner, ascending by node: its unit and group,
+its owner's generation and standing, how many streams it masters through,
+and the carves its domain maps and their bytes. A machine with no unit
+answers empty lists.
+
 `IRQ_LIST` is gated like `SEAT_LIST` and `HARDWARE_TREE` — on
 `CAP_SYSINFO_HW`, and audited — because each `IrqRecord` names which
 driver task owns a physical interrupt line: cross-principal surface
 topology, not a self-scoped observer. The list carries one record per
-*bound* line, in ascending line order, paged by an `IrqListRequest`. The
-per-line `count` is monotonic since boot (the classic `/proc/interrupts`
-total, not reset when a line is re-bound), and `flags` reports the line's
-containment state (`IRQ_FLAG_QUARANTINED` for a line the kernel's
-runaway-interrupt safety net has disabled). It exposes no per-principal
-secret beyond the ownership the hardware view already carries.
+*bound* line, in ascending line order. The per-line `count` is monotonic
+since boot (the classic `/proc/interrupts` total, not reset when a line is
+re-bound), and `flags` reports the line's containment state
+(`IRQ_FLAG_QUARANTINED` for a line the kernel's runaway-interrupt safety
+net has disabled). It exposes no per-principal secret beyond the ownership
+the hardware view already carries.
 
 `NET_INTERFACE_RATES` shares `NET_INTERFACE_COUNTERS`'s boundary —
 `CAP_SYSINFO_GLOBAL` and audited — because it derives from the same
 system-wide counters. It is the one query that carries a *decoration*: a
-`NetInterfaceRatesRequest` adds a caller-supplied averaging window to the
-paging header, and each `NetInterfaceRatesRecord` reports the received /
+`NetInterfaceRatesRequest` adds a caller-supplied averaging window to its
+`PageRequest`, and each `NetInterfaceRatesRecord` reports the received /
 transmitted packets- and bits-per-second **averaged over the window that
 actually elapsed** — which may be shorter than requested when an
 interface's history is younger, and is `0` over a zero window when there
@@ -440,10 +462,10 @@ that. So the API carries the figures both ways:
   class, the reporting process's pid, a `CacheLedgerOrigin` saying
   whether the figures were measured or reported, and the same nine
   figures the class record aggregates. Kernel rows come first, then
-  reported rows, in a stable order so a paging client never skips or
-  repeats one. Summing the rows of a class reproduces that class's
-  `ReclaimClassRecord` exactly — there is one fold, `fold_cache_ledgers`,
-  and both views go through it.
+  reported rows, in a stable order, so a paging client sees each row once
+  while the rows do not change between its pages. Summing the rows of a
+  class reproduces that class's `ReclaimClassRecord` exactly — there is one
+  fold, `fold_cache_ledgers`, and both views go through it.
 
   A row's class is a reclaim class **or** `CACHE_CLASS_PINNED`, which names
   a **pinned** pool: memory the model measures but can never take, because
@@ -576,11 +598,11 @@ process is not changing what it holds.
 
 ## Wire framing
 
-A request is a fixed [`SysinfoRequestHeader`] (24 bytes: magic
-`SYI1`, version, flags, query id, reserved, payload length, and a
-caller-chosen `request_id` echoed in the response) followed by the typed
-request payload. All multi-byte fields are little-endian. The decoder
-fails closed: bad magic or a non-zero reserved field is
+A request is a fixed [`SysinfoRequestHeader`] (16 bytes: magic
+`SYI1`, version, flags, query id, reserved and payload length) followed
+by exactly the typed request payload it declares. All multi-byte fields
+are little-endian. The decoder fails closed: bad magic, a non-zero flags
+or reserved field, or bytes past the declared payload is
 [`Errno::BadMagic`], an unknown version is
 [`Errno::AbiVersionUnsupported`], an out-of-range query id is
 [`Errno::OutOfRange`], and an over-large payload is
@@ -605,9 +627,9 @@ a defined code. The reply frame is untrusted server output, so its decoder
 ## Endpoint, message bounds, and the client transport
 
 `sysinfod` binds the well-known unrestricted-sender call endpoint
-[`SYSINFO_ENDPOINT`]; any process may post a request, and per-query scope is
-enforced by the service against the caller's kernel-attested origin, not by
-the transport. The id itself is a **reserved rendezvous**
+[`SYSINFO_ENDPOINT`]; any process may post a request, and per-query scope
+is enforced by the service against the caller's kernel-attested origin,
+not by the transport. The id itself is a **reserved rendezvous**
 (`tairix_abi::ipc::is_reserved_endpoint`): binding it requires
 `CAP_IPC_BIND_PRIVILEGED` (carried by `sysinfod`'s manifest), so an
 unprivileged squatter can never claim the endpoint and serve forged system
@@ -616,15 +638,26 @@ state. The endpoint's message sizes are one shared contract:
 [`SYSINFO_MAX_REPLY`] bounds the framed reply it delivers (one page of
 records past the status word). The server sizes its endpoint by these
 constants and every client sizes its buffers by them, so neither keeps a
-private copy that could drift; a list longer than one page is paged across
-successive requests (a client advancing `offset`/shrinking `limit`). A
-list's page size is `reply_page(<record>::WIRE_LEN)` — the most whole
-records `SYSINFO_REPLY_PAYLOAD_MAX` holds — and `lib/procinfo` asserts at
-build time that every page it asks for fits one reply. The
-hardware tree pages the same way: each `HARDWARE_TREE` reply is the
-snapshot's `HwTreeHeader` (its total node count and generation) followed
-by one page of whole `HwNode` records, so a client can page a tree of any
-size and detect a snapshot that changed under its walk.
+private copy that could drift. Every list query's payload is the one
+[`PageRequest`] — skip `offset` records, answer at most `limit`, which may
+not be zero — except `NET_INTERFACE_RATES`, whose payload follows it with
+the averaging window. A list longer than one page is paged across
+successive requests, and a page with fewer than `limit` records ends it.
+No page may exceed `reply_page(<record>::WIRE_LEN)`, the most whole
+records `SYSINFO_REPLY_PAYLOAD_MAX` holds, and `lib/procinfo` asserts at
+build time that every page it asks for fits one reply. Every page of one
+walk names the same `walk`, an id distinct among the caller's own walks,
+and is answered from the list as the walk's first page read it: `sysinfod`
+reads the list once a walk and holds it until the walk's short page, so a
+list changing under the walk can neither skip nor repeat a record. A walk
+the service let go of before it ended — its caller began more than four at
+once, or other walks needed the room — is answered `Interrupted`, and is
+started again from offset zero. A page naming `PageRequest::FRESH` is part
+of no walk and reads the list afresh. The hardware tree is the one list no
+walk holds: each `HARDWARE_TREE` page is read from the current snapshot, and
+its reply is the snapshot's `HwTreeHeader` (its total node count and
+generation) followed by one page of whole `HwNode` records, so a client can
+page a tree of any size and detect a snapshot that changed under its walk.
 
 First-party programs do not hand-roll this call: the `program` feature of
 `lib/procinfo` provides `IpcTransport`, the production `Transport` that posts
@@ -636,9 +669,10 @@ the request/render libraries stay testable against in-memory fixtures.
 
 ## Typed payloads
 
-- [`ProcessListRequest`] — `offset`/`limit` pagination for the two
-  process-list queries, so a fixed-size transport buffer never has to
-  hold every process at once.
+- [`PageRequest`] — the `offset`/`limit` window every list query takes
+  (a reserved `flags` field, zero in `sysinfo-v1`), so a fixed-size
+  transport buffer never bounds how long a list may be, and the `walk`
+  every page of one walk names (`FRESH`, zero, for a page of no walk).
 - [`ProcessRecord`] — one process entry. Identity is carried on two axes:
   the numeric `pid`/`parent_pid` (the scheduler task ids, familiar for a
   `ps`-style display but *reused* across process lifetimes) and the
@@ -681,9 +715,6 @@ the request/render libraries stay testable against in-memory fixtures.
 - [`SystemIdentity`] — the per-installation machine id
   ([`MACHINE_ID_LEN`] bytes), the OS version triple, and an inline
   hostname bounded by [`HOSTNAME_MAX`].
-- [`MountListRequest`] — `offset`/`limit` pagination for the mount-list
-  query, structurally parallel to [`ProcessListRequest`] but a distinct
-  frozen payload (each query owns its argument type, `AGENTS.md` §9).
 - [`MountRecord`] — one mount-table entry: the backing `source` (bounded
   by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
   the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), the [`MountFlags`]
@@ -750,15 +781,17 @@ the request/render libraries stay testable against in-memory fixtures.
   request payload; its response is exactly `LimitKind::COUNT` records in
   discriminant order ([`RESOURCE_LIMITS_REPORT_LEN`] bytes), read
   positionally. See [Resource limits and scalability](../architecture/resource-limits.md).
-- [`IrqListRequest`] — `offset`/`limit` pagination for the `IRQ_LIST`
-  query (a reserved `flags` field, zero in `sysinfo-v1`), structurally
-  parallel to [`MountListRequest`].
 - [`IrqRecord`] — one bound interrupt line: the architecture-defined
   `line` id, the kernel-attested `owner` task, the monotonic `count` of
   interrupts delivered since boot, and a `flags` bitmap
   ([`IRQ_FLAG_QUARANTINED`]). A `from_bytes` fails closed on an undefined
   `flags` bit, so an unknown record shape is refused whole rather than
   half-interpreted.
+
+- [`DmaUnitRecord`], [`DmaGroupRecord`], [`DmaNodeRecord`] — a unit, a
+  held isolation group, and a translated node. Each `from_bytes` fails
+  closed on an unknown family, state, signal, table kind or owner standing,
+  and on a reserved byte set.
 
 Every payload is `#[repr(C)]`, allocation-free, and exposes a
 `to_le_bytes`/`from_bytes` pair; every `from_bytes` is exercised by the
@@ -770,7 +803,7 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`ENCODED_QUERY_TABLE`]: ../../tairix_abi/sysinfo/constant.ENCODED_QUERY_TABLE.html
 [`encoded_query_table`]: ../../tairix_abi/sysinfo/fn.encoded_query_table.html
 [`SysinfoRequestHeader`]: ../../tairix_abi/sysinfo/struct.SysinfoRequestHeader.html
-[`ProcessListRequest`]: ../../tairix_abi/sysinfo/struct.ProcessListRequest.html
+[`PageRequest`]: ../../tairix_abi/sysinfo/struct.PageRequest.html
 [`ProcessRecord`]: ../../tairix_abi/sysinfo/struct.ProcessRecord.html
 [`ProcessState`]: ../../tairix_abi/sysinfo/enum.ProcessState.html
 [`SchedPriority`]: ../../tairix_abi/process/enum.SchedPriority.html
@@ -784,7 +817,6 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`SystemIdentity`]: ../../tairix_abi/sysinfo/struct.SystemIdentity.html
 [`MACHINE_ID_LEN`]: ../../tairix_abi/sysinfo/constant.MACHINE_ID_LEN.html
 [`HOSTNAME_MAX`]: ../../tairix_abi/sysinfo/constant.HOSTNAME_MAX.html
-[`MountListRequest`]: ../../tairix_abi/sysinfo/struct.MountListRequest.html
 [`MountRecord`]: ../../tairix_abi/sysinfo/struct.MountRecord.html
 [`MountRecord::medium`]: ../../tairix_abi/sysinfo/struct.MountRecord.html#method.medium
 [`MountAvailability`]: ../../tairix_abi/sysinfo/enum.MountAvailability.html
@@ -816,6 +848,8 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`encode_reply_err`]: ../../tairix_abi/sysinfo/fn.encode_reply_err.html
 [`decode_reply`]: ../../tairix_abi/sysinfo/fn.decode_reply.html
 [`IntrospectDomain`]: ../../tairix_abi/sysinfo/enum.IntrospectDomain.html
-[`IrqListRequest`]: ../../tairix_abi/sysinfo/struct.IrqListRequest.html
 [`IrqRecord`]: ../../tairix_abi/sysinfo/struct.IrqRecord.html
+[`DmaUnitRecord`]: ../../tairix_abi/sysinfo/struct.DmaUnitRecord.html
+[`DmaGroupRecord`]: ../../tairix_abi/sysinfo/struct.DmaGroupRecord.html
+[`DmaNodeRecord`]: ../../tairix_abi/sysinfo/struct.DmaNodeRecord.html
 [`IRQ_FLAG_QUARANTINED`]: ../../tairix_abi/sysinfo/constant.IRQ_FLAG_QUARANTINED.html

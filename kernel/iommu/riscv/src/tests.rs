@@ -3,14 +3,16 @@ extern crate std;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::vec::Vec;
 
+use tairix_arch_api::PageTableFrames;
 use tairix_kernel_iommu_api::conformance::{self, Fixture, TranslationProbe};
 use tairix_kernel_iommu_api::hostmem::HostFrames;
 use tairix_kernel_iommu_api::{
-    Clock, Domain, Fault, FaultReason, FaultRoute, IommuError, IommuUnit,
+    Clock, Domain, Fault, FaultReason, FaultRoute, IommuError, IommuUnit, Notice,
 };
 
 use super::*;
-use crate::model::{cause, op, Features, Interrupts, Model, Quirks};
+use crate::model::{cause, op, Features, Interrupts, Model, Msi, Quirks};
+use tairix_kernel_iommu_api::FrameRun;
 
 /// A clock that moves a millisecond every time it is read, so a wait that
 /// never completes runs out of budget in a thousand spins.
@@ -35,7 +37,7 @@ const PAGES: [u64; 2] = [0x8000_0000, 0x8000_1000];
 const QEMU: Features = Features {
     second_stage: true,
     modes: [true; 3],
-    extended: true,
+    msi: Msi::Files,
     depths: [true; 3],
     interrupts: Interrupts::Both,
     physical_bits: 56,
@@ -69,6 +71,52 @@ fn a_second_stage_unit_with_a_three_level_directory_passes_the_conformance_suite
     assert!(model.processed(op::IOTINVAL) > 0);
 }
 
+/// An unmap that cleared leaves alone is forgotten a page at a time, so what
+/// the domain still maps stays cached; one that took a table away forgets the
+/// domain, a page's invalidation being promised to reach only its leaf.
+#[test]
+fn a_range_sync_keeps_the_domain_s_other_translations_while_only_leaves_changed() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let clock = clock();
+    for second_stage in [true, false] {
+        let model = Model::new(
+            &frames,
+            Features {
+                second_stage,
+                ..QEMU
+            },
+        );
+        let unit = driven(&model, &frames, &clock);
+        unit.enable().unwrap();
+        let domain = unit.create_domain().unwrap();
+        unit.attach(STREAMS[0], domain).unwrap();
+        let iova = 0x4000_0000;
+        let near = iova + 0x1000;
+        let far = iova + 0x4000_0000;
+        for (at, phys) in [(iova, PAGES[0]), (near, PAGES[1]), (far, PAGES[1])] {
+            unit.map(domain, at, phys, 0x1000, Access::READ_WRITE)
+                .unwrap();
+            assert_eq!(model.access(STREAMS[0], at, false), Some(phys));
+        }
+        unit.unmap(domain, iova, 0x1000).unwrap();
+        unit.sync_range(domain, iova, 0x1000).unwrap();
+        assert_eq!(model.access(STREAMS[0], iova, false), None);
+        assert!(
+            model.caches(second_stage, domain.0, far),
+            "a leaf's forget kept the rest"
+        );
+        unit.unmap(domain, near, 0x1000).unwrap();
+        unit.sync_range(domain, near, 0x1000).unwrap();
+        assert_eq!(model.access(STREAMS[0], near, false), None);
+        assert!(
+            !model.caches(second_stage, domain.0, far),
+            "an emptied table forgets all"
+        );
+        unit.block(STREAMS[0]).unwrap();
+        unit.destroy_domain(domain).unwrap();
+    }
+}
+
 #[test]
 fn a_first_stage_unit_with_base_contexts_one_level_deep_passes_the_conformance_suite() {
     let frames = HostFrames::new(0x1_0000_0000);
@@ -76,7 +124,7 @@ fn a_first_stage_unit_with_base_contexts_one_level_deep_passes_the_conformance_s
         &frames,
         Features {
             second_stage: false,
-            extended: false,
+            msi: Msi::None,
             depths: [true, false, false],
             ..QEMU
         },
@@ -251,6 +299,33 @@ fn an_unconfirmed_block_keeps_the_device_its_domain_s_until_one_is_confirmed() {
     unit.destroy_domain(domain).unwrap();
 }
 
+/// A device silenced after its block went unconfirmed lets its domain go once
+/// the unit confirms the silence, and a later block leaves it silent, so the
+/// next storm finds it already quiet.
+#[test]
+fn silencing_after_an_unconfirmed_block_lets_the_domain_go_and_stays_silent() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, QEMU);
+    let clock = clock();
+    let unit = driven(&model, &frames, &clock);
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    model.quirk(Quirks {
+        stall_fences: true,
+        ..Quirks::default()
+    });
+    assert_eq!(unit.block(STREAMS[0]), Err(IommuError::Unconfirmed));
+    model.quirk(Quirks::default());
+    unit.silence(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
+    unit.block(STREAMS[0]).unwrap();
+    assert_eq!(model.access(STREAMS[0], 0x1000, true), None);
+    let mut faults = Vec::new();
+    unit.drain_faults(&mut |fault| faults.push(fault));
+    assert!(faults.is_empty(), "{faults:?}");
+}
+
 /// A valid context is never rewritten in place: moving a device from silence
 /// to a domain, or from a domain to silence, first makes its context invalid
 /// and has the unit forget it, then has the unit confirm the new context's
@@ -263,7 +338,7 @@ fn a_valid_context_is_replaced_only_through_an_invalid_one() {
     let clock = clock();
     let unit = driven(&model, &frames, &clock);
     unit.enable().unwrap();
-    let mut domain = Domain::new(&unit, &[]).unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
     unit.silence(STREAMS[0]).unwrap();
     assert_eq!(
         model.take_forgotten(STREAMS[0]),
@@ -276,7 +351,15 @@ fn a_valid_context_is_replaced_only_through_an_invalid_one() {
         [false, false, true],
         "broken, its other words, then its first"
     );
-    let iova = domain.map(PAGES[0], 0, 0).unwrap();
+    let iova = domain
+        .map(
+            &[FrameRun {
+                phys: PAGES[0],
+                order: 0,
+            }],
+            0,
+        )
+        .unwrap();
     assert_eq!(model.access(STREAMS[0], iova, true), Some(PAGES[0]));
     unit.silence(STREAMS[0]).unwrap();
     assert_eq!(model.take_forgotten(STREAMS[0]), [false, false, true]);
@@ -314,8 +397,16 @@ fn devices_far_apart_each_link_their_own_tables() {
     let unit = driven(&model, &frames, &clock);
     unit.enable().unwrap();
     let live = frames.live();
-    let mut domain = Domain::new(&unit, &[]).unwrap();
-    let iova = domain.map(PAGES[0], 0, 0).unwrap();
+    let mut domain = Domain::new(&unit, &[], &[]).unwrap();
+    let iova = domain
+        .map(
+            &[FrameRun {
+                phys: PAGES[0],
+                order: 0,
+            }],
+            0,
+        )
+        .unwrap();
     let tables = frames.live();
     for device in [0x00_0001, 0x00_0002, 0x00_FF40, 0xFF_0000] {
         domain.attach(device).unwrap();
@@ -536,9 +627,17 @@ fn the_walk_is_as_shallow_as_the_physical_address_space_allows() {
         let unit = RiscvUnit::new(&model, &frames, None, &clock, Signalling::Wired).unwrap();
         assert_eq!(unit.profile().reach.input_bits, bits);
         unit.enable().unwrap();
-        let mut domain = Domain::new(&unit, &[]).unwrap();
+        let mut domain = Domain::new(&unit, &[], &[]).unwrap();
         domain.attach(STREAMS[0]).unwrap();
-        let iova = domain.map(PAGES[0], 0, 0).unwrap();
+        let iova = domain
+            .map(
+                &[FrameRun {
+                    phys: PAGES[0],
+                    order: 0,
+                }],
+                0,
+            )
+            .unwrap();
         assert_eq!(model.access(STREAMS[0], iova, false), Some(PAGES[0]));
     }
 }
@@ -576,6 +675,16 @@ fn a_route_is_taken_only_as_the_unit_was_taken_over_to_signal() {
     let [_, faults, _] = wired.queue_controls();
     assert_ne!(faults & regs::QUEUE_IE, 0);
     assert_eq!(wired.fctl_written_live(), 0);
+    wired.raise(1, 1, 0x40, 0x1000, true);
+    assert!(wired.interrupt_pending());
+    unit.unroute_faults().unwrap();
+    let [_, faults, _] = wired.queue_controls();
+    assert_eq!(faults & regs::QUEUE_IE, 0, "the interrupt is off");
+    assert_ne!(faults & regs::QUEUE_ON, 0, "the queue runs on");
+    assert!(!wired.interrupt_pending(), "the wire is let go");
+    let mut kept = 0;
+    unit.drain_faults(&mut |_| kept += 1);
+    assert_eq!(kept, 1, "the record stays queued");
 
     let frames = HostFrames::new(0x1_0000_0000);
     let sending = Model::new(&frames, QEMU);
@@ -903,4 +1012,194 @@ fn an_attach_the_unit_cannot_confirm_is_taken_back() {
     assert_eq!(model.access(STREAMS[0], 0x1000, true), None);
     unit.block(STREAMS[0]).unwrap();
     unit.destroy_domain(domain).unwrap();
+}
+
+const DOORBELL: u64 = 0x2800_0000;
+
+/// A file and the notice it raises, in memory the model can reach.
+fn message_file(frames: &HostFrames) -> (u64, Notice) {
+    let file = frames.alloc_table().unwrap().phys;
+    (
+        file,
+        Notice {
+            address: DOORBELL,
+            data: 1030,
+        },
+    )
+}
+
+/// A stream's messages to the doorbell set the identity they write in its own
+/// file, and the unit sends the file's notice only for an identity the file
+/// enables; another stream's, and a write elsewhere, are no message.
+#[test]
+fn a_confined_stream_raises_only_its_own_files_identities() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, QEMU);
+    let clock = clock();
+    let unit = driven(&model, &frames, &clock);
+    unit.enable().unwrap();
+    let files = unit.message_files().expect("message files");
+    let (file, notice) = message_file(&frames);
+    files
+        .confine_messages(STREAMS[0], DOORBELL, file, notice)
+        .unwrap();
+    let domain = unit.create_domain().unwrap();
+    for stream in STREAMS {
+        unit.attach(stream, domain).unwrap();
+    }
+    assert_eq!(
+        model.message(STREAMS[0], DOORBELL, 1),
+        Ok(None),
+        "identity 1 is disabled"
+    );
+    assert_eq!(frames.word(file), Some(1 << 1), "but pending");
+    frames.store_word(file + 8, 1 << 1);
+    assert_eq!(
+        model.message(STREAMS[0], DOORBELL, 1),
+        Ok(Some((DOORBELL, 1030)))
+    );
+    assert_eq!(model.message(STREAMS[0], DOORBELL, 70), Ok(None));
+    assert_eq!(frames.word(file + 16), Some(1 << 6), "identity 70's group");
+    assert_eq!(model.message(STREAMS[0], DOORBELL + PAGES[0], 1), Err(()));
+    assert_eq!(
+        model.message(STREAMS[1], DOORBELL, 1),
+        Err(()),
+        "not confined"
+    );
+}
+
+/// Confining a stream already translating rewrites its context at once.
+#[test]
+fn a_translating_stream_is_confined_at_once() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, QEMU);
+    let clock = clock();
+    let unit = driven(&model, &frames, &clock);
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    assert_eq!(model.message(STREAMS[0], DOORBELL, 1), Err(()));
+    let (file, notice) = message_file(&frames);
+    frames.store_word(file + 8, 1 << 1);
+    let files = unit.message_files().unwrap();
+    files
+        .confine_messages(STREAMS[0], DOORBELL, file, notice)
+        .unwrap();
+    assert_eq!(
+        model.message(STREAMS[0], DOORBELL, 1),
+        Ok(Some((DOORBELL, 1030)))
+    );
+    unit.block(STREAMS[0]).unwrap();
+    assert_eq!(
+        model.message(STREAMS[0], DOORBELL, 1),
+        Err(()),
+        "a blocked stream raises nothing"
+    );
+}
+
+/// A confinement refused before its context is written is not recorded, so
+/// a retry confines the stream.
+#[test]
+fn a_refused_confinement_can_be_made_again() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, QEMU);
+    let clock = clock();
+    let unit = driven(&model, &frames, &clock);
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    let (file, notice) = message_file(&frames);
+    frames.store_word(file + 8, 1 << 1);
+    let files = unit.message_files().unwrap();
+    model.quirk(Quirks {
+        stall_fences: true,
+        ..Quirks::default()
+    });
+    assert_eq!(
+        files.confine_messages(STREAMS[0], DOORBELL, file, notice),
+        Err(IommuError::Unconfirmed)
+    );
+    model.quirk(Quirks::default());
+    unit.attach(STREAMS[0], domain).unwrap();
+    files
+        .confine_messages(STREAMS[0], DOORBELL, file, notice)
+        .unwrap();
+    assert_eq!(
+        model.message(STREAMS[0], DOORBELL, 1),
+        Ok(Some((DOORBELL, 1030)))
+    );
+}
+
+#[test]
+fn a_confinement_the_tables_cannot_name_is_refused() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, QEMU);
+    let clock = clock();
+    let unit = driven(&model, &frames, &clock);
+    let files = unit.message_files().unwrap();
+    assert!(
+        !files.atomic_files(),
+        "QEMU's unit sets file bits with a read and a write"
+    );
+    let (file, notice) = message_file(&frames);
+    for (doorbell, file, notice) in [
+        (DOORBELL, file + 8, notice),
+        (DOORBELL + 4, file, notice),
+        (
+            DOORBELL,
+            file,
+            Notice {
+                address: DOORBELL + 4,
+                ..notice
+            },
+        ),
+        (
+            DOORBELL,
+            file,
+            Notice {
+                data: 2048,
+                ..notice
+            },
+        ),
+        (DOORBELL, 1 << 56, notice),
+    ] {
+        assert_eq!(
+            files.confine_messages(STREAMS[0], doorbell, file, notice),
+            Err(IommuError::OutOfRange)
+        );
+    }
+    files
+        .confine_messages(STREAMS[0], DOORBELL, file, notice)
+        .unwrap();
+    assert_eq!(
+        files.confine_messages(STREAMS[0], DOORBELL, file, notice),
+        Err(IommuError::OutOfRange),
+        "confined once"
+    );
+}
+
+/// Only a unit that translates through a second stage, with extended
+/// contexts and file-mode entries, confines messages.
+#[test]
+fn a_unit_confines_messages_only_through_a_second_stage_with_file_entries() {
+    for features in [
+        Features {
+            second_stage: false,
+            ..QEMU
+        },
+        Features {
+            msi: Msi::Flat,
+            ..QEMU
+        },
+        Features {
+            msi: Msi::None,
+            ..QEMU
+        },
+    ] {
+        let frames = HostFrames::new(0x1_0000_0000);
+        let model = Model::new(&frames, features);
+        let clock = clock();
+        let unit = driven(&model, &frames, &clock);
+        assert!(unit.message_files().is_none());
+    }
 }

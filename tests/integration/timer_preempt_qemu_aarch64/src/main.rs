@@ -54,7 +54,7 @@ mod kernel {
     use tairix_arch_aarch64::kernel_arch::read_cntfrq;
     use tairix_arch_aarch64::timer_hal::TimerHal;
     use tairix_arch_aarch64::{
-        exceptions, gic, handle_panic_via_serial, preempt, qemu_exit, SERIAL_SINK,
+        exceptions, handle_panic_via_serial, preempt, qemu_exit, SERIAL_SINK,
     };
     use tairix_arch_api::{CpuId, Timer};
     use tairix_itest_finisher::fail_point;
@@ -143,7 +143,7 @@ mod kernel {
         // before any source is armed; the callback is installed.
         unsafe {
             exceptions::init_vectors();
-            gic::init();
+            tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
         }
 
         // 4. Register the per-CPU preemption backing (sized to this

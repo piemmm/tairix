@@ -86,14 +86,12 @@ use tairix_abi::switchboard_ipc::{
     TrayPressureKind, TraySummary, TrayTask, TrayTaskName,
 };
 use tairix_abi::sysinfo::{
-    decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
-    CacheReportRequest, CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord,
-    DesktopFrameStatsRequest, DesktopFrameTotals, DeviceStatsRequest, GroupDirectoryRecord,
-    GroupDirectoryRequest, IntrospectDomain, KernelMemoryStats, MemoryPressureStats,
-    MountListRequest, MountRecord, ProcessListRequest, ProcessRecord, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-    SelfAccountRecord, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-    UserDirectoryRequest, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord,
+    decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerRecord, CacheReportRequest,
+    CpuLoadRecord, DesktopFrameRecord, DesktopFrameTotals, DmaGroupRecord, DmaNodeRecord,
+    DmaUnitRecord, GroupDirectoryRecord, IntrospectDomain, KernelMemoryStats, MemoryPressureStats,
+    MountRecord, NetInterfaceRatesRequest, PageRequest, ProcessRecord, RamzipStats,
+    ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SysinfoRequestHeader,
+    SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
     SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
@@ -240,13 +238,13 @@ fn exercise_notice_payloads(bytes: &[u8]) {
 }
 
 fn exercise_sysinfo_records(bytes: &[u8]) {
-    if let Ok(req) = ProcessListRequest::from_bytes(bytes) {
-        let redecoded = ProcessListRequest::from_bytes(&req.to_le_bytes())
+    if let Ok(req) = PageRequest::from_bytes(bytes) {
+        let redecoded = PageRequest::from_bytes(&req.to_le_bytes())
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(req, redecoded);
     }
-    if let Ok(req) = MountListRequest::from_bytes(bytes) {
-        let redecoded = MountListRequest::from_bytes(&req.to_le_bytes())
+    if let Ok(req) = NetInterfaceRatesRequest::from_bytes(bytes) {
+        let redecoded = NetInterfaceRatesRequest::from_bytes(&req.to_le_bytes())
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(req, redecoded);
     }
@@ -275,11 +273,6 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
             .expect("round-trip of an accepted identity must succeed");
         assert_eq!(id, redecoded);
     }
-    if let Ok(req) = SeatListRequest::from_bytes(bytes) {
-        let redecoded = SeatListRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
     if let Ok(rec) = SeatRecord::from_bytes(bytes) {
         let redecoded = SeatRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
@@ -292,21 +285,11 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
 /// The account-directory half of the `sysinfo-v1` record sweep: the two
 /// ungated directory frames and the caller's own account record.
 fn exercise_sysinfo_directory_records(bytes: &[u8]) {
-    if let Ok(req) = UserDirectoryRequest::from_bytes(bytes) {
-        let redecoded = UserDirectoryRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
     if let Ok(rec) = UserDirectoryRecord::from_bytes(bytes) {
         let redecoded = UserDirectoryRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
         assert!(rec.name_bytes().len() <= usize::from(rec.name_len));
-    }
-    if let Ok(req) = GroupDirectoryRequest::from_bytes(bytes) {
-        let redecoded = GroupDirectoryRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
     }
     if let Ok(rec) = GroupDirectoryRecord::from_bytes(bytes) {
         let redecoded = GroupDirectoryRecord::from_bytes(&rec.to_le_bytes())
@@ -334,6 +317,26 @@ fn exercise_sysinfo(bytes: &[u8]) {
     exercise_sysinfo_records(bytes);
     exercise_device_stat_records(bytes);
     exercise_desktop_frame_records(bytes);
+    exercise_dma_translation_records(bytes);
+}
+
+/// The DMA-translation reads: the unit, group and node records.
+fn exercise_dma_translation_records(bytes: &[u8]) {
+    if let Ok(rec) = DmaUnitRecord::from_bytes(bytes) {
+        let redecoded = DmaUnitRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(rec) = DmaGroupRecord::from_bytes(bytes) {
+        let redecoded = DmaGroupRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(rec) = DmaNodeRecord::from_bytes(bytes) {
+        let redecoded = DmaNodeRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
 }
 
 /// The memory-accounting half of the `sysinfo-v1` record sweep: the pressure
@@ -344,20 +347,10 @@ fn exercise_sysinfo_memory_records(bytes: &[u8]) {
             .expect("round-trip of accepted pressure stats must succeed");
         assert_eq!(stats, redecoded);
     }
-    if let Ok(req) = ReclaimListRequest::from_bytes(bytes) {
-        let redecoded = ReclaimListRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
     if let Ok(rec) = ReclaimClassRecord::from_bytes(bytes) {
         let redecoded = ReclaimClassRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
-    }
-    if let Ok(req) = CacheLedgerListRequest::from_bytes(bytes) {
-        let redecoded = CacheLedgerListRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
     }
     if let Ok(req) = CacheReportRequest::from_bytes(bytes) {
         let redecoded = CacheReportRequest::from_bytes(&req.to_le_bytes())
@@ -388,11 +381,6 @@ fn exercise_sysinfo_memory_records(bytes: &[u8]) {
             .expect("round-trip of accepted ramzip stats must succeed");
         assert_eq!(stats, redecoded);
     }
-    if let Ok(req) = CpuLoadRequest::from_bytes(bytes) {
-        let redecoded = CpuLoadRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
     if let Ok(rec) = CpuLoadRecord::from_bytes(bytes) {
         let redecoded = CpuLoadRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
@@ -400,20 +388,9 @@ fn exercise_sysinfo_memory_records(bytes: &[u8]) {
     }
 }
 
-/// The per-device statistics decoders — the paged per-volume and
-/// per-graphics-device reads — split out so the sysinfo sweep above stays
-/// inside one screen.
+/// The per-volume statistics decoders, split out so the sysinfo sweep above
+/// stays inside one screen.
 fn exercise_device_stat_records(bytes: &[u8]) {
-    if let Ok(req) = VolumeIoRequest::from_bytes(bytes) {
-        let redecoded = VolumeIoRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
-    if let Ok(req) = DeviceStatsRequest::from_bytes(bytes) {
-        let redecoded = DeviceStatsRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
     if let Ok(rec) = VolumeIoStatsRecord::from_bytes(bytes) {
         let redecoded = VolumeIoStatsRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
@@ -429,11 +406,6 @@ fn exercise_device_stat_records(bytes: &[u8]) {
 /// The desktop frame-accounting decoders, split out so the sysinfo sweep above
 /// stays inside one screen.
 fn exercise_desktop_frame_records(bytes: &[u8]) {
-    if let Ok(req) = DesktopFrameStatsRequest::from_bytes(bytes) {
-        let redecoded = DesktopFrameStatsRequest::from_bytes(&req.to_le_bytes())
-            .expect("round-trip of an accepted request must succeed");
-        assert_eq!(req, redecoded);
-    }
     if let Ok(totals) = DesktopFrameTotals::from_bytes(bytes) {
         let redecoded = DesktopFrameTotals::from_bytes(&totals.to_le_bytes())
             .expect("round-trip of accepted totals must succeed");

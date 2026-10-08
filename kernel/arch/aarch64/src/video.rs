@@ -273,7 +273,6 @@ pub fn purge() {}
 /// `aarch64` system instructions.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod metal {
-    use core::arch::asm;
     use core::cell::UnsafeCell;
     use core::sync::atomic::Ordering;
 
@@ -825,34 +824,7 @@ mod metal {
     /// coherency, so a DMA reader (the HVS scan-out) observes the CPU's
     /// writes.
     fn clean_dcache_range(start: usize, len: usize) {
-        if len == 0 {
-            return;
-        }
-        let ctr: u64;
-        // SAFETY: reading the cache-type register is always permitted at
-        // EL1 and has no side effects.
-        unsafe {
-            asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
-        }
-        // CTR_EL0.DminLine (bits 19:16): log2 of the smallest data-cache
-        // line in 4-byte words.
-        let line = 4usize << ((ctr >> 16) & 0xF);
-        let end = start.saturating_add(len);
-        let mut addr = start & !(line - 1);
-        while addr < end {
-            // SAFETY: `dc cvac` cleans the line containing `addr` to the
-            // point of coherency; it faults on no address the kernel can
-            // form and modifies no memory contents.
-            unsafe {
-                asm!("dc cvac, {0}", in(reg) addr, options(nostack, preserves_flags));
-            }
-            addr += line;
-        }
-        // SAFETY: a data synchronisation barrier completing the cleans
-        // before the function returns.
-        unsafe {
-            asm!("dsb sy", options(nostack, preserves_flags));
-        }
+        crate::paging::clean_range_to_poc(start as u64, len as u64);
     }
 }
 

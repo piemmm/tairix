@@ -20,11 +20,11 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
-    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord,
-    GroupDirectoryRecord, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
-    MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord,
-    SeatRecord, SelfAccountRecord, SystemIdentity, Uptime, UserDirectoryRecord,
-    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, DmaGroupRecord,
+    DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, KernelMemoryStats, LoadAverage,
+    MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord, RamzipStats,
+    ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity, Uptime,
+    UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin, ProcId};
@@ -98,11 +98,11 @@ pub trait SysinfoSource {
     ///
     /// The owned list is returned whole; [`crate::serve`] applies the
     /// `offset`/`limit` paging from the request. Ordering is the source's
-    /// responsibility and must be stable across paged calls so a client
-    /// walking the list never skips or repeats a record. An **owned** `Vec`
-    /// (not a borrowed slice) because a syscall-backed source materialises
-    /// the records freshly on each call — it holds no persistent table to
-    /// lend — and a fixture simply clones its own.
+    /// responsibility and must be stable across paged calls, so a walk over a
+    /// list that does not change between its pages sees each record once. An
+    /// **owned** `Vec` (not a borrowed slice) because a syscall-backed source
+    /// materialises the records freshly on each call — it holds no persistent
+    /// table to lend — and a fixture simply clones its own.
     fn process_records(
         &self,
         caller: &Caller,
@@ -438,6 +438,21 @@ pub trait SysinfoSource {
     /// `offset`/`limit` paging; ordering must be stable across paged calls
     /// (ascending line order is).
     fn irqs(&self, caller: &Caller) -> Result<Vec<IrqRecord>, Errno>;
+
+    /// Return every discovered DMA translation unit, in discovery order:
+    /// those translating, then those stranded.
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed, like
+    /// [`irqs`](Self::irqs): what a unit confines is hardware topology.
+    fn dma_units(&self, caller: &Caller) -> Result<Vec<DmaUnitRecord>, Errno>;
+
+    /// Return each isolation group an owner has taken, ascending by unit and
+    /// group. Gated as [`dma_units`](Self::dma_units).
+    fn dma_groups(&self, caller: &Caller) -> Result<Vec<DmaGroupRecord>, Errno>;
+
+    /// Return each node a unit translates for an owner, ascending by node.
+    /// Gated as [`dma_units`](Self::dma_units).
+    fn dma_nodes(&self, caller: &Caller) -> Result<Vec<DmaNodeRecord>, Errno>;
 
     /// Return the post-mortem crash-record store: one record per recorded
     /// user-fault kill, newest first.

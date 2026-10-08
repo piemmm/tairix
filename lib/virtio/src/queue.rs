@@ -164,8 +164,10 @@ impl SplitQueue {
     /// # Errors
     ///
     /// [`VirtioError::QueueTooShallow`] for a device that cannot hold
-    /// `needed` descriptors, refused before it is given any ring; otherwise
-    /// the allocation and transport errors.
+    /// `needed` descriptors, refused before it is given any ring;
+    /// [`VirtioError::OutOfMemory`] when its rings or their bookkeeping cannot
+    /// be had, [`VirtioError::Host`] for the host's other refusals; otherwise
+    /// the transport's errors.
     pub fn new<T: Transport>(
         transport: &mut T,
         host: &dyn VirtioHost,
@@ -176,13 +178,13 @@ impl SplitQueue {
         let size = negotiate_size(transport, queue_index, requested_size, needed)?;
         let desc = host
             .alloc_dma_zeroed(Self::desc_table_size(size))
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let avail = host
             .alloc_dma_zeroed(Self::avail_ring_size(size))
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let used = host
             .alloc_dma_zeroed(Self::used_ring_size(size))
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let links = zeroed_table(size)?;
         let in_flight = zeroed_table(size)?;
         transport.queue_set(
@@ -440,7 +442,7 @@ fn zeroed_table(size: u16) -> Result<Vec<u16>, VirtioError> {
     let mut table = Vec::new();
     table
         .try_reserve_exact(usize::from(size))
-        .map_err(|_| VirtioError::DeviceFault)?;
+        .map_err(|_| VirtioError::OutOfMemory)?;
     table.resize(usize::from(size), 0);
     Ok(table)
 }
@@ -449,58 +451,60 @@ fn zeroed_table(size: u16) -> Result<Vec<u16>, VirtioError> {
 /// to read the avail ring, collect a chain by descriptor head, and
 /// publish into the used ring without owning the underlying
 /// allocations. The implementation reconstructs the ring layouts from
-/// the device addresses the driver planted, refusing any the mock never
-/// handed out.
+/// the device addresses the driver planted, refusing any extent no slab
+/// the mock handed out holds whole.
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod ring_view {
     use super::{
-        Descriptor, UsedElem, AVAIL_HEADER_BYTES, USED_HEADER_BYTES, VRING_DESC_F_NEXT,
+        Descriptor, SplitQueue, UsedElem, AVAIL_HEADER_BYTES, USED_HEADER_BYTES, VRING_DESC_F_NEXT,
         VRING_DESC_F_WRITE,
     };
-    use crate::host::device_view;
+    use crate::host::MockMemory;
     use crate::transport::{ChainView, VirtioError};
     use alloc::vec::Vec;
     use core::mem::size_of;
 
-    pub(crate) struct RingView {
+    pub(crate) struct RingView<'m> {
+        memory: &'m MockMemory,
         queue_size: u16,
         desc: *mut u8,
         avail: *mut u8,
         used: *mut u8,
     }
 
-    impl RingView {
+    impl<'m> RingView<'m> {
         /// Construct a `RingView` from the device addresses the driver
-        /// programmed into the transport. The lifetime of the
-        /// resulting pointers tracks the driver-owned allocations.
+        /// programmed into the transport, each ring found in `memory` at
+        /// its full length.
         ///
         /// # Errors
         ///
-        /// [`VirtioError::DeviceFault`] for an address the mock never
-        /// handed out: a device reaches memory by device address alone.
+        /// [`VirtioError::DeviceFault`] for a ring no slab the mock handed
+        /// out holds whole: a device reaches memory by device address alone.
         ///
         /// # Safety-invariant
         ///
-        /// The mock peer (the only caller) treats these `*mut u8`s
-        /// as `&mut [u8]` of the appropriate ring length, governed
-        /// by [`crate::queue::SplitQueue`]'s sizing helpers. The
-        /// queue stores those slices in `DmaSlab`s that
-        /// outlive every `RingView` derived from them; we therefore
-        /// only access them inside the body of `MockTransport`
-        /// methods (which borrow the driver exclusively via the
-        /// `&mut self` chain of `kick`/`poll_used`).
+        /// The mock peer (the only caller) treats these `*mut u8`s as the
+        /// rings [`SplitQueue`]'s sizing helpers measure, each inside its
+        /// slab. The queue keeps those rings in `DmaSlab`s that outlive
+        /// every `RingView` derived from them; we therefore only access them
+        /// inside the body of `MockTransport` methods (which borrow the
+        /// driver exclusively via the `&mut self` chain of
+        /// `kick`/`poll_used`).
         pub(crate) fn from_device(
+            memory: &'m MockMemory,
             queue_size: u16,
             desc: u64,
             avail: u64,
             used: u64,
         ) -> Result<Self, VirtioError> {
-            let view = |device| device_view(device).ok_or(VirtioError::DeviceFault);
+            let view = |device, len| memory.view(device, len).ok_or(VirtioError::DeviceFault);
             Ok(Self {
+                memory,
                 queue_size,
-                desc: view(desc)?,
-                avail: view(avail)?,
-                used: view(used)?,
+                desc: view(desc, SplitQueue::desc_table_size(queue_size))?,
+                avail: view(avail, SplitQueue::avail_ring_size(queue_size))?,
+                used: view(used, SplitQueue::used_ring_size(queue_size))?,
             })
         }
 
@@ -618,15 +622,14 @@ pub(crate) mod ring_view {
             let mut device_write: Vec<&'a mut [u8]> = Vec::new();
             let mut foreign = false;
             self.walk_chain(head, |_, d| {
-                let Some(at) = device_view(d.addr) else {
+                let Some(at) = self.memory.view(d.addr, d.len as usize) else {
                     foreign = true;
                     return;
                 };
                 if (d.flags & VRING_DESC_F_WRITE) != 0 {
-                    // SAFETY: the driver published `d` over a `DmaSlab` it
-                    // still owns, `d.len` bytes long, and no table this peer
-                    // drains was scribbled over; the slice lives for one
-                    // `drain_queue` call.
+                    // SAFETY: `view` found all `d.len` bytes inside one
+                    // `DmaSlab` the driver still owns, and the slice lives for
+                    // one `drain_queue` call.
                     device_write
                         .push(unsafe { core::slice::from_raw_parts_mut(at, d.len as usize) });
                 } else {

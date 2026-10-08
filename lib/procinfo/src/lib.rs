@@ -49,8 +49,11 @@
 //!   walks the resolver's per-name lookups and the shell's
 //!   resource-selector enumeration both run.
 //! * [`walk_pages`](list) and the shared [`ListError`], the generic paging
-//!   loop both walks are built on, plus the [`WalkStep`] signal a caller with
-//!   its own bound answers to end a walk early without faking a failure.
+//!   loop every walk is built on, plus the [`WalkStep`] signal a caller with
+//!   its own bound answers to end a walk early without faking a failure;
+//!   [`walk_records`] is the loop over decoded records every `for_each_*` walk
+//!   is, and [`walk_pages_with`] the loop for a query whose payload carries
+//!   more than its page.
 //! * [`resolve()`], the userspace `info:`/`stats:` resource-reference resolver:
 //!   it maps a parsed [`ResourceRef`](tairix_resref::ResourceRef) onto a
 //!   [`SysinfoQueryId`](tairix_abi::sysinfo::SysinfoQueryId), issues it over
@@ -85,6 +88,7 @@
 //! * [`mount`] — the mount-table paging walk and row rendering.
 //! * [`netsock`] — the open-socket-table paging walk.
 //! * [`raid`] — the composed-array and member-device paging walks.
+//! * [`dma`] — the DMA translation unit, group and node paging walks.
 //! * [`netservers`] — the recursive-resolver and network-time server paging
 //!   walks.
 //! * [`resinfo`] — the structured `info:`/`stats:` response records
@@ -118,6 +122,7 @@ pub mod client;
 pub mod composition;
 pub mod cputime;
 pub mod display;
+pub mod dma;
 pub mod human;
 pub mod hwtree;
 pub mod kstats;
@@ -141,6 +146,7 @@ pub mod volume;
 pub use client::{IpcTransport, NamedSource, OpenError, RtOutput};
 pub use composition::{memory_composition, MemoryPart};
 pub use cputime::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
+pub use dma::{for_each_dma_group, for_each_dma_node, for_each_dma_unit, DMA_PAGE};
 pub use human::{
     cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
     format_uptime, SIZE_WIDTH,
@@ -153,7 +159,7 @@ pub use kstats::{
     CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, DESKTOP_FRAME_PAGE, IRQ_PAGE, NET_INTERFACE_PAGE,
     RECLAIM_PAGE,
 };
-pub use list::{field_lossy, walk_pages, ListError, WalkStep};
+pub use list::{field_lossy, walk_pages, walk_pages_with, walk_records, ListError, WalkStep};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
 pub use netaddr::{render_if_addr, render_ip, render_server};
 pub use netservers::{
@@ -173,7 +179,7 @@ pub use resinfo::{
     ResourceResponse, ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN,
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
-pub use resolve::{cpu_info, hostname, resolve, ResolveInfoError};
+pub use resolve::{cpu_info, hostname, resolve, ResolveInfoError, CPU_INFO_PAGE};
 pub use transport::{Output, Transport};
 pub use users::{
     for_each_group, for_each_user, group_names, self_account, user_name, user_names,
@@ -189,9 +195,11 @@ const _: () = {
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
         NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
     };
+    use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
     use tairix_abi::sysinfo::{
-        CacheLedgerRecord, CpuLoadRecord, CpuTimeRecord, DesktopFrameRecord, GroupDirectoryRecord,
-        IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, UserDirectoryRecord,
+        CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, DesktopFrameRecord,
+        DmaGroupRecord, DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, MountRecord,
+        ProcessRecord, ReclaimClassRecord, UserDirectoryRecord,
     };
     const fn fits(page: u16, record_len: usize) -> bool {
         page >= 1 && page as usize * record_len <= tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX
@@ -201,8 +209,14 @@ const _: () = {
     assert!(fits(CACHE_LEDGER_PAGE, CacheLedgerRecord::WIRE_LEN));
     assert!(fits(CPU_TIME_PAGE, CpuTimeRecord::WIRE_LEN));
     assert!(fits(CPU_LOAD_PAGE, CpuLoadRecord::WIRE_LEN));
+    assert!(fits(CPU_INFO_PAGE, CpuInfoRecord::WIRE_LEN));
+    assert!(fits(RAID_PAGE, RaidArrayRecord::WIRE_LEN));
+    assert!(fits(RAID_PAGE, RaidMemberRecord::WIRE_LEN));
     assert!(fits(RECLAIM_PAGE, ReclaimClassRecord::WIRE_LEN));
     assert!(fits(IRQ_PAGE, IrqRecord::WIRE_LEN));
+    assert!(fits(DMA_PAGE, DmaUnitRecord::WIRE_LEN));
+    assert!(fits(DMA_PAGE, DmaGroupRecord::WIRE_LEN));
+    assert!(fits(DMA_PAGE, DmaNodeRecord::WIRE_LEN));
     assert!(fits(DESKTOP_FRAME_PAGE, DesktopFrameRecord::WIRE_LEN));
     assert!(fits(NET_INTERFACE_PAGE, NetInterfaceFactsRecord::WIRE_LEN));
     assert!(fits(NET_INTERFACE_PAGE, NetInterfaceStateRecord::WIRE_LEN));

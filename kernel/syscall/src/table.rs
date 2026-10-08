@@ -8,6 +8,7 @@
 //! decoupled from `kernel/ipc`, `kernel/sched`, and friends
 //! (no bloat).
 
+use tairix_abi::driver::DmaReach;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
@@ -1241,14 +1242,14 @@ pub trait SyscallHandlers {
     /// device-resource grant the driver received for the hardware-tree node
     /// it binds; the implementation resolves it **against the calling task**
     /// (rejecting forgery exactly as [`Self::mmio_map`]),
-    /// confirms the grant names a DMA constraint, carves a physically
-    /// contiguous, zeroed, coherent region of `len` bytes whose physical
-    /// extent lies within the grant's addressing limit,
-    /// maps it `RW`, non-executable, into the caller's own address space,
-    /// writes the buffer's device-visible base to the user pointer
-    /// `device_out`, and returns its base user virtual address. A driver
-    /// therefore reaches no memory the kernel did not grant it (no
-    /// ambient authority).
+    /// confirms the grant names a DMA constraint, carves a zeroed, coherent
+    /// region of `len` bytes its device reaches at contiguous addresses
+    /// within both the grant's addressing limit and the `reach` address bits
+    /// the driver states its device drives, maps it `RW`, non-executable,
+    /// into the caller's own address space, writes the buffer's
+    /// device-visible base to the user pointer `device_out`, and returns its
+    /// base user virtual address. A driver therefore reaches no memory the
+    /// kernel did not grant it (no ambient authority).
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]: a build with neither a
@@ -1259,6 +1260,7 @@ pub trait SyscallHandlers {
         _caller: &CallerContext<'_>,
         _handle: u64,
         _len: usize,
+        _reach: DmaReach,
         _device_out: u64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
@@ -1303,9 +1305,10 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Carve a shared region a DMA master may reach under the caller's `Dma`
-    /// grant `handle`, writing its id to `id_out` and its device address to
-    /// `device_out`, and return the base of the caller's coherent mapping.
+    /// Carve a shared region a DMA master driving `reach` address bits may
+    /// reach under the caller's `Dma` grant `handle`, writing its id to
+    /// `id_out` and its device address to `device_out`, and return the base
+    /// of the caller's coherent mapping.
     ///
     /// The dispatcher has already checked [`CapabilityId::MEM_DMA`] and that
     /// both out pointers are non-null; the implementation also demands
@@ -1318,6 +1321,7 @@ pub trait SyscallHandlers {
         _caller: &CallerContext<'_>,
         _handle: u64,
         _len: usize,
+        _reach: DmaReach,
         _id_out: u64,
         _device_out: u64,
     ) -> SyscallResult {
@@ -3575,11 +3579,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::DMA_ALLOC => {
                 // `validate_arg` accepts args[0] as an opaque `Handle` u64
                 // (resolved against the calling task + grant table in the
-                // handler); args[1] is the byte length and
-                // args[2] is the non-null `device_out` `UserPtr` the handler
-                // writes the device-visible base to.
+                // handler); args[1] is the byte length, args[2] the device's
+                // address bits, and args[3] the non-null `device_out`
+                // `UserPtr` the handler writes the device-visible base to.
                 let len = decode_len(args.0[1])?;
-                self.handlers.dma_alloc(caller, args.0[0], len, args.0[2])
+                let reach = decode_reach(args.0[2])?;
+                self.handlers
+                    .dma_alloc(caller, args.0[0], len, reach, args.0[3])
             }
             SyscallNumber::DMA_FREE => {
                 // `validate_arg` accepts args[0] as an opaque `Handle` u64
@@ -3591,11 +3597,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::DMA_QUIESCED => self.handlers.dma_quiesced(caller),
             SyscallNumber::SHM_CREATE_DMA => {
                 // args[0] is an opaque `Handle` resolved against the caller's
-                // grants; args[1] the byte length; args[2] and args[3] the
-                // non-null `id_out` and `device_out` pointers.
+                // grants; args[1] the byte length; args[2] the device's
+                // address bits; args[3] and args[4] the non-null `id_out` and
+                // `device_out` pointers.
                 let len = decode_len(args.0[1])?;
+                let reach = decode_reach(args.0[2])?;
                 self.handlers
-                    .shm_create_dma(caller, args.0[0], len, args.0[2], args.0[3])
+                    .shm_create_dma(caller, args.0[0], len, reach, args.0[3], args.0[4])
             }
             SyscallNumber::SHM_GRANT_PEER => {
                 // The region id, the endpoint id and the in-service ticket,
@@ -4387,6 +4395,15 @@ fn decode_len(raw: u64) -> Result<usize, Errno> {
     usize::try_from(raw).map_err(|_| Errno::LengthOutOfRange)
 }
 
+/// Decode the address bits a device drives, refusing none and more than 64
+/// at dispatch, so a malformed reach costs no grant lookup.
+fn decode_reach(raw: u64) -> Result<DmaReach, Errno> {
+    u32::try_from(raw)
+        .ok()
+        .and_then(DmaReach::new)
+        .ok_or(Errno::OutOfRange)
+}
+
 /// Decode a port-transfer width, refusing anything that is not one of the
 /// three architectural widths.
 ///
@@ -4983,6 +5000,7 @@ mod tests {
             _c: &CallerContext<'_>,
             handle: u64,
             _len: usize,
+            _reach: DmaReach,
             _device_out: u64,
         ) -> SyscallResult {
             self.record("dma_alloc");
@@ -5010,6 +5028,7 @@ mod tests {
             _c: &CallerContext<'_>,
             _handle: u64,
             _len: usize,
+            _reach: DmaReach,
             _id_out: u64,
             _device_out: u64,
         ) -> SyscallResult {
@@ -6897,6 +6916,38 @@ mod tests {
         assert_eq!(r, Ok(0x11 | 0xF000_0000_0000_0000));
         assert_eq!(h.last(), Some("irq_bind"));
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    /// A device's reach is decoded at dispatch: none, and more than 64 bits,
+    /// are refused before the handler runs or any grant is looked up.
+    #[test]
+    fn a_dma_reach_outside_one_to_64_bits_is_refused_at_dispatch() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::MEM_DMA], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+        let call = |number: SyscallNumber, reach: u64| {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = 3;
+            args.0[1] = 0x1000;
+            args.0[2] = reach;
+            args.0[3] = 0x1000;
+            if number == SyscallNumber::SHM_CREATE_DMA {
+                args.0[4] = 0x2000;
+            }
+            d.dispatch(&ctx, u64::from(number.as_u16()), args)
+        };
+        for number in [SyscallNumber::DMA_ALLOC, SyscallNumber::SHM_CREATE_DMA] {
+            assert_eq!(call(number, 0), Err(Errno::OutOfRange));
+            assert_eq!(call(number, 65), Err(Errno::OutOfRange));
+        }
+        assert_eq!(h.last(), None, "no handler ran");
+        assert_eq!(call(SyscallNumber::DMA_ALLOC, 1), Ok(3));
+        assert_eq!(call(SyscallNumber::DMA_ALLOC, 64), Ok(3));
     }
 
     #[test]

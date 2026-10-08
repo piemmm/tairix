@@ -14,7 +14,10 @@ galwr ei hun; dim ond i alwr sy'n dal `CAP_SYSINFO_GLOBAL` y mae'r
 gwasanaeth yn caniatáu golwg y system gyfan.
 
 Mae'r arddangosfa'n adnewyddu ei hun bob cyfwng oedi (3.0 eiliad oni
-newidia `-d` ef), ac mae `r` yn ei hadnewyddu ar unwaith.
+newidia `-d` ef), ac mae `r` yn ei hadnewyddu ar unwaith. Mae adnewyddiad
+na allai'r gwasanaeth gwybodaeth system ei orffen dan lwyth yn cadw'r
+rhestr olaf, a'r llinell statws yn dweud hynny, ac mae'r adnewyddiad nesaf
+yn darllen y rhestr eto.
 
 Nid yw'r gwyliwr yn cymryd operandau: fe'i rheolir â bysellau a wesgir
 o fewn y sesiwn.

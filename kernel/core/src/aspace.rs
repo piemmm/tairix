@@ -3483,8 +3483,14 @@ mod tests {
         let first = reg.loaded_driver(ProcessId(3)).expect("recorded");
         assert_eq!(first.node, 9);
         assert_eq!(first.dma, crate::iommu::DmaPath::Untranslated);
-        reg.admit_driver(ProcessId(4), 10, crate::iommu::DmaPath::Translated)
-            .expect("another node");
+        reg.admit_driver(
+            ProcessId(4),
+            10,
+            crate::iommu::DmaPath::Translated {
+                output_limit: u64::MAX,
+            },
+        )
+        .expect("another node");
         let second = reg.loaded_driver(ProcessId(4)).expect("recorded");
         assert!(
             second.generation > first.generation,
@@ -3492,7 +3498,9 @@ mod tests {
         );
         assert_eq!(
             second.dma,
-            crate::iommu::DmaPath::Translated,
+            crate::iommu::DmaPath::Translated {
+                output_limit: u64::MAX
+            },
             "the load records how its node reaches memory"
         );
     }
@@ -4296,7 +4304,11 @@ mod tests {
             HwResource::bus_window(0x6000_0000, 0x10_0000, 0xF800_0000),
             8,
         );
-        reg.mint_node_grant(ProcessId(2), HwResource::dma(0x3FFF_FFFF, 0x1000), 7);
+        reg.mint_node_grant(
+            ProcessId(2),
+            HwResource::dma(0x3FFF_FFFF, 0x1000, tairix_abi::DmaCoherence::Snooped),
+            7,
+        );
         assert!(reg.maps_window(ProcessId(2), 0x1800, 0x100));
         assert!(
             reg.maps_window(ProcessId(2), 0x6000_1000, 0x1000),

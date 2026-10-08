@@ -450,7 +450,8 @@ pub trait KernelArch: SchedulerArch {
     ///
     /// Kept apart from [`Self::msi_alloc_facility`], whose vectors a driver
     /// can claim, so a port need not expose its vector space to processes to
-    /// let the kernel take one.
+    /// let the kernel take one, and because the kernel returns what it is
+    /// done with.
     ///
     /// # Default
     ///
@@ -459,7 +460,7 @@ pub trait KernelArch: SchedulerArch {
     #[must_use]
     fn kernel_msi_facility(
         &self,
-    ) -> Option<&'static (dyn crate::devres::MsiAllocFacility + 'static)> {
+    ) -> Option<&'static (dyn crate::devres::KernelMsiFacility + 'static)> {
         None
     }
 
@@ -519,11 +520,13 @@ pub trait KernelArch: SchedulerArch {
 
     /// Route every interrupt source the port set up at boot: through the
     /// translation units' remapping where `remapper` can take every one, for
-    /// a machine of `cpus` CPUs, else in the platform's compatibility format;
-    /// a source left unrouted is named to `log`.
+    /// a machine of `cpus` CPUs, else in the platform's compatibility format,
+    /// or through the port's own interrupt translation, its tables drawn from
+    /// `frames`; a source left unrouted is named to `log`.
     ///
-    /// Called once, after the units translate and before any interrupt is
-    /// taken or any driver admitted, so no source is live while it changes.
+    /// Called once, after the units translate and the interrupt controller is
+    /// up ([`Self::install_irq_dispatch`]), and before any interrupt is taken
+    /// or any driver admitted, so no source is live while it changes.
     ///
     /// # Default
     ///
@@ -533,9 +536,10 @@ pub trait KernelArch: SchedulerArch {
         &self,
         remapper: Option<&'static crate::iommu::Translation>,
         cpus: u32,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
         log: &dyn Sink,
     ) -> crate::iommu::InterruptRouting {
-        let _ = (remapper, cpus, log);
+        let _ = (remapper, cpus, frames, log);
         crate::iommu::InterruptRouting::Native
     }
 
@@ -551,6 +555,17 @@ pub trait KernelArch: SchedulerArch {
     #[must_use]
     fn bus_mastering(&self) -> Option<&'static (dyn crate::iommu::BusMastering + 'static)> {
         None
+    }
+
+    /// Hand `sink` the PCI address windows the port's segments decode as
+    /// memory, which no translated device is given as an IOVA: its DMA there
+    /// may reach a peer before the unit sees it.
+    ///
+    /// # Default
+    ///
+    /// None: a port probing no PCI segment.
+    fn pci_windows(&self, sink: &mut dyn FnMut(core::ops::Range<u64>)) {
+        let _ = sink;
     }
 
     /// The PCI functions translation units are, through which a unit that
@@ -680,11 +695,15 @@ pub trait KernelArch: SchedulerArch {
     ///   `wasm32`) inherit no work.
     ///
     /// [`Phase::Irq`]: crate::Phase::Irq
-    fn install_irq_dispatch(&self, table: &'static IrqTable) {
-        // Default: no-op. The argument is consumed so the trait
-        // method has a concrete signature compilers can monomorphise
-        // through.
+    ///
+    /// # Errors
+    ///
+    /// The interrupt controller's refusal to come up, as the stable reason
+    /// [`crate::InitError::InterruptController`] records: the kernel takes
+    /// no interrupt without one, so the boot halts.
+    fn install_irq_dispatch(&self, table: &'static IrqTable) -> Result<(), &'static str> {
         let _ = table;
+        Ok(())
     }
 
     /// Park the calling CPU until the next interrupt, then return.
@@ -919,11 +938,11 @@ where
     /// re-asserted by [`Self::validate`] / [`crate::kernel_main`].
     pub cpu_count: u32,
 
-    /// Kernel command line as parsed by the bootloader.
+    /// The kernel command line the loader passed, as the port read it: empty
+    /// where it passed none, or the port reads none.
     ///
-    /// May be empty. Stored as a borrowed `&str` so the early boot path
-    /// never allocates; the arch port owns the backing storage for the
-    /// lifetime of `kernel_main`'s call.
+    /// Borrowed so the early boot path never allocates; the arch port owns
+    /// the backing storage for the lifetime of `kernel_main`'s call.
     pub command_line: &'a str,
 
     /// Typed physical-memory map produced by the bootloader.
@@ -1230,6 +1249,10 @@ where
     /// figure.
     pub installed_memory_bytes: u64,
 
+    /// The DMA translation units firmware described in a malformed table,
+    /// where it did ([`Self::with_malformed_units`]).
+    pub malformed_units: Option<crate::iommu::MalformedUnits>,
+
     // Holds the lifetime parameter (covers `command_line`). The PhantomData
     // is invariant in `'a` so callers cannot accidentally extend the
     // borrow.
@@ -1334,6 +1357,7 @@ where
             // pre-carve platform total through `with_installed_memory`;
             // the boot facts stay uninstalled (fail closed) until then.
             installed_memory_bytes: 0,
+            malformed_units: None,
             _marker: core::marker::PhantomData,
         }
     }
@@ -1351,6 +1375,16 @@ where
     #[must_use]
     pub const fn with_installed_memory(mut self, bytes: u64) -> Self {
         self.installed_memory_bytes = bytes;
+        self
+    }
+
+    /// Record that firmware described the DMA translation units in a
+    /// malformed table, and what was done about the functions it would have
+    /// described, consuming and returning `self`: the kernel audits it and
+    /// lists the units in `sysinfo dma`.
+    #[must_use]
+    pub const fn with_malformed_units(mut self, units: crate::iommu::MalformedUnits) -> Self {
+        self.malformed_units = Some(units);
         self
     }
 
@@ -1657,10 +1691,39 @@ impl BootInfoError {
     }
 }
 
+/// The value `key` is given in the kernel command line `line`: the text
+/// after `key=` in the last of its words that names it, as a later word
+/// overrides an earlier one.
+#[must_use]
+pub fn command_line_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_ascii_whitespace()
+        .filter_map(|word| word.strip_prefix(key)?.strip_prefix('='))
+        .next_back()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sched::SchedulerConfig;
+
+    /// A key is matched whole, a later word overrides an earlier one, and a
+    /// key never given has no value.
+    #[test]
+    fn a_command_line_value_is_the_last_word_naming_its_key() {
+        let line = "quiet iommu.malformed=withheld  iommu.malformedx=no iommu.malformed=unconfined";
+        assert_eq!(
+            command_line_value(line, "iommu.malformed"),
+            Some("unconfined")
+        );
+        assert_eq!(command_line_value(line, "iommu"), None);
+        assert_eq!(
+            command_line_value(line, "quiet"),
+            None,
+            "a flag carries no value"
+        );
+        assert_eq!(command_line_value("", "iommu.malformed"), None);
+        assert_eq!(command_line_value("key=", "key"), Some(""));
+    }
     use crate::test_arch::TestArch;
     use alloc::sync::Arc;
     use tairix_log::Level;

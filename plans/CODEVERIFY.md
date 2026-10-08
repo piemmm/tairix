@@ -1091,27 +1091,10 @@ misattribution.
 
 ### Open — duplications too large for the change that found them
 
-The first two were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3, the
-third while landing `plans/NEW-TASKBAR.md` T19, and the last two while landing
-`plans/TEXTEDIT.md`; all are recorded here rather than left silent (§2.18).
-None is a behaviour defect; all are §2.2 duplications whose fix touches far
-more than the change that found them.
+Each is recorded here rather than left silent (§2.18). None is a behaviour
+defect; all are §2.2 duplications whose fix touches far more than the change
+that found them.
 
-- **Seventeen identical paged-list request types in `lib/abi::sysinfo`.**
-  `ProcessListRequest`, `MountListRequest`, `SeatListRequest`,
-  `HardwareTreeRequest`, `CpuTimeListRequest`, `CpuLoadRequest`,
-  `CpuInfoListRequest`, `IrqListRequest`, `CrashRecordRequest`,
-  `UserDirectoryRequest`, `ReclaimListRequest`, `CacheLedgerListRequest`,
-  `NetInterfaceListRequest`, `NetInterfaceRatesRequest` (its prefix),
-  `DesktopFrameStatsRequest`, `VolumeIoRequest`, `RaidListRequest` and
-  `DeviceStatsRequest` are byte-identical `{offset: u32, limit: u16, flags:
-  u16}` types with byte-identical encoders and decoders. The tree already
-  *knows* it: `userland/gui/switchboard/src/sample.rs` spells the payload once
-  and pins the agreement with a compile-time assertion. The fix is one shared
-  request type with every query, consumer, fixture and C-header reference
-  updated in the same change (§2.13, no `v2` beside it) — a large mechanical
-  diff across `lib/abi`, `sysinfod`, the `sysinfo` CLI, `lib/procinfo`, the
-  Switchboard sampler and the fuzz corpus.
 - **Three monotonic-clock seams.** `tairix_abi::time::MonotonicClock` is now
   the shared home (created for `lib/display`'s device-occupancy measurement),
   but `lib/appload::Clock` and `lib/rt`'s private `cachereport::Clock` are the

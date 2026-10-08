@@ -6,5 +6,10 @@
 
 mod vertical;
 
+#[cfg(itest_x86_64)]
+mod hardware;
+#[cfg(itest_x86_64)]
+use hardware::UNIT;
+
 #[cfg(not(itest_x86_64))]
 fn main() {}

@@ -5,11 +5,10 @@
 //! The paging is the generic [`walk_pages`](crate::list) used by the process
 //! and mount lists, so only the per-record decode lives here.
 
-use tairix_abi::sysinfo::{CpuTimeListRequest, CpuTimeRecord, SysinfoQueryId};
+use tairix_abi::sysinfo::{CpuTimeRecord, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{walk_pages, ListError, WalkStep};
-use crate::request::CallError;
+use crate::list::{walk_records, ListError, WalkStep};
 use crate::transport::Transport;
 
 /// Number of [`CpuTimeRecord`]s requested per CPU-time page.
@@ -97,27 +96,15 @@ impl CpuTotals {
 ///   walk stops at that record.
 pub fn for_each_cpu_time(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&CpuTimeRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&CpuTimeRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::CPU_TIME_STATS,
         CpuTimeRecord::WIRE_LEN,
         CPU_TIME_PAGE,
-        |offset, limit| {
-            CpuTimeListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = CpuTimeRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        CpuTimeRecord::from_bytes,
+        sink,
     )
 }
 
@@ -129,9 +116,7 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::sysinfo::{
-        CpuTimeListRequest, CpuTimeRecord, SysinfoQueryId, SysinfoRequestHeader,
-    };
+    use tairix_abi::sysinfo::{CpuTimeRecord, PageRequest, SysinfoQueryId, SysinfoRequestHeader};
     use tairix_abi::Errno;
 
     /// An in-memory `sysinfod` stand-in answering CPU-time queries from a
@@ -161,7 +146,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = CpuTimeListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

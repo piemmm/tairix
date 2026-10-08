@@ -30,6 +30,7 @@ a later tier.
 | `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts | a run set built by hand per subsystem, and the free-list that fragmented beside a live-region map |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
 | `ByteQueue` | a byte FIFO under its holder's bound, kept as one contiguous run; amortised O(1) per byte, storage committed up front or as bytes arrive, and wiped before it is given back | the session frame arena `lib/sandbox` carried privately, and the SSH transport's three stream buffers |
+| `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: lookup, insertion, removal and tagging cost the tree's height — eleven nodes at most — whatever it holds, and an ordered or tagged walk resumes from the path it last took | a sorted `Vec` whose every insertion moved the entries above it |
 
 ## `ByteQueue`
 
@@ -83,6 +84,32 @@ Every link it splices names a node from its own arena, so a refused splice
 means something outside the map corrupted its bookkeeping. Such a refusal is
 fail-closed — nothing found, nothing inserted — and a debug assertion, since no
 input reaches it.
+
+## `RadixTree`
+
+Six key bits a level, as tall as its largest key needs: a key below 2^24
+costs four nodes, and none costs more than eleven.
+
+* Each node keeps a bitmap of its occupied slots and, per tag, one of the
+  slots whose subtree holds a tagged entry, so a successor or predecessor
+  search, and a walk of only the tagged entries, skip empty and untagged
+  subtrees a word at a time.
+* A walk keeps the path to the entry it last found and resumes from the
+  deepest node that entry and its successor share, so a whole walk reaches
+  each node it passes a bounded number of times, never a descent per entry.
+* Nodes live in two arenas, interior and leaf. A removal chains the nodes it
+  empties into its arena's free list and lowers the tree once its largest key
+  no longer needs the height, so the nodes resident are the live keys' paths
+  and a tree at a steady size draws nothing from the allocator.
+  `try_shrink_to_fit` moves the live nodes to the front of their arenas and
+  gives the freed ones and any spare room back, `clear` gives back
+  everything, and `allocated_bytes` says what the arenas hold: a holder
+  under memory pressure can account for and return a tree's memory.
+* `try_reserve_key` allocates every node one insertion of a key needs and
+  changes nothing else. A holder updating several trees at once makes every
+  allocation first, so it changes all of them or none: the IOVA space
+  (`kernel/iommu/api`), its first consumer with one tree per buddy order,
+  reserves the buddies a split will record before the split removes anything.
 
 ## `RangeMap` and `RangeSet`
 

@@ -35,7 +35,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::{
-    net_device_arg, netdev_arg, rtc_base_args, DmaTranslation, Outcome, SessionKind, Spec,
+    net_device_arg, netdev_arg, rtc_base_args, Board, DmaTranslation, InterruptControllers,
+    Outcome, SessionKind, Spec,
 };
 
 /// Default guest RAM size in mebibytes for an aarch64 QEMU integration
@@ -48,25 +49,36 @@ pub const QEMU_BINARY: &str = "qemu-system-aarch64";
 
 /// QEMU machine model the runner targets — the generic `virt` board,
 /// the only aarch64 platform TAIRiX' QEMU tests run on. It carries a
-/// PL011 UART, a GICv2, the ARM generic timer, and a virtio-mmio bus.
+/// PL011 UART, a GICv2 by default, the ARM generic timer, and a virtio-mmio
+/// bus.
 pub const MACHINE: &str = "virt";
 
-/// The `-M` value and the `-global`s a run behind `translation` boots with:
-/// what a vertical dumping the board's device tree gives QEMU too, so the tree
-/// it embeds describes the unit the run attaches.
+/// The `-M` value and the `-global`s a run on `board` boots with: what a
+/// vertical dumping the board's device tree gives QEMU too, so the tree it
+/// embeds describes the board the run starts.
 #[must_use]
-pub fn machine(translation: DmaTranslation) -> (&'static str, &'static [&'static str]) {
-    match translation {
+pub fn machine(board: Board) -> (&'static str, &'static [&'static str]) {
+    let gicv3 = board.interrupts == InterruptControllers::Gicv3;
+    match board.translation {
         // From `virt-9.2` the board builds its unit nested whatever
         // `arm-smmuv3.stage` says; `virt-9.1` is the newest whose unit
         // offers stage 1 alone.
+        DmaTranslation::Smmuv3Stage1 if gicv3 => ("virt-9.1,iommu=smmuv3,gic-version=3", &[]),
         DmaTranslation::Smmuv3Stage1 => ("virt-9.1,iommu=smmuv3", &[]),
+        DmaTranslation::Smmuv3Stage2 if gicv3 => ("virt,iommu=smmuv3,gic-version=3", &[]),
         DmaTranslation::Smmuv3Stage2 => ("virt,iommu=smmuv3", &[]),
         DmaTranslation::Absent
+        | DmaTranslation::VirtioIommu
         | DmaTranslation::Vtd
         | DmaTranslation::AmdVi
         | DmaTranslation::RiscvStage1
-        | DmaTranslation::RiscvStage2 => (MACHINE, &[]),
+        | DmaTranslation::RiscvStage2 => {
+            if gicv3 {
+                ("virt,gic-version=3", &[])
+            } else {
+                (MACHINE, &[])
+            }
+        }
     }
 }
 
@@ -116,12 +128,16 @@ pub(crate) fn push_argv(cmd: &mut Command, spec: &Spec, kernel: &Path) {
 /// unit-testable without spawning QEMU.
 fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len() * 2);
-    let (machine, globals) = machine(spec.dma_translation);
+    let (machine, globals) = machine(spec.board());
     argv.push("-M".into());
     argv.push(machine.into());
     for global in globals {
         argv.push("-global".into());
         argv.push((*global).into());
+    }
+    if let Some(unit) = spec.dma_translation.unit_device() {
+        argv.push("-device".into());
+        argv.push(unit.into());
     }
     argv.push("-cpu".into());
     argv.push(CPU.into());
@@ -218,6 +234,8 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("virtio-crypto-device,id=crypto0,cryptodev=cryptodev0".into());
     }
 
+    argv.extend(crate::message_source_args(spec));
+
     if spec.devices.input == crate::InputPlacement::SharedLine {
         argv.extend(crate::shared_line_input_args(spec));
     } else {
@@ -242,10 +260,12 @@ mod tests {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: crate::x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
+            interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -339,6 +359,17 @@ mod tests {
         // One stream: the `wav` backend records playback and cannot supply
         // capture, so a second stream would advertise what the host has not.
         assert!(argv.iter().any(|a| a.contains("streams=1")), "{argv:?}");
+    }
+
+    #[test]
+    fn message_sources_take_a_slot_each_from_the_first_only_on_request() {
+        let argv = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a.starts_with("edu")));
+        let spec = fixture_spec(1).with_message_sources(2);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let sources: std::vec::Vec<&String> =
+            argv.iter().filter(|a| a.starts_with("edu")).collect();
+        assert_eq!(sources, ["edu,addr=0x2", "edu,addr=0x3"]);
     }
 
     #[test]
@@ -582,7 +613,46 @@ mod tests {
                 "{translation:?}"
             );
         }
-        assert_eq!(machine(DmaTranslation::Absent), (MACHINE, &[][..]));
+        assert_eq!(machine(Board::default()), (MACHINE, &[][..]));
+    }
+
+    #[test]
+    fn a_gicv3_board_says_so_behind_every_unit_its_machine_carries() {
+        let gicv3 = |translation| {
+            machine(Board::translated(translation).with_interrupts(InterruptControllers::Gicv3)).0
+        };
+        assert_eq!(gicv3(DmaTranslation::Absent), "virt,gic-version=3");
+        assert_eq!(gicv3(DmaTranslation::VirtioIommu), "virt,gic-version=3");
+        assert_eq!(
+            gicv3(DmaTranslation::Smmuv3Stage2),
+            "virt,iommu=smmuv3,gic-version=3"
+        );
+        assert_eq!(
+            gicv3(DmaTranslation::Smmuv3Stage1),
+            "virt-9.1,iommu=smmuv3,gic-version=3"
+        );
+        let spec = fixture_spec(2).with_interrupts(InterruptControllers::Gicv3);
+        let argv = render(&build_argv(&spec, Path::new("/k")));
+        let m = argv.iter().position(|a| a == "-M").expect("argv names -M");
+        assert_eq!(argv[m + 1], "virt,gic-version=3");
+    }
+
+    #[test]
+    fn argv_creates_a_virtio_iommu_ahead_of_every_device() {
+        let mut spec = fixture_spec(1).with_dma_translation(DmaTranslation::VirtioIommu);
+        spec.devices.input = crate::InputPlacement::SharedLine;
+        spec.devices.pointing.mouse = true;
+        let argv = render(&build_argv(&spec, Path::new("/k")));
+        let m = argv.iter().position(|a| a == "-M").expect("argv names -M");
+        assert_eq!(argv[m + 1], MACHINE);
+        let first = argv
+            .iter()
+            .position(|a| a == "-device")
+            .expect("a device is attached");
+        assert_eq!(argv[first + 1], "virtio-iommu-pci,addr=0x2");
+        assert!(argv
+            .iter()
+            .any(|a| a.starts_with("virtio-mouse-pci") && a.contains("iommu_platform=on")));
     }
 
     #[test]

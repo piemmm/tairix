@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, ProcessRecord, SysinfoQueryId, Uptime};
-use tairix_abi::ProcId;
+use tairix_abi::{Errno, ProcId};
 use tairix_curses::Event;
 use tairix_procinfo::{call, for_each_process, CallError, CpuTotals, Transport, WalkStep};
 
@@ -64,6 +64,10 @@ pub enum Action {
 /// The one-line notice shown when the system-wide view was refused and the
 /// viewer fell back to the caller's own processes.
 pub const ALL_DENIED_NOTICE: &str = "all view denied: capability not held";
+
+/// The one-line notice shown while the listing is the last one read, the
+/// service having let the latest refresh's walk go before it ended.
+pub const INTERRUPTED_NOTICE: &str = "refresh interrupted: showing the last listing";
 
 /// One process row: the sampled record plus the statistics derived from the
 /// previous refresh.
@@ -200,7 +204,9 @@ impl Model {
     /// The optional summary queries degrade line-by-line: a refused memory
     /// query is recorded as the refusal it is, and a failed uptime or load
     /// query leaves that figure absent. Only the process list itself is
-    /// load-bearing.
+    /// load-bearing. A walk the service let go before it ended keeps the
+    /// last listing under [`INTERRUPTED_NOTICE`], and the next refresh walks
+    /// again.
     ///
     /// # Errors
     ///
@@ -210,10 +216,20 @@ impl Model {
     ///   decode against `sysinfo-v1`.
     pub fn refresh(&mut self, transport: &dyn Transport) -> Result<(), TopError> {
         let mut records = Vec::new();
-        for_each_process(transport, self.scope.is_all(), |record| {
+        let walked = for_each_process(transport, self.scope.is_all(), |record| {
             records.push(*record);
             Ok(WalkStep::Continue)
-        })?;
+        });
+        match walked.map_err(TopError::from) {
+            Err(TopError::Service(Errno::Interrupted)) => {
+                self.notice = Some(INTERRUPTED_NOTICE);
+                return Ok(());
+            }
+            walked => walked?,
+        }
+        if self.notice == Some(INTERRUPTED_NOTICE) {
+            self.notice = None;
+        }
 
         self.summary = Self::sample_summary(transport);
         self.cpu_split = Self::split_cpu(self.prev_cpu, self.summary.cpu);

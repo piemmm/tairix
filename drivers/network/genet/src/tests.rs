@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -16,8 +17,10 @@ use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
-use tairix_abi::driver::net_ring::{FrameRings, RingGeometry};
+use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId, SlabEnd};
+use tairix_abi::driver::net_ring::{
+    aligned_region, FrameRings, RingGeometry, REGION_ALIGN_PADDING,
+};
 use tairix_abi::driver::BufferClass;
 
 use super::*;
@@ -281,43 +284,29 @@ fn buffer_bytes() -> usize {
     layout().bytes() - layout().tx_staging() as usize
 }
 
-/// A leaked frame-buffer carve of `len` bytes standing in for the kernel's
-/// DMA region.
-fn frames_of(len: usize) -> DmaSlab {
-    let storage = alloc::vec![0u8; len].leak();
-    let ptr = NonNull::new(storage.as_mut_ptr()).expect("leaked storage is non-null");
-    // SAFETY: `storage` is a `'static` leaked allocation of exactly `len`
-    // bytes that nothing else references, and `FRAMES_DEVICE` stands in for its
-    // device-visible base in this host model.
-    unsafe { DmaSlab::from_leaked(FRAMES_DEVICE, ptr, len, PoolId::MOCK, 0) }
-}
-
-/// A leaked frame-buffer carve sized for [`layout`].
-fn frames() -> DmaSlab {
-    frames_of(layout().bytes())
-}
-
-/// Counts one frame-buffer release in the `AtomicUsize` the slab was minted
-/// over.
+/// Frees a frame-buffer carve [`frames_of`] made, unless it was withheld from
+/// a device that may still master it.
 ///
 /// # Safety
 ///
-/// `pool` is the `&'static AtomicUsize` [`counted_frames`] minted the slab
-/// with.
-unsafe fn count_release(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
-    // SAFETY: the caller's contract makes `pool` a live `'static` counter.
-    let released = unsafe { &*pool.cast::<AtomicUsize>() };
-    released.fetch_add(1, Ordering::Relaxed);
+/// `cpu` and `len` are the storage `frames_of` leaked for this slab alone,
+/// and a slab's drop runs once.
+unsafe fn free_frames(_pool: *const (), cpu: NonNull<u8>, _slot: usize, len: usize, end: SlabEnd) {
+    if end == SlabEnd::Withheld {
+        return;
+    }
+    let storage = core::ptr::slice_from_raw_parts_mut(cpu.as_ptr(), len);
+    // SAFETY: as above.
+    drop(unsafe { Box::from_raw(storage) });
 }
 
-/// A frame-buffer carve sized for [`layout`] whose release bumps `released`,
-/// so a test can tell a teardown that frees the buffers from one that holds
-/// them.
-fn counted_frames(released: &'static AtomicUsize) -> DmaSlab {
-    let len = layout().bytes();
-    let storage = alloc::vec![0u8; len].leak();
-    let ptr = NonNull::new(storage.as_mut_ptr()).expect("leaked storage is non-null");
-    // SAFETY: as in `frames_of`; `released` outlives the slab, being `'static`.
+/// A frame-buffer carve of `len` bytes standing in for the kernel's DMA
+/// region, its storage freed when the slab is released.
+fn frames_of(len: usize) -> DmaSlab {
+    let ptr = NonNull::from(Box::leak(alloc::vec![0u8; len].into_boxed_slice())).cast::<u8>();
+    // SAFETY: `ptr` is the only handle on `len` freshly leaked bytes, which
+    // `free_frames` reclaims on release, and `FRAMES_DEVICE` stands in for
+    // their device-visible base in this host model.
     unsafe {
         DmaSlab::from_pool(
             FRAMES_DEVICE,
@@ -325,9 +314,90 @@ fn counted_frames(released: &'static AtomicUsize) -> DmaSlab {
             len,
             PoolId::MOCK,
             0,
-            core::ptr::from_ref(released).cast(),
-            count_release,
+            core::ptr::null(),
+            free_frames,
         )
+    }
+}
+
+/// A frame-buffer carve sized for [`layout`].
+fn frames() -> DmaSlab {
+    frames_of(layout().bytes())
+}
+
+/// Counts one frame-buffer release.
+///
+/// # Safety
+///
+/// `pool` is the release count of the [`CountedFrames`] the slab was made
+/// over, which outlives it.
+unsafe fn count_release(
+    pool: *const (),
+    _cpu: NonNull<u8>,
+    _slot: usize,
+    _len: usize,
+    end: SlabEnd,
+) {
+    if end == SlabEnd::Withheld {
+        return;
+    }
+    // SAFETY: the caller's contract makes `pool` a live counter.
+    let released = unsafe { &*pool.cast::<AtomicUsize>() };
+    released.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A frame-buffer carve sized for [`layout`] that the test owns, counting
+/// the releases of the slab made over it, so a test can tell a teardown that
+/// frees the buffers from one that holds them. It frees its storage once
+/// dropped, after the device holding the slab.
+struct CountedFrames {
+    base: NonNull<u8>,
+    len: usize,
+    /// Boxed, so the count a slab names stays put however the carve moves.
+    released: Box<AtomicUsize>,
+}
+
+impl CountedFrames {
+    /// A carve none of whose slabs has been released.
+    fn new() -> Self {
+        let len = layout().bytes();
+        let base = NonNull::from(Box::leak(alloc::vec![0u8; len].into_boxed_slice())).cast::<u8>();
+        Self {
+            base,
+            len,
+            released: Box::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The slab a device is handed.
+    fn slab(&self) -> DmaSlab {
+        // SAFETY: the carve owns `len` bytes at `base` until it is dropped,
+        // after the device holding the slab, and its count lives as long.
+        unsafe {
+            DmaSlab::from_pool(
+                FRAMES_DEVICE,
+                self.base,
+                self.len,
+                PoolId::MOCK,
+                0,
+                core::ptr::from_ref(&*self.released).cast(),
+                count_release,
+            )
+        }
+    }
+
+    /// How many slabs made over the carve have been released.
+    fn released(&self) -> usize {
+        self.released.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CountedFrames {
+    fn drop(&mut self) {
+        let storage = core::ptr::slice_from_raw_parts_mut(self.base.as_ptr(), self.len);
+        // SAFETY: `base` is the pointer `Box::leak` gave for exactly `len`
+        // bytes, freed once, here, after every slab made over it.
+        drop(unsafe { Box::from_raw(storage) });
     }
 }
 
@@ -388,7 +458,7 @@ fn bring_up_declares_the_device_quiesced_once_both_dma_engines_stop() {
 
 #[test]
 fn a_dma_engine_that_never_stops_is_refused_before_the_device_is_declared_quiesced() {
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let frames = CountedFrames::new();
     let mut mock = MockRegs::new();
     mock.dma_stop = DmaStop::Never;
     let probe = QuiesceProbe::default();
@@ -396,7 +466,7 @@ fn a_dma_engine_that_never_stops_is_refused_before_the_device_is_declared_quiesc
         Genet::open(
             mock,
             MockDelay::new(),
-            counted_frames(&RELEASED),
+            frames.slab(),
             MacAddress::new(MAC),
             layout(),
             &probe,
@@ -406,7 +476,7 @@ fn a_dma_engine_that_never_stops_is_refused_before_the_device_is_declared_quiesc
     );
     assert_eq!(probe.declared.get(), 0);
     assert_eq!(
-        RELEASED.load(Ordering::Relaxed),
+        frames.released(),
         1,
         "the frames were never handed to the device"
     );
@@ -414,14 +484,14 @@ fn a_dma_engine_that_never_stops_is_refused_before_the_device_is_declared_quiesc
 
 #[test]
 fn a_failure_once_live_stops_the_dma_engines_before_releasing_the_frames() {
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let frames = CountedFrames::new();
     let mut mock = MockRegs::new();
     mock.mdio_hangs = true;
     assert_eq!(
         Genet::open(
             mock,
             MockDelay::new(),
-            counted_frames(&RELEASED),
+            frames.slab(),
             MacAddress::new(MAC),
             layout(),
             &QuiesceProbe::default(),
@@ -429,12 +499,12 @@ fn a_failure_once_live_stops_the_dma_engines_before_releasing_the_frames() {
         .err(),
         Some(DriverError::DeviceFault)
     );
-    assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
+    assert_eq!(frames.released(), 1);
 }
 
 #[test]
 fn a_failure_once_live_on_an_engine_that_never_stops_again_releases_nothing() {
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let frames = CountedFrames::new();
     let mut mock = MockRegs::new();
     mock.mdio_hangs = true;
     mock.dma_stop = DmaStop::OnceStarted;
@@ -442,7 +512,7 @@ fn a_failure_once_live_on_an_engine_that_never_stops_again_releases_nothing() {
         Genet::open(
             mock,
             MockDelay::new(),
-            counted_frames(&RELEASED),
+            frames.slab(),
             MacAddress::new(MAC),
             layout(),
             &QuiesceProbe::default(),
@@ -450,26 +520,26 @@ fn a_failure_once_live_on_an_engine_that_never_stops_again_releases_nothing() {
         .err(),
         Some(DriverError::DeviceFault)
     );
-    assert_eq!(RELEASED.load(Ordering::Relaxed), 0);
+    assert_eq!(frames.released(), 0);
 }
 
 #[test]
 fn a_live_device_dropped_stops_its_engines_before_releasing_the_frames() {
     // Whatever owns the running device — the channel server's serve loop —
     // may return on any failure and drop it.
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let frames = CountedFrames::new();
     let file = Rc::new(RefCell::new(MockRegs::new()));
     let device = Genet::open(
         Rc::clone(&file),
         MockDelay::new(),
-        counted_frames(&RELEASED),
+        frames.slab(),
         MacAddress::new(MAC),
         layout(),
         &QuiesceProbe::default(),
     )
     .expect("bring-up");
     drop(device);
-    assert_eq!(RELEASED.load(Ordering::Relaxed), 1);
+    assert_eq!(frames.released(), 1);
     let file = file.borrow();
     for desc_base in [regs::RDMA_DESC, regs::TDMA_DESC] {
         let ctrl = regs::dma_regs(desc_base) + regs::DMA_CTRL;
@@ -489,11 +559,11 @@ fn a_live_device_dropped_stops_its_engines_before_releasing_the_frames() {
 
 #[test]
 fn a_live_device_whose_engines_will_not_stop_is_dropped_without_releasing_the_frames() {
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
+    let frames = CountedFrames::new();
     let mut device = Genet::open(
         MockRegs::new(),
         MockDelay::new(),
-        counted_frames(&RELEASED),
+        frames.slab(),
         MacAddress::new(MAC),
         layout(),
         &QuiesceProbe::default(),
@@ -502,7 +572,7 @@ fn a_live_device_whose_engines_will_not_stop_is_dropped_without_releasing_the_fr
     device.regs.dma_stop = DmaStop::Never;
     drop(device);
     assert_eq!(
-        RELEASED.load(Ordering::Relaxed),
+        frames.released(),
         0,
         "the engines may still be mastering them"
     );
@@ -510,16 +580,16 @@ fn a_live_device_whose_engines_will_not_stop_is_dropped_without_releasing_the_fr
 
 #[test]
 fn a_live_device_with_one_engine_that_will_not_stop_still_stops_the_other_and_keeps_the_frames() {
-    static RELEASED: AtomicUsize = AtomicUsize::new(0);
     for (wedged, other) in [
         (regs::TDMA_DESC, regs::RDMA_DESC),
         (regs::RDMA_DESC, regs::TDMA_DESC),
     ] {
+        let frames = CountedFrames::new();
         let file = Rc::new(RefCell::new(MockRegs::new()));
         let device = Genet::open(
             Rc::clone(&file),
             MockDelay::new(),
-            counted_frames(&RELEASED),
+            frames.slab(),
             MacAddress::new(MAC),
             layout(),
             &QuiesceProbe::default(),
@@ -528,7 +598,7 @@ fn a_live_device_with_one_engine_that_will_not_stop_still_stops_the_other_and_ke
         file.borrow_mut().dma_stop = DmaStop::Wedged(regs::dma_regs(wedged));
         drop(device);
         assert_eq!(
-            RELEASED.load(Ordering::Relaxed),
+            frames.released(),
             0,
             "the wedged engine may still be mastering them"
         );
@@ -881,9 +951,10 @@ fn every_service_report_states_the_live_link() {
     // a change into a bond failover; a report that always said `Up` would
     // pin the interface up for ever however the wire actually looked.
     let mut device = open();
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     assert_eq!(
-        service(&mut device, &mut region, BufferClass::NonSensitive).link,
+        service(&mut device, region, BufferClass::NonSensitive).link,
         LinkState::Up
     );
 
@@ -891,7 +962,7 @@ fn every_service_report_states_the_live_link() {
     device.regs.assert_irq(regs::IRQ_LINK_DOWN);
     device.ack_interrupt();
     assert_eq!(
-        service(&mut device, &mut region, BufferClass::NonSensitive).link,
+        service(&mut device, region, BufferClass::NonSensitive).link,
         LinkState::Down
     );
 }
@@ -1264,9 +1335,10 @@ fn a_link_event_re_resolves_the_link_on_the_next_service() {
     device.ack_interrupt();
     assert!(device.link_event);
 
-    let mut region = alloc::vec![0u8; geometry().region_len()];
-    let mut rings =
-        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
+    let mut rings = FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     assert_eq!(device.link, None);
     assert!(!device.link_event, "the event is consumed");
@@ -1308,13 +1380,14 @@ fn service(
 #[test]
 fn a_queued_frame_is_written_into_a_transmit_slot_and_rung_through() {
     let mut device = open();
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
         rings.tx.push(&[0xAB; 64]).expect("queue");
     }
-    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    let report = service(&mut device, region, BufferClass::NonSensitive);
     assert_eq!(report.transmitted, 1);
 
     // The frame reached slot 0's buffer past the transmit status block, its
@@ -1361,16 +1434,16 @@ fn a_full_transmit_ring_stops_draining_without_loss() {
         1,
     )
     .expect("geometry");
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
         for _ in 0..queued {
             rings.tx.push(&[0x5A; 100]).expect("queue");
         }
     }
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, device_slots, "exactly one ring's worth");
     assert_eq!(rings.tx.len(), Ok(4), "the rest stay queued");
@@ -1385,14 +1458,15 @@ fn a_full_transmit_ring_stops_draining_without_loss() {
 #[test]
 fn runt_and_oversize_frames_are_dropped_without_wedging_the_queue() {
     let mut device = open();
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
         rings.tx.push(&[0x01; 4]).expect("queue runt");
         rings.tx.push(&[0x02; 60]).expect("queue good");
     }
-    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    let report = service(&mut device, region, BufferClass::NonSensitive);
     // The runt was consumed and dropped; the good frame behind it flowed.
     assert_eq!(report.transmitted, 1);
     let (start, _) = Genet::<MockRegs, MockDelay>::tx_frame_range(layout(), 0);
@@ -1406,9 +1480,9 @@ fn a_device_claiming_impossible_ring_progress_fails_closed() {
     // the producer past the ring.
     let mut device = open();
     device.regs.set_tx_consumed(7);
-    let mut region = alloc::vec![0u8; geometry().region_len()];
-    let mut rings =
-        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
+    let mut rings = FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
     assert_eq!(
         device.service(&mut rings).err(),
         Some(DriverError::DeviceFault)
@@ -1439,18 +1513,18 @@ fn a_frame_too_large_for_a_device_buffer_is_dropped_not_wedged() {
     // queue behind it never moves.
     let oversize = BUF_LEN + 512;
     let geometry = RingGeometry::new(4, 4, oversize, oversize, 1).expect("geometry");
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push(&alloc::vec![0x9Cu8; oversize as usize])
             .expect("queue oversize");
         rings.tx.push(&[0x3D; 80]).expect("queue good");
     }
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     // The oversize frame carried no segmentation descriptor, so it was
     // dropped, and the one behind it flowed.
@@ -1474,13 +1548,14 @@ fn a_completed_receive_descriptor_is_delivered_past_the_alignment_pad() {
     );
     device.regs.set_rx_produced(1);
 
-    let mut region = alloc::vec![0u8; geometry().region_len()];
-    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
+    let report = service(&mut device, region, BufferClass::NonSensitive);
     assert_eq!(report.received, 1);
     assert!(!report.rx_ring_full);
 
-    let mut rings =
-        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
     let mut out = alloc::vec![0u8; 2048];
     assert_eq!(rings.rx_ring(0).expect("rx0").pop(&mut out), Ok(Some(68)));
     assert_eq!(&out[..68], &[0xC3; 68]);
@@ -1537,8 +1612,9 @@ fn flagged_fragmented_and_malformed_receives_are_dropped() {
         let mut device = open();
         device.regs.set_rx_desc(0, status);
         device.regs.set_rx_produced(1);
-        let mut region = alloc::vec![0u8; geometry().region_len()];
-        let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+        let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+        let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
+        let report = service(&mut device, region, BufferClass::NonSensitive);
         assert_eq!(report.received, 0, "{label} must not be delivered");
         // The slot is still freed: a bad frame must not wedge the ring.
         let ring = regs::ring_regs(regs::RDMA_DESC, regs::DEFAULT_RING);
@@ -1574,9 +1650,10 @@ fn a_full_receive_ring_back_pressures_without_loss() {
     }
     device.regs.set_rx_produced(5);
 
-    let mut region = alloc::vec![0u8; geometry.region_len()];
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     assert_eq!(report.received, 4);
     assert!(
@@ -1599,16 +1676,17 @@ fn a_full_receive_ring_back_pressures_without_loss() {
 #[test]
 fn both_rings_wrap_at_their_last_slot() {
     let mut device = open();
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     // Walk the transmit ring right round: each pass fills one slot, and the
     // device is told it consumed it, so the ring never fills.
     for pass in 0..layout().ring_slots() + 3 {
         {
             let mut rings =
-                FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+                FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
             rings.tx.push(&[0x77; 64]).expect("queue");
         }
-        let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+        let report = service(&mut device, region, BufferClass::NonSensitive);
         assert_eq!(report.transmitted, 1, "pass {pass}");
         device.regs.set_tx_consumed(pass + 1);
     }
@@ -1621,19 +1699,19 @@ fn both_rings_wrap_at_their_last_slot() {
 #[test]
 fn a_sensitive_ring_scrubs_both_directions_staging() {
     let mut device = open();
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
-        let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::Sensitive).expect("bind");
+        let mut rings = FrameRings::bind(region, geometry(), BufferClass::Sensitive).expect("bind");
         rings.tx.push(&[0xEE; 128]).expect("queue");
     }
-    service(&mut device, &mut region, BufferClass::Sensitive);
+    service(&mut device, region, BufferClass::Sensitive);
     let (tx_start, tx_end) = Genet::<MockRegs, MockDelay>::tx_buffer_range(layout(), 0);
     // The frame is still staged while the device owns it.
     assert!(device.frames.as_bytes()[tx_start..tx_end].contains(&0xEE));
     // Once the device has consumed it, the reclaim scrubs the buffer.
     device.regs.set_tx_consumed(1);
-    service(&mut device, &mut region, BufferClass::Sensitive);
+    service(&mut device, region, BufferClass::Sensitive);
     assert!(device.frames.as_bytes()[tx_start..tx_end]
         .iter()
         .all(|&b| b == 0));
@@ -1648,7 +1726,7 @@ fn a_sensitive_ring_scrubs_both_directions_staging() {
         (reported << regs::DMA_BUFLENGTH_SHIFT) | regs::DMA_SOP | regs::DMA_EOP,
     );
     device.regs.set_rx_produced(1);
-    let report = service(&mut device, &mut region, BufferClass::Sensitive);
+    let report = service(&mut device, region, BufferClass::Sensitive);
     assert_eq!(report.received, 1);
     assert!(device.frames.as_bytes()[rx_start..rx_end]
         .iter()
@@ -1658,15 +1736,16 @@ fn a_sensitive_ring_scrubs_both_directions_staging() {
 #[test]
 fn a_non_sensitive_ring_leaves_its_staging_alone() {
     let mut device = open();
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
         rings.tx.push(&[0xEE; 128]).expect("queue");
     }
-    service(&mut device, &mut region, BufferClass::NonSensitive);
+    service(&mut device, region, BufferClass::NonSensitive);
     device.regs.set_tx_consumed(1);
-    service(&mut device, &mut region, BufferClass::NonSensitive);
+    service(&mut device, region, BufferClass::NonSensitive);
     let (start, end) = Genet::<MockRegs, MockDelay>::tx_buffer_range(layout(), 0);
     assert!(device.frames.as_bytes()[start..end].contains(&0xEE));
 }
@@ -1802,12 +1881,12 @@ fn a_verified_receive_checksum_reaches_the_stack_as_validated() {
             | regs::DMA_RX_CHK_OK,
     );
     device.regs.set_rx_produced(1);
-    let mut region = alloc::vec![0u8; geometry().region_len()];
-    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
+    let report = service(&mut device, region, BufferClass::NonSensitive);
     assert_eq!(report.received, 1);
 
-    let mut rings =
-        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
     let mut offload = FrameOffload::None;
     let mut out = alloc::vec![0u8; 2048];
     rings
@@ -1831,11 +1910,11 @@ fn an_unparsed_receive_frame_keeps_the_software_fold() {
         (reported << regs::DMA_BUFLENGTH_SHIFT) | regs::DMA_SOP | regs::DMA_EOP,
     );
     device.regs.set_rx_produced(1);
-    let mut region = alloc::vec![0u8; geometry().region_len()];
-    service(&mut device, &mut region, BufferClass::NonSensitive);
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
+    service(&mut device, region, BufferClass::NonSensitive);
 
-    let mut rings =
-        FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
     let mut offload = FrameOffload::None;
     let mut out = alloc::vec![0u8; 2048];
     rings
@@ -1850,10 +1929,11 @@ fn an_unparsed_receive_frame_keeps_the_software_fold() {
 fn a_partial_checksum_frame_directs_the_transmit_engine() {
     let mut device = open();
     let frame = tcp_frame(6, 100);
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -1865,7 +1945,7 @@ fn a_partial_checksum_frame_directs_the_transmit_engine() {
             )
             .expect("queue");
     }
-    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    let report = service(&mut device, region, BufferClass::NonSensitive);
     assert_eq!(report.transmitted, 1);
 
     let directive = tsb_directive(&device, 0);
@@ -1891,10 +1971,11 @@ fn a_partial_checksum_frame_directs_the_transmit_engine() {
 fn a_udp_frame_is_flagged_so_a_zero_checksum_is_sent_as_all_ones() {
     let mut device = open();
     let frame = tcp_frame(17, 40);
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -1906,7 +1987,7 @@ fn a_udp_frame_is_flagged_so_a_zero_checksum_is_sent_as_all_ones() {
             )
             .expect("queue");
     }
-    service(&mut device, &mut region, BufferClass::NonSensitive);
+    service(&mut device, region, BufferClass::NonSensitive);
     assert_eq!(
         tsb_directive(&device, 0) & regs::TSB_CSUM_PROTO_UDP,
         regs::TSB_CSUM_PROTO_UDP
@@ -1917,10 +1998,11 @@ fn a_udp_frame_is_flagged_so_a_zero_checksum_is_sent_as_all_ones() {
 fn a_checksum_offset_past_the_frame_drops_it_rather_than_sending_a_partial() {
     let mut device = open();
     let frame = tcp_frame(6, 0);
-    let mut region = alloc::vec![0u8; geometry().region_len()];
+    let mut buffer = alloc::vec![0u8; geometry().region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry().region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry(), BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry(), BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -1934,7 +2016,7 @@ fn a_checksum_offset_past_the_frame_drops_it_rather_than_sending_a_partial() {
             .expect("queue");
         rings.tx.push(&[0x5E; 64]).expect("queue good");
     }
-    let report = service(&mut device, &mut region, BufferClass::NonSensitive);
+    let report = service(&mut device, region, BufferClass::NonSensitive);
     assert_eq!(
         report.transmitted, 1,
         "the unhonourable frame is dropped, never sent half-checksummed"
@@ -1949,10 +2031,11 @@ fn a_super_frame_is_split_into_wire_frames_the_engine_checksums() {
     let geometry = tso_geometry();
     // Three segments at an MSS of 1000.
     let frame = tcp_frame(6, 2_500);
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -1967,8 +2050,7 @@ fn a_super_frame_is_split_into_wire_frames_the_engine_checksums() {
             )
             .expect("queue");
     }
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     assert_eq!(
         report.transmitted, 3,
@@ -2020,10 +2102,11 @@ fn a_full_transmit_ring_defers_the_rest_of_a_split_rather_than_dropping_it() {
     // finish in one doorbell.
     let payload = (layout().ring_slots() as usize + 3) * 100;
     let frame = tcp_frame(6, payload);
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -2038,8 +2121,7 @@ fn a_full_transmit_ring_defers_the_rest_of_a_split_rather_than_dropping_it() {
             )
             .expect("queue");
     }
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let first = device.service(&mut rings).expect("service");
     assert_eq!(first.transmitted, layout().ring_slots(), "the ring filled");
     assert!(
@@ -2059,10 +2141,11 @@ fn a_segmentation_descriptor_the_frame_does_not_bear_out_is_dropped() {
     let mut device = open();
     let geometry = tso_geometry();
     let frame = tcp_frame(6, 2_000);
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -2080,8 +2163,7 @@ fn a_segmentation_descriptor_the_frame_does_not_bear_out_is_dropped() {
             .expect("queue");
         rings.tx.push(&[0x77; 64]).expect("queue good");
     }
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1, "only the well-formed frame flowed");
     assert!(device.staged.is_none());
@@ -2094,10 +2176,10 @@ fn a_sensitive_ring_scrubs_the_staged_super_frame_after_the_split() {
     let mut device = open();
     let geometry = tso_geometry();
     let frame = tcp_frame(6, 1_500);
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
-        let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::Sensitive).expect("bind");
+        let mut rings = FrameRings::bind(region, geometry, BufferClass::Sensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -2112,7 +2194,7 @@ fn a_sensitive_ring_scrubs_the_staged_super_frame_after_the_split() {
             )
             .expect("queue");
     }
-    let mut rings = FrameRings::bind(&mut region, geometry, BufferClass::Sensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::Sensitive).expect("bind");
     device.service(&mut rings).expect("service");
     let staged = &device.frames.as_bytes()[buffer_bytes()..buffer_bytes() + frame.len()];
     assert!(
@@ -2126,10 +2208,11 @@ fn a_segment_size_past_a_transmit_buffer_is_refused_rather_than_wedging() {
     let mut device = open();
     let geometry = tso_geometry();
     let frame = tcp_frame(6, 8_000);
-    let mut region = alloc::vec![0u8; geometry.region_len()];
+    let mut buffer = alloc::vec![0u8; geometry.region_len() + REGION_ALIGN_PADDING];
+    let region = aligned_region(&mut buffer, geometry.region_len()).expect("aligned region");
     {
         let mut rings =
-            FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+            FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
         rings
             .tx
             .push_with(
@@ -2146,8 +2229,7 @@ fn a_segment_size_past_a_transmit_buffer_is_refused_rather_than_wedging() {
             .expect("queue");
         rings.tx.push(&[0x2A; 64]).expect("queue good");
     }
-    let mut rings =
-        FrameRings::bind(&mut region, geometry, BufferClass::NonSensitive).expect("bind");
+    let mut rings = FrameRings::bind(region, geometry, BufferClass::NonSensitive).expect("bind");
     let report = device.service(&mut rings).expect("service");
     assert_eq!(report.transmitted, 1);
     assert!(device.staged.is_none());

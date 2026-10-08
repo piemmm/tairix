@@ -596,13 +596,12 @@ volume published. A driver reports a *sooner* deadline through
 later than that — so a sync-heavy workload costs no task switch per commit, and
 an idle machine arms nothing and takes no wakeup.
 
-**Deferral is armed by the flusher and disarmed with it.** The registry's host
-reads no clock until the flusher has proved it can park, and stops reading one
-if the flusher ever ends — at which point every driver's next operation
-publishes and the flusher publishes what is still held on its way out. So no
-transaction is ever deferred against a timer that will not fire: a port with no
-storage floor, a service that was not admitted, a scheduler hook that is not
-wired all fall back to publishing eagerly.
+**Deferral is armed by the flusher.** The registry's host reads no clock until
+the flusher has proved it can park; a proven park cannot fail again, so the
+flusher then parks for the life of the system. So no transaction is ever
+deferred against a timer that will not fire: a port with no storage floor, a
+service that was not admitted, a scheduler hook that is not wired all fall back
+to publishing eagerly.
 
 *Measured (`kernel/tairix-kernel/src/writeback_service_tests.rs`, over a real
 ARXFS volume whose device image the test re-opens).* An operation leaves the
@@ -784,10 +783,10 @@ deadline consumed so it cannot re-arm in the past. A driver that reports a
 needs no wake, because the flusher recomputes the soonest deadline every time
 it runs.
 
-**Deferral exists only while something can fire it.** The host reads no clock
-until the flusher has parked once, and stops reading one if it ever ends — so
-every fallback (no storage floor, a service not admitted, an unwired scheduler
-hook) is *eager publication*, never a deferred transaction with no timer. That
+**Deferral exists only once something can fire it.** The host reads no clock
+until the flusher has proved its park, which then cannot fail — so every
+fallback (no storage floor, a service not admitted, an unwired scheduler hook)
+is *eager publication*, never a deferred transaction with no timer. That
 is the trade `AGENTS.md` §2.17 forbids making the other way round.
 
 **One flusher, in deadline order.** A task per mount would cost a kernel stack

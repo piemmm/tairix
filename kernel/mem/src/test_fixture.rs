@@ -14,8 +14,9 @@ use alloc::vec::Vec;
 use tairix_sync::{Once, SpinLock};
 
 use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-use crate::dma::{DeviceTranslation, DmaBlock, DmaCustody, DmaError};
+use crate::dma::{DeviceTranslation, DmaCustody, DmaError};
 use crate::error::AllocError;
+use crate::frame::{Chunks, FrameBlock};
 use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
 use crate::phys::SimPhysMap;
 
@@ -79,7 +80,7 @@ pub(crate) struct CustodyRecord {
     /// Every reservation accepted.
     pub(crate) reservations: usize,
     /// Every block held, with the node and generation it came under.
-    pub(crate) held: Vec<(u32, u64, DmaBlock)>,
+    pub(crate) held: Vec<(u32, u64, FrameBlock)>,
 }
 
 /// A [`DmaCustody`] that records what it is given, optionally refusing every
@@ -122,7 +123,7 @@ impl DmaCustody for RecordingCustody {
         self.record.lock().reserved -= 1;
     }
 
-    fn hold(&self, node: u32, generation: u64, block: DmaBlock) {
+    fn hold(&self, node: u32, generation: u64, block: FrameBlock) {
         let mut record = self.record.lock();
         record.reserved -= 1;
         record.held.push((node, generation, block));
@@ -148,21 +149,28 @@ pub(crate) use custody;
 
 /// What a [`RecordingTranslation`] was asked to do.
 pub(crate) struct TranslationRecord {
-    /// Every mapping handed out: its IOVA, block and the limit asked for.
-    pub(crate) mapped: Vec<(u64, DmaBlock, u64)>,
-    /// Every unmap confirmed by the unit: its IOVA and block.
-    pub(crate) unmapped: Vec<(u64, DmaBlock)>,
+    /// Every mapping handed out: its IOVA, blocks and the limit asked for.
+    pub(crate) mapped: Vec<(u64, Vec<FrameBlock>, u64)>,
+    /// Every unmap confirmed by the unit: its IOVA.
+    pub(crate) unmapped: Vec<u64>,
     /// Every owner ended: its node and generation.
     pub(crate) ended: Vec<(u32, u64)>,
+    /// Every block kept as custody, with the node and generation it came
+    /// under: a translation counts no reservation.
+    pub(crate) held: Vec<(u32, u64, FrameBlock)>,
+    /// Every carve whose free was deferred: its IOVA and the blocks taken.
+    pub(crate) deferred: Vec<(u64, Vec<FrameBlock>)>,
 }
 
 /// A [`DeviceTranslation`] that hands out IOVAs from a fixed base and records
-/// every call, refusing maps with `refuse_map` and leaving every unmap and end
-/// unconfirmed when `unconfirmed_unmap`. Once an owner is ended its unmaps
-/// answer without reaching the unit, as the facility's do.
+/// every call, refusing maps with `refuse_map`, leaving every unmap and end
+/// unconfirmed when `unconfirmed_unmap`, and taking every free to defer when
+/// `deferring`. Once an owner is ended its unmaps answer without reaching the
+/// unit, as the facility's do.
 pub(crate) struct RecordingTranslation {
     refuse_map: Option<DmaError>,
     unconfirmed_unmap: bool,
+    deferring: bool,
     record: SpinLock<TranslationRecord>,
 }
 
@@ -172,13 +180,24 @@ pub(crate) const IOVA_BASE: u64 = 0x7F00_0000_0000;
 
 impl RecordingTranslation {
     pub(crate) const fn new(refuse_map: Option<DmaError>, unconfirmed_unmap: bool) -> Self {
+        Self::with_deferral(refuse_map, unconfirmed_unmap, false)
+    }
+
+    pub(crate) const fn with_deferral(
+        refuse_map: Option<DmaError>,
+        unconfirmed_unmap: bool,
+        deferring: bool,
+    ) -> Self {
         Self {
             refuse_map,
             unconfirmed_unmap,
+            deferring,
             record: SpinLock::new(TranslationRecord {
                 mapped: Vec::new(),
                 unmapped: Vec::new(),
                 ended: Vec::new(),
+                held: Vec::new(),
+                deferred: Vec::new(),
             }),
         }
     }
@@ -194,37 +213,58 @@ impl DeviceTranslation for RecordingTranslation {
         &self,
         _node: u32,
         _generation: u64,
-        block: DmaBlock,
+        blocks: &[FrameBlock],
         limit: u64,
     ) -> Result<u64, DmaError> {
         if let Some(err) = self.refuse_map {
             return Err(err);
         }
         let mut record = self.record.lock();
-        let iova = IOVA_BASE + (record.mapped.len() as u64) * (1 << 30);
-        record.mapped.push((iova, block, limit));
+        let iova = IOVA_BASE + (record.mapped.len() as u64) * (1 << 40);
+        record.mapped.push((iova, blocks.to_vec(), limit));
         Ok(iova)
     }
 
-    fn unmap(
-        &self,
-        node: u32,
-        generation: u64,
-        iova: u64,
-        block: DmaBlock,
-    ) -> Result<(), DmaError> {
+    fn unmap(&self, node: u32, generation: u64, iova: u64) -> Result<(), DmaError> {
         if self.unconfirmed_unmap {
             return Err(DmaError::Unconfirmed);
         }
         let mut record = self.record.lock();
         if !record.ended.contains(&(node, generation)) {
-            record.unmapped.push((iova, block));
+            record.unmapped.push(iova);
         }
         Ok(())
     }
 
+    fn defer_free(
+        &self,
+        _node: u32,
+        _generation: u64,
+        iova: u64,
+        blocks: &mut Chunks,
+    ) -> Result<bool, DmaError> {
+        if !self.deferring {
+            return Ok(false);
+        }
+        let taken = core::mem::take(blocks);
+        self.record.lock().deferred.push((iova, taken.to_vec()));
+        Ok(true)
+    }
+
     fn end(&self, node: u32, generation: u64) {
         self.record.lock().ended.push((node, generation));
+    }
+}
+
+impl DmaCustody for RecordingTranslation {
+    fn reserve(&self, _node: u32) -> Result<(), DmaError> {
+        Ok(())
+    }
+
+    fn unreserve(&self, _node: u32) {}
+
+    fn hold(&self, node: u32, generation: u64, block: FrameBlock) {
+        self.record.lock().held.push((node, generation, block));
     }
 }
 
@@ -244,6 +284,11 @@ macro_rules! translation {
     (unconfirmed) => {{
         static TRANSLATION: crate::test_fixture::RecordingTranslation =
             crate::test_fixture::RecordingTranslation::new(None, true);
+        &TRANSLATION
+    }};
+    (deferring) => {{
+        static TRANSLATION: crate::test_fixture::RecordingTranslation =
+            crate::test_fixture::RecordingTranslation::with_deferral(None, false, true);
         &TRANSLATION
     }};
 }

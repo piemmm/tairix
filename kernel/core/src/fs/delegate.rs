@@ -260,9 +260,11 @@ enum Walk {
 /// Every structural refusal a driver can report carries its own code, so
 /// this mapping is total and the same wherever a driver call is made: a
 /// taken name is [`VfsError::AlreadyExists`] whichever operation met it, a
-/// populated directory is [`VfsError::NotEmpty`], and a move that would make
-/// a directory its own descendant is [`VfsError::DirectoryCycle`]. Only an
-/// unrecoverable backing fault reaches [`VfsError::Io`].
+/// populated directory is [`VfsError::NotEmpty`], a move that would make a
+/// directory its own descendant is [`VfsError::DirectoryCycle`], and a full
+/// volume and exhausted memory are [`VfsError::NoSpace`] and
+/// [`VfsError::OutOfMemory`]. Only an unrecoverable backing fault reaches
+/// [`VfsError::Io`].
 const fn map_driver_error(error: DriverError) -> VfsError {
     match error {
         DriverError::NotFound => VfsError::NotFound,
@@ -274,6 +276,8 @@ const fn map_driver_error(error: DriverError) -> VfsError {
         // A fixed on-disk count, exhausted: reported as itself so a caller
         // is not told to free space that would not help.
         DriverError::TooManyLinks => VfsError::TooManyLinks,
+        DriverError::NoSpace => VfsError::NoSpace,
+        DriverError::OutOfMemory => VfsError::OutOfMemory,
         _ => VfsError::Io,
     }
 }
@@ -718,6 +722,7 @@ const fn map_attr_driver_error(error: DriverError) -> VfsError {
         DriverError::NotFound => VfsError::NotFound,
         DriverError::BufferTooSmall => VfsError::BufferTooSmall,
         DriverError::NoSpace => VfsError::NoSpace,
+        DriverError::OutOfMemory => VfsError::OutOfMemory,
         DriverError::OutOfRange | DriverError::LengthOutOfRange => VfsError::InvalidKey,
         _ => VfsError::Io,
     }
@@ -1515,6 +1520,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     ///
     /// * [`VfsError::InvalidPath`] if `components` is empty.
     /// * [`VfsError::IsADirectory`] if `components` names a directory.
+    /// * [`VfsError::NoSpace`] on a full volume, [`VfsError::OutOfMemory`]
+    ///   where the driver's memory is exhausted.
     /// * [`VfsError::PermissionDenied`], [`VfsError::NotFound`],
     ///   [`VfsError::NotADirectory`], [`VfsError::LinkLoop`], or
     ///   [`VfsError::Io`].

@@ -452,6 +452,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _c: &CallerContext<'_>,
         _handle: u64,
         _len: usize,
+        _reach: tairix_abi::driver::DmaReach,
         _device_out: u64,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
@@ -470,6 +471,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _c: &CallerContext<'_>,
         _handle: u64,
         _len: usize,
+        _reach: tairix_abi::driver::DmaReach,
         _id_out: u64,
         _device_out: u64,
     ) -> SyscallResult {
@@ -1172,6 +1174,12 @@ const CLOSED_U32_ARGS: &[ClosedArg] = &[
     (SyscallNumber::PEER_WATCH, 0, |raw| {
         tairix_abi::PeerWatchOp::from_u32(raw).is_ok()
     }),
+    (SyscallNumber::DMA_ALLOC, 2, |raw| {
+        tairix_abi::driver::DmaReach::new(raw).is_some()
+    }),
+    (SyscallNumber::SHM_CREATE_DMA, 2, |raw| {
+        tairix_abi::driver::DmaReach::new(raw).is_some()
+    }),
 ];
 
 /// Whether the dispatcher's **per-operand** decodes accept `args`.
@@ -1553,6 +1561,13 @@ fn pointer_shaped_user_ptr_inputs_are_handled_deterministically() {
                 if *ty == AbiType::UserPtr {
                     args[i] = base;
                 }
+            }
+            // A carve's reach (arg 2) is one to 64 address bits.
+            if matches!(
+                spec.number,
+                SyscallNumber::DMA_ALLOC | SyscallNumber::SHM_CREATE_DMA
+            ) {
+                args[2] = 64;
             }
             // The attribute calls bound their key length (arg 3) to
             // `1..=FS_ATTR_KEY_MAX` at dispatch; seed the zeroed slot with

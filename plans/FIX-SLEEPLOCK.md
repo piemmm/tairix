@@ -209,13 +209,14 @@ carries open defect D15 (an intermittent single-CPU freeze at its Ctrl-C
 stage), so an SMP failure there would be ambiguous and a 4-vCPU budget miss
 would be the load-dependent timeout §7 forbids.
 
-The dedicated `cpus: 4` row is a **second enrolment of an existing guest**,
+The dedicated `cpus: 4` row boots the **same vertical** as
 `tairix-test-netstack-autoload-qemu-aarch64` — unlock → store scan → autoload
-a signed driver into its own user process → `devmgr` binds it to `netstack`.
-Multiple enrolments of one binary are a designed-for feature of the table
-(`sidecar_path` disambiguates each enrolment's planted image and serial log by
-its `TESTS` index, and `sidecar_paths_never_collide_across_enrolments_or_replicas`
-pins it), so the SMP coverage costs no new guest and duplicates nothing. That
+a signed driver into its own user process → `devmgr` binds it to `netstack` —
+as its second binary, `tairix-test-netstack-autoload-smp-qemu-aarch64`, whose
+tree describes four CPUs: the aarch64 boot starts only the cores its tree
+names, so the one-CPU tree under `-smp 4` would run on one. `sidecar_path`
+disambiguates each enrolment's planted image and serial log by its `TESTS`
+index (`sidecar_paths_never_collide_across_enrolments_or_replicas` pins it). That
 chain rather than the graphical one because it reaches the same store scan and
 user-space driver spawn without the desktop and pty stages, so a failure there
 cannot be confused with D15.

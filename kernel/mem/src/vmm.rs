@@ -174,17 +174,18 @@ bitflags_like! {
         const USER      = 0b0000_1000;
         /// Page is mapped with caching disabled (MMIO).
         const NO_CACHE  = 0b0001_0000;
-        /// Page backs a buffer shared with a DMA-capable device that must
-        /// stay coherent with it without per-access cache maintenance (the
-        /// HAL [`PageFlags::DMA_COHERENT`]). On a non-I/O-coherent platform
-        /// (the BCM2711 PCIe root complex) the port maps it Normal
-        /// Non-Cacheable; on a coherent platform it is ordinary cacheable
-        /// RAM. Distinct from [`Self::NO_CACHE`] (Device/MMIO): a DMA buffer
-        /// is accessed with ordinary loads/stores.
+        /// Page backs a buffer shared with a DMA master that does not snoop
+        /// the CPU's caches (the HAL [`PageFlags::DMA_COHERENT`]): mapped
+        /// Normal Non-Cacheable, or refused by a port that cannot. Distinct
+        /// from [`Self::NO_CACHE`] (Device/MMIO): a DMA buffer is accessed
+        /// with ordinary loads and stores.
         const DMA_COHERENT = 0b0010_0000;
         /// Page is a write-mostly framebuffer aperture whose stores may be
         /// gathered and combined.
         const WRITE_COMBINE = 0b0100_0000;
+        /// Page backs a buffer a DMA master reads or writes, whatever its
+        /// memory type (the HAL [`PageFlags::DMA`]).
+        const DMA = 0b1000_0000;
     }
 }
 
@@ -219,11 +220,10 @@ pub enum PageTableError {
     InvalidFlags,
     /// The underlying allocator failed.
     AllocFailed(AllocError),
-    /// The backend does not implement the requested page-table operation
-    /// (the fail-closed [`tairix_arch_api::mmu::MapError::Unsupported`]).
-    /// The map/unmap façade never drives such an operation, so this
-    /// surfaces only if a future caller routes one through this layer —
-    /// fail closed, never a silent success.
+    /// The backend cannot do what was asked (the fail-closed
+    /// [`tairix_arch_api::mmu::MapError::Unsupported`]): a memory type its
+    /// page tables cannot state, such as a buffer a device that does not
+    /// snoop shares on a port with no uncached memory type.
     Unsupported,
 }
 
@@ -273,6 +273,9 @@ fn to_page_flags(flags: MapFlags) -> PageFlags {
     if flags.contains(MapFlags::WRITE_COMBINE) {
         out = out | PageFlags::WRITE_COMBINE;
     }
+    if flags.contains(MapFlags::DMA) {
+        out = out | PageFlags::DMA;
+    }
     out
 }
 
@@ -300,6 +303,9 @@ fn from_page_flags(flags: PageFlags) -> MapFlags {
     }
     if flags.contains(PageFlags::WRITE_COMBINE) {
         out = out | MapFlags::WRITE_COMBINE;
+    }
+    if flags.contains(PageFlags::DMA) {
+        out = out | MapFlags::DMA;
     }
     out
 }

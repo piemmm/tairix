@@ -1,6 +1,6 @@
 extern crate std;
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::vec;
 use std::vec::Vec;
@@ -17,6 +17,8 @@ struct Device {
     writable: BTreeMap<u8, u32>,
     fixed: BTreeMap<u8, u32>,
     children: Vec<Device>,
+    /// Writes its command register took.
+    commanded: Cell<usize>,
 }
 
 impl Device {
@@ -27,6 +29,7 @@ impl Device {
             writable: BTreeMap::new(),
             fixed: BTreeMap::new(),
             children: Vec::new(),
+            commanded: Cell::new(0),
         };
         device.fixed.insert(0, 0x1041_1AF4);
         device.fixed.insert(HEADER_TYPE, u32::from(header) << 16);
@@ -85,6 +88,9 @@ impl Device {
     }
 
     fn write(&self, register: u8, value: u32) {
+        if register == COMMAND_STATUS {
+            self.commanded.set(self.commanded.get() + 1);
+        }
         self.held.borrow_mut().insert(register, value);
     }
 
@@ -503,4 +509,61 @@ fn wide_bars_share_the_low_window_when_no_wide_window_is_reached() {
     }
     assert_eq!(command(a) & MEMORY_SPACE_ENABLE, MEMORY_SPACE_ENABLE);
     assert_eq!(command(b) & MEMORY_SPACE_ENABLE, MEMORY_SPACE_ENABLE);
+}
+
+/// A segment decodes its root functions' memory BARs, a root bridge's own
+/// among them, and what its root bridges forward, below which every deeper
+/// BAR lies; an I/O BAR and an empty bridge's closed windows decode no
+/// memory.
+#[test]
+fn a_segment_decodes_its_root_bars_and_what_its_bridges_forward() {
+    use crate::topology::{Confinement, PciTopology};
+    let deep = Device::endpoint((0, 0)).memory(0, 0x1000, false, false);
+    let port = Device::bridge((1, 0), true, vec![deep]).memory(1, 0x2000, false, false);
+    let root = Device::endpoint((2, 0))
+        .memory(0, 0x4000, false, false)
+        .io(3, 0x20);
+    let pci = pci(vec![port, root, Device::bridge((3, 0), true, vec![])]);
+    pci.assign(0..=255, &windows()).unwrap();
+    let topology = pci.topology(Confinement::Leave, &|_| false).unwrap();
+    // The empty bridge decodes, so sizing it would turn its forwarding off.
+    pci.config_space().root[2].write(COMMAND_STATUS, MEMORY_SPACE_ENABLE);
+    let commanded = |at: usize| pci.config_space().root[at].commanded.get();
+    let before = (commanded(0), commanded(2));
+    let decoded = pci.decoded_windows(&topology).unwrap();
+    assert!(commanded(0) > before.0, "the port's own BAR was sized");
+    assert_eq!(
+        commanded(2),
+        before.1,
+        "a bridge with no BAR placed never stops forwarding"
+    );
+    let machine = pci.config_space();
+    let deep = machine.root[0].children[0].bar(0);
+    let own = machine.root[0].bar(1);
+    let bar = machine.root[1].bar(0);
+    assert_eq!(decoded.len(), 3, "{decoded:#x?}");
+    assert!(
+        decoded.iter().any(|window| window.contains(&deep)),
+        "below the port"
+    );
+    assert!(decoded.contains(&(own..own + 0x2000)), "the port's own BAR");
+    assert!(decoded.contains(&(bar..bar + 0x4000)), "a root BAR");
+}
+
+/// A bridge's own BAR placed above 4 GiB, its base's low half zero, is still
+/// found placed and its window decoded.
+#[test]
+fn a_bridge_bar_placed_above_four_gib_is_decoded() {
+    use crate::topology::{Confinement, PciTopology};
+    let port = Device::bridge((1, 0), true, vec![]).memory(0, 0x1_0000_0000, true, true);
+    let pci = pci(vec![port]);
+    pci.assign(0..=255, &windows()).unwrap();
+    let topology = pci.topology(Confinement::Leave, &|_| false).unwrap();
+    let bar = pci.config_space().root[0].bar(0);
+    assert_eq!(bar & 0xFFFF_FFFF, 0, "{bar:#x} has no low half");
+    let decoded = pci.decoded_windows(&topology).unwrap();
+    assert!(
+        decoded.contains(&(bar..bar + 0x1_0000_0000)),
+        "{decoded:#x?}"
+    );
 }

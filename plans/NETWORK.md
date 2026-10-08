@@ -704,7 +704,7 @@ improvement, not test scaffolding):
   driver signals through that entry and `irq_bind`s the line, never touching
   PCI configuration or the MSI-X BAR, so the kernel owns interrupt routing.
   `seed_hardware_tree` runs after `discover_and_program_io_apics`
-  (`install_msi_lines`), so `msi::allocate` is available at probe time. The QEMU
+  (`vectors::install`), so `msi::allocate` is available at probe time. The QEMU
   harness (`tools/qemu/src/x86_64.rs`) gained `virtio-keyboard-pci` /
   `virtio-mouse-pci` attachment (the PCI form of the aarch64
   `virtio-keyboard-device`). Foundations that were in place: the synthetic node-id bases the probes emit
@@ -740,10 +740,10 @@ improvement, not test scaffolding):
   aarch64 uses (§2.2 / §2.21), so the served tree now carries the probed,
   autoloadable Block/Input/Network nodes. The interrupt-driven input/network
   nodes carry their discovered PLIC line, resolved by the arch port's pure
-  `tairix_arch_riscv64::fdt::plic_device_source` (reads a `virtio,mmio` node's
-  single `interrupts` cell — the QEMU `virt` PLIC is `#interrupt-cells = <1>`
-  — and bounds it against the discovered `riscv,ndev`; a discovered value,
-  never a board constant, host-tested). Fifth foundation in place: **the
+  `tairix_arch_riscv64::platform::Riscv64Fdt::node_line` (decodes a
+  `virtio,mmio` node's first `interrupts` specifier against the discovered
+  root controller and bounds it against its source count; a discovered
+  value, never a board constant, host-tested). Fifth foundation in place: **the
   in-kernel bootstrap-floor driver catalogue is now per-architecture.**
   `driver_catalog::IN_KERNEL_DRIVERS`/`IN_KERNEL_DRIVER_COUNT`/`EMMC2_PATH`
   and `build.rs`'s signed-manifest set are gated on `kernel_isa`: the floor is

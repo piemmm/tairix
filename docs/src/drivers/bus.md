@@ -292,7 +292,9 @@ the separate `drivers/bus/usb/vl805` device crate's job and the xHCI
 bring-up the separate `drivers/bus/usb/xhci` crate's. Both windows the
 `PcieWindows` carries are device-tree-discovered: the inbound aperture
 from the node's `dma-ranges` (an `HwResource::dma_translated` carrying
-the CPU-reachability top, extent, and the inbound PCIe-space base) and
+the CPU-reachability top, extent, the inbound PCIe-space base, and whether
+the functions behind it snoop, which the published function's grant carries
+on unchanged) and
 the outbound MMIO window from its `ranges` (an `HwResource::bus_window`
 carrying the CPU base, size, and far-side PCIe base —
 `kernel/arch/aarch64::fdt::{dma_ranges_aperture,outbound_mmio_window}`,
@@ -924,11 +926,12 @@ the `CAP_MMIO_MAP`-gated `MmioMapper`. As with PCI, this hand-off is
 a frozen ABI seam: `Mmio<'_, T>` implements
 `tairix_abi::driver::virtio_mmio::VirtioMmioBus` (a supertrait of
 `Bus`), whose `map_slot_window` forwards to the inherent one. The
-kernel's `provision_virtio_mmio(bus, device_id, mapper, build)` (in
+kernel's `provision_virtio_mmio(bus, device_id, slot, mapper, build)` (in
 `kernel/virtio/src/virtio_mmio_walk.rs`) takes a `&dyn
-VirtioMmioBus`, enumerates the bus into a bounded table, picks the
-first slot whose `DeviceID` matches the requested virtio device type
-(the bare type over MMIO, not the PCI `0x1040 + type` encoding), maps
+VirtioMmioBus`, enumerates the bus into a bounded table, takes the slot
+at position `slot`, refusing it unless its `DeviceID` is the requested
+virtio device type (the bare type over MMIO, not the PCI `0x1040 + type`
+encoding; `first_virtio_slot` finds the first of a type), maps
 its single window, and hands it to `build` (in production
 `MmioTransport::new`). As with the PCI walk, `kernel/virtio` names no
 concrete transport type, so it depends only on `lib/*` and never on the
@@ -940,7 +943,7 @@ panic (`AGENTS.md` §2.9).
 
 `provision_virtio_pci` yields the transport its `build` closure
 constructs. The in-kernel floor disk's bring-up
-(`kernel/tairix-kernel/src/x86_64/root_unlock.rs`) claims its node for the
+(`kernel/tairix-kernel/src/x86_64/floor.rs`) claims its node for the
 kernel, so no process is admitted as its driver, provisions it through
 the kernel's one owner of PCI configuration space
 (`kernel/tairix-kernel/src/pci_host.rs`), routes its MSI-X interrupt (see
@@ -969,7 +972,11 @@ list from offset `0x100` are each walked by one bounded iterator; the
 extended space is reached through ECAM and the BCM2711 window only, so
 mechanism #1 reports no extended capability. Every kernel PCI observer
 reads this one walk, so a bus is scanned once however many observers run
-and however many functions it holds.
+and however many functions it holds. Over that walk,
+`PciTopology::decoded_windows` answers the PCI addresses the segment decodes
+as memory: each root-bus function's memory BARs (the host bridge's aside),
+sized with its decoding off, and each memory window a root-bus bridge
+forwards, below which every other function's BARs lie.
 
 ### MSI-X interrupt routing
 
@@ -992,7 +999,9 @@ A table that lives in an I/O-port BAR is refused (`Unsupported`); an
 entry index beyond the table or an entry that overruns its BAR fails
 closed (`OutOfRange`); a caller without `CAP_MMIO_MAP` is denied
 (`PermissionDenied`, propagated from the mapper). The driver never
-synthesises a pointer.
+synthesises a pointer. `Pci::mask_msix(bdf, masked)` sets or clears that
+function mask alone, read back, so a function the kernel must stop raising
+its messages raises none until it is routed again.
 
 The `MsiMessage` (address + data) is **opaque** to the bus driver: only
 the architecture layer knows how to address its interrupt controller.
@@ -1082,7 +1091,10 @@ through `&dyn PciBus`, never naming the concrete `lib/pci` crate
 No routing or mapping helper makes a function a bus master
 (`plans/IOMMU.md` IOM7). The owner of a function's configuration space
 sets Bus Master Enable when it hands the function over and clears it
-when it takes the function back:
+when it takes the function back. `Pci::set_bus_master` first clears a PCI
+Express function's Enable No Snoop, leaving it stopped where the bit will
+not clear: a No Snoop request reaches memory past the caches its buffers
+were scrubbed and kept coherent through.
 
 - **The x86_64 kernel** owns every function its boot probe enumerates.
   Before any translation unit is taken over, the probe stops mastering
@@ -1114,7 +1126,12 @@ through `Xhci::open` + `UsbDevice::start` + `UsbDevice::bring_up`
 (`bring_up_controller_diagnostic`, whose phase breadcrumb reports a
 map / open / start / enumerate failure distinctly — the `enumerate`
 phase now only ever names a fault of the **controller**, because a device
-that will not enumerate is a counted skip and never fails the walk). A
+that will not enumerate is a counted skip and never fails the walk). Before
+its first chunk, `UsbDevice::start` narrows the bank, and through it every
+later carve of the host, to the controller's own reach — 32 address bits
+for a controller without `HCCPARAMS1.AC64` — so the kernel places the
+chunks where the controller reaches them rather than the bank refusing them
+after the fact. A
 skipped port is warned with the failing port's own snapshot (port,
 enumeration stage, completion / event-type / reject) rather than the live
 breadcrumb, which after a multi-port walk describes whichever port ran

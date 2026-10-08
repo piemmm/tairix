@@ -12,23 +12,22 @@ use tairix_abi::raid_admin::{
     RaidArrayRecord, RaidMemberDisposition, RaidMemberRecord, RAID_SLOT_NONE,
 };
 use tairix_abi::sysinfo::{
-    CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-    DeviceStatsRequest, KernelMemoryStats, MemoryPressureStats, MountAvailability, RamzipStats,
-    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-    SysinfoQueryId, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoRequest, VolumeIoStatsRecord, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT,
-    RECLAIM_CLASS_NAMES,
+    CpuCoreClass, CpuInfoRecord, DmaFaultSignal, DmaTables, KernelMemoryStats, MemoryPressureStats,
+    MountAvailability, PageRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord,
+    SeatRecord, SysinfoQueryId, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoStatsRecord, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, LimitKind};
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
-    call, emit_self_scope_omission, fetch_tree, for_each_desktop_frame_report, for_each_irq,
-    for_each_process, for_each_raid_array, for_each_raid_member, format_count, format_tenths,
-    render_limit_bound, render_process, resolve, Authorization, InfoValue, Metric, MetricKind,
-    Output, Producer, ResetBehavior, ResourceResponse, ResponsePayload, Sensitivity, Transport,
-    Unit, ValueKind, WalkStep, PROCESS_HEADER,
+    call, emit_self_scope_omission, fetch_tree, for_each_cpu_load, for_each_desktop_frame_report,
+    for_each_dma_group, for_each_dma_node, for_each_dma_unit, for_each_irq, for_each_process,
+    for_each_raid_array, for_each_raid_member, format_count, format_size, format_tenths,
+    render_limit_bound, render_process, resolve, walk_records, Authorization, InfoValue, Metric,
+    MetricKind, Output, Producer, ResetBehavior, ResourceResponse, ResponsePayload, Sensitivity,
+    Transport, Unit, ValueKind, WalkStep, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -56,6 +55,7 @@ queries:
   frames              what each desktop session's frames cost (needs CAP_SYSINFO_GLOBAL)
   storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
   raid                composed arrays and the devices they are made of (needs CAP_SYSINFO_HW)
+  dma                 DMA translation units, groups, and nodes (needs CAP_SYSINFO_HW)
   show <ref>          read one info:/state:/stats: resource reference
   describe <ref>      report a reference's producer, authorization, and metric metadata
   help, -h, -?        show this help";
@@ -109,6 +109,7 @@ pub fn run(
         Command::Frames => run_frames(transport, out),
         Command::Storage => run_storage(transport, out),
         Command::Raid => run_raid(transport, out),
+        Command::Dma => run_dma(transport, out),
     }
 }
 
@@ -378,31 +379,18 @@ fn run_graphics_devices(transport: &dyn Transport, out: &dyn Output) -> Result<(
         out,
         "graphics device   scan-out              busy%   vram-used     vram      layers",
     )?;
-    let mut offset: u32 = 0;
-    loop {
-        let request = DeviceStatsRequest {
-            offset,
-            limit: DEVICE_PAGE,
-            flags: 0,
-        };
-        let reply = service_call(
-            transport,
-            SysinfoQueryId::GPU_DEVICE_STATS,
-            &request.to_le_bytes(),
-        )?;
-        if reply.len() % DisplayStats::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BufferTooSmall));
-        }
-        let records = reply.len() / DisplayStats::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ DisplayStats::WIRE_LEN }>().0 {
-            let stats = DisplayStats::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            emit(out, &graphics_row(&stats))?;
-        }
-        if records < usize::from(DEVICE_PAGE) {
-            return Ok(());
-        }
-        offset = offset.saturating_add(u32::from(DEVICE_PAGE));
-    }
+    walk_records(
+        transport,
+        SysinfoQueryId::GPU_DEVICE_STATS,
+        DisplayStats::WIRE_LEN,
+        DEVICE_PAGE,
+        DisplayStats::from_bytes,
+        |stats| {
+            out.write_line(&graphics_row(stats))
+                .map(|()| WalkStep::Continue)
+        },
+    )
+    .map_err(SysinfoError::from)
 }
 
 /// One graphics device's row.
@@ -506,38 +494,38 @@ fn run_limits(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
     Ok(())
 }
 
-/// Fetch and render the seat inventory, one aligned row per seat.
-///
-/// The reply is whole [`SeatRecord`]s packed back-to-back; a reply that is
-/// not a whole number of records fails closed rather than rendering a
-/// partial row. One page is ample for the seat count a machine has today;
-/// the request's `limit` bounds it explicitly.
+/// Seats one page of the seat inventory asks for: as many as one reply holds.
+const SEAT_PAGE: u16 = tairix_abi::reply_page(SeatRecord::WIRE_LEN);
+
+/// Fetch and render the seat inventory, one aligned row per seat, paged
+/// through the shared walk so every seat is listed and a reply that is not
+/// whole records fails closed rather than rendering a partial row.
 fn run_seats(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
-    let request = SeatListRequest {
-        offset: 0,
-        limit: 32,
-        flags: 0,
-    };
-    let reply = service_call(transport, SysinfoQueryId::SEAT_LIST, &request.to_le_bytes())?;
-    if reply.len() % SeatRecord::WIRE_LEN != 0 {
-        return Err(SysinfoError::Service(Errno::BufferTooSmall));
-    }
     emit(out, "seat  owner       generation  foreground")?;
-    for chunk in reply.as_chunks::<{ SeatRecord::WIRE_LEN }>().0 {
-        let record = SeatRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-        let owner = match record.owner() {
-            Some(task) => format!("task {task}"),
-            None => String::from("unowned"),
-        };
-        emit(
-            out,
-            &format!(
-                "{:<4}  {:<10}  {:>10}  console {}",
-                record.seat_id, owner, record.generation, record.foreground_console,
-            ),
-        )?;
-    }
-    Ok(())
+    walk_records(
+        transport,
+        SysinfoQueryId::SEAT_LIST,
+        SeatRecord::WIRE_LEN,
+        SEAT_PAGE,
+        SeatRecord::from_bytes,
+        |record| {
+            out.write_line(&seat_row(record))
+                .map(|()| WalkStep::Continue)
+        },
+    )
+    .map_err(SysinfoError::from)
+}
+
+/// One [`SeatRecord`]'s row.
+fn seat_row(record: &SeatRecord) -> String {
+    let owner = match record.owner() {
+        Some(task) => format!("task {task}"),
+        None => String::from("unowned"),
+    };
+    format!(
+        "{:<4}  {:<10}  {:>10}  console {}",
+        record.seat_id, owner, record.generation, record.foreground_console,
+    )
 }
 
 /// Fetch and render the live memory-pressure gauge: the band, the free/
@@ -583,10 +571,11 @@ fn run_pressure(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
 /// class. The class set is small and closed, so one page carries it; a
 /// reply that is not a whole number of records fails closed.
 fn run_reclaim(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
-    let request = ReclaimListRequest {
+    let request = PageRequest {
         offset: 0,
         limit: u16::try_from(RECLAIM_CLASS_COUNT).unwrap_or(u16::MAX),
         flags: 0,
+        walk: PageRequest::FRESH,
     };
     let reply = service_call(
         transport,
@@ -692,37 +681,15 @@ fn run_ramzip(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
 /// per CPU. One page carries every CPU a machine has today; the request's
 /// `limit` bounds it explicitly and a second page continues the walk.
 fn run_cpu_load(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
-    /// Records requested per page: bounds the reply size without bounding
-    /// how many CPUs the machine may have.
-    const PAGE: u16 = 64;
     emit(out, "cpu   queue     switches  preemptions")?;
-    let mut offset: u32 = 0;
-    loop {
-        let request = CpuLoadRequest {
-            offset,
-            limit: PAGE,
-            flags: 0,
-        };
-        let reply = service_call(transport, SysinfoQueryId::CPU_LOAD, &request.to_le_bytes())?;
-        if reply.len() % CpuLoadRecord::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BufferTooSmall));
-        }
-        let records = reply.len() / CpuLoadRecord::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ CpuLoadRecord::WIRE_LEN }>().0 {
-            let record = CpuLoadRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            emit(
-                out,
-                &format!(
-                    "{:<4}  {:>5}  {:>10}  {:>11}",
-                    record.cpu, record.queue_depth, record.switches, record.preemptions,
-                ),
-            )?;
-        }
-        if records < usize::from(PAGE) {
-            return Ok(());
-        }
-        offset = offset.saturating_add(u32::from(PAGE));
-    }
+    for_each_cpu_load(transport, |record| {
+        out.write_line(&format!(
+            "{:<4}  {:>5}  {:>10}  {:>11}",
+            record.cpu, record.queue_depth, record.switches, record.preemptions,
+        ))
+        .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)
 }
 
 /// Format a frequency in Hz as `MHz` with three decimals, using integer
@@ -783,35 +750,13 @@ fn render_cpu_info(record: &CpuInfoRecord, out: &dyn Output) -> Result<(), Sysin
 /// explicitly and a second page continues the walk. Ungated — the facts are
 /// the public hardware view every user may read.
 fn run_cpu_info(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
-    /// Records requested per page: bounds the reply size without bounding
-    /// how many CPUs the machine may have.
-    const PAGE: u16 = 64;
-    let mut offset: u32 = 0;
-    let mut first = true;
-    loop {
-        let request = CpuInfoListRequest {
-            offset,
-            limit: PAGE,
-            flags: 0,
-        };
-        let reply = service_call(transport, SysinfoQueryId::CPU_INFO, &request.to_le_bytes())?;
-        if reply.len() % CpuInfoRecord::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+    for (index, record) in tairix_procinfo::cpu_info(transport)?.iter().enumerate() {
+        if index != 0 {
+            emit(out, "")?;
         }
-        let records = reply.len() / CpuInfoRecord::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ CpuInfoRecord::WIRE_LEN }>().0 {
-            let record = CpuInfoRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            if !first {
-                emit(out, "")?;
-            }
-            first = false;
-            render_cpu_info(&record, out)?;
-        }
-        if records < usize::from(PAGE) {
-            return Ok(());
-        }
-        offset = offset.saturating_add(u32::from(PAGE));
+        render_cpu_info(record, out)?;
     }
+    Ok(())
 }
 
 /// Fetch and render the kernel IRQ table, one aligned row per bound line:
@@ -964,54 +909,43 @@ fn run_volume_service(transport: &dyn Transport, out: &dyn Output) -> Result<(),
         out,
         "volume            dev                 device               read-B     write-B  read-ops  write-ops     busy-ms",
     )?;
-    let mut offset: u32 = 0;
-    loop {
-        let request = VolumeIoRequest {
-            offset,
-            limit: VOLUME_PAGE,
-            flags: 0,
-        };
-        let reply = service_call(
-            transport,
-            SysinfoQueryId::VOLUME_IO_STATS,
-            &request.to_le_bytes(),
-        )?;
-        if reply.len() % VolumeIoStatsRecord::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BufferTooSmall));
-        }
-        let records = reply.len() / VolumeIoStatsRecord::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ VolumeIoStatsRecord::WIRE_LEN }>().0 {
-            let record = VolumeIoStatsRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            let volume_id = record.volume_id();
-            let counters = record.counters();
-            let device = record.device();
-            emit(
-                out,
-                &format!(
-                    "{:<16}  {:#018x}  {:<16}  {:>10}  {:>10}  {:>8}  {:>9}  {:>10}",
-                    hex(&volume_id[..8]),
-                    record.dev(),
-                    // Printable by construction: the field's decode admits
-                    // only graphic ASCII, so a driver's declaration cannot
-                    // carry an escape sequence into a terminal.
-                    if device.is_named() {
-                        device.as_str()
-                    } else {
-                        "-"
-                    },
-                    counters.read_bytes,
-                    counters.write_bytes,
-                    counters.read_ops,
-                    counters.write_ops,
-                    counters.busy_ns / 1_000_000,
-                ),
-            )?;
-        }
-        if records < usize::from(VOLUME_PAGE) {
-            return Ok(());
-        }
-        offset = offset.saturating_add(u32::from(VOLUME_PAGE));
-    }
+    walk_records(
+        transport,
+        SysinfoQueryId::VOLUME_IO_STATS,
+        VolumeIoStatsRecord::WIRE_LEN,
+        VOLUME_PAGE,
+        VolumeIoStatsRecord::from_bytes,
+        |record| {
+            out.write_line(&volume_service_row(record))
+                .map(|()| WalkStep::Continue)
+        },
+    )
+    .map_err(SysinfoError::from)
+}
+
+/// One [`VolumeIoStatsRecord`]'s row.
+fn volume_service_row(record: &VolumeIoStatsRecord) -> String {
+    let volume_id = record.volume_id();
+    let counters = record.counters();
+    let device = record.device();
+    format!(
+        "{:<16}  {:#018x}  {:<16}  {:>10}  {:>10}  {:>8}  {:>9}  {:>10}",
+        hex(&volume_id[..8]),
+        record.dev(),
+        // Printable by construction: the field's decode admits
+        // only graphic ASCII, so a driver's declaration cannot
+        // carry an escape sequence into a terminal.
+        if device.is_named() {
+            device.as_str()
+        } else {
+            "-"
+        },
+        counters.read_bytes,
+        counters.write_bytes,
+        counters.read_ops,
+        counters.write_ops,
+        counters.busy_ns / 1_000_000,
+    )
 }
 
 /// Fetch and render the per-volume queue occupancy against the budget in
@@ -1023,45 +957,34 @@ fn run_volume_queue(transport: &dyn Transport, out: &dyn Output) -> Result<(), S
         out,
         "volume            dev                 in-flight   depth-sum    arrivals  max-depth  deadline-ms",
     )?;
-    let mut offset: u32 = 0;
-    loop {
-        let request = VolumeIoRequest {
-            offset,
-            limit: VOLUME_PAGE,
-            flags: 0,
-        };
-        let reply = service_call(
-            transport,
-            SysinfoQueryId::VOLUME_IO_QUEUE,
-            &request.to_le_bytes(),
-        )?;
-        if reply.len() % VolumeIoQueueRecord::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BufferTooSmall));
-        }
-        let records = reply.len() / VolumeIoQueueRecord::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ VolumeIoQueueRecord::WIRE_LEN }>().0 {
-            let record = VolumeIoQueueRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            let volume_id = record.volume_id();
-            let queue = record.queue();
-            emit(
-                out,
-                &format!(
-                    "{:<16}  {:#018x}  {:>9}  {:>10}  {:>10}  {:>9}  {:>11}",
-                    hex(&volume_id[..8]),
-                    record.dev(),
-                    queue.in_flight,
-                    queue.queue_depth_sum,
-                    queue.queue_samples,
-                    record.budget_depth(),
-                    record.budget_deadline_ns() / 1_000_000,
-                ),
-            )?;
-        }
-        if records < usize::from(VOLUME_PAGE) {
-            return Ok(());
-        }
-        offset = offset.saturating_add(u32::from(VOLUME_PAGE));
-    }
+    walk_records(
+        transport,
+        SysinfoQueryId::VOLUME_IO_QUEUE,
+        VolumeIoQueueRecord::WIRE_LEN,
+        VOLUME_PAGE,
+        VolumeIoQueueRecord::from_bytes,
+        |record| {
+            out.write_line(&volume_queue_row(record))
+                .map(|()| WalkStep::Continue)
+        },
+    )
+    .map_err(SysinfoError::from)
+}
+
+/// One [`VolumeIoQueueRecord`]'s row.
+fn volume_queue_row(record: &VolumeIoQueueRecord) -> String {
+    let volume_id = record.volume_id();
+    let queue = record.queue();
+    format!(
+        "{:<16}  {:#018x}  {:>9}  {:>10}  {:>10}  {:>9}  {:>11}",
+        hex(&volume_id[..8]),
+        record.dev(),
+        queue.in_flight,
+        queue.queue_depth_sum,
+        queue.queue_samples,
+        record.budget_depth(),
+        record.budget_deadline_ns() / 1_000_000,
+    )
 }
 
 /// Fetch and render the per-volume storage I/O health, one aligned row per
@@ -1071,53 +994,39 @@ fn run_volume_queue(transport: &dyn Transport, out: &dyn Output) -> Result<(), S
 /// paged walk and fail-closed decode mirror [`run_cpu_load`]; the service
 /// gates the query on `CAP_SYSINFO_KERNEL`.
 fn run_volume_health(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
-    /// Records requested per page: bounds the reply without bounding how
-    /// many volumes may be mounted.
-    const PAGE: u16 = VOLUME_PAGE;
     emit(
         out,
         "volume            dev                 health      done  resets  tmout  medium  reissue",
     )?;
-    let mut offset: u32 = 0;
-    loop {
-        let request = VolumeIoRequest {
-            offset,
-            limit: PAGE,
-            flags: 0,
-        };
-        let reply = service_call(
-            transport,
-            SysinfoQueryId::VOLUME_IO_HEALTH,
-            &request.to_le_bytes(),
-        )?;
-        if reply.len() % VolumeIoHealthRecord::WIRE_LEN != 0 {
-            return Err(SysinfoError::Service(Errno::BufferTooSmall));
-        }
-        let records = reply.len() / VolumeIoHealthRecord::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ VolumeIoHealthRecord::WIRE_LEN }>().0 {
-            let record = VolumeIoHealthRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
-            let volume_id = record.volume_id();
-            let counters = record.counters();
-            emit(
-                out,
-                &format!(
-                    "{:<16}  {:#018x}  {:<10}  {:>4}  {:>6}  {:>5}  {:>6}  {:>7}",
-                    hex(&volume_id[..8]),
-                    record.dev(),
-                    availability_name(record.availability()),
-                    counters.completions,
-                    counters.resets,
-                    counters.timeouts,
-                    counters.medium_errors,
-                    counters.reissues,
-                ),
-            )?;
-        }
-        if records < usize::from(PAGE) {
-            return Ok(());
-        }
-        offset = offset.saturating_add(u32::from(PAGE));
-    }
+    walk_records(
+        transport,
+        SysinfoQueryId::VOLUME_IO_HEALTH,
+        VolumeIoHealthRecord::WIRE_LEN,
+        VOLUME_PAGE,
+        VolumeIoHealthRecord::from_bytes,
+        |record| {
+            out.write_line(&volume_health_row(record))
+                .map(|()| WalkStep::Continue)
+        },
+    )
+    .map_err(SysinfoError::from)
+}
+
+/// One [`VolumeIoHealthRecord`]'s row.
+fn volume_health_row(record: &VolumeIoHealthRecord) -> String {
+    let volume_id = record.volume_id();
+    let counters = record.counters();
+    format!(
+        "{:<16}  {:#018x}  {:<10}  {:>4}  {:>6}  {:>5}  {:>6}  {:>7}",
+        hex(&volume_id[..8]),
+        record.dev(),
+        availability_name(record.availability()),
+        counters.completions,
+        counters.resets,
+        counters.timeouts,
+        counters.medium_errors,
+        counters.reissues,
+    )
 }
 
 /// The short display name of a RAID level, for the `raid` array row. A
@@ -1231,6 +1140,77 @@ fn run_raid(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoEr
     .map_err(SysinfoError::from)
 }
 
+/// `name`, or a dash for a value the row does not have.
+const fn dash_if(absent: bool, name: &'static str) -> &'static str {
+    if absent {
+        "-"
+    } else {
+        name
+    }
+}
+
+/// Render the translation units, then the groups owners hold, then each node
+/// a unit translates for an owner.
+fn run_dma(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(
+        out,
+        "unit    family        state         faults   tables   owners  firmware  recorded  dropped  silenced",
+    )?;
+    for_each_dma_unit(transport, |unit| {
+        out.write_line(&format!(
+            "{:<6}  {:<12}  {:<12}  {:<7}  {:<7}  {:>6}  {:>8}  {:>8}  {:>7}  {:>8}",
+            unit.node,
+            unit.family.name(),
+            unit.state.name(),
+            dash_if(unit.faults == DmaFaultSignal::None, unit.faults.name()),
+            dash_if(unit.tables == DmaTables::None, unit.tables.name()),
+            unit.owners,
+            unit.firmware_streams,
+            unit.faults_recorded,
+            unit.faults_dropped,
+            unit.streams_silenced,
+        ))
+        .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)?;
+
+    emit(out, "")?;
+    emit(out, "unit    group     holder  generation  state")?;
+    for_each_dma_group(transport, |group| {
+        out.write_line(&format!(
+            "{:<6}  {:<8}  {:<6}  {:>10}  {}",
+            group.unit,
+            group.group,
+            group.holder,
+            group.generation,
+            group.state.name(),
+        ))
+        .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)?;
+
+    emit(out, "")?;
+    emit(
+        out,
+        "node    unit    group     generation  state        streams  mappings  mapped",
+    )?;
+    for_each_dma_node(transport, |node| {
+        out.write_line(&format!(
+            "{:<6}  {:<6}  {:<8}  {:>10}  {:<11}  {:>7}  {:>8}  {}",
+            node.node,
+            node.unit,
+            node.group,
+            node.generation,
+            node.state.name(),
+            node.streams,
+            node.mappings,
+            format_size(node.mapped_bytes),
+        ))
+        .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)
+}
+
 /// The array a held device belongs to, as a column: a short prefix of the
 /// array's identity, or a dash for an unaffiliated candidate that belongs to
 /// none.
@@ -1287,13 +1267,11 @@ mod tests {
         RAID_SLOT_NONE,
     };
     use tairix_abi::sysinfo::{
-        CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-        DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals, KernelMemoryStats,
-        MemoryPressureStats, MountAvailability, ProcessListRequest, ProcessRecord, ProcessState,
-        RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-        CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
+        CpuCoreClass, CpuInfoRecord, CpuLoadRecord, DesktopFrameRecord, DesktopFrameTotals,
+        KernelMemoryStats, MemoryPressureStats, MountAvailability, PageRequest, ProcessRecord,
+        ProcessState, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord,
+        VolumeIoQueueRecord, VolumeIoStatsRecord, CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::MEMORY_CLASS_COUNT;
@@ -1472,7 +1450,7 @@ mod tests {
     ) -> Result<Vec<u8>, Errno> {
         // Every paged list query shares one paging-header layout, so one
         // decode serves them all.
-        let request = RaidListRequest::from_bytes(payload)?;
+        let request = PageRequest::from_bytes(payload)?;
         let offset = request.offset as usize;
         if offset >= records.len() {
             return Ok(Vec::new());
@@ -1622,7 +1600,7 @@ mod tests {
                 if self.malformed_process_list {
                     return Ok(alloc::vec![0u8; ProcessRecord::WIRE_LEN + 1]);
                 }
-                let req = ProcessListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let offset = req.offset as usize;
                 if offset >= self.records.len() {
                     return Ok(Vec::new());
@@ -1644,7 +1622,7 @@ mod tests {
             } else if header.query == SysinfoQueryId::UPTIME {
                 Ok(self.uptime.to_le_bytes().to_vec())
             } else if header.query == SysinfoQueryId::SEAT_LIST {
-                let req = SeatListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let offset = req.offset as usize;
                 if offset >= self.seats.len() {
                     return Ok(Vec::new());
@@ -1660,7 +1638,7 @@ mod tests {
             } else if header.query == SysinfoQueryId::RAMZIP_STATS {
                 Ok(self.ramzip.to_le_bytes().to_vec())
             } else if header.query == SysinfoQueryId::RECLAIM_STATS {
-                let req = ReclaimListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let offset = req.offset as usize;
                 if offset >= self.reclaim.len() {
                     return Ok(Vec::new());
@@ -1672,7 +1650,7 @@ mod tests {
                 }
                 Ok(out)
             } else if header.query == SysinfoQueryId::DESKTOP_FRAME_STATS {
-                let req = DesktopFrameStatsRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let offset = req.offset as usize;
                 if offset >= self.frames.len() {
                     return Ok(Vec::new());
@@ -1684,7 +1662,7 @@ mod tests {
                 }
                 Ok(out)
             } else if header.query == SysinfoQueryId::CPU_LOAD {
-                let req = CpuLoadRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let offset = req.offset as usize;
                 if offset >= self.cpu_loads.len() {
                     return Ok(Vec::new());
@@ -1696,7 +1674,7 @@ mod tests {
                 }
                 Ok(out)
             } else if header.query == SysinfoQueryId::CPU_INFO {
-                let req = CpuInfoListRequest::from_bytes(payload)?;
+                let req = PageRequest::from_bytes(payload)?;
                 let records = [
                     CpuInfoRecord::new(
                         0,
@@ -1790,6 +1768,14 @@ mod tests {
                 page(payload, &fixture_members(), |record| {
                     record.to_le_bytes().to_vec()
                 })
+            } else if header.query == SysinfoQueryId::DMA_UNITS {
+                page(payload, &DMA_UNITS, |record| record.to_le_bytes().to_vec())
+            } else if header.query == SysinfoQueryId::DMA_GROUPS {
+                page(payload, &[DMA_GROUP], |record| {
+                    record.to_le_bytes().to_vec()
+                })
+            } else if header.query == SysinfoQueryId::DMA_NODES {
+                page(payload, &[DMA_NODE], |record| record.to_le_bytes().to_vec())
             } else if header.query == SysinfoQueryId::NET_INTERFACE_RATES {
                 // One interface's throughput rates, echoing the window the
                 // caller asked for so a described window can be checked
@@ -2371,6 +2357,26 @@ mod tests {
         assert_eq!(run(Command::Seats, &fixture, &out), Ok(()));
         assert!(out.lines()[1].contains("unowned"));
 
+        // More seats than one page holds are all listed.
+        let mut fixture = Fixture::new(Vec::new());
+        let seats = usize::from(super::SEAT_PAGE) + 1;
+        fixture.seats = (0..seats)
+            .map(|seat| SeatRecord {
+                seat_id: u64::try_from(seat).unwrap(),
+                owner_task: 0,
+                generation: 0,
+                foreground_console: 0,
+                flags: 0,
+            })
+            .collect();
+        let out = Recorder::new();
+        assert_eq!(run(Command::Seats, &fixture, &out), Ok(()));
+        assert_eq!(out.lines().len(), seats + 1);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::SEAT_LIST, SysinfoQueryId::SEAT_LIST]
+        );
+
         // The service's capability refusal surfaces as the CLI's
         // permission-denied error, never a fabricated table.
         let mut fixture = Fixture::new(Vec::new());
@@ -2679,6 +2685,109 @@ mod tests {
         assert_eq!(
             fixture.seen.borrow().as_slice(),
             &[SysinfoQueryId::RAID_ARRAYS, SysinfoQueryId::RAID_MEMBERS]
+        );
+    }
+
+    const DMA_UNITS: [tairix_abi::sysinfo::DmaUnitRecord; 3] = [
+        tairix_abi::sysinfo::DmaUnitRecord {
+            node: 40,
+            family: tairix_abi::sysinfo::DmaUnitFamily::AmdVi,
+            state: tairix_abi::sysinfo::DmaUnitState::Translating,
+            faults: tairix_abi::sysinfo::DmaFaultSignal::Message,
+            tables: tairix_abi::sysinfo::DmaTables::SecondStage,
+            owners: 2,
+            firmware_streams: 1,
+            faults_recorded: 9,
+            faults_dropped: 3,
+            streams_silenced: 1,
+        },
+        tairix_abi::sysinfo::DmaUnitRecord {
+            node: 41,
+            family: tairix_abi::sysinfo::DmaUnitFamily::Unmatched,
+            state: tairix_abi::sysinfo::DmaUnitState::Unmatched,
+            faults: tairix_abi::sysinfo::DmaFaultSignal::None,
+            tables: tairix_abi::sysinfo::DmaTables::None,
+            owners: 0,
+            firmware_streams: 0,
+            faults_recorded: 0,
+            faults_dropped: 0,
+            streams_silenced: 0,
+        },
+        tairix_abi::sysinfo::DmaUnitRecord {
+            node: tairix_abi::hwtree::HW_NODE_ROOT_ID,
+            family: tairix_abi::sysinfo::DmaUnitFamily::Vtd,
+            state: tairix_abi::sysinfo::DmaUnitState::Withheld,
+            faults: tairix_abi::sysinfo::DmaFaultSignal::None,
+            tables: tairix_abi::sysinfo::DmaTables::None,
+            owners: 0,
+            firmware_streams: 0,
+            faults_recorded: 0,
+            faults_dropped: 0,
+            streams_silenced: 0,
+        },
+    ];
+
+    const DMA_GROUP: tairix_abi::sysinfo::DmaGroupRecord = tairix_abi::sysinfo::DmaGroupRecord {
+        unit: 40,
+        group: 16,
+        holder: 77,
+        state: tairix_abi::sysinfo::DmaOwnerState::Live,
+        generation: 3,
+    };
+
+    const DMA_NODE: tairix_abi::sysinfo::DmaNodeRecord = tairix_abi::sysinfo::DmaNodeRecord {
+        node: 77,
+        unit: 40,
+        group: 16,
+        state: tairix_abi::sysinfo::DmaOwnerState::Live,
+        streams: 1,
+        generation: 3,
+        mappings: 2,
+        mapped_bytes: 2 << 20,
+    };
+
+    #[test]
+    fn dma_renders_the_unit_group_and_node_tables() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Dma, &fixture, &out).expect("dma renders");
+        let lines = out.lines();
+        assert_eq!(lines.len(), 10, "lines: {lines:?}");
+        assert!(lines[0].starts_with("unit") && lines[0].contains("silenced"));
+        assert!(lines[1].starts_with("40") && lines[1].contains("amd-vi"));
+        assert!(lines[1].contains("translating") && lines[1].contains("message"));
+        assert!(lines[1].contains("stage-2"), "row: {}", lines[1]);
+        assert!(lines[2].starts_with("41") && lines[2].contains("unmatched"));
+        assert!(
+            lines[3].starts_with('0') && lines[3].contains("vt-d") && lines[3].contains("withheld"),
+            "a malformed table's units: {}",
+            lines[3]
+        );
+        assert!(lines[4].is_empty());
+        assert!(lines[5].contains("holder"));
+        assert!(
+            lines[6].starts_with("40") && lines[6].contains("77") && lines[6].ends_with("live")
+        );
+        assert!(lines[7].is_empty());
+        assert!(lines[8].starts_with("node") && lines[8].contains("mapped"));
+        assert!(
+            lines[9].starts_with("77") && lines[9].contains("2.0M"),
+            "row: {}",
+            lines[9]
+        );
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[
+                SysinfoQueryId::DMA_UNITS,
+                SysinfoQueryId::DMA_GROUPS,
+                SysinfoQueryId::DMA_NODES
+            ]
+        );
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::DMA_GROUPS);
+        assert_eq!(
+            run(Command::Dma, &denied, &Recorder::new()),
+            Err(SysinfoError::PermissionDenied)
         );
     }
 

@@ -620,7 +620,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
     syscall_entry::set_dispatch_callback(dispatch);
 

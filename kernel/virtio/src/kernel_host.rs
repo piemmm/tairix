@@ -64,7 +64,7 @@ use tairix_kernel_sec::dma::{alloc_dma, free_dma, DmaGateError};
 use tairix_log::Sink;
 use tairix_sync::SpinLock;
 
-use tairix_virtio::{DmaHost, DmaSlab, PoolId, VirtioHost};
+use tairix_virtio::{DmaHost, DmaSlab, PoolId, SlabEnd, VirtioHost};
 
 /// Capability-checked, [`DmaPool`]-backed [`VirtioHost`].
 ///
@@ -125,12 +125,9 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     /// Take ownership of a [`DmaPool`] behind a capability-checking
     /// host.
     ///
-    /// The host owns the pool for its whole lifetime so that a
-    /// `&self` factory (the kernel binary's
-    /// `KernelVirtioFactory`) can mint a fresh per-driver host from
-    /// a freshly-constructed pool — a borrowed-`&mut` pool could not
-    /// be handed out from behind a shared `&self` borrow. The pool's
-    /// `'a` allocator borrow still bounds the host.
+    /// The host owns the pool for its whole lifetime, so a bring-up hands
+    /// each device a host of its own over a fresh pool. The pool's `'a`
+    /// allocator borrow still bounds the host.
     ///
     /// `id` must be a fresh, process-unique [`PoolId`] (mint via
     /// [`PoolId::fresh`]). `caller` is the [`TaskCapabilities`] of
@@ -221,7 +218,11 @@ unsafe fn slab_free_shim<P: PageTable, S: Sink + Sync + ?Sized>(
     _cpu: core::ptr::NonNull<u8>,
     slot: usize,
     _len: usize,
+    end: SlabEnd,
 ) {
+    if end == SlabEnd::Withheld {
+        return;
+    }
     // SAFETY: `pool` was produced at the matching `from_pool` call by
     // casting `&KernelVirtioHost<'_, P, S>` through `*const Self as
     // *const ()`. The slab's lifetime is bounded by the host's `'a`
@@ -248,7 +249,8 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         }
         let buf = {
             let mut pool = self.pool.lock();
-            alloc_dma(&mut *pool, self.caller, size, 0, self.audit).map_err(map_gate_error)?
+            alloc_dma(&mut *pool, self.caller, size, 0, self.audit)
+                .map_err(DmaGateError::as_driver_error)?
         };
         // `slot_base` returns the data-region base for the buffer.
         // It cannot fail for a buffer minted from this pool one
@@ -345,25 +347,6 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> VirtioHost for KernelVirtioHost<'_, 
 
     fn now_ns(&self) -> u64 {
         self.waiter.now_ns()
-    }
-}
-
-/// Map a [`DmaGateError`] to the closest [`DriverError`].
-///
-/// Capability refusals surface as [`DriverError::PermissionDenied`];
-/// every other failure (oversize requests, OOM, pool config bugs)
-/// collapses to [`DriverError::LengthOutOfRange`] — the same
-/// variant the test `tairix_virtio::MockHost` uses when its
-/// 64 MiB cap is hit, so a driver consumer sees a single failure
-/// shape regardless of which host minted it.
-fn map_gate_error(e: DmaGateError) -> DriverError {
-    // `DmaGateError` is `#[non_exhaustive]`; today every non-
-    // capability variant collapses to `LengthOutOfRange`, but the
-    // explicit wildcard arm keeps the function total against
-    // future kernel-side additions without a panic.
-    match e {
-        DmaGateError::CapabilityMissing => DriverError::PermissionDenied,
-        _ => DriverError::LengthOutOfRange,
     }
 }
 
@@ -531,6 +514,7 @@ mod tests {
             16,
             frames,
             sim,
+            tairix_abi::DmaCoherence::Snooped,
         )
         .expect("pool constructs")
     }
@@ -898,8 +882,9 @@ mod tests {
         assert!(host.now_ns() >= 5, "the timed-out wait spent its budget");
     }
 
+    /// A carve the pool cannot back reaches the driver as exhaustion.
     #[test]
-    fn oversize_request_collapses_to_length_out_of_range() {
+    fn a_carve_the_pool_cannot_back_is_exhaustion() {
         let frames = FrameAllocator::new(&small_map(16)).unwrap();
         let sim = fresh_sim();
         let pool = fresh_pool(&frames, &sim);
@@ -909,11 +894,9 @@ mod tests {
         let waiter = TestWaiter::idle(&irq);
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
-        // The pool is configured with 16 pages; requesting many
-        // multiples of that triggers the pool's size-or-OOM path,
-        // which `map_gate_error` collapses to `LengthOutOfRange`.
+        // The pool's frames hold sixteen pages.
         let err = host.alloc_dma_zeroed(PAGE_SIZE * 64).unwrap_err();
-        assert!(matches!(err, DriverError::LengthOutOfRange));
+        assert_eq!(err, DriverError::OutOfMemory);
         assert_eq!(host.outstanding(), 0);
     }
 }

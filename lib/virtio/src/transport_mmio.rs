@@ -42,6 +42,9 @@ use tairix_abi::RegisterWindow;
 use crate::transport::{await_reset, le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{Status, Transport, VirtioError};
 
+/// The devicetree `compatible` of a virtio-MMIO slot.
+pub const COMPATIBLE: &str = "virtio,mmio";
+
 /// Byte offsets within the virtio-MMIO register block (virtio 1.1
 /// §4.2.2, `MMIO Device Register Layout`). All registers are 32 bits
 /// wide and naturally aligned.
@@ -53,6 +56,8 @@ pub mod regs {
     pub const VERSION: usize = 0x004;
     /// `DeviceID` (R) — virtio device type; `0` means "no device".
     pub const DEVICE_ID: usize = 0x008;
+    /// `VendorID` (R) — the device's vendor.
+    pub const VENDOR_ID: usize = 0x00C;
     /// `DeviceFeatures` (R) — windowed by `DeviceFeaturesSel`.
     pub const DEVICE_FEATURES: usize = 0x010;
     /// `DeviceFeaturesSel` (W) — selects which 32-bit half
@@ -267,15 +272,23 @@ impl Transport for MmioTransport {
         let _ = self.window.write_u32(regs::QUEUE_NOTIFY, u32::from(queue));
     }
 
+    fn config_len(&self) -> usize {
+        self.window.len().saturating_sub(regs::CONFIG)
+    }
+
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         for (i, b) in buf.iter_mut().enumerate() {
-            *b = self.window.read_u8(regs::CONFIG + offset + i).unwrap_or(0);
+            *b = crate::transport::config_byte(regs::CONFIG, offset, i)
+                .and_then(|at| self.window.read_u8(at).ok())
+                .unwrap_or(0);
         }
     }
 
     fn write_config(&mut self, offset: usize, data: &[u8]) {
         for (i, &b) in data.iter().enumerate() {
-            let _ = self.window.write_u8(regs::CONFIG + offset + i, b);
+            if let Some(at) = crate::transport::config_byte(regs::CONFIG, offset, i) {
+                let _ = self.window.write_u8(at, b);
+            }
         }
     }
 
@@ -300,20 +313,14 @@ impl Transport for MmioTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::register_region::Region;
     use crate::{MockHost, SplitQueue};
-    use alloc::boxed::Box;
-    use core::ptr::NonNull;
 
-    /// A buffer-backed stand-in for a modern virtio-MMIO device. The
-    /// leaked, 8-byte-aligned backing storage outlives every window
-    /// built over it (the test process never frees it), and the region
-    /// is accessed only through the volatile [`RegisterWindow`]
-    /// accessors, so the driver-side window held by [`MmioTransport`]
-    /// and the test's `dev` window alias the same bytes exactly as real
-    /// hardware does.
+    /// A buffer-backed stand-in for a modern virtio-MMIO device: its register
+    /// block, which the transport's window and the test's `dev` window alias
+    /// exactly as they would a real device's.
     struct FakeMmioDevice {
-        base: NonNull<u8>,
-        len: usize,
+        region: Region,
     }
 
     impl FakeMmioDevice {
@@ -321,11 +328,9 @@ mod tests {
         /// at least [`regs::WINDOW_MIN_LEN`]) and pre-load the identity
         /// registers a valid modern virtio-MMIO device exposes.
         fn new(len: usize) -> Self {
-            let words = len.div_ceil(8);
-            let boxed = alloc::vec![0u64; words.max(1)].into_boxed_slice();
-            let raw = Box::leak(boxed);
-            let base = NonNull::new(raw.as_mut_ptr().cast::<u8>()).expect("non-null");
-            let dev = Self { base, len };
+            let dev = Self {
+                region: Region::new(len),
+            };
             let w = dev.window(0xD000_0000);
             w.write_u32(regs::MAGIC, regs::MAGIC_VALUE).unwrap();
             w.write_u32(regs::VERSION, regs::VERSION_MODERN).unwrap();
@@ -335,11 +340,9 @@ mod tests {
 
         /// Build a fresh window over the region. `phys` is synthetic.
         fn window(&self, phys: u64) -> RegisterWindow {
-            // SAFETY: `base` covers `len` bytes of leaked storage that
-            // lives for the rest of the process; the window only ever
-            // performs volatile accesses, so aliasing windows are sound
-            // for the single-threaded test.
-            unsafe { RegisterWindow::from_mapping(phys, self.base, self.len) }
+            // SAFETY: every test holds its fake for its whole body, so the
+            // region outlives the windows and transports over it.
+            unsafe { self.region.window(phys) }
         }
 
         fn dev(&self) -> RegisterWindow {
@@ -353,16 +356,11 @@ mod tests {
 
     #[test]
     fn new_rejects_short_window() {
-        let dev = FakeMmioDevice::new(regs::WINDOW_MIN_LEN);
         // A window one register short of the full register block must
         // be rejected so every infallible access stays in bounds.
-        // SAFETY: the same leaked, process-lifetime backing store as
-        // every other window in this test; volatile access only.
-        let too_short = unsafe {
-            RegisterWindow::from_mapping(0xD000_0000, dev.base, regs::WINDOW_MIN_LEN - 4)
-        };
+        let dev = FakeMmioDevice::new(regs::WINDOW_MIN_LEN - 4);
         assert!(matches!(
-            MmioTransport::new(too_short),
+            MmioTransport::new(dev.window(0xD000_0000)),
             Err(VirtioError::DeviceFault)
         ));
     }
@@ -499,6 +497,34 @@ mod tests {
         assert_eq!(over, [7, 8, 0, 0]);
     }
 
+    /// An offset at the top of the address space reads zeros and writes
+    /// nothing, rather than wrapping onto the identity registers.
+    #[test]
+    fn a_config_offset_past_the_address_space_wraps_onto_no_register() {
+        let dev = FakeMmioDevice::new(regs::CONFIG + 8);
+        let magic = dev.dev().read_u32(regs::MAGIC).unwrap();
+        let mut t = dev.transport();
+        let mut buf = [0xCDu8; 4];
+        t.read_config(usize::MAX - regs::CONFIG, &mut buf);
+        assert_eq!(buf, [0, 0, 0, 0]);
+        t.write_config(usize::MAX - regs::CONFIG, &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(dev.dev().read_u32(regs::MAGIC).unwrap(), magic);
+    }
+
+    #[test]
+    fn the_config_window_is_what_follows_the_registers() {
+        assert_eq!(
+            FakeMmioDevice::new(regs::CONFIG + 40)
+                .transport()
+                .config_len(),
+            40
+        );
+        assert_eq!(
+            FakeMmioDevice::new(regs::CONFIG).transport().config_len(),
+            0
+        );
+    }
+
     #[test]
     fn write_config_writes_the_config_window_and_drops_bytes_past_it() {
         let dev = FakeMmioDevice::new(regs::CONFIG + 4);
@@ -544,7 +570,7 @@ mod tests {
         let dev = FakeMmioDevice::new(regs::WINDOW_MIN_LEN);
         dev.dev().write_u32(regs::QUEUE_NUM_MAX, 8).unwrap();
         let mut t = dev.transport();
-        let host: &'static MockHost = Box::leak(Box::new(MockHost::new()));
+        let host = &MockHost::new();
         let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("queue setup");
         assert_eq!(q.size(), 8);
         let c = dev.dev();

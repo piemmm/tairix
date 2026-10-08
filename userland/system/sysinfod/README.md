@@ -103,14 +103,17 @@ capability implies. See `docs/src/userland/sysinfod.md`.
 
 There is no response envelope: the typed payload *is* the response.
 
-- Process-list queries pack zero or more `ProcessRecord`s back-to-back.
-  The caller pages with the request's `offset`/`limit` and detects the
-  end of the list when it receives fewer than `limit` records. Paging
-  bounds live in the dispatcher (one place), not in the source.
+- List queries pack zero or more fixed-size records back-to-back. The
+  caller pages with the request's `offset`/`limit` and detects the end of
+  the list when it receives fewer than `limit` records. Every page of one
+  walk names the same `walk` and is answered from one reading of the list,
+  held by `Walks` until the walk's short page; a walk let go of is
+  answered `Interrupted`. Paging bounds live in the dispatcher (one
+  place), not in the source.
 - Scalar queries return the little-endian wire image of their struct.
-- The hardware-tree query passes the source's encoded bytes through
-  verbatim: the hardware-tree wire format is owned by `lib/abi`
-  (`AGENTS.md` §18.1), not by this service.
+- The hardware-tree query checks the source's snapshot against its own
+  header and answers that header followed by the requested page of whole
+  nodes; its generation, not a held walk, tells a walk the tree changed.
 
 ## `SysinfoSource` seam
 
@@ -136,9 +139,8 @@ Reserved `EventId` range `8000..9000`:
 
 ## Layering & safety
 
-`no_std`, depends only on `tairix-abi` and `tairix-log` (both `lib/*`),
-so a userland service never links a kernel or driver crate (`AGENTS.md`
-§17.4). No `unsafe`, no `unwrap`/`expect`/`panic!` in production paths
+`no_std`, depends only on `lib/*` crates, so a userland service never
+links a kernel or driver crate (`AGENTS.md` §17.4). No `unsafe`, no `unwrap`/`expect`/`panic!` in production paths
 (`AGENTS.md` §2.9).
 
 ## Test surface
@@ -147,6 +149,11 @@ so a userland service never links a kernel or driver crate (`AGENTS.md`
 
 - self-scoped list needs no capability and is not audited;
 - paging by `offset`/`limit`, and an empty page past the end;
+- a walk reading its list once, neither skipping nor repeating a record of
+  a list that changes under it, and a page of a walk not held answered
+  `Interrupted`; the walk store's per-caller share and byte budget;
+- reading a kernel list whole from one reading, and refusing a partial
+  record, a peer page past its bounds, and a peer list that never ends;
 - global list denied without `CAP_SYSINFO_GLOBAL` (with the denial
   audit record);
 - an audited query emitting exactly one `QUERY_SERVED` record;

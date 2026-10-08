@@ -18,6 +18,7 @@ depends on it for the inline half of its `SmallVec`.
 | `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts — so the entry count is one per contiguous run |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
 | `ByteQueue` | a bounded byte FIFO kept as one contiguous run, so a stream is parsed or transformed in place; storage committed up front or as bytes arrive, and wiped before it is given back |
+| `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: every operation, and each step of an ordered or tagged walk, costs the tree's height; nodes are reserved before a change |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed across both container
 crates and what is still to come. `HashSet` and `SmallVec` are the two types

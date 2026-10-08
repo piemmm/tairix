@@ -19,7 +19,7 @@ use super::*;
 use core::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use tairix_abi::driver::dma::{DmaHost, SlabCoherencyFn};
+use tairix_abi::driver::dma::{DmaHost, DmaReach, SlabCoherencyFn};
 use tairix_abi::driver::CompletionSignal;
 use tairix_abi::hwtree::{HwProperty, HwResource};
 use tairix_abi::{
@@ -83,6 +83,8 @@ struct MockSyscalls {
     /// assert the host requested only the sub-region (not the whole grant).
     last_mmio: Rc<Cell<(u64, usize)>>,
     dma_calls: Rc<Cell<usize>>,
+    /// The reach every `dma_alloc` stated, in call order.
+    dma_reaches: Rc<RefCell<Vec<DmaReach>>>,
     /// Every CPU base address passed to `dma_free`, in call order. Shared so a
     /// test can assert each carve's slab freed itself on drop.
     dma_frees: Rc<RefCell<Vec<u64>>>,
@@ -130,6 +132,7 @@ impl MockSyscalls {
             mmio_calls: Rc::new(Cell::new(0)),
             last_mmio: Rc::new(Cell::new((0, 0))),
             dma_calls: Rc::new(Cell::new(0)),
+            dma_reaches: Rc::new(RefCell::new(Vec::new())),
             quiesced_calls: Rc::new(Cell::new(0)),
             dma_frees: Rc::new(RefCell::new(Vec::new())),
             delivered: RefCell::new(Vec::new()),
@@ -266,8 +269,9 @@ unsafe impl GrantSyscalls for MockSyscalls {
         }
     }
 
-    fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64 {
+    fn dma_alloc(&self, handle: u64, len: usize, reach: DmaReach, device_out: &mut u64) -> i64 {
         self.dma_calls.set(self.dma_calls.get() + 1);
+        self.dma_reaches.borrow_mut().push(reach);
         let mut backings = self.backings.borrow_mut();
         match backings.iter_mut().find(|b| b.handle == handle) {
             Some(b) if len <= b.buffer.len() => {
@@ -418,7 +422,10 @@ fn buswin_grant() -> GrantedResource {
 }
 
 fn dma_grant() -> GrantedResource {
-    GrantedResource::new(DMA_HANDLE, HwResource::dma(DMA_ADDR_LIMIT, 0x4_0000))
+    GrantedResource::new(
+        DMA_HANDLE,
+        HwResource::dma(DMA_ADDR_LIMIT, 0x4_0000, tairix_abi::DmaCoherence::Snooped),
+    )
 }
 
 #[test]
@@ -639,6 +646,23 @@ fn carves_a_dma_buffer_against_the_dma_grant() {
 }
 
 #[test]
+fn every_carve_states_the_narrowest_reach_the_driver_declared() {
+    let mock = MockSyscalls::new();
+    mock.back(DMA_HANDLE, 0x4000, DMA_DEVICE_BASE);
+    let reaches = Rc::clone(&mock.dma_reaches);
+    let host =
+        RtDriverHost::new(caps(&[CapabilityId::MEM_DMA]), mock, &[dma_grant()], None).unwrap();
+    let reach = |bits| DmaReach::new(bits).unwrap();
+    drop(host.alloc_dma_zeroed(0x1000).expect("dma carve"));
+    host.narrow_dma_reach(reach(32)).expect("narrowed");
+    drop(host.alloc_dma_zeroed(0x1000).expect("dma carve"));
+    host.narrow_dma_reach(reach(40))
+        .expect("a wider statement is no change");
+    drop(host.alloc_dma_zeroed(0x1000).expect("dma carve"));
+    assert_eq!(*reaches.borrow(), [DmaReach::FULL, reach(32), reach(32)]);
+}
+
+#[test]
 fn dma_without_capability_is_refused_before_any_syscall() {
     let mock = MockSyscalls::new();
     mock.back(DMA_HANDLE, 0x4000, DMA_DEVICE_BASE);
@@ -657,7 +681,7 @@ fn dma_rejects_zero_size() {
         RtDriverHost::new(caps(&[CapabilityId::MEM_DMA]), mock, &[dma_grant()], None).unwrap();
     assert_eq!(
         host.alloc_dma_zeroed(0).err(),
-        Some(DriverError::LengthOutOfRange)
+        Some(DriverError::BufferTooSmall)
     );
 }
 
@@ -675,8 +699,10 @@ fn dma_without_a_dma_grant_is_unsupported() {
     );
 }
 
+/// A carve the kernel cannot back reaches the driver as exhaustion, never as
+/// a bad length or a faulted device.
 #[test]
-fn dma_exhaustion_maps_to_length_out_of_range() {
+fn dma_exhaustion_reaches_the_driver_as_exhaustion() {
     let mock = MockSyscalls::new();
     mock.back(DMA_HANDLE, 0x1000, DMA_DEVICE_BASE);
     let host =
@@ -684,7 +710,7 @@ fn dma_exhaustion_maps_to_length_out_of_range() {
     // Larger than the mock's backing buffer → the mock returns -OutOfMemory.
     assert_eq!(
         host.alloc_dma_zeroed(0x4000).err(),
-        Some(DriverError::LengthOutOfRange)
+        Some(DriverError::OutOfMemory)
     );
 }
 
@@ -779,7 +805,6 @@ fn reports_capabilities_and_user_space_kind() {
     assert!(!host.has_capability(CapabilityId::MEM_DMA));
     assert_eq!(host.kind(), DriverKind::UserSpace);
     assert!(host.mmio_mapper().is_some());
-    assert!(host.virtio_host().is_some());
 }
 
 #[test]
@@ -802,14 +827,24 @@ const MEMORY_WINDOW_DEVICE_BASE: u64 = 0xC000_0000;
 fn peripheral_window() -> GrantedResource {
     GrantedResource::new(
         DMA_HANDLE,
-        HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000),
+        HwResource::dma_translated(
+            0xFF80_0000,
+            0x0380_0000,
+            0x7C00_0000,
+            tairix_abi::DmaCoherence::Snooped,
+        ),
     )
 }
 
 fn memory_window() -> GrantedResource {
     GrantedResource::new(
         MEMORY_WINDOW_HANDLE,
-        HwResource::dma_translated(0x4000_0000, 0x4000_0000, MEMORY_WINDOW_DEVICE_BASE),
+        HwResource::dma_translated(
+            0x4000_0000,
+            0x4000_0000,
+            MEMORY_WINDOW_DEVICE_BASE,
+            tairix_abi::DmaCoherence::Snooped,
+        ),
     )
 }
 
@@ -879,7 +914,12 @@ fn a_grant_handle_is_found_only_for_the_exact_resource() {
     );
     assert_eq!(host.grant_handle(&regs_grant().resource), Some(REGS_HANDLE));
     assert_eq!(
-        host.grant_handle(&HwResource::dma_translated(0x4000_0000, 0x1000, 0)),
+        host.grant_handle(&HwResource::dma_translated(
+            0x4000_0000,
+            0x1000,
+            0,
+            tairix_abi::DmaCoherence::Snooped
+        )),
         None
     );
 }

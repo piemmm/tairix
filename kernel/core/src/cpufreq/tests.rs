@@ -97,10 +97,10 @@ impl TargetWaiter for DoomedWaiter {
     }
 }
 
-/// Mark every test CPU idle as of `now_ns`, so a test states the machine it
-/// means rather than inheriting one.
-fn all_cpus_idle(now_ns: u64) {
-    for cpu in 0..u32::try_from(cpu_state::TEST_CPUS).expect("test CPU count fits") {
+/// Mark every CPU the governor weighs for this test idle as of `now_ns`, so a
+/// test states the machine it means rather than inheriting one.
+fn governed_cpus_idle(now_ns: u64) {
+    for cpu in crate::test_boot::claimed_cpus() {
         note_idle(cpu, now_ns);
     }
 }
@@ -247,7 +247,7 @@ fn a_quiet_machine_settles_at_the_minimum_and_then_stops_waking() {
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
         let waiter = ScriptedWaiter::at(start);
         let (target, _) = settle(handle, &waiter, &limits);
         assert_eq!(
@@ -257,6 +257,35 @@ fn a_quiet_machine_settles_at_the_minimum_and_then_stops_waking() {
         assert!(
             waiter.settled(),
             "settled at the minimum, the governor must arm no further wakeup"
+        );
+    });
+}
+
+/// A CPU another test keeps busy while this one has the mechanism bound is
+/// not this test's load: its quiet machine still settles at the minimum.
+#[test]
+fn a_concurrent_test_s_busy_cpu_is_not_counted() {
+    let limits = pi4();
+    let start = 1_000_000;
+    let _ = crate::test_boot::claim_cpu();
+    with_mechanism(limits, start, |handle| {
+        governed_cpus_idle(start);
+        let theirs = std::thread::spawn(move || {
+            let theirs = crate::test_boot::claim_cpu();
+            note_active(theirs, start);
+            theirs
+        })
+        .join()
+        .expect("the sibling ran");
+        let state = cpu_state::get(theirs).expect("a test CPU");
+        state.gov_util.store(UTIL_ONE, Ordering::Relaxed);
+        state.gov_folded_ns.store(start, Ordering::Relaxed);
+        let waiter = ScriptedWaiter::at(start);
+        assert_eq!(settle(handle, &waiter, &limits).0, limits.min_hz);
+        assert_ne!(
+            state.cpu_active_since.load(Ordering::Relaxed),
+            0,
+            "the sibling's CPU stayed busy throughout"
         );
     });
 }
@@ -271,7 +300,7 @@ fn sustained_work_climbs_to_full_speed() {
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
         let waiter = ScriptedWaiter::at(start);
         let (settled_at, mut seq) = settle(handle, &waiter, &limits);
         assert_eq!(settled_at, limits.min_hz);
@@ -351,7 +380,7 @@ fn work_that_resumes_inside_the_attention_span_is_still_noticed() {
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
         let quiet = ScriptedWaiter::at(start);
         let (settled_at, _) = settle(handle, &quiet, &limits);
         assert_eq!(settled_at, limits.min_hz);
@@ -383,7 +412,7 @@ fn a_machine_past_half_busy_is_given_the_whole_range() {
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
         let quiet = ScriptedWaiter::at(start);
         let (_, seq) = settle(handle, &quiet, &limits);
 
@@ -424,7 +453,7 @@ fn the_ceiling_is_held_before_it_is_given_up() {
             .seq;
         // Nothing runs from here on, so utilisation alone would give the
         // ceiling up as soon as the boost lapsed.
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
 
         let dropped = domain::wait(DRIVER, handle, seq, &waiter).expect("a reduction");
         assert!(
@@ -448,7 +477,7 @@ fn the_hold_never_delays_a_rise() {
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
         let quiet = ScriptedWaiter::at(start);
         let (settled_at, seq) = settle(handle, &quiet, &limits);
         assert_eq!(settled_at, limits.min_hz);
@@ -477,7 +506,7 @@ fn a_low_duty_wake_pattern_does_not_pin_the_ceiling() {
     let limits = pi4();
     let mut now = 1_000_000;
     with_mechanism(limits, now, |handle| {
-        all_cpus_idle(now);
+        governed_cpus_idle(now);
         // Twenty wakes a second, each a millisecond of work: about 2% of one
         // core, and far more often than a boost window would have lapsed.
         for _ in 0..40 {
@@ -502,7 +531,7 @@ fn a_program_launch_is_served_at_full_speed_from_an_idle_machine() {
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
-        all_cpus_idle(start);
+        governed_cpus_idle(start);
         let waiter = ScriptedWaiter::at(start);
         let (settled_at, seq) = settle(handle, &waiter, &limits);
         assert_eq!(settled_at, limits.min_hz);
@@ -527,7 +556,7 @@ fn sustained_partial_load_settles_below_full_speed() {
     let limits = pi4();
     let mut now = 1_000_000;
     with_mechanism(limits, now, |handle| {
-        all_cpus_idle(now);
+        governed_cpus_idle(now);
         // Twenty windows of a 20% duty cycle on one CPU.
         for _ in 0..20 {
             for _ in 0..10 {

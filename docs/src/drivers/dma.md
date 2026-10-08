@@ -118,8 +118,11 @@ every rule the protocol makes:
 - The device is stopped before the endpoint unmaps a buffer, and a chain is
   freed only after its channel's reset. A stop answers whether the reset was
   issued at all: a channel that would not take one may still fetch its chain
-  and write its buffer, so it is withdrawn from service with both kept and
-  answers everything but Stop and Close with `DeviceFault`, and a channel
+  and write its buffer, so its Stop answers `DeviceFault` and its client
+  never reuses the buffer, and it is withdrawn from service with both kept,
+  answering everything but Stop and Close with `DeviceFault` and its latched
+  interrupt cleared whenever its line fires, so a shared line is not held
+  up. A channel
   refusing its reset at bring-up ends the driver with the node's memory still
   quarantined. A driver that ends on its own resets every running channel
   before its chains are freed, and withholds the chain of one that refuses.
@@ -172,9 +175,11 @@ error flags (bits 2:0).
   client's word. Only the duty holder may ask, and only about those two:
   a request line naming its own endpoint, or an MMIO window.
 - **`shm_create_dma`** carves a channel's buffer below the controller's own
-  `Dma` window, mapped coherent in every process that maps it, and returns
-  the bus address the controller programs; **`shm_grant_peer`** mints that
-  buffer to the client whose call is being served.
+  `Dma` window and the engines' 32-bit reach, mapped coherent in every process
+  that maps it, and returns the bus address the controller programs;
+  **`shm_grant_peer`** mints that buffer to the client whose call is being
+  served. The driver narrows its runtime host to the same reach, so the
+  control-block chains it carves are placed within it too.
 - **The buffer outlives a crash safely.** The controller keeps its own
   mapping while a channel may master the buffer — its unmap is its word that
   the device is done — and should it end still mapping it, the buffer joins

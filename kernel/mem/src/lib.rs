@@ -84,14 +84,14 @@ pub use anon_window::AnonWindowMap;
 pub use bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 pub use coldscan::{ColdPageScanner, ColdScanError};
 pub use dma::{
-    window_slots, DeviceTranslation, DmaBlock, DmaBuffer, DmaCustodian, DmaCustody, DmaError,
-    DmaPool, DmaTranslator, DmaWindowMap,
+    free_blocks, scrub_blocks, window_slots, CarveDevice, DeviceTranslation, DmaBuffer,
+    DmaCustodian, DmaCustody, DmaError, DmaPool, DmaTranslator, DmaWindowMap,
 };
 pub use error::AllocError;
 pub use filemap::{map_file_page, unmap_file_region, FILE_FLAGS};
 pub use frame::{
-    Frame, FrameAllocator, FrameCount, FrameSnapshot, MemoryClass, PhysAddr, MAX_ORDER,
-    MEMORY_CLASS_COUNT, PAGE_SHIFT, PAGE_SIZE,
+    Chunks, Frame, FrameAllocator, FrameBlock, FrameCount, FrameSnapshot, MemoryClass, PhysAddr,
+    MAX_ORDER, MEMORY_CLASS_COUNT, PAGE_SHIFT, PAGE_SIZE,
 };
 pub use framepages::FramePages;
 pub use kvmap::{back_run, release_run, KernelRemap, KernelVirtMap, RemapError};

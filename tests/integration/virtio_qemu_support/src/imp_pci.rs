@@ -9,13 +9,13 @@
 //! hand-over that makes the function a bus master, and the `sti; hlt; cli`
 //! IRQ park.
 
-use tairix_abi::CapabilityId;
+use tairix_abi::{CapabilityId, DmaCoherence};
 use tairix_arch_x86_64::qemu_exit;
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_virtio::PciTransport;
 use tairix_kernel::x86_64::arch_wrapper::{published_irq_table, published_memory_map};
 use tairix_kernel::SERIAL_SINK;
-use tairix_kernel::{KernelVirtioFactory, KernelVirtioFactoryConfig};
+use tairix_kernel_core::iommu::{MasterOwner, MasterTarget, Mastering, KERNEL_OWNER};
 use tairix_kernel_irq::{IrqWaitAbort, IrqWaiter};
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
@@ -24,7 +24,7 @@ use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Event, EventId, Level, Sink};
-use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
+use tairix_virtio::{PoolId, VirtioHost};
 
 use crate::common::{
     carve_dma_map, drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
@@ -192,19 +192,19 @@ fn rdtsc() -> u64 {
 
 // --- Shared scenario -------------------------------------------------
 
-/// The function the boot probe published a node for keyed by
-/// `virtio_type`, by the segment and requester id it recorded.
+/// The node the boot probe published keyed by `virtio_type`, and the
+/// function it recorded for it.
 fn published_function(
     pci: &tairix_kernel::pci_host::PciHost,
     virtio_type: u32,
-) -> Option<tairix_kernel::pci_host::Published> {
+) -> Option<(u32, tairix_kernel::pci_host::Published)> {
     let snapshot =
         tairix_kernel_core::HwTreeSource::snapshot(&tairix_kernel::hwtree_store::HW_TREE_SOURCE)
             .ok()?;
     let key = tairix_abi::HwMatchKey::virtio(virtio_type);
     let node = tairix_abi::hwtree::snapshot_nodes(&snapshot)?
         .find(|node| node.match_keys().contains(&key))?;
-    pci.published(node.id())
+    Some((node.id(), pci.published(node.id())?))
 }
 
 /// Perform the x86_64 virtio-PCI bring-up for the modern function of virtio
@@ -253,11 +253,11 @@ where
     let Some(pci) = tairix_kernel::pci_host::published() else {
         env.fail("no PCI host");
     };
-    let Some(function) = published_function(pci, virtio_type) else {
+    let Some((node, function)) = published_function(pci, virtio_type) else {
         env.fail("no published function of the scenario's virtio type");
     };
     let vector = match tairix_kernel::x86_64::remapping::route_function(pci, &function) {
-        Ok(vector) => vector,
+        Ok(routed) => routed.vector,
         Err(step) => env.fail(step),
     };
     let Ok(bind) = table.bind(vector.line, TASK) else {
@@ -265,9 +265,10 @@ where
     };
     let handle = bind.handle;
 
-    // 4. Map the four virtio register windows and hand the function over a
-    //    bus master, through the kernel's one owner of the configuration
-    //    space the boot probe enumerated.
+    // 4. Map the four virtio register windows through the kernel's one owner
+    //    of the configuration space the boot probe enumerated, and hand the
+    //    untranslated function over a bus master as root unlock does: through
+    //    the audited grant, which ordering and read-back make the kernel's.
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),
@@ -280,26 +281,39 @@ where
     let transport = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
         let provisioned = pci.with(function.segment, |bus| {
-            let prov = tairix_kernel::provision_virtio_pci(bus, bdf, &mapper, |windows| {
-                PciTransport::new(windows, Some(tairix_kernel::x86_64::msi::MSIX_ENTRY))
+            tairix_kernel::provision_virtio_pci(bus, bdf, &mapper, |windows| {
+                PciTransport::new(windows, Some(tairix_kernel::pci_host::MSIX_ENTRY))
             })
-            .map_err(|_| "virtio-PCI provisioning")?;
-            bus.set_bus_master(prov.bdf, true)
-                .map_err(|_| "hand the function over")?;
-            Ok::<_, &'static str>(prov.transport)
+            .map(|prov| prov.transport)
         });
         match provisioned {
             Some(Ok(transport)) => transport,
-            Some(Err(step)) => env.fail(step),
+            Some(Err(_)) => env.fail("virtio-PCI provisioning"),
             None => env.fail("the published function's segment is unowned"),
         }
     };
+    let Some(port) = tairix_kernel::pci_host::bus_mastering() else {
+        env.fail("no bus-mastering authority");
+    };
+    let mastering = Mastering::new(port, &SERIAL_SINK);
+    let owner = MasterOwner {
+        node,
+        generation: KERNEL_OWNER,
+        epoch: mastering.begin(),
+    };
+    mastering.set(MasterTarget::Node(node), true, owner);
     env.log("virtio-qemu: MSI-X routed, transport provisioned, bus master");
 
     // 5. Mint the per-device DMA host the driver allocates through.
     let space = AddressSpace::new(HostPageTable::new());
-    let Ok(pool) = DmaPool::new(space, VirtAddr::new(POOL_VBASE), POOL_PAGES, &frames, &phys)
-    else {
+    let Ok(pool) = DmaPool::new(
+        space,
+        VirtAddr::new(POOL_VBASE),
+        POOL_PAGES,
+        &frames,
+        &phys,
+        DmaCoherence::Snooped,
+    ) else {
         env.fail("DMA pool construct");
     };
     let waiter = HltWaiter;
@@ -313,24 +327,8 @@ where
         &waiter,
     );
 
-    // 6. Mint the per-driver factory, then drive the shared lifecycle with
-    //    `body` against the reloaded driver.
-    let factory = KernelVirtioFactory::new(
-        KernelVirtioFactoryConfig {
-            frames: &frames,
-            phys: &phys,
-            caller: &caller,
-            audit: &SERIAL_SINK,
-            irq: table,
-            irq_handle: handle,
-            waiter: &waiter,
-            pool_base: VirtAddr::new(POOL_VBASE),
-            pool_pages: POOL_PAGES,
-        },
-        HostPageTable::new,
-    );
-    let factory: &dyn VirtioHostFactory = &factory;
-    drive_driver_lifecycle(&env, cfg, factory, transport, &vhost, body)
+    // 6. Drive the shared lifecycle with `body` against the reloaded driver.
+    drive_driver_lifecycle(&env, cfg, transport, &vhost, body)
 }
 
 // --- Boot harness ----------------------------------------------------

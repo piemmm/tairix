@@ -63,20 +63,22 @@ pub mod transport_mmio;
 pub mod transport_pci;
 
 #[cfg(test)]
+mod register_region;
+#[cfg(test)]
 mod tests;
 
-pub use dma::{scrub, BounceBuffer, DmaSlab, PoolId, SlabFreeFn};
-pub use host::{CompletionSignal, DmaHost, VirtioHost, VirtioHostFactory};
+pub use dma::{scrub, BounceBuffer, DmaSlab, PoolId, SlabEnd, SlabFreeFn};
+pub use host::{CompletionSignal, DmaHost, VirtioHost};
 #[cfg(any(test, feature = "mock"))]
 pub use host::{MockHost, MockWait};
 pub use packed::PackedQueue;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use request::{RequestQueue, MAX_COMPLETION_WAKES};
+pub use transport::{
+    negotiate, Direction, Negotiated, PciTransportWindows, Status, Transport, VirtioError,
+    TRANSPORT_FEATURES, VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
+};
 #[cfg(any(test, feature = "mock"))]
 pub use transport::{ChainView, ConfigResponder, DeviceShim, MockTransport};
-pub use transport::{
-    Direction, PciTransportWindows, Status, Transport, VirtioError, TRANSPORT_FEATURES,
-    VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
-};
 pub use transport_mmio::MmioTransport;
 pub use transport_pci::{PciTransport, VIRTIO_MSI_NO_VECTOR};

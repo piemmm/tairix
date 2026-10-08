@@ -38,7 +38,11 @@ const DMA_GRANT_LEN: u64 = 0x10_0000;
 /// not depend on ordering).
 fn node_a_grants() -> [HwResource; 2] {
     [
-        HwResource::dma(DMA_APERTURE_TOP, DMA_GRANT_LEN),
+        HwResource::dma(
+            DMA_APERTURE_TOP,
+            DMA_GRANT_LEN,
+            tairix_abi::DmaCoherence::Snooped,
+        ),
         HwResource::mmio(BAR_CPU_PHYS, BAR_LEN),
     ]
 }
@@ -126,7 +130,11 @@ fn build_xhci_node_forwards_the_bar_and_dma_under_the_xhci_compatible_key() {
 fn build_xhci_node_fails_closed_without_the_bar_grant() {
     // Only the DMA grant: the controller's register window is missing, so no
     // node is fabricated.
-    let dma = [HwResource::dma(DMA_APERTURE_TOP, DMA_GRANT_LEN)];
+    let dma = [HwResource::dma(
+        DMA_APERTURE_TOP,
+        DMA_GRANT_LEN,
+        tairix_abi::DmaCoherence::Snooped,
+    )];
     assert_eq!(build_xhci_node(dma.iter()), Err(DriverError::NotFound));
 }
 

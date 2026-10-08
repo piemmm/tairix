@@ -20,7 +20,7 @@
 //! is asserted for *shape* (`Some`), not for a size.
 
 use tairix_abi::driver::timing::Delay;
-use tairix_abi::{HwNode, HwResourceKind};
+use tairix_abi::{DmaCoherence, HwNode, HwResourceKind};
 use tairix_arch_aarch64::{console, firmware, platform, sd_supply, uart_init};
 use tairix_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use tairix_fdt::Fdt;
@@ -92,6 +92,35 @@ fn real_pi4_dtb_discovery() {
         .map(|r| (r.base(), r.length(), r.translated_base()))
         .collect();
     assert_eq!(dma, [(0x4000_0000, 0x4000_0000, 0xc000_0000)]);
+
+    // No BCM2711 master states `dma-coherent`, so by Arm's convention none
+    // snoops: every DMA grant the board's masters carry says so.
+    for compatible in [
+        platform::EMMC2_COMPATIBLE,
+        platform::GENET_COMPATIBLE,
+        platform::PCIE_COMPATIBLE,
+        tairix_vcmailbox::MAILBOX_COMPATIBLE,
+    ] {
+        let node = sink
+            .nodes
+            .iter()
+            .find(|n| {
+                n.match_keys()
+                    .iter()
+                    .any(|k| k.compatible_bytes() == compatible)
+            })
+            .expect("master emitted");
+        let coherence: Vec<DmaCoherence> = node
+            .resources()
+            .iter()
+            .filter_map(tairix_abi::HwResource::dma_coherence)
+            .collect();
+        assert!(!coherence.is_empty(), "{compatible:?} states its DMA");
+        assert!(
+            coherence.iter().all(|&c| c == DmaCoherence::Unsnooped),
+            "{compatible:?} does not snoop"
+        );
+    }
 }
 
 /// A delay that returns at once: the probe checks which lines move, not when.

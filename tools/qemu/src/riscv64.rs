@@ -48,7 +48,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::{
-    net_device_arg, netdev_arg, rtc_base_args, DmaTranslation, Outcome, SessionKind, Spec,
+    net_device_arg, netdev_arg, rtc_base_args, Board, DmaTranslation, InterruptControllers,
+    Outcome, SessionKind, Spec,
 };
 
 /// Default guest RAM size in mebibytes for a riscv64 QEMU integration
@@ -71,17 +72,28 @@ pub const QEMU_BINARY: &str = "qemu-system-riscv64";
 /// bridge the kernel takes.
 pub const MACHINE: &str = "virt";
 
-/// The `-M` value and the `-global`s a run behind `translation` boots with.
+/// The `-M` value and the `-global`s a run on `board` boots with.
 #[must_use]
-pub fn machine(translation: DmaTranslation) -> (&'static str, &'static [&'static str]) {
-    match translation {
+pub fn machine(board: Board) -> (&'static str, &'static [&'static str]) {
+    const FIRST_STAGE: &[&str] = &["riscv-iommu-device.g-stage=false"];
+    let aia = board.interrupts == InterruptControllers::Aia;
+    match board.translation {
+        DmaTranslation::RiscvStage2 if aia => ("virt,iommu-sys=on,aia=aplic-imsic", &[]),
         DmaTranslation::RiscvStage2 => ("virt,iommu-sys=on", &[]),
-        DmaTranslation::RiscvStage1 => ("virt,iommu-sys=on", &["riscv-iommu-device.g-stage=false"]),
+        DmaTranslation::RiscvStage1 if aia => ("virt,iommu-sys=on,aia=aplic-imsic", FIRST_STAGE),
+        DmaTranslation::RiscvStage1 => ("virt,iommu-sys=on", FIRST_STAGE),
         DmaTranslation::Absent
+        | DmaTranslation::VirtioIommu
         | DmaTranslation::Vtd
         | DmaTranslation::AmdVi
         | DmaTranslation::Smmuv3Stage1
-        | DmaTranslation::Smmuv3Stage2 => (MACHINE, &[]),
+        | DmaTranslation::Smmuv3Stage2 => {
+            if aia {
+                ("virt,aia=aplic-imsic", &[])
+            } else {
+                (MACHINE, &[])
+            }
+        }
     }
 }
 
@@ -161,12 +173,16 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // without the implicit stdio muxing `-nographic` would impose — the
     // same rationale documented on the x86_64 builder.
     let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len() * 2);
-    let (machine, globals) = machine(spec.dma_translation);
+    let (machine, globals) = machine(spec.board());
     argv.push("-M".into());
     argv.push(machine.into());
     for global in globals {
         argv.push("-global".into());
         argv.push((*global).into());
+    }
+    if let Some(unit) = spec.dma_translation.unit_device() {
+        argv.push("-device".into());
+        argv.push(unit.into());
     }
     // Pin the CPU to `rv64` with **software-managed** page-table A/D bits
     // (`svade=true,svadu=false`). RISC-V leaves A/D update
@@ -267,6 +283,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
+    argv.extend(crate::message_source_args(spec));
     if spec.devices.input == crate::InputPlacement::SharedLine {
         argv.extend(crate::shared_line_input_args(spec));
     } else {
@@ -296,10 +313,12 @@ mod tests {
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
             x86_64_cpu: None,
+            x86_64_topology: crate::x86_64::Topology::Dense,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
+            interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -408,7 +427,60 @@ mod tests {
                 .collect();
             assert_eq!(set, globals, "{translation:?}");
         }
-        assert_eq!(machine(DmaTranslation::Absent), (MACHINE, &[][..]));
+        assert_eq!(machine(Board::default()), (MACHINE, &[][..]));
+    }
+
+    #[test]
+    fn an_aia_board_says_so_behind_every_unit_its_machine_carries() {
+        let aia = |translation| {
+            machine(Board::translated(translation).with_interrupts(InterruptControllers::Aia))
+        };
+        assert_eq!(
+            aia(DmaTranslation::Absent),
+            ("virt,aia=aplic-imsic", &[][..])
+        );
+        assert_eq!(
+            aia(DmaTranslation::RiscvStage2),
+            ("virt,iommu-sys=on,aia=aplic-imsic", &[][..])
+        );
+        assert_eq!(
+            aia(DmaTranslation::RiscvStage1),
+            (
+                "virt,iommu-sys=on,aia=aplic-imsic",
+                &["riscv-iommu-device.g-stage=false"][..]
+            )
+        );
+    }
+
+    #[test]
+    fn argv_creates_a_virtio_iommu_ahead_of_every_device() {
+        let mut spec = fixture_spec(1).with_dma_translation(DmaTranslation::VirtioIommu);
+        spec.devices.input = crate::InputPlacement::SharedLine;
+        spec.devices.pointing.mouse = true;
+        let argv = render(&build_argv(&spec, Path::new("/k")));
+        let m = argv.iter().position(|a| a == "-M").expect("argv names -M");
+        assert_eq!(argv[m + 1], MACHINE);
+        let first = argv
+            .iter()
+            .position(|a| a == "-device")
+            .expect("a device is attached");
+        assert_eq!(argv[first + 1], "virtio-iommu-pci,addr=0x2");
+        assert!(argv
+            .iter()
+            .any(|a| a.starts_with("virtio-mouse-pci") && a.contains("iommu_platform=on")));
+    }
+
+    #[test]
+    fn message_sources_take_a_slot_each_from_the_first_only_on_request() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a.starts_with("edu")));
+        let argv = render(&build_argv(
+            &spec.with_message_sources(2),
+            Path::new("/tmp/k.elf"),
+        ));
+        let sources: Vec<&String> = argv.iter().filter(|a| a.starts_with("edu")).collect();
+        assert_eq!(sources, ["edu,addr=0x2", "edu,addr=0x3"]);
     }
 
     #[test]

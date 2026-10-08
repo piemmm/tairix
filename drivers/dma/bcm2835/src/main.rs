@@ -25,8 +25,10 @@ mod program {
         CapabilityId, Errno, MmioMapper, ProcId, HW_NODE_MAX_RESOURCES, PROC_ID_HEX_LEN,
     };
     use tairix_caps::CapabilitySet;
-    use tairix_drv_dma_bcm2835::controller::{Buffer, Controller, ControllerHost, Record};
-    use tairix_drv_dma_bcm2835::engine::Bcm2835Dma;
+    use tairix_drv_dma_bcm2835::controller::{
+        split_windows, Buffer, Controller, ControllerHost, Record,
+    };
+    use tairix_drv_dma_bcm2835::engine::{Bcm2835Dma, REACH};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_rt::LogSink;
@@ -110,26 +112,13 @@ mod program {
         let Some(mask) = duty.channels() else {
             return fail(EXIT_NO_RESOURCES, "dma: the tree states no channel mask");
         };
-        let mut windows = [HwResource::dma(0, 0); HW_NODE_MAX_RESOURCES];
-        let mut window_count = 0;
-        for window in resources().filter(|r| r.is_translated_dma_window()) {
-            windows[window_count] = *window;
-            window_count += 1;
-        }
-        let windows = &windows[..window_count];
-        // The engines reach peripherals through the window covering their
-        // own registers, and memory through the others.
-        let covers_registers =
-            |window: &HwResource| window.dma_bus_address(base, len as u64).is_some();
-        let peripheral_window = windows
-            .iter()
-            .copied()
-            .find(|window| covers_registers(window));
-        let Some(memory) = windows.iter().find(|window| !covers_registers(window)) else {
+        let windows = resources().filter(|r| r.is_translated_dma_window());
+        let (peripheral_window, memory) = split_windows(windows, base, len as u64);
+        let Some(memory) = memory else {
             return fail(EXIT_NO_RESOURCES, "dma: the node reaches no memory");
         };
         let (Some(memory_grant), Ok(())) =
-            (host.grant_handle(memory), host.select_dma_window(memory))
+            (host.grant_handle(&memory), host.select_dma_window(&memory))
         else {
             return fail(EXIT_NO_RESOURCES, "dma: the memory window was not granted");
         };
@@ -145,6 +134,12 @@ mod program {
                 "dma: the register window would not map",
             );
         };
+        if host.narrow_dma_reach(REACH).is_err() {
+            return fail(
+                EXIT_BRINGUP_FAILED,
+                "dma: chains cannot be held within the engines' 32-bit reach",
+            );
+        }
         let store: &dyn DmaHost = &host;
         let Ok(engine) = Bcm2835Dma::new(&regs, &store) else {
             return fail(
@@ -342,6 +337,7 @@ mod program {
             let base = status(tairix_rt::shm_create_dma(
                 self.memory,
                 len,
+                REACH,
                 &mut region,
                 &mut bus,
             ))?;

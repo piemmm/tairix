@@ -14,13 +14,14 @@
 //!    `tairix_kernel::x86_64::arch_wrapper::published_irq_table` and the
 //!    typed `IoApicController` via
 //!    `tairix_kernel::x86_64::ioapic_controller::published_typed`.
-//! 2. Look up the IDT vector assigned to **GSI 2** (the legacy
-//!    IRQ-0 line under QEMU's PC/Q35 default `InterruptSourceOverride`
-//!    `source = 0 → gsi = 2`) through
+//! 2. Activate **GSI 2** (the legacy IRQ-0 line under QEMU's PC/Q35 default
+//!    `InterruptSourceOverride` `source = 0 → gsi = 2`) through the
+//!    published composite controller, as `irq_bind` does, and look up the
+//!    vector its activation routed to it through
 //!    `tairix_arch_x86_64::irq::global_routing().vector_for_gsi(2)`.
 //! 3. Bind GSI 2 in the `IrqTable` for the synthesised
-//!    `TaskId(0)`; the kernel boot pipeline programmed the line
-//!    `masked = true`, so no spurious delivery has reached the LAPIC.
+//!    `TaskId(0)`; activation programmed the line masked, so no spurious
+//!    delivery has reached the LAPIC.
 //! 4. Mask the legacy 8259 PIC (write `0xFF` to ports `0x21` and
 //!    `0xA1`) so PIT pulses do not double-deliver through the
 //!    legacy chain — QEMU's PIIX/Q35 firmware leaves the PIC in
@@ -68,7 +69,7 @@ extern crate alloc;
 compile_error!(
     "tairix-test-irq-qemu-x86-64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
-     See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
+     See AGENTS.md §2.1 (no hacks) and §5.4.5 (fail closed)."
 );
 
 // --- Freestanding test bin (`x86_64-tairix-none`) -----------------
@@ -84,10 +85,11 @@ mod kernel {
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
     use tairix_kernel::x86_64::ioapic_controller::published_typed;
+    use tairix_kernel::x86_64::msi::published_composite;
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use tairix_kernel_irq::WaitStep;
+    use tairix_kernel_irq::{IrqController, WaitStep};
     use tairix_kernel_sec::ProcessId;
     use tairix_log::{Event, EventId, Sink};
 
@@ -123,10 +125,8 @@ mod kernel {
 
     /// GSI the test drives. QEMU's PIIX/Q35 firmware ships an MADT
     /// `InterruptSourceOverride { source: 0, gsi: 2 }` mapping the
-    /// legacy ISA IRQ-0 (PIT channel 0) to GSI 2. The boot pipeline
-    /// programs every IO-APIC pin masked, so GSI 2 has been left
-    /// `masked = true` with a vector allocated from the
-    /// `0x30..=0xFE` external-IRQ range.
+    /// legacy ISA IRQ-0 (PIT channel 0) to GSI 2. The boot masks every
+    /// pin, and none takes a vector until it is activated.
     const PIT_GSI: u32 = 2;
 
     /// PIT channel-0 reload value. The PIT input frequency is the
@@ -285,12 +285,14 @@ mod kernel {
             qemu_exit::exit_failure();
         };
 
-        // 2. Resolve the IDT vector the boot pipeline assigned to
-        //    GSI 2. The bound is `Some(_)` for every GSI in
-        //    `0..max_redirection_entry + 1`; a `None` here would mean
-        //    QEMU advertised an MADT without the standard 24-pin
-        //    IO-APIC, which is an environment defect rather than a
-        //    test failure — surface as `exit_failure` per.
+        // 2. Activate GSI 2 as `irq_bind` does, giving it a routed vector
+        //    of its own, or the run fails.
+        let Some(composite) = published_composite() else {
+            qemu_exit::exit_failure();
+        };
+        if composite.activate(PIT_GSI).is_err() {
+            qemu_exit::exit_failure();
+        }
         let Some(_vector) = arch_irq::global_routing().vector_for_gsi(PIT_GSI) else {
             qemu_exit::exit_failure();
         };
@@ -308,7 +310,7 @@ mod kernel {
         //    pulse only delivers through the IO-APIC.
         mask_legacy_pic();
 
-        // 5. Unmask GSI 2 — boot pipeline left it masked.
+        // 5. Unmask GSI 2, which its activation left masked.
         if controller.unmask(PIT_GSI).is_err() {
             qemu_exit::exit_failure();
         }

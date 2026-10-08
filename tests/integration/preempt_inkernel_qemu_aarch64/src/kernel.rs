@@ -188,7 +188,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // any interrupt source is armed.
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
 
     // 3. Register the production tickless preemption path verbatim: per-CPU storage, the EL0-preemption callback (must never fire

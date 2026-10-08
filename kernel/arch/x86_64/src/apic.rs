@@ -131,6 +131,31 @@ pub const fn xapic_destination(destination: u32) -> Option<u32> {
     }
 }
 
+/// APIC `id` as xAPIC's eight-bit physical destination, or [`None`] for one
+/// it cannot name: what an IO-APIC's or a message's compatibility format
+/// carries.
+#[must_use]
+pub const fn xapic_id(id: u32) -> Option<u8> {
+    match xapic_destination(id) {
+        // Below the broadcast id, so eight bits hold it.
+        #[allow(clippy::cast_possible_truncation)]
+        Some(_) => Some(id as u8),
+        None => None,
+    }
+}
+
+/// Whether APIC `id` can be a CPU's while the APICs run in x2APIC mode where
+/// `x2apic` says so: in x2APIC mode any id but its broadcast one, in xAPIC
+/// mode one its eight-bit destination names.
+#[must_use]
+pub const fn names_cpu(id: u32, x2apic: bool) -> bool {
+    if x2apic {
+        id != u32::MAX
+    } else {
+        xapic_destination(id).is_some()
+    }
+}
+
 /// The local APIC's registers.
 ///
 /// The production implementation is [`LocalApic`]; tests use an in-memory
@@ -768,6 +793,30 @@ mod tests {
         assert!(mock.writes.is_empty(), "{:?}", mock.writes);
         mock.send_command(0xFE, 0x4041);
         assert_eq!(mock.writes.len(), 2);
+    }
+
+    /// Compatibility format carries an id below the broadcast one, never the
+    /// broadcast id itself, which would reach every CPU.
+    #[test]
+    fn compatibility_format_names_only_ids_below_the_broadcast_one() {
+        assert_eq!(super::xapic_id(0), Some(0));
+        assert_eq!(super::xapic_id(0xFE), Some(0xFE));
+        assert_eq!(super::xapic_id(0xFF), None);
+        assert_eq!(super::xapic_id(0x100), None);
+    }
+
+    /// x2APIC mode lets a CPU have any id but its broadcast one; xAPIC mode
+    /// only the eight bits below its own.
+    #[test]
+    fn a_cpu_s_apic_id_is_one_the_mode_can_name() {
+        for id in [0, 0xFE, 0xFF, 0x100, 0xFFFF_FFFE] {
+            assert!(super::names_cpu(id, true), "x2APIC names {id:#x}");
+        }
+        assert!(!super::names_cpu(u32::MAX, true));
+        assert!(super::names_cpu(0xFE, false));
+        for id in [0xFF, 0x100, u32::MAX] {
+            assert!(!super::names_cpu(id, false), "xAPIC cannot name {id:#x}");
+        }
     }
 
     /// A batch reaches each target in order with one command each.

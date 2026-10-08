@@ -13,15 +13,21 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_abi::driver::msix::MsixBus;
-use tairix_abi::driver::pci::{PciBus, BUS_MASTER_ENABLE, COMMAND_OFFSET};
-use tairix_abi::driver::virtio_pci::VirtioPciBus;
-use tairix_abi::IommuStreams;
+use tairix_abi::driver::msix::{MsiMessage, MsixBus};
+use tairix_abi::driver::pci::{PciAddress, PciBus, BUS_MASTER_ENABLE, COMMAND_OFFSET};
+use tairix_abi::driver::virtio_pci::{
+    VirtioPciBus, VirtioPciWindows, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
+    VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY,
+};
+use tairix_abi::driver::MmioMapper;
+use tairix_abi::{DriverError, IommuStreams};
 use tairix_kernel_core::iommu::{
     BusMastering, InterruptSource, MasterChange, MasterTarget, Quiesced,
 };
+use tairix_kernel_iommu_api::IommuError;
 use tairix_sync::SpinLock;
 
 /// The seams the kernel drives a PCI bus through: enumeration and virtio
@@ -29,6 +35,11 @@ use tairix_sync::SpinLock;
 pub trait HostBus: VirtioPciBus + MsixBus + PciBus {}
 
 impl<B: VirtioPciBus + MsixBus + PciBus + ?Sized> HostBus for B {}
+
+/// The MSI-X table entry each interrupt-driven PCI function's message is
+/// routed into: every virtqueue of a virtio function shares it, so one bound
+/// line covers the whole device.
+pub const MSIX_ENTRY: u16 = 0;
 
 /// A function whose configuration space the kernel owns.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -102,10 +113,11 @@ pub struct HostSegment {
     bus: Box<dyn HostBus + Send>,
     functions: Vec<Function>,
     bridges: Vec<Bridge>,
+    windows: Vec<Range<u64>>,
 }
 
 impl HostSegment {
-    /// Segment `number`, reached through `bus`.
+    /// Segment `number`, reached through `bus`, decoding no memory.
     #[must_use]
     pub fn new(
         number: u16,
@@ -118,7 +130,14 @@ impl HostSegment {
             bus,
             functions,
             bridges,
+            windows: Vec::new(),
         }
+    }
+
+    /// The segment, decoding the PCI addresses `windows` as memory.
+    #[must_use]
+    pub fn decoding(self, windows: Vec<Range<u64>>) -> Self {
+        Self { windows, ..self }
     }
 }
 
@@ -126,10 +145,16 @@ impl HostSegment {
 /// probe publishes.
 static PUBLISHED: tairix_sync::Once<PciHost> = tairix_sync::Once::new();
 
-/// Publish the segments the boot probe owns as the kernel's PCI host, once;
-/// a host that cannot be held is logged, and then no function masters.
-pub fn publish(segments: Vec<HostSegment>, log: &dyn tairix_log::Sink) {
-    let owned = PciHost::new(segments)
+/// Publish the segments the boot probe owns as the kernel's PCI host, once,
+/// reaching the registers it programs itself — a unit function's MSI-X
+/// table — through `registers`; a host that cannot be held is logged, and
+/// then no function masters.
+pub fn publish(
+    segments: Vec<HostSegment>,
+    registers: Box<dyn MmioMapper + Send + Sync>,
+    log: &dyn tairix_log::Sink,
+) {
+    let owned = PciHost::new(segments, registers)
         .is_some_and(|host| PUBLISHED.call_once_infallible(move || host).is_ok());
     if !owned {
         crate::pci_probe::log_discovery(
@@ -162,6 +187,14 @@ pub fn unit_function() -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunct
     published().map(|host| host as &'static dyn tairix_kernel_iommu_api::UnitFunction)
 }
 
+/// Hand `sink` the PCI address windows the published host's segments
+/// decode as memory: every port's.
+pub fn decoded_windows(sink: &mut dyn FnMut(Range<u64>)) {
+    if let Some(host) = published() {
+        host.decoded_windows(sink);
+    }
+}
+
 /// The kernel's one owner of PCI configuration space.
 pub struct PciHost {
     /// Ascending by segment number.
@@ -169,6 +202,8 @@ pub struct PciHost {
     /// The next ownership epoch handed out; every function's record starts
     /// below it.
     epochs: AtomicU64,
+    /// The kernel's own reach of the device registers it programs.
+    registers: Box<dyn MmioMapper + Send + Sync>,
 }
 
 struct Segment {
@@ -176,6 +211,7 @@ struct Segment {
     state: SpinLock<HostState>,
     functions: Vec<Function>,
     bridges: Vec<Bridge>,
+    windows: Vec<Range<u64>>,
 }
 
 /// What every access to one segment's bus is serialised over.
@@ -188,9 +224,13 @@ struct HostState {
 
 impl PciHost {
     /// The owner of every segment in `segments`, a segment named twice
-    /// keeping its first bus; [`None`] where its records cannot be had.
+    /// keeping its first bus, reaching the registers it programs through
+    /// `registers`; [`None`] where its records cannot be had.
     #[must_use]
-    pub fn new(mut segments: Vec<HostSegment>) -> Option<Self> {
+    pub fn new(
+        mut segments: Vec<HostSegment>,
+        registers: Box<dyn MmioMapper + Send + Sync>,
+    ) -> Option<Self> {
         segments.sort_by_key(|segment| segment.number);
         segments.dedup_by_key(|segment| segment.number);
         let mut owned = Vec::new();
@@ -207,12 +247,21 @@ impl PciHost {
                 }),
                 functions: segment.functions,
                 bridges: segment.bridges,
+                windows: segment.windows,
             });
         }
         Some(Self {
             segments: owned,
             epochs: AtomicU64::new(1),
+            registers,
         })
+    }
+
+    /// Hand `sink` every PCI address window a segment decodes as memory.
+    pub fn decoded_windows(&self, sink: &mut dyn FnMut(Range<u64>)) {
+        for window in self.segments.iter().flat_map(|segment| &segment.windows) {
+            sink(window.clone());
+        }
     }
 
     /// The function the probe published as `node`, as the probe recorded it:
@@ -247,15 +296,10 @@ impl PciHost {
 }
 
 impl tairix_kernel_iommu_api::UnitFunction for PciHost {
-    fn route_msi(
-        &self,
-        address: u32,
-        message_address: u64,
-        data: u32,
-    ) -> Result<(), tairix_kernel_iommu_api::IommuError> {
-        let function = tairix_abi::driver::pci::PciAddress::from_node_address(address);
+    fn route_msi(&self, address: u32, message_address: u64, data: u32) -> Result<(), IommuError> {
+        let function = PciAddress::from_node_address(address);
         let bdf = function.config_address();
-        let message = tairix_abi::driver::msix::MsiMessage {
+        let message = MsiMessage {
             address: message_address,
             data,
         };
@@ -263,7 +307,105 @@ impl tairix_kernel_iommu_api::UnitFunction for PciHost {
             PciBus::route_msi(bus, bdf, message)
         })
         .and_then(Result::ok)
-        .ok_or(tairix_kernel_iommu_api::IommuError::Hardware)
+        .ok_or(IommuError::Hardware)
+    }
+
+    fn route_msix(
+        &self,
+        address: u32,
+        entry: u16,
+        message_address: u64,
+        data: u32,
+    ) -> Result<(), IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        let message = MsiMessage {
+            address: message_address,
+            data,
+        };
+        self.with(function.segment(), |bus| {
+            MsixBus::route_msix(bus, bdf, entry, message, &*self.registers)
+        })
+        .and_then(Result::ok)
+        .ok_or(IommuError::Hardware)
+    }
+
+    fn msix_entries(&self, address: u32) -> Result<u16, IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        match self.with(function.segment(), |bus| bus.msix_entries(bdf)) {
+            Some(Ok(entries)) => Ok(entries),
+            Some(Err(DriverError::NotFound)) => Ok(0),
+            Some(Err(_)) | None => Err(IommuError::Hardware),
+        }
+    }
+
+    fn mask_msix(&self, address: u32, masked: bool) -> Result<(), IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        self.with(function.segment(), |bus| bus.mask_msix(bdf, masked))
+            .and_then(Result::ok)
+            .ok_or(IommuError::Hardware)
+    }
+
+    fn capability_header(&self, address: u32, id: u8) -> Result<Option<u32>, IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        match self.with(function.segment(), |bus| bus.capability_header(bdf, id)) {
+            Some(Ok(header)) => Ok(Some(header)),
+            Some(Err(DriverError::NotFound)) => Ok(None),
+            Some(Err(_)) | None => Err(IommuError::Hardware),
+        }
+    }
+
+    fn set_master(&self, address: u32, master: bool) -> Result<(), IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        let segment = self
+            .segments
+            .binary_search_by_key(&function.segment(), |owned| owned.number)
+            .map(|at| &self.segments[at])
+            .map_err(|_| IommuError::Hardware)?;
+        let state = segment.state.lock();
+        let bus = &*state.bus;
+        if master {
+            open_bridges(bus, &segment.bridges, bdf);
+        }
+        if mastering(bus, bdf) != Some(master) {
+            let _ = bus.set_bus_master(bdf, master);
+        }
+        (mastering(bus, bdf) == Some(master))
+            .then_some(())
+            .ok_or(IommuError::Hardware)
+    }
+
+    fn set_intx(&self, address: u32, raise: bool) -> Result<(), IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        self.with(function.segment(), |bus| bus.set_intx(bdf, raise))
+            .and_then(Result::ok)
+            .ok_or(IommuError::Hardware)
+    }
+
+    fn virtio_windows(&self, address: u32) -> Result<VirtioPciWindows, IommuError> {
+        let function = PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        let unknown = |err| match err {
+            DriverError::NotFound => IommuError::OutOfRange,
+            _ => IommuError::Hardware,
+        };
+        self.with(function.segment(), |bus| {
+            let window = |role| bus.virtio_window_region(bdf, role).map_err(unknown);
+            Ok(VirtioPciWindows {
+                common: window(VIRTIO_PCI_CFG_COMMON)?,
+                notify: window(VIRTIO_PCI_CFG_NOTIFY)?,
+                isr: window(VIRTIO_PCI_CFG_ISR)?,
+                device: window(VIRTIO_PCI_CFG_DEVICE)?,
+                notify_off_multiplier: bus.notify_off_multiplier(bdf).map_err(unknown)?,
+                msix_entry: None,
+            })
+        })
+        .ok_or(IommuError::Hardware)?
     }
 }
 
@@ -406,6 +548,14 @@ mod tests {
         ) -> Result<(), DriverError> {
             Err(DriverError::Unsupported)
         }
+
+        fn msix_entries(&self, _bdf: u64) -> Result<u16, DriverError> {
+            Err(DriverError::NotFound)
+        }
+
+        fn mask_msix(&self, _bdf: u64, _masked: bool) -> Result<(), DriverError> {
+            Err(DriverError::NotFound)
+        }
     }
 
     impl PciBus for CommandBus {
@@ -474,6 +624,10 @@ mod tests {
                 .map_or(u32::MAX, |(_, command)| *command))
         }
 
+        fn capability_header(&self, _bdf: u64, _id: u8) -> Result<u32, DriverError> {
+            Err(DriverError::NotFound)
+        }
+
         fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
             Err(DriverError::Unsupported)
         }
@@ -524,12 +678,10 @@ mod tests {
                 interrupts: None,
             },
         ];
-        PciHost::new(vec![HostSegment::new(
-            0,
-            Box::new(bus),
-            functions,
-            Vec::new(),
-        )])
+        PciHost::new(
+            vec![HostSegment::new(0, Box::new(bus), functions, Vec::new())],
+            Box::new(crate::test_support::NoRegisters),
+        )
         .unwrap()
     }
 
@@ -636,38 +788,41 @@ mod tests {
             stuck: Vec::new(),
         };
         let behind = InterruptSource::Buses { first: 2, last: 3 };
-        let host = PciHost::new(vec![
-            HostSegment::new(
-                4,
-                Box::new(bus()),
-                vec![Function {
-                    address: DEVICE,
-                    node: Some(7),
-                    stream: Some(stream(0x18, 1)),
-                    interrupts: Some(behind),
-                }],
-                Vec::new(),
-            ),
-            HostSegment::new(
-                0,
-                Box::new(bus()),
-                vec![
-                    Function {
-                        address: QUIET,
-                        node: None,
-                        stream: Some(stream(0x1F, 1)),
-                        interrupts: None,
-                    },
-                    Function {
-                        address: STUCK,
-                        node: Some(9),
-                        stream: None,
-                        interrupts: None,
-                    },
-                ],
-                Vec::new(),
-            ),
-        ])
+        let host = PciHost::new(
+            vec![
+                HostSegment::new(
+                    4,
+                    Box::new(bus()),
+                    vec![Function {
+                        address: DEVICE,
+                        node: Some(7),
+                        stream: Some(stream(0x18, 1)),
+                        interrupts: Some(behind),
+                    }],
+                    Vec::new(),
+                ),
+                HostSegment::new(
+                    0,
+                    Box::new(bus()),
+                    vec![
+                        Function {
+                            address: QUIET,
+                            node: None,
+                            stream: Some(stream(0x1F, 1)),
+                            interrupts: None,
+                        },
+                        Function {
+                            address: STUCK,
+                            node: Some(9),
+                            stream: None,
+                            interrupts: None,
+                        },
+                    ],
+                    Vec::new(),
+                ),
+            ],
+            Box::new(crate::test_support::NoRegisters),
+        )
         .unwrap();
         assert_eq!(
             host.published(7),
@@ -712,21 +867,24 @@ mod tests {
             ]),
             stuck: Vec::new(),
         };
-        let host = PciHost::new(vec![HostSegment::new(
-            0,
-            Box::new(bus),
-            vec![Function {
-                address: BEHIND,
-                node: Some(7),
-                stream: Some(stream(0x1800, 1)),
-                interrupts: None,
-            }],
-            vec![
-                bridge(ROOT_PORT, 0x10, 0x1F),
-                bridge(SWITCH, 0x18, 0x18),
-                bridge(ASIDE, 0x20, 0x2F),
-            ],
-        )])
+        let host = PciHost::new(
+            vec![HostSegment::new(
+                0,
+                Box::new(bus),
+                vec![Function {
+                    address: BEHIND,
+                    node: Some(7),
+                    stream: Some(stream(0x1800, 1)),
+                    interrupts: None,
+                }],
+                vec![
+                    bridge(ROOT_PORT, 0x10, 0x1F),
+                    bridge(SWITCH, 0x18, 0x18),
+                    bridge(ASIDE, 0x20, 0x2F),
+                ],
+            )],
+            Box::new(crate::test_support::NoRegisters),
+        )
         .unwrap();
         for bridge in [ROOT_PORT, SWITCH, ASIDE] {
             assert_eq!(command(&host, bridge), 0x0002, "nothing granted yet");
@@ -845,17 +1003,20 @@ mod tests {
             commands: SpinLock::new(vec![(STUCK, BUS_MASTER_ENABLE)]),
             stuck: vec![STUCK],
         };
-        let host = PciHost::new(vec![HostSegment::new(
-            0,
-            Box::new(bus),
-            vec![Function {
-                address: STUCK,
-                node: None,
-                stream: Some(stream(0x20, 1)),
-                interrupts: None,
-            }],
-            Vec::new(),
-        )])
+        let host = PciHost::new(
+            vec![HostSegment::new(
+                0,
+                Box::new(bus),
+                vec![Function {
+                    address: STUCK,
+                    node: None,
+                    stream: Some(stream(0x20, 1)),
+                    interrupts: None,
+                }],
+                Vec::new(),
+            )],
+            Box::new(crate::test_support::NoRegisters),
+        )
         .unwrap();
         assert_eq!(
             host.quiesce(UNIT, &|_| false),
@@ -895,10 +1056,13 @@ mod tests {
             stream: None,
             interrupts: None,
         };
-        let host = PciHost::new(vec![
-            HostSegment::new(1, Box::new(bus(0)), vec![function(11)], Vec::new()),
-            HostSegment::new(0, Box::new(bus(0)), vec![function(10)], Vec::new()),
-        ])
+        let host = PciHost::new(
+            vec![
+                HostSegment::new(1, Box::new(bus(0)), vec![function(11)], Vec::new()),
+                HostSegment::new(0, Box::new(bus(0)), vec![function(10)], Vec::new()),
+            ],
+            Box::new(crate::test_support::NoRegisters),
+        )
         .unwrap();
         assert_eq!(
             change(&host, MasterTarget::Node(11), true, OWNER),

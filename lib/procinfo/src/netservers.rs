@@ -11,11 +11,10 @@
 //! per-record decode lives here, once for both sets.
 
 use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
-use tairix_abi::sysinfo::{NetInterfaceListRequest, SysinfoQueryId};
+use tairix_abi::sysinfo::SysinfoQueryId;
 use tairix_abi::{Errno, MAX_TIME_SERVERS};
 
-use crate::list::{walk_pages, ListError, WalkStep};
-use crate::request::CallError;
+use crate::list::{walk_records, ListError, WalkStep};
 use crate::transport::Transport;
 
 /// Number of resolver [`NetServerAddr`]s requested per page.
@@ -41,27 +40,15 @@ fn for_each_server(
     transport: &dyn Transport,
     query: SysinfoQueryId,
     page: u16,
-    mut sink: impl FnMut(&NetServerAddr) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&NetServerAddr) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         query,
         NetServerAddr::WIRE_LEN,
         page,
-        |offset, limit| {
-            NetInterfaceListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = NetServerAddr::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        NetServerAddr::from_bytes,
+        sink,
     )
 }
 
@@ -132,10 +119,11 @@ pub fn for_each_time_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::CallError;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::net_ipc::NetAddrFamily;
-    use tairix_abi::sysinfo::SysinfoRequestHeader;
+    use tairix_abi::sysinfo::{PageRequest, SysinfoRequestHeader};
 
     /// An in-memory `sysinfod` stand-in answering either server-set query
     /// from a fixed record set, decoding the request exactly as the real
@@ -165,7 +153,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = NetInterfaceListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

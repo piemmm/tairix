@@ -584,10 +584,10 @@ impl RxQueue {
             .ok_or(VirtioError::QueueSizeTooLarge)?;
         let pool = host
             .alloc_dma_zeroed(bytes)
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         let reasm = host
             .alloc_dma_zeroed(wire::MAX_FRAME_LEN)
-            .map_err(|_| VirtioError::DeviceFault)?;
+            .map_err(VirtioError::host_refused)?;
         Ok(Self {
             queue,
             pool,
@@ -1026,10 +1026,7 @@ impl RxQueue {
 /// Network device backed by a cross-arch virtio transport.
 ///
 /// `'h` bounds the borrow of the [`VirtioHost`] the driver allocates
-/// its DMA regions through. The host is *minted per driver load* by
-/// a `VirtioHostFactory` (the seam defined in `lib/virtio`)
-/// and lives only for the duration of that load, so the driver borrows
-/// it for `'h` rather than demanding a `'static` host (per-process pools are reclaimed when the driver unloads). This
+/// its DMA regions through, so the driver needs no `'static` host. This
 /// mirrors [`VirtioBlk`](../tairix_drv_storage_virtio_blk/struct.VirtioBlk.html).
 pub struct VirtioNet<'h, T: Transport> {
     transport: T,
@@ -1088,6 +1085,65 @@ pub struct VirtioNet<'h, T: Transport> {
     features: u64,
 }
 
+/// The features this driver takes of those a device `offered`.
+fn accepted_features(offered: u64) -> u64 {
+    // Negotiate only the features this driver implements. The sole
+    // extended feature is receive-checksum offload
+    // (`VIRTIO_NET_F_GUEST_CSUM`): with it the device may mark a
+    // received frame checksum-validated, or deliver it with a
+    // partial checksum the stack completes. A feature the device
+    // offers but this vocabulary does not name is left un-negotiated
+    // (no speculative surface).
+    let guest_csum = offered & wire::VIRTIO_NET_F_GUEST_CSUM != 0;
+    let host_csum = offered & wire::VIRTIO_NET_F_CSUM != 0;
+    // TCP segmentation offload requires the device to complete the
+    // transport checksum (`VIRTIO_NET_F_CSUM`) and to segment both IP
+    // families, since the stack advertises one family-neutral
+    // `TX_SEGMENT_TCP`; negotiate it only when all three hold.
+    let host_tso = host_csum
+        && offered & wire::VIRTIO_NET_F_HOST_TSO4 != 0
+        && offered & wire::VIRTIO_NET_F_HOST_TSO6 != 0;
+    // Mergeable receive buffers: the device may deliver one frame
+    // across several receive buffers, counting them in the first
+    // buffer's `num_buffers`. Negotiating it lets the driver post a
+    // pool of receive buffers (burst depth) and obliges it to
+    // reassemble a multi-buffer frame. It also grows every chain's
+    // header to 12 bytes on both rings.
+    let mergeable = offered & wire::VIRTIO_NET_F_MRG_RXBUF != 0;
+    // Multiqueue receive: the device steers received frames across
+    // several receive queues (`VIRTIO_NET_F_MQ`), selected at runtime
+    // through the control virtqueue (`VIRTIO_NET_F_CTRL_VQ`). Negotiate
+    // it only when both are offered and the device advertises more than
+    // one queue pair; otherwise stay single-queue.
+    let ctrl_vq = offered & wire::VIRTIO_NET_F_CTRL_VQ != 0;
+    let multiqueue = ctrl_vq && offered & wire::VIRTIO_NET_F_MQ != 0;
+    // Link-status sensing: with it the device exposes a live `status`
+    // word and raises a config-change interrupt on a link change, so
+    // the driver reports a real link state instead of a permanent
+    // "up". Without it the link is assumed up once operational.
+    let status_feature = offered & wire::VIRTIO_NET_F_STATUS != 0;
+    let mut driver_features = offered & TRANSPORT_FEATURES;
+    if guest_csum {
+        driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
+    }
+    if host_csum {
+        driver_features |= wire::VIRTIO_NET_F_CSUM;
+    }
+    if host_tso {
+        driver_features |= wire::VIRTIO_NET_F_HOST_TSO4 | wire::VIRTIO_NET_F_HOST_TSO6;
+    }
+    if mergeable {
+        driver_features |= wire::VIRTIO_NET_F_MRG_RXBUF;
+    }
+    if multiqueue {
+        driver_features |= wire::VIRTIO_NET_F_MQ | wire::VIRTIO_NET_F_CTRL_VQ;
+    }
+    if status_feature {
+        driver_features |= wire::VIRTIO_NET_F_STATUS;
+    }
+    driver_features
+}
+
 impl<'h, T: Transport> VirtioNet<'h, T> {
     /// Bring the device online.
     ///
@@ -1119,73 +1175,17 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         host: &'h dyn VirtioHost,
         machine: Option<&BootFacts>,
     ) -> Result<Self, VirtioError> {
-        transport.reset()?;
-        host.device_quiesced();
-        let mut status = Status::default().with(Status::ACKNOWLEDGE);
-        transport.set_status(status);
-        status = status.with(Status::DRIVER);
-        transport.set_status(status);
-        // Negotiate only the features this driver implements. The sole
-        // extended feature is receive-checksum offload
-        // (`VIRTIO_NET_F_GUEST_CSUM`): with it the device may mark a
-        // received frame checksum-validated, or deliver it with a
-        // partial checksum the stack completes. A feature the device
-        // offers but this vocabulary does not name is left un-negotiated
-        // (no speculative surface).
-        let device_features = transport.device_features();
-        let guest_csum = device_features & wire::VIRTIO_NET_F_GUEST_CSUM != 0;
-        let host_csum = device_features & wire::VIRTIO_NET_F_CSUM != 0;
-        // TCP segmentation offload requires the device to complete the
-        // transport checksum (`VIRTIO_NET_F_CSUM`) and to segment both IP
-        // families, since the stack advertises one family-neutral
-        // `TX_SEGMENT_TCP`; negotiate it only when all three hold.
-        let host_tso = host_csum
-            && device_features & wire::VIRTIO_NET_F_HOST_TSO4 != 0
-            && device_features & wire::VIRTIO_NET_F_HOST_TSO6 != 0;
-        // Mergeable receive buffers: the device may deliver one frame
-        // across several receive buffers, counting them in the first
-        // buffer's `num_buffers`. Negotiating it lets the driver post a
-        // pool of receive buffers (burst depth) and obliges it to
-        // reassemble a multi-buffer frame. It also grows every chain's
-        // header to 12 bytes on both rings.
-        let mergeable = device_features & wire::VIRTIO_NET_F_MRG_RXBUF != 0;
-        // Multiqueue receive: the device steers received frames across
-        // several receive queues (`VIRTIO_NET_F_MQ`), selected at runtime
-        // through the control virtqueue (`VIRTIO_NET_F_CTRL_VQ`). Negotiate
-        // it only when both are offered and the device advertises more than
-        // one queue pair; otherwise stay single-queue.
-        let ctrl_vq = device_features & wire::VIRTIO_NET_F_CTRL_VQ != 0;
-        let multiqueue = ctrl_vq && device_features & wire::VIRTIO_NET_F_MQ != 0;
-        // Link-status sensing: with it the device exposes a live `status`
-        // word and raises a config-change interrupt on a link change, so
-        // the driver reports a real link state instead of a permanent
-        // "up". Without it the link is assumed up once operational.
-        let status_feature = device_features & wire::VIRTIO_NET_F_STATUS != 0;
-        let mut driver_features = device_features & TRANSPORT_FEATURES;
-        if guest_csum {
-            driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
-        }
-        if host_csum {
-            driver_features |= wire::VIRTIO_NET_F_CSUM;
-        }
-        if host_tso {
-            driver_features |= wire::VIRTIO_NET_F_HOST_TSO4 | wire::VIRTIO_NET_F_HOST_TSO6;
-        }
-        if mergeable {
-            driver_features |= wire::VIRTIO_NET_F_MRG_RXBUF;
-        }
-        if multiqueue {
-            driver_features |= wire::VIRTIO_NET_F_MQ | wire::VIRTIO_NET_F_CTRL_VQ;
-        }
-        if status_feature {
-            driver_features |= wire::VIRTIO_NET_F_STATUS;
-        }
-        transport.set_driver_features(driver_features);
-        status = status.with(Status::FEATURES_OK);
-        transport.set_status(status);
-        if !transport.status().contains(Status::FEATURES_OK) {
-            return Err(VirtioError::FeaturesRejected);
-        }
+        let negotiated = tairix_virtio::negotiate(
+            &mut transport,
+            || host.device_quiesced(),
+            |offered| Ok::<_, VirtioError>(accepted_features(offered)),
+        )?;
+        let driver_features = negotiated.features;
+        let mut status = negotiated.status;
+        let took = |feature| driver_features & feature != 0;
+        let host_tso = took(wire::VIRTIO_NET_F_HOST_TSO4);
+        let mergeable = took(wire::VIRTIO_NET_F_MRG_RXBUF);
+        let multiqueue = took(wire::VIRTIO_NET_F_MQ);
         // Header + buffer sizing, shared by every receive queue. The modern
         // header always carries `num_buffers`, the legacy one only once
         // mergeable receive buffers are negotiated, and either device sizes
@@ -1214,9 +1214,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // `MAX_RX_QUEUES` bound, so a device advertising an over-large count
         // never sizes an unbounded number of pinned rings.
         let max_pairs = if multiqueue {
-            let mut buf = [0u8; 2];
-            transport.read_config(wire::CONFIG_MAX_VQ_PAIRS_OFFSET, &mut buf);
-            u16::from_le_bytes(buf)
+            transport.read_config_u16(wire::CONFIG_MAX_VQ_PAIRS_OFFSET)
         } else {
             1
         };
@@ -1293,10 +1291,10 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         for slot in tx_free.iter_mut().take(tx_inflight) {
             let header = host
                 .alloc_dma_zeroed(net_hdr_len)
-                .map_err(|_| VirtioError::DeviceFault)?;
+                .map_err(VirtioError::host_refused)?;
             let data = host
                 .alloc_dma_zeroed(max_tx_frame_len)
-                .map_err(|_| VirtioError::DeviceFault)?;
+                .map_err(VirtioError::host_refused)?;
             *slot = Some((header, data));
         }
         // Everything fallible above precedes DRIVER_OK, so a failure there
@@ -1669,7 +1667,7 @@ fn set_virtqueue_pairs<T: Transport>(
 ) -> Result<(), VirtioError> {
     let mut cmd = host
         .alloc_dma_zeroed(8)
-        .map_err(|_| VirtioError::DeviceFault)?;
+        .map_err(VirtioError::host_refused)?;
     {
         let bytes = cmd.as_bytes_mut();
         bytes[0] = wire::VIRTIO_NET_CTRL_MQ;

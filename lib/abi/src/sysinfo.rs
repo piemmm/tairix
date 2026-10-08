@@ -63,19 +63,21 @@ impl SysinfoQueryId {
     pub const GLOBAL_PROCESS_LIST: Self = Self(1);
     /// Read kernel memory statistics. Requires `CAP_SYSINFO_KERNEL`.
     pub const KERNEL_MEMORY_STATS: Self = Self(2);
-    /// Read the detected hardware tree, paged by a [`HardwareTreeRequest`].
+    /// Read the detected hardware tree, paged by a [`PageRequest`].
     /// Requires `CAP_SYSINFO_HW`.
     ///
     /// The reply is one [`HwTreeHeader`](crate::hwtree::HwTreeHeader) —
     /// whose `node_count` is the **total** node count of the snapshot and
     /// whose `generation` identifies it — followed by up to
-    /// [`HardwareTreeRequest::limit`] whole
+    /// [`PageRequest::limit`] whole
     /// [`HwNode`](crate::hwtree::HwNode) records starting at
-    /// [`HardwareTreeRequest::offset`]. A tree is larger than one framed
+    /// [`PageRequest::offset`]. A tree is larger than one framed
     /// reply can carry (one [`HwNode`](crate::hwtree::HwNode) is hundreds
     /// of bytes), so a client pages until it holds `node_count` records,
     /// checking that `generation` stayed constant across pages and
-    /// restarting the walk when the tree changed under it.
+    /// restarting the walk when the tree changed under it: no walk holds the
+    /// tree, so each page is read from the current snapshot whatever its
+    /// [`PageRequest::walk`].
     pub const HARDWARE_TREE: Self = Self(3);
     /// Read machine identity (machine ID, OS version). Requires none.
     pub const SYSTEM_IDENTITY: Self = Self(4);
@@ -128,7 +130,7 @@ impl SysinfoQueryId {
     pub const USER_DIRECTORY: Self = Self(10);
 
     /// List per-CPU execution-time accounting: one [`CpuTimeRecord`] per
-    /// online CPU, paged by a [`CpuTimeListRequest`].
+    /// online CPU, paged by a [`PageRequest`].
     ///
     /// Ungated: the aggregate busy/idle split is the `top`/`uptime`-class
     /// utilisation figure every user may see, and it exposes strictly less
@@ -138,7 +140,7 @@ impl SysinfoQueryId {
 
     /// List the kernel's seats: one [`SeatRecord`] per seat (seat id, live
     /// owner, lease generation, foreground console), paged by a
-    /// [`SeatListRequest`].
+    /// [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_HW` and is audited: like
     /// [`Self::HARDWARE_TREE`], the seat inventory names which task owns
@@ -160,7 +162,7 @@ impl SysinfoQueryId {
     /// Read the reclaimable-cache ledger: one [`ReclaimClassRecord`]
     /// per reclaim class with live payload/metadata bytes, entry count,
     /// and the per-class event counters, paged by a
-    /// [`ReclaimListRequest`].
+    /// [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited, exactly like its
     /// sibling [`Self::KERNEL_MEMORY_STATS`] (`plans/STRESSTEST.md` ST1).
@@ -177,7 +179,7 @@ impl SysinfoQueryId {
 
     /// Read per-CPU scheduler load figures: one [`CpuLoadRecord`] per
     /// online CPU (run-queue depth sample, context-switch and
-    /// preemption counters), paged by a [`CpuLoadRequest`].
+    /// preemption counters), paged by a [`PageRequest`].
     ///
     /// The cumulative busy/idle time split lives in
     /// [`Self::CPU_TIME_STATS`]; this query carries only the remainder,
@@ -190,7 +192,7 @@ impl SysinfoQueryId {
     /// List every managed network interface's static facts: one
     /// [`NetInterfaceFactsRecord`](crate::net_ipc::NetInterfaceFactsRecord)
     /// per interface (alias, kind, MAC, MTU, negotiated offloads,
-    /// receive-queue count), paged by a [`NetInterfaceListRequest`].
+    /// receive-queue count), paged by a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_HW` and is audited: the record carries the
     /// device's MAC address — stable hardware identity, the same class of
@@ -202,7 +204,7 @@ impl SysinfoQueryId {
     /// one
     /// [`NetInterfaceStateRecord`](crate::net_ipc::NetInterfaceStateRecord)
     /// per interface (link, bound v4/v6 addresses with their SLAAC/DAD
-    /// state), paged by a [`NetInterfaceListRequest`].
+    /// state), paged by a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the address book is
     /// system-wide, cross-principal network state, not a self-scoped
@@ -211,8 +213,8 @@ impl SysinfoQueryId {
 
     /// List the kernel IRQ table: one [`IrqRecord`] per bound interrupt
     /// line (line id, the owning driver task, the monotonic fire count
-    /// since boot, and whether the line is quarantined), paged by an
-    /// [`IrqListRequest`].
+    /// since boot, and whether the line is quarantined), paged by a
+    /// [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_HW` and is audited: like
     /// [`Self::HARDWARE_TREE`] and [`Self::SEAT_LIST`], the table names
@@ -226,7 +228,7 @@ impl SysinfoQueryId {
     /// Read the post-mortem crash record of each user task killed by an
     /// unresolvable memory fault: one [`CrashRecord`] per recorded crash
     /// (faulting identity, cause class, the load-relative `pc` and
-    /// backtrace, the register file), paged by a [`CrashRecordRequest`].
+    /// backtrace, the register file), paged by a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited. The record is the
     /// privileged-debugger analogue of a Linux kernel oops: it carries the
@@ -246,7 +248,7 @@ impl SysinfoQueryId {
     /// per interface (received/transmitted frames and bytes, receive
     /// drops, transmit resolution drops, and the stack-wide ICMP-error
     /// and reassembly-eviction defence counters), paged by a
-    /// [`NetInterfaceListRequest`].
+    /// [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the counters are
     /// system-wide, cross-principal network metrics — the same class of
@@ -273,7 +275,7 @@ impl SysinfoQueryId {
     /// [`NetSocketRecord`](crate::net_ipc::NetSocketRecord) per socket
     /// (protocol, state, local and peer addresses, the owning process,
     /// and the receive/send queue depths), paged by a
-    /// [`NetInterfaceListRequest`] — the `ss`/`netstat` socket table.
+    /// [`PageRequest`] — the `ss`/`netstat` socket table.
     ///
     /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the records name
     /// every principal's sockets and every connection's peer address, so
@@ -285,7 +287,7 @@ impl SysinfoQueryId {
     /// [`NetBondMemberRecord`](crate::net_ipc::NetBondMemberRecord) per
     /// (bond, member) pair (the owning bond, the member alias, whether the
     /// member is the bond's currently-active transmitting member, and its
-    /// link/eligibility health), paged by a [`NetInterfaceListRequest`].
+    /// link/eligibility health), paged by a [`PageRequest`].
     /// The surface `info:net/<bond>/members`,
     /// `state:net/<bond>/active-member`, and per-member health read.
     ///
@@ -298,7 +300,7 @@ impl SysinfoQueryId {
     /// List per-CPU processor information: one [`CpuInfoRecord`] per online
     /// CPU (core index, performance class, ISA-extension feature bits, raw
     /// identity register, the fixed reference/timebase frequency, and the
-    /// live measured core-clock frequency), paged by a [`CpuInfoListRequest`].
+    /// live measured core-clock frequency), paged by a [`PageRequest`].
     ///
     /// Ungated: vendor, model, ISA features, topology, and clock speed are
     /// the classic `/proc/cpuinfo` public hardware facts every user may read
@@ -311,7 +313,7 @@ impl SysinfoQueryId {
 
     /// Report the host's active recursive-resolver server set: one
     /// [`NetServerAddr`](crate::net_ipc::NetServerAddr) per server
-    /// (family and address), paged by a [`NetInterfaceListRequest`]. The
+    /// (family and address), paged by a [`PageRequest`]. The
     /// aggregated, deduplicated DHCP-learned ∪ statically-configured DNS
     /// servers the stack maintains (`plans/DNS.md` DNS2), the one source
     /// both a userland resolver client and this read share.
@@ -330,7 +332,7 @@ impl SysinfoQueryId {
     /// endpoint serving it, its current live availability, and the cumulative
     /// [`BlkHealthCounters`] the kernel
     /// filesystem client folded from every completion), paged by a
-    /// [`VolumeIoRequest`].
+    /// [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited: the per-device outcome
     /// tallies (resets, timeouts, reissues, medium errors) are kernel-wide
@@ -395,7 +397,7 @@ impl SysinfoQueryId {
     /// composer serves (its identity, level, health, width, geometry, the
     /// endpoint and node it is published on, and how far a running
     /// verification pass or rebuild has reached), paged by a
-    /// [`RaidListRequest`].
+    /// [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_HW` and is audited, like [`Self::HARDWARE_TREE`]
     /// and [`Self::IRQ_LIST`]: how a machine's storage is composed is
@@ -409,7 +411,7 @@ impl SysinfoQueryId {
     /// List the devices the RAID composer holds: one
     /// [`RaidMemberRecord`](crate::raid_admin::RaidMemberRecord) per array
     /// member *and* per unaffiliated candidate a new array could be created
-    /// over, paged by a [`RaidListRequest`].
+    /// over, paged by a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_HW` and is audited, for the same reason as
     /// [`Self::RAID_ARRAYS`]. This is the surface that names a bare disk: a
@@ -422,7 +424,7 @@ impl SysinfoQueryId {
     /// [`CacheLedgerRecord`] per registered cache — its label, its owner,
     /// its class, whether the figures are kernel-measured or self-reported,
     /// and the same nine figures [`Self::RECLAIM_STATS`] aggregates — paged
-    /// by a [`CacheLedgerListRequest`].
+    /// by a [`PageRequest`].
     ///
     /// This is the breakdown behind the class totals: a class row says
     /// "disposable UI holds 12 MiB", and these rows say which caches hold
@@ -430,6 +432,9 @@ impl SysinfoQueryId {
     /// service, the per-process glyph client caches, the desktop's icon
     /// artwork, the kernel's block and filesystem caches. Summing every row
     /// of a class reproduces that class's [`ReclaimClassRecord`] exactly.
+    /// The order is stable across pages — kernel rows in registration order,
+    /// then reported rows by reporter and label — so a walk over rows that
+    /// do not change between its pages sees each exactly once.
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited, exactly like
     /// [`Self::RECLAIM_STATS`]: naming every cache in the machine, with the
@@ -497,7 +502,7 @@ impl SysinfoQueryId {
 
     /// Read the composited-frame accounting every live desktop session has
     /// published: one [`DesktopFrameRecord`] per publishing process, paged
-    /// by a [`DesktopFrameStatsRequest`].
+    /// by a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_GLOBAL` and is audited: the answer names
     /// another principal — the session process — and its work, which is
@@ -508,7 +513,7 @@ impl SysinfoQueryId {
 
     /// Report the network time servers the host's DHCP client(s) learned:
     /// one [`NetServerAddr`](crate::net_ipc::NetServerAddr) per server,
-    /// paged by a [`NetInterfaceListRequest`]. The aggregated, deduplicated
+    /// paged by a [`PageRequest`]. The aggregated, deduplicated
     /// DHCPv4 option 42 / DHCPv6 option 56 servers of every managed
     /// interface's current lease (`plans/TIMESYNC.md` §3).
     ///
@@ -522,7 +527,7 @@ impl SysinfoQueryId {
 
     /// List per-volume storage **service** counters: one
     /// [`VolumeIoStatsRecord`] per fault-aware block-backed volume, paged by
-    /// a [`VolumeIoRequest`].
+    /// a [`PageRequest`].
     ///
     /// Ungated for the same reason as [`Self::CPU_TIME_STATS`]: a
     /// machine-wide throughput and utilisation figure is one every user may
@@ -536,7 +541,7 @@ impl SysinfoQueryId {
 
     /// List per-volume storage **queue** occupancy: one
     /// [`VolumeIoQueueRecord`] per fault-aware block-backed volume, paged by
-    /// a [`VolumeIoRequest`].
+    /// a [`PageRequest`].
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited, the exact analogue of
     /// [`Self::CPU_LOAD`] and for the same reason: a queue depth is a driver
@@ -549,7 +554,7 @@ impl SysinfoQueryId {
 
     /// List per-graphics-device statistics: one packed
     /// [`DisplayStats`](crate::display_ipc::DisplayStats) per device a
-    /// display service drives, paged by a [`DeviceStatsRequest`].
+    /// display service drives, paged by a [`PageRequest`].
     ///
     /// The record is the display service's own reply type rather than a
     /// second spelling of it, exactly as [`Self::RAID_ARRAYS`] serves the
@@ -617,6 +622,33 @@ impl SysinfoQueryId {
     /// state enumerates which accounts are live, and credentials stay behind
     /// `CAP_USERS_READ`.
     pub const SELF_ACCOUNT: Self = Self(43);
+
+    /// List every discovered DMA translation unit: one [`DmaUnitRecord`] —
+    /// its family, whether it translates or why not, how it raises its
+    /// faults, the domains it holds, and its fault counters — paged by a
+    /// [`PageRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited, like [`Self::IRQ_LIST`]:
+    /// which devices a unit confines, and how often they fault, is hardware
+    /// topology rather than a per-principal fact.
+    pub const DMA_UNITS: Self = Self(44);
+
+    /// List the isolation groups an owner has taken: one [`DmaGroupRecord`]
+    /// per group — its unit and the node and generation holding it — paged
+    /// by a [`PageRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited, for the same reason as
+    /// [`Self::DMA_UNITS`].
+    pub const DMA_GROUPS: Self = Self(45);
+
+    /// List the translation state of every node a unit translates for an
+    /// owner: one [`DmaNodeRecord`] — its unit and group, its owner's
+    /// generation and state, and what its domain maps — paged by a
+    /// [`PageRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited, for the same reason as
+    /// [`Self::DMA_UNITS`].
+    pub const DMA_NODES: Self = Self(46);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -775,6 +807,16 @@ pub enum IntrospectDomain {
     /// [`Self::UserDirectory`] pairing does not already publish, beyond
     /// that account's own display fields.
     Account = 24,
+    /// The discovered DMA translation units: every unit, one packed
+    /// [`DmaUnitRecord`], with the syscall's `arg` naming the record offset
+    /// to page from.
+    DmaUnits = 25,
+    /// The isolation groups an owner has taken: one packed
+    /// [`DmaGroupRecord`] each, paged by the syscall's `arg`.
+    DmaGroups = 26,
+    /// The nodes units translate for an owner: one packed
+    /// [`DmaNodeRecord`] each, paged by the syscall's `arg`.
+    DmaNodes = 27,
 }
 
 impl IntrospectDomain {
@@ -814,6 +856,9 @@ impl IntrospectDomain {
             22 => Ok(Self::SystemConfig),
             23 => Ok(Self::GroupDirectory),
             24 => Ok(Self::Account),
+            25 => Ok(Self::DmaUnits),
+            26 => Ok(Self::DmaGroups),
+            27 => Ok(Self::DmaNodes),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1143,6 +1188,24 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         required_capability: None,
         audit: false,
     },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::DMA_UNITS,
+        name: "dma_units",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::DMA_GROUPS,
+        name: "dma_groups",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::DMA_NODES,
+        name: "dma_nodes",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding in [`ENCODED_QUERY_TABLE`].
@@ -1339,7 +1402,6 @@ pub fn encode_request(
         query,
         reserved: 0,
         payload_len,
-        request_id: 0,
     };
     out[..SysinfoRequestHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
     out[SysinfoRequestHeader::WIRE_LEN..total].copy_from_slice(payload);
@@ -1426,7 +1488,7 @@ pub struct SysinfoRequestHeader {
     pub magic: u32,
     /// `sysinfo` protocol version; see [`SYSINFO_VERSION_CURRENT`].
     pub version: u16,
-    /// Implementation-defined flag bits; reserved bits must be zero.
+    /// No flag is defined in `sysinfo-v1`; must be zero.
     pub flags: u16,
     /// Identifies which query the payload addresses.
     pub query: SysinfoQueryId,
@@ -1434,13 +1496,11 @@ pub struct SysinfoRequestHeader {
     pub reserved: u16,
     /// Length of the typed request payload that follows the header.
     pub payload_len: u32,
-    /// Caller-chosen correlation token echoed in the response.
-    pub request_id: u64,
 }
 
 impl SysinfoRequestHeader {
     /// Encoded size of a [`SysinfoRequestHeader`] on the wire.
-    pub const WIRE_LEN: usize = 24;
+    pub const WIRE_LEN: usize = 16;
 
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
@@ -1452,7 +1512,6 @@ impl SysinfoRequestHeader {
         put_u16(&mut out, 8, self.query.as_u16());
         put_u16(&mut out, 10, self.reserved);
         put_u32(&mut out, 12, self.payload_len);
-        put_u64(&mut out, 16, self.request_id);
         out
     }
 
@@ -1460,9 +1519,9 @@ impl SysinfoRequestHeader {
     ///
     /// Returns:
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the magic word does not match, or the
-    ///   reserved field is non-zero (reserved-must-be-zero violations are
-    ///   wire corruption).
+    /// * [`Errno::BadMagic`] if the magic word does not match, or the flags
+    ///   or the reserved field is non-zero (reserved-must-be-zero violations
+    ///   are wire corruption).
     /// * [`Errno::AbiVersionUnsupported`] if `version` is not
     ///   [`SYSINFO_VERSION_CURRENT`].
     /// * [`Errno::OutOfRange`] if `query` exceeds [`SysinfoQueryId::MAX`].
@@ -1483,14 +1542,13 @@ impl SysinfoRequestHeader {
         let flags = read_u16(bytes, 6);
         let query = SysinfoQueryId::from_raw(read_u16(bytes, 8))?;
         let reserved = read_u16(bytes, 10);
-        if reserved != 0 {
+        if flags != 0 || reserved != 0 {
             return Err(Errno::BadMagic);
         }
         let payload_len = read_u32(bytes, 12);
         if payload_len > SYSINFO_MAX_PAYLOAD_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        let request_id = read_u64(bytes, 16);
         Ok(Self {
             magic,
             version,
@@ -1498,32 +1556,41 @@ impl SysinfoRequestHeader {
             query,
             reserved,
             payload_len,
-            request_id,
         })
     }
 }
 
-/// Request payload for the process-list queries
-/// ([`SysinfoQueryId::SELF_PROCESS_LIST`] and
-/// [`SysinfoQueryId::GLOBAL_PROCESS_LIST`]).
+/// Request payload of every paged list query: skip `offset` records and
+/// answer at most `limit` whole ones, so a fixed-size transport buffer never
+/// bounds how long a list may be.
 ///
-/// The response is a sequence of [`ProcessRecord`]s; the client pages
-/// through it with `offset`/`limit` so a fixed-size transport buffer never
-/// has to hold every process at once.
+/// Every page of one walk names the same `walk`, and is answered from the
+/// list as that walk's first page read it: the service reads the list once a
+/// walk, and a list changing under the walk can neither skip nor repeat a
+/// record. A walk the service let go before it ended is answered
+/// [`Errno::Interrupted`], and is started again. The hardware tree alone is
+/// not held, its generation guarding a walk instead
+/// ([`SysinfoQueryId::HARDWARE_TREE`]).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct ProcessListRequest {
+pub struct PageRequest {
     /// Number of leading records to skip.
     pub offset: u32,
     /// Maximum number of records the caller will accept in the response.
     pub limit: u16,
     /// Reserved flag bits; must be zero in `sysinfo-v1`.
     pub flags: u16,
+    /// The walk the page is part of, distinct among the caller's own walks;
+    /// [`PageRequest::FRESH`] reads the list afresh for this page alone.
+    pub walk: u32,
 }
 
-impl ProcessListRequest {
+impl PageRequest {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
+    pub const WIRE_LEN: usize = 12;
+
+    /// The [`walk`](Self::walk) of a page part of no walk.
+    pub const FRESH: u32 = 0;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -1532,13 +1599,17 @@ impl ProcessListRequest {
         put_u32(&mut out, 0, self.offset);
         put_u16(&mut out, 4, self.limit);
         put_u16(&mut out, 6, self.flags);
+        put_u32(&mut out, 8, self.walk);
         out
     }
 
     /// Decode from `bytes`.
     ///
-    /// Returns [`Errno::BufferTooSmall`] if the slice is short, or
-    /// [`Errno::BadMagic`] if a reserved flag bit is set.
+    /// Returns [`Errno::BufferTooSmall`] if the slice is short,
+    /// [`Errno::BadMagic`] if a reserved flag bit is set, or
+    /// [`Errno::LengthOutOfRange`] for a zero `limit`: a page that can hold
+    /// nothing is never shorter than its limit, so a walk ending at its first
+    /// short page would ask for ever.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -1547,10 +1618,15 @@ impl ProcessListRequest {
         if flags != 0 {
             return Err(Errno::BadMagic);
         }
+        let limit = read_u16(bytes, 4);
+        if limit == 0 {
+            return Err(Errno::LengthOutOfRange);
+        }
         Ok(Self {
             offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
+            limit,
             flags,
+            walk: read_u32(bytes, 8),
         })
     }
 }
@@ -2075,53 +2151,6 @@ impl LoadAverage {
     }
 }
 
-/// Request payload for [`SysinfoQueryId::USER_DIRECTORY`]: the record
-/// window to return, mirroring the process-list paging shape.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct UserDirectoryRequest {
-    /// Zero-based index of the first record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl UserDirectoryRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// Returns [`Errno::BufferTooSmall`] if the slice is short, or
-    /// [`Errno::BadMagic`] if a reserved flag bit is set.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// One account entry in a [`SysinfoQueryId::USER_DIRECTORY`] response: the
 /// numeric uid and the account's username, and **nothing else** — no
 /// password material, home, shell, or grant set. The `/etc/passwd`-class
@@ -2201,55 +2230,6 @@ impl UserDirectoryRecord {
             uid: read_u32(bytes, 0),
             name_len,
             name,
-        })
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::GROUP_DIRECTORY`]: the record
-/// window to return, the group sibling of [`UserDirectoryRequest`].
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct GroupDirectoryRequest {
-    /// Zero-based index of the first record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl GroupDirectoryRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::BufferTooSmall`] if the slice is short, or
-    /// [`Errno::BadMagic`] if a reserved flag bit is set.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
         })
     }
 }
@@ -2571,60 +2551,6 @@ fn bounded(declared: u8, bound: usize) -> Result<u8, Errno> {
     Ok(declared)
 }
 
-/// Request payload for [`SysinfoQueryId::CPU_TIME_STATS`].
-///
-/// Structurally parallel to [`MountListRequest`] but a distinct frozen
-/// payload: each `sysinfo-v1` query owns its argument type. The response is
-/// a sequence of [`CpuTimeRecord`]s; the client pages through it with
-/// `offset`/`limit` so a fixed-size transport buffer never bounds how many
-/// CPUs the machine may have.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct CpuTimeListRequest {
-    /// Index of the first CPU to return.
-    pub offset: u32,
-    /// Maximum number of [`CpuTimeRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl CpuTimeListRequest {
-    /// Encoded size of a [`CpuTimeListRequest`] on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` into its little-endian wire representation.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`CpuTimeListRequest`].
-    ///
-    /// Returns:
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero
-    ///   (reserved-must-be-zero violations are wire corruption).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// One CPU's execution-time accounting inside a
 /// [`SysinfoQueryId::CPU_TIME_STATS`] response.
 ///
@@ -2681,107 +2607,6 @@ impl CpuTimeRecord {
             reserved,
             busy_ns: read_u64(bytes, 8),
             idle_ns: read_u64(bytes, 16),
-        })
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::SEAT_LIST`].
-///
-/// Identical paging shape to [`CpuTimeListRequest`]: `offset` names the
-/// first seat-record index to return and `limit` bounds the page.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct SeatListRequest {
-    /// Index of the first seat record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl SeatListRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
-    /// a reserved flag bit is set (fail closed on an unknown request shape).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::HARDWARE_TREE`].
-///
-/// Identical paging shape to [`SeatListRequest`]: `offset` names the first
-/// [`HwNode`](crate::hwtree::HwNode) index to return and `limit` bounds the
-/// page. The reply prefixes every page with the snapshot's
-/// [`HwTreeHeader`](crate::hwtree::HwTreeHeader) so the client always sees
-/// the total node count and the generation the page was served from.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct HardwareTreeRequest {
-    /// Index of the first node record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl HardwareTreeRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
-    /// a reserved flag bit is set (fail closed on an unknown request shape).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
         })
     }
 }
@@ -3412,161 +3237,43 @@ impl BlkHealthTransition {
     }
 }
 
-/// Request payload for [`SysinfoQueryId::MOUNT_LIST`].
-///
-/// Structurally parallel to [`ProcessListRequest`] but a distinct frozen
-/// payload: each `sysinfo-v1` query owns its argument type, exactly as each
-/// syscall owns its argument shape. The response is a
-/// sequence of [`MountRecord`]s; the client pages through it with
-/// `offset`/`limit` so a fixed-size transport buffer never has to hold every
-/// mount at once.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct MountListRequest {
-    /// Index of the first mount to return.
-    pub offset: u32,
-    /// Maximum number of [`MountRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl MountListRequest {
-    /// Encoded size of a [`MountListRequest`] on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` into its little-endian wire representation.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`MountListRequest`].
-    ///
-    /// Returns:
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero
-    ///   (reserved-must-be-zero violations are wire corruption).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::NET_INTERFACE_FACTS`] and
-/// [`SysinfoQueryId::NET_INTERFACE_STATE`]: the record window to
-/// return, in the stack's stable interface-table order.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct NetInterfaceListRequest {
-    /// Index of the first interface to return.
-    pub offset: u32,
-    /// Maximum number of records the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl NetInterfaceListRequest {
-    /// Encoded size of a [`NetInterfaceListRequest`] on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` into its little-endian wire representation.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`NetInterfaceListRequest`].
-    ///
-    /// Returns:
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero
-    ///   (reserved-must-be-zero violations are wire corruption).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::NET_INTERFACE_RATES`]: the record
-/// window to return (in the stack's stable interface-table order) plus the
-/// rate-averaging window the caller requests.
+/// Request payload for [`SysinfoQueryId::NET_INTERFACE_RATES`]: the page of
+/// interface records to return plus the rate-averaging window the caller
+/// requests.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NetInterfaceRatesRequest {
-    /// Index of the first interface to return.
-    pub offset: u32,
-    /// Maximum number of records the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
+    /// The window of interface records to return.
+    pub page: PageRequest,
     /// The rate-averaging window the caller requests.
     pub window: Duration64,
 }
 
 impl NetInterfaceRatesRequest {
-    /// Encoded size of a [`NetInterfaceRatesRequest`] on the wire: the
-    /// paging header (8) followed by the window (12).
-    pub const WIRE_LEN: usize = 8 + Duration64::WIRE_LEN;
+    /// Encoded size on the wire: the page, then the window.
+    pub const WIRE_LEN: usize = PageRequest::WIRE_LEN + Duration64::WIRE_LEN;
 
     /// Encode `self` into its little-endian wire representation.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out[8..8 + Duration64::WIRE_LEN].copy_from_slice(&self.window.to_le_bytes());
+        let (page, window) = out.split_at_mut(PageRequest::WIRE_LEN);
+        page.copy_from_slice(&self.page.to_le_bytes());
+        window.copy_from_slice(&self.window.to_le_bytes());
         out
     }
 
     /// Decode `bytes` into a [`NetInterfaceRatesRequest`].
     ///
-    /// Returns:
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
-    /// * [`Errno::TimestampOutOfRange`] if the window is non-canonical.
+    /// Returns [`Errno::BufferTooSmall`] if the slice is short, the
+    /// [`PageRequest`] refusal for a malformed page, or
+    /// [`Errno::TimestampOutOfRange`] for a non-canonical window.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        let window = Duration64::from_bytes(&bytes[8..8 + Duration64::WIRE_LEN])?;
+        let window = bytes
+            .get(PageRequest::WIRE_LEN..Self::WIRE_LEN)
+            .ok_or(Errno::BufferTooSmall)?;
         Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-            window,
+            page: PageRequest::from_bytes(bytes)?,
+            window: Duration64::from_bytes(window)?,
         })
     }
 }
@@ -4319,58 +4026,6 @@ pub fn reclaim_class_from_name(name: &str) -> Option<u8> {
         .and_then(|index| u8::try_from(index).ok())
 }
 
-/// Request payload for [`SysinfoQueryId::RECLAIM_STATS`].
-///
-/// Structurally parallel to [`CpuTimeListRequest`] but a distinct frozen
-/// payload: each `sysinfo-v1` query owns its argument type. The response
-/// is a sequence of [`ReclaimClassRecord`]s paged with `offset`/`limit`.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct ReclaimListRequest {
-    /// Index of the first class record to return.
-    pub offset: u32,
-    /// Maximum number of [`ReclaimClassRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl ReclaimListRequest {
-    /// Encoded size of a [`ReclaimListRequest`] on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` into its little-endian wire representation.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`ReclaimListRequest`].
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// One reclaim class's ledger figures inside a
 /// [`SysinfoQueryId::RECLAIM_STATS`] response.
 ///
@@ -4826,59 +4481,6 @@ fn is_printable_label(label: &[u8]) -> bool {
     !label.is_empty() && label.iter().all(|&byte| (0x20..=0x7e).contains(&byte))
 }
 
-/// Request payload for [`SysinfoQueryId::CACHE_LEDGERS`].
-///
-/// The response is a sequence of [`CacheLedgerRecord`]s paged with
-/// `offset`/`limit`. Ordering is stable across paged calls: kernel rows
-/// first in registration order, then reported rows ordered by reporter and
-/// label, so a client walking the list never skips or repeats a row.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct CacheLedgerListRequest {
-    /// Index of the first cache row to return.
-    pub offset: u32,
-    /// Maximum number of [`CacheLedgerRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl CacheLedgerListRequest {
-    /// Encoded size of a [`CacheLedgerListRequest`] on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` into its little-endian wire representation.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`CacheLedgerListRequest`].
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// Most cache rows one process may report in a single
 /// [`SysinfoQueryId::CACHE_REPORT`].
 ///
@@ -4948,61 +4550,6 @@ impl CacheReportRequest {
             count,
             flags,
             reserved,
-        })
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::DESKTOP_FRAME_STATS`].
-///
-/// The same paging shape as [`SeatListRequest`]: `offset` names the first
-/// [`DesktopFrameRecord`] to return and `limit` bounds the page. A machine
-/// holds one publisher per compositing session, so a page is small — but the
-/// count is a function of how many seats and switched-away sessions exist,
-/// never a fixed one, so it is paged like every other list.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct DesktopFrameStatsRequest {
-    /// Index of the first record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl DesktopFrameStatsRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than [`Self::WIRE_LEN`].
-    /// * [`Errno::BadMagic`] if a reserved flag bit is set (fail closed on an
-    ///   unknown request shape).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
         })
     }
 }
@@ -5477,58 +5024,6 @@ impl RamzipStats {
     }
 }
 
-/// Request payload for [`SysinfoQueryId::CPU_LOAD`].
-///
-/// Structurally parallel to [`CpuTimeListRequest`] but a distinct frozen
-/// payload: each `sysinfo-v1` query owns its argument type. The response
-/// is a sequence of [`CpuLoadRecord`]s paged with `offset`/`limit`.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct CpuLoadRequest {
-    /// Index of the first CPU to return.
-    pub offset: u32,
-    /// Maximum number of [`CpuLoadRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl CpuLoadRequest {
-    /// Encoded size of a [`CpuLoadRequest`] on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` into its little-endian wire representation.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`CpuLoadRequest`].
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// One CPU's scheduler load figures inside a
 /// [`SysinfoQueryId::CPU_LOAD`] response.
 ///
@@ -5627,58 +5122,6 @@ impl CpuCoreClass {
             1 => Ok(Self::Efficiency),
             _ => Err(Errno::OutOfRange),
         }
-    }
-}
-
-/// Request payload for [`SysinfoQueryId::CPU_INFO`].
-///
-/// Same paging shape as [`CpuLoadRequest`]: `offset` names the first CPU
-/// index to return and `limit` bounds the page. Each `sysinfo-v1` query
-/// owns its own frozen payload type.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct CpuInfoListRequest {
-    /// Index of the first CPU to return.
-    pub offset: u32,
-    /// Maximum number of [`CpuInfoRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl CpuInfoListRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
     }
 }
 
@@ -5846,55 +5289,6 @@ impl CpuInfoRecord {
     }
 }
 
-/// Request payload for [`SysinfoQueryId::IRQ_LIST`].
-///
-/// Identical paging shape to [`SeatListRequest`]: `offset` names the first
-/// interrupt-record index to return and `limit` bounds the page.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct IrqListRequest {
-    /// Index of the first interrupt record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl IrqListRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
-    ///
-    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
-    /// a reserved flag bit is set (fail closed on an unknown request shape).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// [`IrqRecord::flags`] bit: the line is **quarantined** — the kernel's
 /// runaway-interrupt safety net disabled it after it fired far faster than
 /// any correctly-serviced device could, so it is kept masked and delivers
@@ -5907,11 +5301,11 @@ pub const IRQ_FLAG_QUARANTINED: u32 = 1 << 0;
 ///
 /// Every field is filled from the kernel's own IRQ table — the
 /// kernel-attested owning task, never a caller claim. The list carries one
-/// record per *bound* line, in ascending line order, so a client walking it
-/// never skips or repeats a record. `count` is monotonic since boot (it is
-/// not reset when a line is re-bound), the classic `/proc/interrupts`-style
-/// per-line total; `flags` reports the line's containment state
-/// ([`IRQ_FLAG_QUARANTINED`]).
+/// record per *bound* line, in ascending line order, so a walk over lines
+/// that stay bound between its pages sees each once. `count` is monotonic
+/// since boot (it is not reset when a line is re-bound), the classic
+/// `/proc/interrupts`-style per-line total; `flags` reports the line's
+/// containment state ([`IRQ_FLAG_QUARANTINED`]).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct IrqRecord {
@@ -5970,86 +5364,253 @@ impl IrqRecord {
     }
 }
 
-/// Request payload for the three per-volume I/O reads —
-/// [`SysinfoQueryId::VOLUME_IO_STATS`], [`SysinfoQueryId::VOLUME_IO_QUEUE`]
-/// and [`SysinfoQueryId::VOLUME_IO_HEALTH`].
-///
-/// One request type serves all three because they page identically over the
-/// same volume set: `offset` names the first record index to return and
-/// `limit` bounds the page, the same shape [`IrqListRequest`] uses.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct VolumeIoRequest {
-    /// Index of the first record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
+/// The family a DMA translation unit is driven by.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaUnitFamily {
+    /// No family here drives it.
+    Unmatched = 0,
+    /// Intel VT-d.
+    Vtd = 1,
+    /// AMD-Vi.
+    AmdVi = 2,
+    /// Arm `SMMUv3`.
+    Smmuv3 = 3,
+    /// The RISC-V IOMMU.
+    Riscv = 4,
+    /// A virtio-iommu PCI function.
+    VirtioPci = 5,
+    /// A virtio-iommu MMIO slot.
+    VirtioMmio = 6,
 }
 
-impl VolumeIoRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode from `bytes`.
+impl DmaUnitFamily {
+    /// Decode a raw family, failing closed on an unknown one.
     ///
-    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
-    /// a reserved flag bit is set (fail closed on an unknown request shape).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
+    /// # Errors
+    ///
+    /// [`Errno::BadMagic`] for a value no family has.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Unmatched),
+            1 => Ok(Self::Vtd),
+            2 => Ok(Self::AmdVi),
+            3 => Ok(Self::Smmuv3),
+            4 => Ok(Self::Riscv),
+            5 => Ok(Self::VirtioPci),
+            6 => Ok(Self::VirtioMmio),
+            _ => Err(Errno::BadMagic),
         }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
+    }
+
+    /// The family as an administrator reads it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unmatched => "unmatched",
+            Self::Vtd => "vt-d",
+            Self::AmdVi => "amd-vi",
+            Self::Smmuv3 => "smmu-v3",
+            Self::Riscv => "riscv-iommu",
+            Self::VirtioPci | Self::VirtioMmio => "virtio-iommu",
         }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
     }
 }
 
-/// Request payload for the per-device statistics reads —
-/// [`SysinfoQueryId::GPU_DEVICE_STATS`].
-///
-/// The same shape as every other paged read: `offset` names the first record
-/// index to return and `limit` bounds the page, so a fixed transport buffer
-/// never bounds how many graphics devices a machine may have.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct DeviceStatsRequest {
-    /// Index of the first record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
+/// What became of a discovered unit.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaUnitState {
+    /// It translates.
+    Translating = 1,
+    /// No family drives it: the devices behind it master no DMA.
+    Unmatched = 2,
+    /// Its node names no register window the kernel can map.
+    NoRegisters = 3,
+    /// Its family could not take it over or enable it.
+    Failed = 4,
+    /// The firmware table describing it is malformed, so no PCI function it
+    /// would have described was published: none masters DMA.
+    Withheld = 5,
+    /// The firmware table describing it is malformed, and the administrator
+    /// chose to publish the PCI functions it would have described
+    /// untranslated: their DMA is unconfined.
+    Unconfined = 6,
+    /// Its node does not say it snoops the CPU's caches, through which its
+    /// tables, queues and records are kept: the devices behind it master no
+    /// DMA.
+    Unsnooped = 7,
 }
 
-impl DeviceStatsRequest {
+impl DmaUnitState {
+    /// Decode a raw state, failing closed on an unknown one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BadMagic`] for a value no state has.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            1 => Ok(Self::Translating),
+            2 => Ok(Self::Unmatched),
+            3 => Ok(Self::NoRegisters),
+            4 => Ok(Self::Failed),
+            5 => Ok(Self::Withheld),
+            6 => Ok(Self::Unconfined),
+            7 => Ok(Self::Unsnooped),
+            _ => Err(Errno::BadMagic),
+        }
+    }
+
+    /// The state as an administrator reads it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Translating => "translating",
+            Self::Unmatched => "unmatched",
+            Self::NoRegisters => "no-registers",
+            Self::Failed => "failed",
+            Self::Withheld => "withheld",
+            Self::Unconfined => "unconfined",
+            Self::Unsnooped => "unsnooped",
+        }
+    }
+}
+
+/// How a translating unit raises its faults.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaFaultSignal {
+    /// It translates nothing, so it raises none.
+    None = 0,
+    /// On the wired line its node names.
+    Wired = 1,
+    /// As a message the kernel gave it.
+    Message = 2,
+    /// Nowhere the kernel hears: its faults are unrouted.
+    Unheard = 3,
+}
+
+impl DmaFaultSignal {
+    /// Decode a raw signal, failing closed on an unknown one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BadMagic`] for a value no signal has.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Wired),
+            2 => Ok(Self::Message),
+            3 => Ok(Self::Unheard),
+            _ => Err(Errno::BadMagic),
+        }
+    }
+
+    /// The signal as an administrator reads it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Wired => "wired",
+            Self::Message => "message",
+            Self::Unheard => "unheard",
+        }
+    }
+}
+
+/// Where a translating unit's domains' translations live.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaTables {
+    /// It translates nothing.
+    None = 0,
+    /// In page tables it walks at its first stage.
+    FirstStage = 1,
+    /// In page tables it walks at its second stage.
+    SecondStage = 2,
+    /// In the unit itself, each installed by a request.
+    Kept = 3,
+}
+
+impl DmaTables {
+    /// Decode a raw value, failing closed on an unknown one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BadMagic`] for a value none has.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::None),
+            1 => Ok(Self::FirstStage),
+            2 => Ok(Self::SecondStage),
+            3 => Ok(Self::Kept),
+            _ => Err(Errno::BadMagic),
+        }
+    }
+
+    /// The tables as an administrator reads them.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FirstStage => "stage-1",
+            Self::SecondStage => "stage-2",
+            Self::Kept => "kept",
+        }
+    }
+}
+
+/// One discovered DMA translation unit inside a
+/// [`SysinfoQueryId::DMA_UNITS`] response: those translating in discovery
+/// order, then those stranded. Units a malformed firmware table described
+/// have no node of their own, so their one record names the tree's root.
+///
+/// The counters run from boot: `faults_recorded` the faults the unit's
+/// budget let through to the audit trail, `faults_dropped` those past it,
+/// and `streams_silenced` the streams a storm silenced.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaUnitRecord {
+    /// The unit's hardware-tree node.
+    pub node: u32,
+    /// Its family.
+    pub family: DmaUnitFamily,
+    /// Whether it translates, or why not.
+    pub state: DmaUnitState,
+    /// How it raises its faults.
+    pub faults: DmaFaultSignal,
+    /// Where its translations live.
+    pub tables: DmaTables,
+    /// Nodes whose owner holds a live domain on it.
+    pub owners: u32,
+    /// Streams no owner holds that keep firmware's windows on it.
+    pub firmware_streams: u32,
+    /// Faults recorded since boot.
+    pub faults_recorded: u64,
+    /// Faults dropped past the unit's budget since boot.
+    pub faults_dropped: u64,
+    /// Streams silenced after a storm since boot.
+    pub streams_silenced: u64,
+}
+
+impl DmaUnitRecord {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
+    pub const WIRE_LEN: usize = 40;
 
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
+        put_u32(&mut out, 0, self.node);
+        out[4] = self.family as u8;
+        out[5] = self.state as u8;
+        out[6] = self.faults as u8;
+        out[7] = self.tables as u8;
+        put_u32(&mut out, 8, self.owners);
+        put_u32(&mut out, 12, self.firmware_streams);
+        put_u64(&mut out, 16, self.faults_recorded);
+        put_u64(&mut out, 24, self.faults_dropped);
+        put_u64(&mut out, 32, self.streams_silenced);
         out
     }
 
@@ -6057,73 +5618,240 @@ impl DeviceStatsRequest {
     ///
     /// # Errors
     ///
-    /// [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if a
-    /// reserved flag bit is set (fail closed on an unknown request shape).
+    /// [`Errno::BufferTooSmall`] if short, [`Errno::BadMagic`] for an
+    /// unknown family, state, signal or table kind, or for a record its own
+    /// state contradicts: a translating unit no family drives or with no
+    /// signal or tables, an unmatched one naming a family, a withheld or
+    /// unconfined one naming no family or a node, or a stranded one with a
+    /// signal, tables, owners or counts.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
+        let record = Self {
+            node: read_u32(bytes, 0),
+            family: DmaUnitFamily::from_u8(bytes[4])?,
+            state: DmaUnitState::from_u8(bytes[5])?,
+            faults: DmaFaultSignal::from_u8(bytes[6])?,
+            tables: DmaTables::from_u8(bytes[7])?,
+            owners: read_u32(bytes, 8),
+            firmware_streams: read_u32(bytes, 12),
+            faults_recorded: read_u64(bytes, 16),
+            faults_dropped: read_u64(bytes, 24),
+            streams_silenced: read_u64(bytes, 32),
+        };
+        let matched = record.family != DmaUnitFamily::Unmatched;
+        let consistent = match record.state {
+            DmaUnitState::Translating => {
+                matched && record.faults != DmaFaultSignal::None && record.tables != DmaTables::None
+            }
+            stranded => {
+                let named = match stranded {
+                    DmaUnitState::Unmatched => !matched,
+                    DmaUnitState::Failed | DmaUnitState::Unsnooped => matched,
+                    DmaUnitState::Withheld | DmaUnitState::Unconfined => {
+                        matched && record.node == crate::hwtree::HW_NODE_ROOT_ID
+                    }
+                    DmaUnitState::NoRegisters | DmaUnitState::Translating => true,
+                };
+                named
+                    && record.faults == DmaFaultSignal::None
+                    && record.tables == DmaTables::None
+                    && record.owners == 0
+                    && record.firmware_streams == 0
+                    && record.faults_recorded == 0
+                    && record.faults_dropped == 0
+                    && record.streams_silenced == 0
+            }
+        };
+        if consistent {
+            Ok(record)
+        } else {
+            Err(Errno::BadMagic)
         }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
     }
 }
 
-/// Request payload for [`SysinfoQueryId::RAID_ARRAYS`] and
-/// [`SysinfoQueryId::RAID_MEMBERS`].
-///
-/// One request type serves both because they page identically: `offset` names
-/// the first record to return and `limit` bounds the page. A limit above the
-/// composer's own page bound is clamped by the broker rather than refused,
-/// exactly as the other paged reads behave.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct RaidListRequest {
-    /// Index of the first record to return.
-    pub offset: u32,
-    /// Maximum number of records to return.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
+/// Where a node's owner stands with its domain.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaOwnerState {
+    /// Its domain is being made, under the owner's own lock: a listing waits
+    /// on that lock and so reports what the owner settles to instead.
+    Adopting = 1,
+    /// It holds a live domain.
+    Live = 2,
+    /// Its domain could not be made.
+    Unadopted = 3,
+    /// It ended, and the unit confirmed its device reaches nothing it mapped.
+    Ended = 4,
+    /// It ended, and the unit could not confirm it: what it mapped is kept
+    /// out of reuse for good, and its node takes no further owner.
+    Unconfirmed = 5,
 }
 
-impl RaidListRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
+impl DmaOwnerState {
+    /// Decode a raw state, failing closed on an unknown one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BadMagic`] for a value no state has.
+    pub const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            1 => Ok(Self::Adopting),
+            2 => Ok(Self::Live),
+            3 => Ok(Self::Unadopted),
+            4 => Ok(Self::Ended),
+            5 => Ok(Self::Unconfirmed),
+            _ => Err(Errno::BadMagic),
+        }
+    }
 
-    /// Encode `self` little-endian.
+    /// The state as an administrator reads it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Adopting => "adopting",
+            Self::Live => "live",
+            Self::Unadopted => "unadopted",
+            Self::Ended => "ended",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+
+/// One isolation group an owner has taken, inside a
+/// [`SysinfoQueryId::DMA_GROUPS`] response, ascending by unit and group.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaGroupRecord {
+    /// The unit's hardware-tree node.
+    pub unit: u32,
+    /// The group, as the unit's topology names it.
+    pub group: u32,
+    /// The node whose owner holds it.
+    pub holder: u32,
+    /// Where that owner stands.
+    pub state: DmaOwnerState,
+    /// The holder's admission generation.
+    pub generation: u64,
+}
+
+impl DmaGroupRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 24;
+
+    /// Encode `self` little-endian; the bytes after `state` are reserved
+    /// zero.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
         let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
+        put_u32(&mut out, 0, self.unit);
+        put_u32(&mut out, 4, self.group);
+        put_u32(&mut out, 8, self.holder);
+        out[12] = self.state as u8;
+        put_u64(&mut out, 16, self.generation);
         out
     }
 
     /// Decode from `bytes`.
     ///
-    /// Returns [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if
-    /// a reserved flag bit is set (fail closed on an unknown request shape).
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if short, [`Errno::BadMagic`] for an
+    /// unknown state or a reserved byte set.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
+        if bytes[13..16] != [0; 3] {
             return Err(Errno::BadMagic);
         }
         Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
+            unit: read_u32(bytes, 0),
+            group: read_u32(bytes, 4),
+            holder: read_u32(bytes, 8),
+            state: DmaOwnerState::from_u8(bytes[12])?,
+            generation: read_u64(bytes, 16),
         })
+    }
+}
+
+/// One node a unit translates for an owner, inside a
+/// [`SysinfoQueryId::DMA_NODES`] response, ascending by node.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaNodeRecord {
+    /// The node's hardware-tree id.
+    pub node: u32,
+    /// The unit translating it.
+    pub unit: u32,
+    /// Its isolation group.
+    pub group: u32,
+    /// Where its owner stands.
+    pub state: DmaOwnerState,
+    /// Streams its DMA arrives as.
+    pub streams: u16,
+    /// Its owner's admission generation.
+    pub generation: u64,
+    /// Carves its domain maps.
+    pub mappings: u32,
+    /// Bytes those carves map.
+    pub mapped_bytes: u64,
+}
+
+impl DmaNodeRecord {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 40;
+
+    /// Encode `self` little-endian; byte 13 and bytes 28 to 31 are reserved
+    /// zero.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.node);
+        put_u32(&mut out, 4, self.unit);
+        put_u32(&mut out, 8, self.group);
+        out[12] = self.state as u8;
+        put_u16(&mut out, 14, self.streams);
+        put_u64(&mut out, 16, self.generation);
+        put_u32(&mut out, 24, self.mappings);
+        put_u64(&mut out, 32, self.mapped_bytes);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if short, [`Errno::BadMagic`] for an
+    /// unknown state, a reserved byte set, or counts that contradict the
+    /// state or each other: only a live owner maps anything, and every carve
+    /// maps some bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[13] != 0 || read_u32(bytes, 28) != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let record = Self {
+            node: read_u32(bytes, 0),
+            unit: read_u32(bytes, 4),
+            group: read_u32(bytes, 8),
+            state: DmaOwnerState::from_u8(bytes[12])?,
+            streams: read_u16(bytes, 14),
+            generation: read_u64(bytes, 16),
+            mappings: read_u32(bytes, 24),
+            mapped_bytes: read_u64(bytes, 32),
+        };
+        let maps_nothing = record.mappings == 0;
+        if maps_nothing != (record.mapped_bytes == 0)
+            || (record.state != DmaOwnerState::Live && !maps_nothing)
+        {
+            return Err(Errno::BadMagic);
+        }
+        Ok(record)
     }
 }
 
@@ -6138,8 +5866,8 @@ impl RaidListRequest {
 /// `/proc/interrupts` totals [`IrqRecord`] carries: monotonic since the volume
 /// was attached, never reset, and named against the serving endpoint rather
 /// than any secret. There is one record per attached block-backed volume, in a
-/// stable order the source defines, so a client walking the list never skips
-/// or repeats a record.
+/// stable order the source defines, so a walk over volumes that stay attached
+/// between its pages sees each once.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeIoHealthRecord {
@@ -6254,10 +5982,11 @@ impl VolumeIoHealthRecord {
 ///
 /// There is one record per attached block-backed volume, in the same stable
 /// order and keyed by the same 16-byte `volume_id` as
-/// [`VolumeIoHealthRecord`], so a client walking either list never skips or
-/// repeats a record and can join the two. Every volume on one disk shares
-/// that disk's counters — service is a property of the device, not of a
-/// mount — which is why the device is identified and named alongside the id.
+/// [`VolumeIoHealthRecord`], so a walk over either list sees each volume that
+/// stays attached once, and the two can be joined. Every volume on one disk
+/// shares that disk's counters — service is a property of the device, not of
+/// a mount — which is why the device is identified and named alongside the
+/// id.
 /// It holds no secret.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -6727,57 +6456,6 @@ impl CrashNamedReg {
     }
 }
 
-/// Request payload for [`SysinfoQueryId::CRASH_RECORD`].
-///
-/// The response is a sequence of [`CrashRecord`]s paged with
-/// `offset`/`limit`, exactly like the other list queries.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct CrashRecordRequest {
-    /// Index of the first crash record to return.
-    pub offset: u32,
-    /// Maximum number of [`CrashRecord`]s the caller will accept.
-    pub limit: u16,
-    /// Reserved; must be zero in `sysinfo-v1`.
-    pub flags: u16,
-}
-
-impl CrashRecordRequest {
-    /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
-
-    /// Encode `self` little-endian.
-    #[must_use]
-    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, self.offset);
-        put_u16(&mut out, 4, self.limit);
-        put_u16(&mut out, 6, self.flags);
-        out
-    }
-
-    /// Decode `bytes` into a [`CrashRecordRequest`].
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
-    /// * [`Errno::BadMagic`] if the reserved `flags` field is non-zero.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
-        if bytes.len() < Self::WIRE_LEN {
-            return Err(Errno::BufferTooSmall);
-        }
-        let flags = read_u16(bytes, 6);
-        if flags != 0 {
-            return Err(Errno::BadMagic);
-        }
-        Ok(Self {
-            offset: read_u32(bytes, 0),
-            limit: read_u16(bytes, 4),
-            flags,
-        })
-    }
-}
-
 /// [`CrashRecord::flags`] bit: the fatal **data** access was a store as
 /// opposed to a load. Always clear for [`CrashFaultClass::Instruction`],
 /// which performed no data access; read the direction through
@@ -7110,12 +6788,11 @@ impl CrashRecord {
 #[cfg(test)]
 mod tests {
     use super::{
-        encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeListRequest,
-        CpuTimeRecord, DeviceStatsRequest, HardwareTreeRequest, KernelMemoryStats, LoadAverage,
-        MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState, OsVersion,
-        ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
+        encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeRecord,
+        KernelMemoryStats, LoadAverage, MemoryTotal, MountAvailability, MountRecord,
+        MountVolumeState, OsVersion, PageRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
         SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, VolumeHealth, VolumeStats, ENCODED_QUERY_TABLE,
+        UserDirectoryRecord, VolumeHealth, VolumeStats, ENCODED_QUERY_TABLE,
         ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_GROUPNAME_LEN,
         MAX_USERNAME_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE,
         PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
@@ -7126,21 +6803,18 @@ mod tests {
         reply_page, PROCESS_FLAGS_ALL, SYSINFO_MAX_REPLY, SYSINFO_REPLY_PAYLOAD_MAX,
         SYSINFO_REPLY_STATUS_LEN,
     };
-    use super::{
-        CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CPU_INFO_FLAG_FREQ_MEASURED,
-        CPU_MODEL_NAME_MAX,
-    };
+    use super::{CpuCoreClass, CpuInfoRecord, CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX};
     use super::{
         CrashAccess, CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord,
-        CrashRecordRequest, CRASH_FLAG_WRITE, CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
+        CRASH_FLAG_WRITE, CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
-    use super::{DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals};
+    use super::{DesktopFrameRecord, DesktopFrameTotals};
     use super::{
-        GroupDirectoryRecord, GroupDirectoryRequest, SelfAccountRecord, SelfAccountText,
-        MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
+        GroupDirectoryRecord, SelfAccountRecord, SelfAccountText, MAX_DISPLAY_NAME_LEN,
+        MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
     };
-    use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
-    use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord};
+    use super::{IrqRecord, IRQ_FLAG_QUARANTINED};
+    use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord};
     use crate::blkio::{
         BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
         BLK_DEVICE_NAME_LEN, BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
@@ -7258,29 +6932,19 @@ mod tests {
             Some(CapabilityId::SYSINFO_HW)
         );
         assert!(spec_for(SysinfoQueryId::GPU_DEVICE_STATS).unwrap().audit);
+        // What a translation unit confines and how often it faults is
+        // hardware topology, read under the tree's authority.
+        for (query, id) in [
+            (SysinfoQueryId::DMA_UNITS, 44),
+            (SysinfoQueryId::DMA_GROUPS, 45),
+            (SysinfoQueryId::DMA_NODES, 46),
+        ] {
+            assert_eq!(query.as_u16(), id);
+            let spec = spec_for(query).unwrap();
+            assert_eq!(spec.required_capability, Some(CapabilityId::SYSINFO_HW));
+            assert!(spec.audit);
+        }
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
-    }
-
-    #[test]
-    fn device_stats_request_pages_and_fails_closed_on_a_reserved_flag() {
-        let request = DeviceStatsRequest {
-            offset: 9,
-            limit: 4,
-            flags: 0,
-        };
-        let bytes = request.to_le_bytes();
-        assert_eq!(bytes.len(), DeviceStatsRequest::WIRE_LEN);
-        assert_eq!(DeviceStatsRequest::from_bytes(&bytes), Ok(request));
-        assert_eq!(
-            DeviceStatsRequest::from_bytes(&bytes[..DeviceStatsRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-        let mut reserved = bytes;
-        reserved[6] = 1;
-        assert_eq!(
-            DeviceStatsRequest::from_bytes(&reserved),
-            Err(Errno::BadMagic)
-        );
     }
 
     #[test]
@@ -7346,12 +7010,15 @@ mod tests {
             (22, IntrospectDomain::SystemConfig),
             (23, IntrospectDomain::GroupDirectory),
             (24, IntrospectDomain::Account),
+            (25, IntrospectDomain::DmaUnits),
+            (26, IntrospectDomain::DmaGroups),
+            (27, IntrospectDomain::DmaNodes),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(25), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(28), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -7486,27 +7153,7 @@ mod tests {
     }
 
     #[test]
-    fn user_directory_request_and_record_round_trip_and_fail_closed() {
-        let req = UserDirectoryRequest {
-            offset: 3,
-            limit: 16,
-            flags: 0,
-        };
-        assert_eq!(
-            UserDirectoryRequest::from_bytes(&req.to_le_bytes()),
-            Ok(req)
-        );
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1; // reserved flag set
-        assert_eq!(
-            UserDirectoryRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
-        assert_eq!(
-            UserDirectoryRequest::from_bytes(&[0u8; 4]),
-            Err(Errno::BufferTooSmall)
-        );
-
+    fn user_directory_record_round_trips_and_fails_closed() {
         let rec = UserDirectoryRecord::new(1000, b"alice").expect("record");
         assert_eq!(rec.name_bytes(), b"alice");
         let decoded = UserDirectoryRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
@@ -7531,27 +7178,7 @@ mod tests {
     }
 
     #[test]
-    fn group_directory_request_and_record_round_trip_and_fail_closed() {
-        let req = GroupDirectoryRequest {
-            offset: 5,
-            limit: 32,
-            flags: 0,
-        };
-        assert_eq!(
-            GroupDirectoryRequest::from_bytes(&req.to_le_bytes()),
-            Ok(req)
-        );
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1; // reserved flag set
-        assert_eq!(
-            GroupDirectoryRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
-        assert_eq!(
-            GroupDirectoryRequest::from_bytes(&[0u8; 4]),
-            Err(Errno::BufferTooSmall)
-        );
-
+    fn group_directory_record_round_trips_and_fails_closed() {
         let rec = GroupDirectoryRecord::new(100, b"storage").expect("record");
         assert_eq!(rec.name_bytes(), b"storage");
         let decoded = GroupDirectoryRecord::from_bytes(&rec.to_le_bytes()).expect("round trip");
@@ -7804,43 +7431,6 @@ mod tests {
     }
 
     #[test]
-    fn seat_list_request_round_trips_and_rejects_reserved() {
-        let req = SeatListRequest {
-            offset: 1,
-            limit: 4,
-            flags: 0,
-        };
-        assert_eq!(SeatListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(SeatListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            SeatListRequest::from_bytes(&[0u8; SeatListRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
-    fn hardware_tree_request_round_trips_and_rejects_reserved() {
-        let req = HardwareTreeRequest {
-            offset: 14,
-            limit: 14,
-            flags: 0,
-        };
-        assert_eq!(HardwareTreeRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(
-            HardwareTreeRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
-        assert_eq!(
-            HardwareTreeRequest::from_bytes(&[0u8; HardwareTreeRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
     fn seat_record_round_trips_owned_and_unowned() {
         let held = SeatRecord {
             seat_id: 0,
@@ -7978,15 +7568,14 @@ mod tests {
             flags: 0,
             query: SysinfoQueryId::GLOBAL_PROCESS_LIST,
             reserved: 0,
-            payload_len: u32::try_from(ProcessListRequest::WIRE_LEN).unwrap(),
-            request_id: 0xDEAD_BEEF_0000_0001,
+            payload_len: u32::try_from(PageRequest::WIRE_LEN).unwrap(),
         }
     }
 
     #[test]
     fn request_header_round_trips() {
         let h = sample_header();
-        assert_eq!(SysinfoRequestHeader::WIRE_LEN, 24);
+        assert_eq!(SysinfoRequestHeader::WIRE_LEN, 16);
         let bytes = h.to_le_bytes();
         assert_eq!(SysinfoRequestHeader::from_bytes(&bytes), Ok(h));
     }
@@ -8010,6 +7599,17 @@ mod tests {
             SysinfoRequestHeader::from_bytes(&header.to_le_bytes()),
             Err(Errno::AbiVersionUnsupported)
         );
+
+        // No flag is defined, so any bit set is corruption.
+        for bit in 0..16 {
+            let mut header = sample_header();
+            header.flags = 1 << bit;
+            assert_eq!(
+                SysinfoRequestHeader::from_bytes(&header.to_le_bytes()),
+                Err(Errno::BadMagic),
+                "flag bit {bit}"
+            );
+        }
 
         // Query id out of range: write a raw oversize id into the buffer.
         let mut bytes = sample_header().to_le_bytes();
@@ -8036,19 +7636,30 @@ mod tests {
     }
 
     #[test]
-    fn process_list_request_round_trips_and_rejects_reserved() {
-        let req = ProcessListRequest {
-            offset: 10,
-            limit: 64,
+    fn page_request_round_trips_and_fails_closed() {
+        let req = PageRequest {
+            offset: 0x0403_0201,
+            limit: 0x0605,
             flags: 0,
+            walk: 0x0A09_0807,
         };
-        assert_eq!(ProcessListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1; // reserved flag set
-        assert_eq!(ProcessListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+        let bytes = req.to_le_bytes();
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 10]);
+        assert_eq!(PageRequest::from_bytes(&bytes), Ok(req));
+        for bit in 0..16 {
+            let mut reserved = bytes;
+            reserved[6..8].copy_from_slice(&(1u16 << bit).to_le_bytes());
+            assert_eq!(PageRequest::from_bytes(&reserved), Err(Errno::BadMagic));
+        }
         assert_eq!(
-            ProcessListRequest::from_bytes(&[0u8; 4]),
+            PageRequest::from_bytes(&bytes[..PageRequest::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
+        );
+        let empty = PageRequest { limit: 0, ..req };
+        assert_eq!(
+            PageRequest::from_bytes(&empty.to_le_bytes()),
+            Err(Errno::LengthOutOfRange),
+            "a page that holds nothing never ends a walk"
         );
     }
 
@@ -8412,24 +8023,6 @@ mod tests {
     }
 
     #[test]
-    fn cpu_time_list_request_round_trips_and_rejects_reserved() {
-        let req = CpuTimeListRequest {
-            offset: 2,
-            limit: 64,
-            flags: 0,
-        };
-        assert_eq!(CpuTimeListRequest::WIRE_LEN, 8);
-        assert_eq!(CpuTimeListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(CpuTimeListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            CpuTimeListRequest::from_bytes(&[0u8; 4]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
     fn cpu_time_record_round_trips_and_rejects_reserved() {
         let record = CpuTimeRecord {
             cpu: 3,
@@ -8444,24 +8037,6 @@ mod tests {
         assert_eq!(CpuTimeRecord::from_bytes(&bytes), Err(Errno::BadMagic));
         assert_eq!(
             CpuTimeRecord::from_bytes(&[0u8; 8]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
-    fn mount_list_request_round_trips_and_rejects_reserved() {
-        let req = MountListRequest {
-            offset: 3,
-            limit: 32,
-            flags: 0,
-        };
-        assert_eq!(MountListRequest::WIRE_LEN, 8);
-        assert_eq!(MountListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1; // reserved flag set
-        assert_eq!(MountListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            MountListRequest::from_bytes(&[0u8; 4]),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -9086,24 +8661,6 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_list_request_round_trips_and_rejects_reserved() {
-        use super::ReclaimListRequest;
-        let req = ReclaimListRequest {
-            offset: 2,
-            limit: 9,
-            flags: 0,
-        };
-        assert_eq!(ReclaimListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(ReclaimListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            ReclaimListRequest::from_bytes(&[0u8; ReclaimListRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
     fn reclaim_class_record_round_trips_and_fails_closed() {
         use super::{ReclaimClassRecord, RECLAIM_CLASS_COUNT};
         let record = ReclaimClassRecord {
@@ -9308,30 +8865,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_ledger_list_request_round_trips_and_rejects_reserved() {
-        use super::CacheLedgerListRequest;
-        let req = CacheLedgerListRequest {
-            offset: 4,
-            limit: 32,
-            flags: 0,
-        };
-        assert_eq!(
-            CacheLedgerListRequest::from_bytes(&req.to_le_bytes()),
-            Ok(req)
-        );
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(
-            CacheLedgerListRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
-        assert_eq!(
-            CacheLedgerListRequest::from_bytes(&[0u8; CacheLedgerListRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
     fn cache_report_request_bounds_what_one_process_may_submit() {
         use super::{CacheReportRequest, MAX_CACHE_REPORT_ENTRIES};
         let req = CacheReportRequest {
@@ -9477,44 +9010,37 @@ mod tests {
     }
 
     #[test]
-    fn net_interface_rates_request_round_trips_and_rejects_reserved() {
+    fn net_interface_rates_request_is_a_page_then_a_window() {
         use super::NetInterfaceRatesRequest;
-        let req = NetInterfaceRatesRequest {
+        let page = PageRequest {
             offset: 3,
             limit: 8,
             flags: 0,
+            walk: 5,
+        };
+        let req = NetInterfaceRatesRequest {
+            page,
             window: Duration64::from_secs(1),
         };
+        let bytes = req.to_le_bytes();
+        assert_eq!(bytes[..PageRequest::WIRE_LEN], page.to_le_bytes());
+        assert_eq!(bytes[PageRequest::WIRE_LEN..], req.window.to_le_bytes());
+        assert_eq!(NetInterfaceRatesRequest::from_bytes(&bytes), Ok(req));
+
+        let mut reserved = bytes;
+        reserved[6] = 1;
         assert_eq!(
-            NetInterfaceRatesRequest::from_bytes(&req.to_le_bytes()),
-            Ok(req)
-        );
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(
-            NetInterfaceRatesRequest::from_bytes(&bytes),
+            NetInterfaceRatesRequest::from_bytes(&reserved),
             Err(Errno::BadMagic)
         );
+        let mut skewed = bytes;
+        skewed[PageRequest::WIRE_LEN + 8..].copy_from_slice(&1_000_000_000u32.to_le_bytes());
         assert_eq!(
-            NetInterfaceRatesRequest::from_bytes(&[0u8; NetInterfaceRatesRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
+            NetInterfaceRatesRequest::from_bytes(&skewed),
+            Err(Errno::TimestampOutOfRange)
         );
-    }
-
-    #[test]
-    fn cpu_load_request_round_trips_and_rejects_reserved() {
-        use super::CpuLoadRequest;
-        let req = CpuLoadRequest {
-            offset: 1,
-            limit: 8,
-            flags: 0,
-        };
-        assert_eq!(CpuLoadRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(CpuLoadRequest::from_bytes(&bytes), Err(Errno::BadMagic));
         assert_eq!(
-            CpuLoadRequest::from_bytes(&[0u8; CpuLoadRequest::WIRE_LEN - 1]),
+            NetInterfaceRatesRequest::from_bytes(&bytes[..NetInterfaceRatesRequest::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -9539,23 +9065,6 @@ mod tests {
         let mut bytes = record.to_le_bytes();
         bytes[4] = 1;
         assert_eq!(CpuLoadRecord::from_bytes(&bytes), Err(Errno::BadMagic));
-    }
-
-    #[test]
-    fn cpu_info_list_request_round_trips_and_rejects_reserved() {
-        let req = CpuInfoListRequest {
-            offset: 1,
-            limit: 8,
-            flags: 0,
-        };
-        assert_eq!(CpuInfoListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(CpuInfoListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            CpuInfoListRequest::from_bytes(&[0u8; CpuInfoListRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
     }
 
     #[test]
@@ -9626,21 +9135,276 @@ mod tests {
         assert_eq!(CpuInfoRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
+    /// A unit translating, with something in every count.
+    fn translating_unit() -> super::DmaUnitRecord {
+        use super::{DmaFaultSignal, DmaTables, DmaUnitFamily, DmaUnitRecord, DmaUnitState};
+        DmaUnitRecord {
+            node: 0x41,
+            family: DmaUnitFamily::AmdVi,
+            state: DmaUnitState::Translating,
+            faults: DmaFaultSignal::Message,
+            tables: DmaTables::SecondStage,
+            owners: 3,
+            firmware_streams: 1,
+            faults_recorded: 12,
+            faults_dropped: 2,
+            streams_silenced: 1,
+        }
+    }
+
+    /// A unit whose registers were never reached, so it counts nothing.
+    fn stranded_unit() -> super::DmaUnitRecord {
+        use super::{DmaFaultSignal, DmaTables, DmaUnitRecord, DmaUnitState};
+        DmaUnitRecord {
+            state: DmaUnitState::NoRegisters,
+            faults: DmaFaultSignal::None,
+            tables: DmaTables::None,
+            owners: 0,
+            firmware_streams: 0,
+            faults_recorded: 0,
+            faults_dropped: 0,
+            streams_silenced: 0,
+            ..translating_unit()
+        }
+    }
+
     #[test]
-    fn irq_list_request_round_trips_and_rejects_reserved() {
-        let req = IrqListRequest {
-            offset: 2,
-            limit: 16,
-            flags: 0,
-        };
-        assert_eq!(IrqListRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(IrqListRequest::from_bytes(&bytes), Err(Errno::BadMagic));
+    fn a_dma_unit_record_round_trips_and_refuses_unknown_values() {
+        use super::DmaUnitRecord;
+        let unit = translating_unit();
+        let bytes = unit.to_le_bytes();
+        assert_eq!(DmaUnitRecord::from_bytes(&bytes), Ok(unit));
         assert_eq!(
-            IrqListRequest::from_bytes(&[0u8; IrqListRequest::WIRE_LEN - 1]),
+            DmaUnitRecord::from_bytes(&bytes[..DmaUnitRecord::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
+        for (at, bad) in [(4, 7), (5, 0), (5, 5), (6, 4), (7, 4)] {
+            let mut broken = bytes;
+            broken[at] = bad;
+            assert_eq!(DmaUnitRecord::from_bytes(&broken), Err(Errno::BadMagic));
+        }
+    }
+
+    /// A stranded unit translates nothing, so it counts nothing; one that
+    /// failed names the family that tried, and one unmatched names none.
+    #[test]
+    fn a_unit_that_translates_nothing_names_only_the_family_that_tried() {
+        use super::{DmaUnitFamily, DmaUnitRecord, DmaUnitState};
+        let stranded = stranded_unit();
+        assert_eq!(
+            DmaUnitRecord::from_bytes(&stranded.to_le_bytes()),
+            Ok(stranded)
+        );
+        let failed = DmaUnitRecord {
+            state: DmaUnitState::Failed,
+            ..stranded
+        };
+        assert_eq!(DmaUnitRecord::from_bytes(&failed.to_le_bytes()), Ok(failed));
+        // A unit refused for not snooping names the family that would drive
+        // it, as a failed one does.
+        let unsnooped = DmaUnitRecord {
+            state: DmaUnitState::Unsnooped,
+            ..stranded
+        };
+        assert_eq!(
+            DmaUnitRecord::from_bytes(&unsnooped.to_le_bytes()),
+            Ok(unsnooped)
+        );
+        let nameless = DmaUnitRecord {
+            family: DmaUnitFamily::Unmatched,
+            ..unsnooped
+        };
+        assert_eq!(
+            DmaUnitRecord::from_bytes(&nameless.to_le_bytes()),
+            Err(Errno::BadMagic)
+        );
+        let unmatched = DmaUnitRecord {
+            state: DmaUnitState::Unmatched,
+            family: DmaUnitFamily::Unmatched,
+            ..stranded
+        };
+        assert_eq!(
+            DmaUnitRecord::from_bytes(&unmatched.to_le_bytes()),
+            Ok(unmatched)
+        );
+        assert_eq!(DmaUnitFamily::VirtioMmio.name(), "virtio-iommu");
+    }
+
+    #[test]
+    fn a_dma_unit_record_refuses_values_that_contradict_each_other() {
+        use super::{DmaFaultSignal, DmaTables, DmaUnitFamily, DmaUnitRecord, DmaUnitState};
+        let unit = translating_unit();
+        let stranded = stranded_unit();
+        for contradiction in [
+            DmaUnitRecord {
+                firmware_streams: 1,
+                ..stranded
+            },
+            DmaUnitRecord {
+                faults_recorded: 1,
+                ..stranded
+            },
+            DmaUnitRecord {
+                faults_dropped: 1,
+                ..stranded
+            },
+            DmaUnitRecord {
+                faults: DmaFaultSignal::None,
+                ..unit
+            },
+            DmaUnitRecord {
+                tables: DmaTables::None,
+                ..unit
+            },
+            DmaUnitRecord {
+                family: DmaUnitFamily::Unmatched,
+                ..unit
+            },
+            DmaUnitRecord {
+                state: DmaUnitState::Unmatched,
+                ..stranded
+            },
+            DmaUnitRecord {
+                state: DmaUnitState::Failed,
+                family: DmaUnitFamily::Unmatched,
+                ..stranded
+            },
+            DmaUnitRecord {
+                faults: DmaFaultSignal::Wired,
+                ..stranded
+            },
+            DmaUnitRecord {
+                tables: DmaTables::Kept,
+                ..stranded
+            },
+            DmaUnitRecord {
+                owners: 1,
+                ..stranded
+            },
+            DmaUnitRecord {
+                streams_silenced: 1,
+                ..stranded
+            },
+        ] {
+            assert_eq!(
+                DmaUnitRecord::from_bytes(&contradiction.to_le_bytes()),
+                Err(Errno::BadMagic),
+                "{contradiction:?}"
+            );
+        }
+    }
+
+    /// The units a malformed table described are listed under the family the
+    /// table describes and the tree's root, translating and counting
+    /// nothing.
+    #[test]
+    fn a_malformed_table_s_units_name_their_family_and_the_root_alone() {
+        use super::{DmaFaultSignal, DmaTables, DmaUnitFamily, DmaUnitRecord, DmaUnitState};
+        for state in [DmaUnitState::Withheld, DmaUnitState::Unconfined] {
+            let table = DmaUnitRecord {
+                node: crate::hwtree::HW_NODE_ROOT_ID,
+                family: DmaUnitFamily::Vtd,
+                state,
+                faults: DmaFaultSignal::None,
+                tables: DmaTables::None,
+                owners: 0,
+                firmware_streams: 0,
+                faults_recorded: 0,
+                faults_dropped: 0,
+                streams_silenced: 0,
+            };
+            assert_eq!(DmaUnitRecord::from_bytes(&table.to_le_bytes()), Ok(table));
+            for contradiction in [
+                DmaUnitRecord { node: 7, ..table },
+                DmaUnitRecord {
+                    family: DmaUnitFamily::Unmatched,
+                    ..table
+                },
+                DmaUnitRecord { owners: 1, ..table },
+            ] {
+                assert_eq!(
+                    DmaUnitRecord::from_bytes(&contradiction.to_le_bytes()),
+                    Err(Errno::BadMagic),
+                    "{contradiction:?}"
+                );
+            }
+        }
+        assert_eq!(DmaUnitState::Withheld.name(), "withheld");
+        assert_eq!(DmaUnitState::Unconfined.name(), "unconfined");
+    }
+
+    #[test]
+    fn dma_group_and_node_records_round_trip_and_refuse_unknown_values() {
+        use super::{DmaGroupRecord, DmaNodeRecord, DmaOwnerState};
+        let group = DmaGroupRecord {
+            unit: 0x41,
+            group: 9,
+            holder: 0x77,
+            state: DmaOwnerState::Unconfirmed,
+            generation: 5,
+        };
+        let bytes = group.to_le_bytes();
+        assert_eq!(DmaGroupRecord::from_bytes(&bytes), Ok(group));
+        for (at, bad) in [(12, 0), (12, 6), (13, 1), (15, 1)] {
+            let mut broken = bytes;
+            broken[at] = bad;
+            assert_eq!(DmaGroupRecord::from_bytes(&broken), Err(Errno::BadMagic));
+        }
+
+        let node = DmaNodeRecord {
+            node: 0x77,
+            unit: 0x41,
+            group: 9,
+            state: DmaOwnerState::Live,
+            streams: 2,
+            generation: 5,
+            mappings: 40,
+            mapped_bytes: 40 << 12,
+        };
+        let bytes = node.to_le_bytes();
+        assert_eq!(DmaNodeRecord::from_bytes(&bytes), Ok(node));
+        for (at, bad) in [(12, 9), (13, 1), (28, 1), (31, 1)] {
+            let mut broken = bytes;
+            broken[at] = bad;
+            assert_eq!(DmaNodeRecord::from_bytes(&broken), Err(Errno::BadMagic));
+        }
+        let ended = DmaNodeRecord {
+            state: DmaOwnerState::Ended,
+            mappings: 0,
+            mapped_bytes: 0,
+            ..node
+        };
+        assert_eq!(DmaNodeRecord::from_bytes(&ended.to_le_bytes()), Ok(ended));
+        for contradiction in [
+            DmaNodeRecord {
+                mappings: 0,
+                ..node
+            },
+            DmaNodeRecord {
+                mapped_bytes: 0,
+                ..node
+            },
+            DmaNodeRecord {
+                state: DmaOwnerState::Ended,
+                ..node
+            },
+            DmaNodeRecord {
+                state: DmaOwnerState::Unconfirmed,
+                ..node
+            },
+            DmaNodeRecord {
+                state: DmaOwnerState::Unadopted,
+                mappings: 1,
+                ..ended
+            },
+        ] {
+            assert_eq!(
+                DmaNodeRecord::from_bytes(&contradiction.to_le_bytes()),
+                Err(Errno::BadMagic),
+                "{contradiction:?}"
+            );
+        }
+        assert_eq!(DmaOwnerState::Ended.name(), "ended");
     }
 
     #[test]
@@ -9673,23 +9437,6 @@ mod tests {
         let mut bytes = record.to_le_bytes();
         bytes[4] = 0x02;
         assert_eq!(IrqRecord::from_bytes(&bytes), Err(Errno::BadMagic));
-    }
-
-    #[test]
-    fn volume_io_health_request_round_trips_and_rejects_reserved() {
-        let req = VolumeIoRequest {
-            offset: 2,
-            limit: 8,
-            flags: 0,
-        };
-        assert_eq!(VolumeIoRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(VolumeIoRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            VolumeIoRequest::from_bytes(&[0u8; VolumeIoRequest::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
     }
 
     #[test]
@@ -9916,23 +9663,6 @@ mod tests {
         );
         assert_eq!(
             CrashNamedReg::from_bytes(&[0u8; CrashNamedReg::WIRE_LEN - 1]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
-    fn crash_record_request_round_trips_and_rejects_reserved() {
-        let req = CrashRecordRequest {
-            offset: 3,
-            limit: 4,
-            flags: 0,
-        };
-        assert_eq!(CrashRecordRequest::from_bytes(&req.to_le_bytes()), Ok(req));
-        let mut bytes = req.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(CrashRecordRequest::from_bytes(&bytes), Err(Errno::BadMagic));
-        assert_eq!(
-            CrashRecordRequest::from_bytes(&[0u8; CrashRecordRequest::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -10226,30 +9956,6 @@ mod tests {
         );
         assert_eq!(
             DesktopFrameRecord::from_bytes(&record.to_le_bytes()[..111]),
-            Err(Errno::BufferTooSmall)
-        );
-    }
-
-    #[test]
-    fn desktop_frame_stats_request_round_trips_and_refuses_reserved_flags() {
-        let request = DesktopFrameStatsRequest {
-            offset: 3,
-            limit: 8,
-            flags: 0,
-        };
-        assert_eq!(DesktopFrameStatsRequest::WIRE_LEN, 8);
-        assert_eq!(
-            DesktopFrameStatsRequest::from_bytes(&request.to_le_bytes()),
-            Ok(request)
-        );
-        let mut bytes = request.to_le_bytes();
-        bytes[6] = 1;
-        assert_eq!(
-            DesktopFrameStatsRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
-        assert_eq!(
-            DesktopFrameStatsRequest::from_bytes(&bytes[..7]),
             Err(Errno::BufferTooSmall)
         );
     }

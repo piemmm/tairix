@@ -1,32 +1,14 @@
 //! The aarch64 live root-unlock bring-up (`plans/PI.md` P11 Chunk B-2
 //! INCREMENT (2)).
 //!
-//! The freestanding-aarch64 half of the in-kernel root-unlock service: it
-//! lives in the architecture subtree ([`crate::aarch64`]) because it names
-//! the aarch64 port directly (`tairix_arch_aarch64`, the GIC, the firmware
-//! device tree), while the device-independent core — the boot stash and the
-//! console-0 ownership gate — stays in the arch-neutral
-//! [`crate::unlock_service`].
-//!
-//! It admits the in-kernel unlock kthread at the init seam, brings the
-//! bootstrap virtio-blk root device up over the production device-IRQ path
-//! (INCREMENT (1)), and runs the device-independent unlock policy
-//! ([`crate::root_mount::unlock_root_disk_interactively`]) inside the
-//! kthread — opening the console-0 ownership gate the instant the unlock
-//! resolves so `login` can take over
-//! ([`crate::unlock_service::CONSOLE0_GATE`]).
-//!
-//! Two bootstrap-floor block drivers are brought up
-//! here, selected by which one [`crate::root_storage`] bound: the virtio-blk
-//! device over the production device-IRQ path (the QEMU `virt` / x86_64
-//! root, proven on `-M virt`), or the Raspberry Pi 4 EMMC2 SD host over
-//! cache-synchronized ADMA2 with a programmed-I/O fallback
-//! ([`crate::driver_catalog::EMMC2_PATH`], the Pi-metal root
-//! — `raspi4b` cannot model EMMC2, so it is host-tested at the driver level
-//! and metal-gated here, `plans/PI.md` P8/B4). The bring-up differs per
-//! device; the read-only `/System` autoload, the passphrase prompt, and the
-//! interactive unlock are identical and shared in [`finish_unlock`]. A bound driver that is neither fails closed
-//! (logged, gate opened, no database installed;).
+//! It admits the in-kernel unlock kthread at the init seam and brings up the
+//! floor block driver [`crate::root_storage`] bound: the virtio-blk device
+//! through the shared [`crate::floor_mmio`] bring-up (the QEMU `virt` root),
+//! or the Raspberry Pi 4 EMMC2 SD host over cache-synchronized ADMA2 with a
+//! programmed-I/O fallback (the Pi-metal root; `raspi4b` cannot model EMMC2,
+//! so it is host-tested at the driver level and metal-gated here,
+//! `plans/PI.md` P8/B4). Either disk then runs the shared [`finish_unlock`]
+//! tail; a bound driver that is neither fails closed.
 
 use core::convert::Infallible;
 
@@ -35,7 +17,8 @@ use tairix_abi::driver::sole_register_window;
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::driver::CompletionSignal;
 use tairix_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper, RegisterWindow,
+    CapabilityId, DmaCoherence, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper,
+    RegisterWindow,
 };
 use tairix_arch_aarch64::fdt::gic_device_intid;
 use tairix_arch_aarch64::firmware::find_mailbox;
@@ -43,32 +26,26 @@ use tairix_arch_aarch64::kernel_arch::{busy_delay_us, clean_invalidate_dcache_ra
 use tairix_arch_aarch64::paging::{
     configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
 };
-use tairix_arch_aarch64::platform::EMMC2_COMPATIBLE;
+use tairix_arch_aarch64::platform::{Aarch64Fdt, EMMC2_COMPATIBLE};
 use tairix_arch_aarch64::sd_supply::{find_sd_supplies, FirmwareSdSupply, SdSupplies};
-use tairix_arch_aarch64::{gic, video, SERIAL_SINK};
+use tairix_arch_aarch64::{video, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
-use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
-use tairix_drv_bus_virtio::MmioTransport;
 use tairix_drv_storage_emmc2::{
     Board, BringUpFault, CardSupply, CompletionWait, Link, SignalVoltage, DMA_DATA_BYTES,
     DMA_TABLE_BYTES,
 };
-use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
-use tairix_fdt::Fdt;
+use tairix_fdt::{Fdt, Node};
 use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{
     dma_constraint, park_until, translate_device_addr, wait_now_ns, ConsoleRead, ConsoleWrite,
     CooperativeYield, DmaConstraint, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
-use tairix_kernel_irq::{IrqTable, WaitOutcome};
-use tairix_kernel_mem::{
-    window_slots, AddressSpace, DmaPool, FrameAllocator, MmioMap, PageTable, PhysAddr, PhysMap,
-    VirtAddr,
-};
+use tairix_kernel_irq::{IrqTable, Trigger, WaitOutcome};
+use tairix_kernel_mem::{window_slots, DmaPool, FrameAllocator, PageTable, PhysAddr, PhysMap};
 use tairix_kernel_sec::captable::TaskCapabilities;
-use tairix_kernel_sec::dma::{alloc_dma, DmaGateError};
+use tairix_kernel_sec::dma::alloc_dma;
 use tairix_kernel_sec::identity::UserId;
-use tairix_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
+use tairix_kernel_virtio::KernelMmioMapper;
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
@@ -81,72 +58,90 @@ use tairix_vcmailbox::{
 use crate::aarch64::arch_wrapper::{
     UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
 };
-use crate::aarch64::gic_irq::{
-    published_irq_table, COMPOSITE_IRQ_CONTROLLER, CPU0_TARGET, GIC_IRQ_CONTROLLER,
-};
+use crate::aarch64::gic_irq::{published_irq_table, COMPOSITE_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use crate::aarch64::storage_trace::{self, flag, hex, text, unsigned};
 use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
+use crate::floor_dma::Confinement;
+use crate::floor_irq::LineHost;
+use crate::floor_mmio::{bring_up_virtio_mmio, dma_window, register_map, MmioFloorPort};
 use crate::root_mount::LATE_USERS_DB;
 use crate::root_storage::RootBlockBinding;
-use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
+use crate::unlock_orchestrate::{finish_unlock, finish_virtio_unlock, UnlockConsole, UnlockEnv};
 use crate::unlock_service::{
     loader_caps, note, note_stage, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_SERVICE,
     UNLOCK_TASK,
 };
 
-/// Per-device DMA window capacity, in pages, the virtio-blk driver
-/// allocates its request/data buffers from (transient per-request DMA).
-const POOL_PAGES: usize = 64;
-
-/// Bookkeeping virtual base of the minted per-driver DMA window.
-///
-/// The driver reaches buffers through the kernel's direct physical map
-/// ([`SPAWN_TABLE_PHYSMAP`]), so this address space is **pure bookkeeping**;
-/// the base is chosen far above the boot identity window (which never exceeds
-/// a few GiB) so a window mapping never collides with an identity gigapage
-/// block in the throwaway bookkeeping space. Genuinely this bring-up's own
-/// constant.
-const POOL_VBASE: u64 = 0x60_0000_0000;
-
-/// Bookkeeping virtual base of the MMIO register-window map (see
-/// [`POOL_VBASE`] — far above the identity window, bookkeeping only).
-const MMIO_VBASE: u64 = 0x40_0000_0000;
-
-/// The page-table frame pool the two throwaway *bookkeeping* address
-/// spaces (the MMIO map and the DMA pool) allocate their root + window
-/// tables from. Private to the unlock service, so it never contends with
-/// the boot/init page-table pools. The bookkeeping spaces are never made
-/// live (register windows are reached through [`DeviceWindows`], DMA
-/// buffers through the kernel's direct map); the pool only backs the
-/// guard-bracketed window accounting `kernel/mem` performs.
+/// The page-table frames the floor's bookkeeping spaces take their tables
+/// from, apart from the boot and init pools so the unlock never contends them.
 static UNLOCK_PT_POOL: PageTablePool = PageTablePool::new();
 
-/// Capacity, in pages, of the MMIO register-window map.
-const MMIO_CAP_PAGES: usize = 64;
+/// The aarch64 half of the floor bring-up.
+struct Aarch64Floor;
 
-/// Find the GICv2 INTID of the `virtio,mmio` node whose `reg` base equals
-/// `slot_base`, decoded through the production [`gic_device_intid`]
-/// (INCREMENT (1)) — no board constant. [`None`] when
-/// no node matches or its `interrupts` specifier is unrepresentable
-/// (fail closed).
-pub(crate) fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
-    for node in fdt.nodes() {
-        let node = node.ok()?;
-        if !node.is_compatible("virtio,mmio") {
-            continue;
-        }
-        let reg = node.property("reg")?;
-        if reg.read_be_u64(0).ok()? != slot_base {
-            continue;
-        }
-        return gic_device_intid(&node);
+// SAFETY: the boot maps the tree's virtio-MMIO aperture into the identity
+// window's Device gigapages (`DeviceWindows`) for the life of the kernel, and
+// nothing holds a reference into it.
+unsafe impl MmioFloorPort for Aarch64Floor {
+    type Platform = Aarch64Fdt;
+    type Space = ArchAddressSpace;
+    const MMIO_VBASE: u64 = 0x40_0000_0000;
+    const POOL_VBASE: u64 = 0x60_0000_0000;
+
+    fn bookkeeping_space() -> Option<ArchAddressSpace> {
+        ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, configured_identity_gigapages())
     }
-    None
+
+    fn registers() -> &'static dyn PhysMap {
+        &DeviceWindows
+    }
+
+    fn frames() -> &'static dyn PhysMap {
+        &SPAWN_TABLE_PHYSMAP
+    }
+
+    fn slot_line(_fdt: &Fdt<'_>, slot: &Node<'_>) -> Option<u32> {
+        gic_device_intid(slot)
+    }
+
+    fn lines() -> Option<LineHost> {
+        Some(LineHost {
+            table: published_irq_table()?,
+            controller: &COMPOSITE_IRQ_CONTROLLER,
+            park: wfi_fallback_park,
+        })
+    }
 }
 
-/// Find the GICv2 INTID of the console UART node — the same node
+/// The park a device wait takes where the scheduler cannot park it: mask IRQ
+/// taking, re-check the line's ready flag and `wfi` only if it is still not
+/// ready, so a completion landing in that window stays pending and wakes the
+/// `wfi` rather than being lost.
+fn wfi_fallback_park(table: &IrqTable, handle: IrqHandle) {
+    // SAFETY: the EL1 vector table is installed (boot
+    // `exceptions::init_vectors`) and the production device dispatch is
+    // published (the kernel-core `irq` phase), so the woken IRQ is handled
+    // rather than faulting; the three calls only manipulate `DAIF.I` and issue
+    // the `wfi` hint.
+    unsafe {
+        tairix_arch_aarch64::exceptions::mask_irq();
+        if !table.ready_for(handle) {
+            tairix_arch_aarch64::exceptions::wait_for_interrupt();
+        }
+        tairix_arch_aarch64::exceptions::enable_irq();
+    }
+}
+
+/// The GIC INTID the operational `virtio,mmio` slot at `slot_base` raises,
+/// as [`gic_device_intid`] decodes it; [`None`] when no slot is there or its
+/// `interrupts` specifier is unrepresentable.
+pub(crate) fn device_spi(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
+    gic_device_intid(&crate::hwdiscovery::virtio_mmio_slot(fdt, slot_base)?)
+}
+
+/// Find the GIC INTID of the console UART node — the same node
 /// [`tairix_arch_aarch64::console::find_console`] selects (`arm,pl011`
 /// preferred, the BCM2835 AUX mini-UART as fallback) — decoded through
 /// [`gic_device_intid`], a discovered value and never a board constant.
@@ -169,7 +164,7 @@ pub(crate) fn console_spi(fdt: &Fdt<'_>) -> Option<u32> {
     mini
 }
 
-/// Find the GICv2 INTID of the EMMC2 SD host node (the same node the
+/// Find the GIC INTID of the EMMC2 SD host node (the same node the
 /// hardware tree's Storage device is discovered from), decoded through
 /// [`gic_device_intid`] — a discovered value, never a board constant.
 ///
@@ -180,7 +175,7 @@ pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
     gic_device_intid(&fdt.find_compatible(EMMC2_COMPATIBLE)?)
 }
 
-/// Find the GICv2 INTID of the BCM2711 PCIe root complex's internal **MSI
+/// Find the GIC INTID of the BCM2711 PCIe root complex's internal **MSI
 /// controller** — the shared SPI it raises when an endpoint behind the
 /// bridge (the VL805 xHCI) sends a message-signalled interrupt — decoded
 /// through [`gic_intid_from_cells`], a discovered value and never a board
@@ -195,7 +190,7 @@ pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
 ///
 /// [`None`] when the tree describes no `brcm,bcm2711-pcie` node, the node
 /// carries fewer than two interrupt specifiers, or the MSI specifier is not
-/// a GICv2 SPI/PPI this port can route (fail closed — `msi_alloc` then
+/// a GIC SPI/PPI this port can route (fail closed — `msi_alloc` then
 /// reports no controller).
 pub(crate) fn pcie_msi_spi(fdt: &Fdt<'_>) -> Option<u32> {
     use tairix_arch_aarch64::fdt::gic_intid_from_cells;
@@ -211,38 +206,6 @@ pub(crate) fn pcie_msi_spi(fdt: &Fdt<'_>) -> Option<u32> {
         return gic_intid_from_cells(kind, number);
     }
     None
-}
-
-/// Race-free CPU park for a device wait whose context cannot be
-/// scheduler-parked — the boot kthreads bringing the disk up and serving
-/// the driver store ([`tairix_kernel_core::IrqParkWaiter`]'s fallback).
-///
-/// Mask IRQ *taking* ([`tairix_arch_aarch64::exceptions::mask_irq`]),
-/// re-check the line's ready flag, `wfi`
-/// ([`tairix_arch_aarch64::exceptions::wait_for_interrupt`]) only if still
-/// not ready, then unmask ([`tairix_arch_aarch64::exceptions::enable_irq`])
-/// so the woken completion is taken by the EL1 vector and dispatched into
-/// `IrqTable::fire`. The sequence takes exactly one completion per wake and
-/// loses no edge (a completion landing in the check-park window stays
-/// pending and wakes the `wfi`). During the boot root-unlock everything
-/// else is parked waiting on this work, so briefly halting the CPU here
-/// starves nothing; every steady-state filesystem wait comes from a user
-/// task's syscall context, which the shared waiter parks off the run queue
-/// instead — the dispatch loop (and the buffered console drain) keeps
-/// running for the whole device wait.
-fn wfi_fallback_park(table: &IrqTable, handle: IrqHandle) {
-    // SAFETY: the EL1 vector table is installed (boot
-    // `exceptions::init_vectors`) and the production device dispatch is
-    // published (the kernel-core `irq` phase), so the woken IRQ is
-    // handled rather than faulting; the three calls only manipulate
-    // `DAIF.I` and issue the `wfi` hint.
-    unsafe {
-        tairix_arch_aarch64::exceptions::mask_irq();
-        if !table.ready_for(handle) {
-            tairix_arch_aarch64::exceptions::wait_for_interrupt();
-        }
-        tairix_arch_aarch64::exceptions::enable_irq();
-    }
 }
 
 /// Longest silence the EMMC2 completion wait tolerates before failing the
@@ -574,23 +537,22 @@ fn run_unlock(
     ));
 
     match binding.driver_path {
-        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, dtb, frames, env),
+        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, &binding.node, dtb, frames, env),
         EMMC2_PATH => emmc2_unlock(&coop, caller, binding, dtb, frames, env),
         _ => Err("root-unlock: bound block driver is not a known floor driver"),
     }
 }
 
-/// Bring the virtio-blk root device up over the production device-IRQ path
-/// and hand it to the shared [`finish_unlock`] tail (the QEMU `virt` /
-/// x86_64 root, proven on `-M virt`).
+/// Bring the virtio-blk root device up through the shared floor bring-up and
+/// open it for the unlock (the QEMU `virt` root).
 fn virtio_blk_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
     caller: &'static TaskCapabilities,
+    node: &tairix_abi::HwNode,
     dtb: u64,
     frames: &'static FrameAllocator,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
-    let audit = env.audit;
     if dtb == 0 {
         return Err("root-unlock: no device tree; root unbound");
     }
@@ -600,116 +562,26 @@ fn virtio_blk_unlock<'a>(
     // blob by its own `totalsize` before any read.
     let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }
         .map_err(|_| "root-unlock: device tree unreadable; root unbound")?;
-    // The DTB bytes the bus builder needs: the blob the validated `Fdt`
-    // bounds, reborrowed as a `'static` slice (the firmware tree outlives
-    // the kernel).
-    let total = fdt.total_size();
-    // SAFETY: `dtb`/`total` bound the same firmware blob `Fdt::from_ptr`
+    // SAFETY: `dtb` and the size bound the same firmware blob `Fdt::from_ptr`
     // validated; it is identity-mapped, read-only, and outlives the kernel.
-    let dtb_bytes: &'static [u8] = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
-
-    // Build the `virt`-board virtio-MMIO bus and provision the block
-    // transport through the `CAP_MMIO_MAP`-gated kernel mapper.
-    // SAFETY: the virtio-MMIO aperture the device tree describes is
-    // identity-mapped Device memory the bus alone reads.
-    let bus =
-        unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }.map_err(|_| "root-unlock: virtio bus")?;
-    // The device backing is boot-leaked to `'static`: the brought-up disk is
-    // shared for the life of the system by two independent preemptive tasks
-    // (the driver-store serve task and the encrypted-root unlock task, see
-    // `finish_unlock`), so its backing must outlive both frames. Leaking is
-    // the sanctioned "kernel state is never freed" pattern
-    // (`kernel/core/src/spawn.rs`) and uses only safe `Box::leak`, never an
-    // `unsafe` lifetime cast.
-    let gib = configured_identity_gigapages();
-    // Two throwaway *bookkeeping* page tables: one for the MMIO window map,
-    // one for the DMA pool. Each identity-maps the boot window so the
-    // bookkeeping tables themselves are reachable; the window/pool VAs sit
-    // far above it so they never collide with an identity block.
-    let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
-        .ok_or("root-unlock: mmio bookkeeping space")?;
-    let mmio: &'static mut MmioMap<'static, _> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        MmioMap::new(
-            AddressSpace::new(mmio_space),
-            VirtAddr::new(MMIO_VBASE),
-            MMIO_CAP_PAGES,
-            &DeviceWindows,
-        )
-        .map_err(|_| "root-unlock: mmio map")?,
-    ));
-    let (transport, slot_base) = {
-        let mapper = KernelMmioMapper::new(mmio, caller, audit);
-        let prov = provision_virtio_mmio(&bus, VIRTIO_BLK_DEVICE_ID, &mapper, MmioTransport::new)
-            .map_err(|_| "root-unlock: virtio provisioning")?;
-        (prov.transport, prov.base)
-    };
-
-    // Resolve, bind, route, and arm the device's GIC SPI on the table the
-    // kernel core published (INCREMENT (1)). The EL1 device-IRQ dispatch is
-    // already installed by the core's `irq` phase, firing into this table.
-    let intid = device_spi(&fdt, slot_base).ok_or("root-unlock: no device interrupt in DTB")?;
-    let table: &'static IrqTable =
-        published_irq_table().ok_or("root-unlock: no published IRQ table")?;
-    let bind = table
-        .bind_exclusive(intid, UNLOCK_TASK)
-        .map_err(|_| "root-unlock: bind device SPI")?;
-    let handle: IrqHandle = bind.handle;
-    // SAFETY: the GIC distributor + CPU interface are up (the kernel-core
-    // `irq` phase brought them up via `gic_irq::install_device_irq_dispatch`
-    // -> `gic::init`), and the EL1 vectors + device dispatch are installed;
-    // this routes + enables the bound SPI on CPU 0.
-    unsafe {
-        gic::route_spi(intid, CPU0_TARGET);
-    }
-    // Arm the line for the first completion; the waiter re-arms it after
-    // each subsequent one.
-    let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
-
-    // Mint the per-driver DMA host the driver allocates through, driven by
-    // the shared parking waiter.
-    let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
-        .ok_or("root-unlock: dma bookkeeping space")?;
-    let pool = DmaPool::new(
-        AddressSpace::new(dma_space),
-        VirtAddr::new(POOL_VBASE),
-        POOL_PAGES,
+    let tree: &'static [u8] =
+        unsafe { core::slice::from_raw_parts(dtb as *const u8, fdt.total_size()) };
+    let device = bring_up_virtio_mmio::<Aarch64Floor>(
+        env.ctx,
+        node,
+        tree,
+        caller,
+        env.audit,
         frames,
-        &SPAWN_TABLE_PHYSMAP,
+        Confinement::WhereTranslated,
+    )?;
+    finish_virtio_unlock(
+        device.transport,
+        device.host,
+        coop,
+        env,
+        &AARCH64_UNLOCK_CONSOLE,
     )
-    .map_err(|_| "root-unlock: dma pool")?;
-    let waiter: &'static IrqParkWaiter =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqParkWaiter::new(
-            table,
-            handle,
-            UNLOCK_TASK,
-            &COMPOSITE_IRQ_CONTROLLER,
-            Some(wfi_fallback_park),
-        )));
-    let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(KernelVirtioHost::new(
-            pool,
-            caller,
-            audit,
-            PoolId::fresh(),
-            table,
-            handle,
-            waiter,
-        )));
-
-    // Admit the virtio-blk driver through the signed driver load gate (Ed25519
-    // signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it drives
-    // hardware — a refusal fails closed.
-    let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
-    loader
-        .admit(VIRTIO_BLK_PATH, &loader_caps())
-        .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
-
-    // Open the whole-disk block device over the provisioned transport. Every
-    // borrowed backing (`transport`/`vhost`/`mmio`/`pool`/`waiter`/`phys`) is
-    // `'static`, so the opened device is `VirtioBlk<'static>` and can be
-    // shared for life behind the block-sharing layer (`finish_unlock`).
-    let blk = VirtioBlk::open(transport, vhost).map_err(|_| "root-unlock: virtio-blk open")?;
-    finish_unlock(blk, coop, env, &AARCH64_UNLOCK_CONSOLE)
 }
 
 /// Bring the Raspberry Pi 4 EMMC2 SD host up at the fastest bus it, the card,
@@ -755,65 +627,26 @@ fn emmc2_unlock<'a>(
     // blob by its own `totalsize` before any read.
     let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }
         .map_err(|_| "root-unlock: device tree unreadable; emmc2 root unbound")?;
-    // Resolve, bind, route, and arm the controller's GIC SPI on the table the
-    // kernel core published; with no interrupt the driver would park
-    // forever, so fail closed.
+    // With no interrupt the driver would park forever, so fail closed.
     let intid = emmc2_spi(&fdt).ok_or("root-unlock: no emmc2 interrupt in DTB")?;
     storage_trace::line("emmc2 trace: interrupt", &[unsigned("intid", intid)]);
-    let table: &'static IrqTable =
-        published_irq_table().ok_or("root-unlock: no published IRQ table")?;
-    let bind = table
-        .bind_exclusive(intid, UNLOCK_TASK)
-        .map_err(|_| "root-unlock: bind emmc2 SPI")?;
-    let handle: IrqHandle = bind.handle;
-    // SAFETY: the GIC distributor + CPU interface are up (the kernel-core
-    // `irq` phase brought them up via `gic_irq::install_device_irq_dispatch`
-    // -> `gic::init`), and the EL1 vectors + device dispatch are installed;
-    // this routes + enables the bound SPI on CPU 0.
-    unsafe {
-        gic::route_spi(intid, CPU0_TARGET);
-    }
-    // Arm the line for the first completion; the waiter re-arms it after each
-    // subsequent one.
-    let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
+    // An SDHCI controller signals by level until its status is cleared.
+    let armed = Aarch64Floor::lines()
+        .ok_or("root-unlock: no published IRQ table")?
+        .bind(intid, Some(Trigger::Level), UNLOCK_TASK)?;
     let waiter = Emmc2Completion {
-        waiter: IrqParkWaiter::new(
-            table,
-            handle,
-            UNLOCK_TASK,
-            &COMPOSITE_IRQ_CONTROLLER,
-            Some(wfi_fallback_park),
-        ),
+        waiter: armed.waiter(),
         #[cfg(feature = "storage-trace")]
         trace: storage_trace::EngineTrace::new(),
     };
 
-    // Throwaway *bookkeeping* page tables for the register-window map and the
-    // DMA pool, boot-leaked like the virtio path's: the brought-up disk is
-    // shared for life by the two tasks `finish_unlock` runs, so its backing
-    // must outlive both frames.
-    let gib = configured_identity_gigapages();
-    let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
-        .ok_or("root-unlock: mmio bookkeeping space")?;
-    let mmio: &'static mut MmioMap<'static, _> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        MmioMap::new(
-            AddressSpace::new(mmio_space),
-            VirtAddr::new(MMIO_VBASE),
-            MMIO_CAP_PAGES,
-            &DeviceWindows,
-        )
-        .map_err(|_| "root-unlock: mmio map")?,
-    ));
-    let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
-        .ok_or("root-unlock: emmc2 dma bookkeeping space")?;
-    let mut dma_pool = DmaPool::new(
-        AddressSpace::new(dma_space),
-        VirtAddr::new(POOL_VBASE),
+    let mmio = register_map::<Aarch64Floor>()?;
+    let window = emmc2_dma_window(&binding.node);
+    let mut dma_pool = dma_window::<Aarch64Floor>(
         EMMC2_POOL_PAGES,
         frames,
-        &SPAWN_TABLE_PHYSMAP,
-    )
-    .map_err(|_| "root-unlock: emmc2 dma pool")?;
+        window.map_or(DmaCoherence::Unsnooped, |window| window.coherence),
+    )?;
 
     // The mailbox transport lives only in this block, which ends before the
     // driver store — and with it the `vcmailbox` service — can be reached.
@@ -824,7 +657,6 @@ fn emmc2_unlock<'a>(
         // at 3.3 V, on the capabilities' own base clock.
         let mut firmware = Emmc2Firmware::open(&fdt, &mapper, &mut dma_pool, caller, audit);
         trace_firmware(firmware.as_ref());
-        let window = emmc2_dma_window(&binding.node);
         trace_dma_window(&binding.node, window);
         let dma_host: &'static Emmc2DmaHost<'static, _, dyn Sink + Sync> =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(Emmc2DmaHost::new(
@@ -1230,13 +1062,8 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
             Err(refusal) => {
                 drop(pool);
                 storage_trace::debug_line("emmc2 trace: staging carve refused", "reason", &refusal);
-                return Err(match refusal {
-                    DmaGateError::CapabilityMissing => DriverError::PermissionDenied,
-                    // Pool exhaustion, an oversize carve, or no RAM the device
-                    // reaches: fail closed, and the driver runs on programmed
-                    // I/O.
-                    _ => DriverError::LengthOutOfRange,
-                });
+                // Any refusal leaves the driver on programmed I/O.
+                return Err(refusal.as_driver_error());
             }
         };
         let base = pool
@@ -1249,8 +1076,8 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
     }
 }
 
-/// Synchronize cacheable EMMC2 DMA staging bytes with the non-coherent SD
-/// host before or after a DMA ownership hand-off.
+/// Synchronize cacheable EMMC2 DMA staging bytes with an SD host that does
+/// not snoop the caches, before or after a DMA ownership hand-off.
 fn sync_emmc2_dma_range(base: *const u8, len: usize) {
     clean_invalidate_dcache_range(base as usize, len);
 }
@@ -1285,13 +1112,14 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
         // on the controller's bus, translated through the node's window. The
         // buffer is exclusively this slab's and intentionally leaked: this
         // host and its pool are boot-leaked to `'static`, so the frames stay
-        // valid for the life of the kernel. The coherency shim cleans and
-        // invalidates each range at the driver's hand-offs, because EMMC2
-        // does not snoop the CPU caches.
-        Ok(
-            unsafe { DmaSlab::from_leaked(device, base, len, self.id, 0) }
-                .with_coherency(sync_emmc2_dma_range),
-        )
+        // valid for the life of the kernel.
+        let slab = unsafe { DmaSlab::from_leaked(device, base, len, self.id, 0) };
+        // A controller that does not snoop sees its staging only through
+        // the shim's clean and invalidate at each hand-off.
+        Ok(match window.coherence {
+            DmaCoherence::Snooped => slab,
+            DmaCoherence::Unsnooped => slab.with_coherency(sync_emmc2_dma_range),
+        })
     }
 
     /// Nothing to release: the staging lives for the kernel's life.

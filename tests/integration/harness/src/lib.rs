@@ -31,7 +31,7 @@
 
 pub mod elf2rxe;
 
-pub use tairix_qemu::DmaTranslation;
+pub use tairix_qemu::{Board, DmaTranslation, InterruptControllers};
 
 /// The freestanding cross-compile target vocabulary (`PieArch`) and how
 /// cargo is told to build for one: each Tier-1 target's name, its `--target`
@@ -153,25 +153,24 @@ pub fn emit_target_cfg() {
 pub const DEFAULT_DTB_RAM_MIB: u32 = tairix_qemu::aarch64::DEFAULT_RAM_MIB;
 
 /// Build the `qemu-system-aarch64` argument vector that dumps, to
-/// `dtb_path`, the device tree of the `virt` board a run behind
-/// `translation` boots, for `cpus` CPUs and `ram_mib` mebibytes of guest RAM.
+/// `dtb_path`, the device tree of the `virt` `board` a run boots, for `cpus`
+/// CPUs and `ram_mib` mebibytes of guest RAM.
 ///
-/// The machine, its `-global`s and the CPU are `tools/qemu`'s own, so the
-/// tree describes the board the runner starts. The DTB layout the verticals
+/// The machine, its `-global`s, the unit a run creates as a device and the
+/// CPU are `tools/qemu`'s own, so the tree describes the board the runner
+/// starts. The DTB layout the verticals
 /// read from the blob (virtio-MMIO transport bases, GICv2 SPIs, the `/psci`
-/// conduit) is the stable `virt`-board layout, independent of the CPU count
-/// and the memory size.
+/// conduit) is the stable `virt`-board layout, independent of the memory size;
+/// its `/cpus` names `cpus` CPUs, which are the only ones the boot starts.
 #[must_use]
-pub fn dump_virt_dtb_args(
-    dtb_path: &str,
-    cpus: u32,
-    ram_mib: u32,
-    translation: DmaTranslation,
-) -> Vec<String> {
-    let (machine, globals) = tairix_qemu::aarch64::machine(translation);
+pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32, ram_mib: u32, board: Board) -> Vec<String> {
+    let (machine, globals) = tairix_qemu::aarch64::machine(board);
     let mut args = vec!["-M".to_string(), format!("{machine},dumpdtb={dtb_path}")];
     for global in globals {
         args.extend(["-global".to_string(), (*global).to_string()]);
+    }
+    if let Some(unit) = board.translation.unit_device() {
+        args.extend(["-device".to_string(), unit.to_string()]);
     }
     args.extend([
         "-cpu".to_string(),
@@ -185,32 +184,6 @@ pub fn dump_virt_dtb_args(
         "-no-reboot".to_string(),
     ]);
     args
-}
-
-/// Dump the canonical QEMU `virt`-board flattened device tree for `cpus`
-/// CPUs into `OUT_DIR` and return its (trimmed) bytes, so a freestanding
-/// QEMU vertical can embed it.
-///
-/// QEMU's `-kernel <ELF>` aarch64 path treats the image as bare firmware
-/// and passes no DTB pointer to the kernel (`x0 = 0`, unlike the Linux
-/// Image protocol), so a vertical that needs the board's device tree at
-/// runtime embeds this blob instead of reading a live pointer. This lives
-/// here **once** rather than copied into every aarch64 build script
-/// (no duplication).
-///
-/// QEMU's `dumpdtb` pads the blob to the machine's 1 MiB device-tree
-/// region; the bytes are passed through [`trim_fdt_to_extent`] so the
-/// embedded copy is only the meaningful FDT and a vertical that links it
-/// is not bloated by ~1 MiB of zero padding.
-///
-/// # Panics
-///
-/// Panics if `qemu-system-aarch64` cannot be spawned, exits non-zero, or
-/// the dumped file cannot be read. A build script cannot proceed without
-/// the blob, so failing loudly is correct.
-#[must_use]
-pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
-    dump_aarch64_virt_dtb_with_ram(out_dir, cpus, DEFAULT_DTB_RAM_MIB)
 }
 
 /// The whole build script of an x86_64 vertical that links the port alone:
@@ -296,33 +269,72 @@ fn x86_64_layout() -> Option<String> {
 ///
 /// As [`aarch64_virt_guest_build_trees`].
 pub fn aarch64_virt_guest_build(cpus: u32) {
-    aarch64_virt_guest_build_trees(cpus, &[("dtb_fixture", DmaTranslation::Absent)]);
+    aarch64_virt_guest_build_trees(&[("dtb_fixture", Board::default(), cpus)]);
 }
 
 /// [`aarch64_virt_guest_build`] for a crate whose binaries boot different
-/// machines: for each `(stem, translation)`, the tree of the board a run
-/// behind `translation` boots, as `DTB_BLOB` in `OUT_DIR/{stem}.rs`, so each
-/// binary includes the tree of the machine it runs on and no other.
+/// machines: for each `(stem, board, cpus)`, the tree of `board` with `cpus`
+/// CPUs as `DTB_BLOB` in `OUT_DIR/{stem}.rs`, so each binary includes the
+/// tree of the machine it runs on and no other. A machine given more CPUs
+/// than its tree describes starts only those the tree names.
 ///
 /// # Panics
 ///
-/// As [`dump_aarch64_virt_dtb`], or when cargo set no `OUT_DIR` or manifest
-/// directory, or a fixture cannot be written: a build script cannot go on
-/// without them.
-pub fn aarch64_virt_guest_build_trees(cpus: u32, trees: &[(&str, DmaTranslation)]) {
+/// As [`aarch64_virt_guest_build_with_ram`].
+pub fn aarch64_virt_guest_build_trees(trees: &[(&str, Board, u32)]) {
+    embed_aarch64_virt_trees(None, trees);
+}
+
+/// [`aarch64_virt_guest_build`] for a guest given `ram_mib` mebibytes of RAM,
+/// which its QEMU enrolment must declare too: the boot sizes the direct map
+/// from the tree's `/memory` window, so a default tree would leave the rest
+/// unmapped. The fixture also carries the figure as `GUEST_RAM_MIB`.
+///
+/// # Panics
+///
+/// When `qemu-system-aarch64` cannot dump the tree, cargo set no `OUT_DIR`
+/// or manifest directory, or a fixture cannot be written: a build script
+/// cannot go on without them.
+pub fn aarch64_virt_guest_build_with_ram(cpus: u32, ram_mib: u32) {
+    embed_aarch64_virt_trees(Some(ram_mib), &[("dtb_fixture", Board::default(), cpus)]);
+}
+
+/// The whole build script of an aarch64 `virt` vertical whose kernel reads no
+/// device tree: link the board's linker script on the freestanding target.
+///
+/// # Panics
+///
+/// When cargo set no manifest directory: a build script cannot go on without
+/// it.
+pub fn aarch64_virt_guest_build_without_tree() {
+    emit_target_cfg();
+    println!("cargo:rerun-if-changed=build.rs");
+    link_virt_layout(pie::PieArch::Aarch64, "aarch64/link/aarch64-virt.ld");
+}
+
+/// Link the `virt` layout and write, for each `(stem, board)`, the tree of
+/// `board` for `cpus` CPUs as `OUT_DIR/{stem}.rs`, empty on a host build: of
+/// the default RAM, or of `ram_mib` mebibytes, which the fixture then states.
+fn embed_aarch64_virt_trees(ram_mib: Option<u32>, trees: &[(&str, Board, u32)]) {
     use std::fmt::Write as _;
 
     emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
     let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR set by cargo");
     let freestanding = link_virt_layout(pie::PieArch::Aarch64, "aarch64/link/aarch64-virt.ld");
-    for &(stem, translation) in trees {
+    for &(stem, board, cpus) in trees {
         let dtb = if freestanding {
-            dump_aarch64_dtb(&out_dir, stem, cpus, DEFAULT_DTB_RAM_MIB, translation)
+            dump_aarch64_dtb(
+                &out_dir,
+                stem,
+                cpus,
+                ram_mib.unwrap_or(DEFAULT_DTB_RAM_MIB),
+                board,
+            )
         } else {
             Vec::new()
         };
-        let (machine, _) = tairix_qemu::aarch64::machine(translation);
+        let (machine, _) = tairix_qemu::aarch64::machine(board);
         let mut out = format!(
             "// Auto-generated by build.rs. DO NOT EDIT.\n\
              /// The QEMU `{machine}` flattened device tree, dumped at build\n\
@@ -336,6 +348,14 @@ pub fn aarch64_virt_guest_build_trees(cpus: u32, trees: &[(&str, DmaTranslation)
             write!(out, "0x{byte:02x}, ").expect("write to String never fails");
         }
         out.push_str("\n];\n");
+        if let Some(ram_mib) = ram_mib {
+            write!(
+                out,
+                "/// Guest RAM the tree describes, in mebibytes.\n\
+                 pub const GUEST_RAM_MIB: u64 = {ram_mib};\n"
+            )
+            .expect("write to String never fails");
+        }
         std::fs::write(
             std::path::PathBuf::from(&out_dir).join(format!("{stem}.rs")),
             out,
@@ -374,35 +394,19 @@ fn link_virt_layout(arch: pie::PieArch, script: &str) -> bool {
     true
 }
 
-/// [`dump_aarch64_virt_dtb`] for a guest whose RAM the vertical overrides.
-///
-/// The boot path sizes the direct physical map from the tree's `/memory`
-/// window, so a vertical that runs with more RAM than the default must dump
-/// a tree that says so — otherwise the kernel maps the default and the
-/// extra RAM is simply invisible, which is not the thing under test.
-/// `ram_mib` must match the `ram_mib` its QEMU enrolment declares.
-#[must_use]
-pub fn dump_aarch64_virt_dtb_with_ram(
-    out_dir: &std::ffi::OsStr,
-    cpus: u32,
-    ram_mib: u32,
-) -> Vec<u8> {
-    dump_aarch64_dtb(out_dir, "virt", cpus, ram_mib, DmaTranslation::Absent)
-}
-
-/// Dump the tree of the board a run behind `translation` boots into
-/// `OUT_DIR/{stem}.dtb` and return its trimmed bytes.
+/// Dump the tree of `board` into `OUT_DIR/{stem}.dtb` and return its
+/// trimmed bytes.
 fn dump_aarch64_dtb(
     out_dir: &std::ffi::OsStr,
     stem: &str,
     cpus: u32,
     ram_mib: u32,
-    translation: DmaTranslation,
+    board: Board,
 ) -> Vec<u8> {
     let dtb_path = std::path::PathBuf::from(out_dir).join(format!("{stem}.dtb"));
     let dtb_str = dtb_path.display().to_string();
     let status = std::process::Command::new(tairix_qemu::aarch64::QEMU_BINARY)
-        .args(dump_virt_dtb_args(&dtb_str, cpus, ram_mib, translation))
+        .args(dump_virt_dtb_args(&dtb_str, cpus, ram_mib, board))
         .status()
         .expect("run qemu-system-aarch64 to dump the virt DTB");
     assert!(status.success(), "qemu dumpdtb failed: {status}");
@@ -522,7 +526,7 @@ mod tests {
             "/tmp/out/virt.dtb",
             2,
             DEFAULT_DTB_RAM_MIB,
-            DmaTranslation::Absent,
+            Board::default(),
         );
         assert_eq!(
             args,
@@ -556,15 +560,55 @@ mod tests {
                 "virt,iommu=smmuv3,dumpdtb=/t.dtb",
             ),
         ] {
-            let args = dump_virt_dtb_args("/t.dtb", 1, DEFAULT_DTB_RAM_MIB, translation);
+            let args = dump_virt_dtb_args(
+                "/t.dtb",
+                1,
+                DEFAULT_DTB_RAM_MIB,
+                Board::translated(translation),
+            );
             assert_eq!(args[..3], ["-M", board, "-cpu"], "{translation:?}");
         }
+        let args = dump_virt_dtb_args(
+            "/t.dtb",
+            1,
+            DEFAULT_DTB_RAM_MIB,
+            Board::translated(DmaTranslation::VirtioIommu),
+        );
+        assert_eq!(
+            args[..5],
+            [
+                "-M",
+                "virt,dumpdtb=/t.dtb",
+                "-device",
+                "virtio-iommu-pci,addr=0x2",
+                "-cpu"
+            ]
+        );
+    }
+
+    #[test]
+    fn dump_virt_dtb_args_name_the_interrupt_controllers_the_run_builds() {
+        let args = dump_virt_dtb_args(
+            "/t.dtb",
+            1,
+            DEFAULT_DTB_RAM_MIB,
+            Board::translated(DmaTranslation::Smmuv3Stage2)
+                .with_interrupts(InterruptControllers::Gicv3),
+        );
+        assert_eq!(
+            args[..3],
+            [
+                "-M",
+                "virt,iommu=smmuv3,gic-version=3,dumpdtb=/t.dtb",
+                "-cpu"
+            ]
+        );
     }
 
     #[test]
     fn dump_virt_dtb_args_render_the_cpu_count() {
-        let one = dump_virt_dtb_args("d", 1, DEFAULT_DTB_RAM_MIB, DmaTranslation::Absent);
-        let four = dump_virt_dtb_args("d", 4, DEFAULT_DTB_RAM_MIB, DmaTranslation::Absent);
+        let one = dump_virt_dtb_args("d", 1, DEFAULT_DTB_RAM_MIB, Board::default());
+        let four = dump_virt_dtb_args("d", 4, DEFAULT_DTB_RAM_MIB, Board::default());
         let smp = |a: &[String]| a[a.iter().position(|s| s == "-smp").unwrap() + 1].clone();
         assert_eq!(smp(&one), "1");
         assert_eq!(smp(&four), "4");
@@ -575,7 +619,7 @@ mod tests {
     /// default and the extra memory is invisible.
     #[test]
     fn dump_virt_dtb_args_render_the_declared_memory() {
-        let args = dump_virt_dtb_args("d", 1, 3072, DmaTranslation::Absent);
+        let args = dump_virt_dtb_args("d", 1, 3072, Board::default());
         let mem = args[args.iter().position(|a| a == "-m").unwrap() + 1].clone();
         assert_eq!(mem, "3072M");
         // The default tracks the runner's own figure, so the two cannot
@@ -618,5 +662,31 @@ mod tests {
         let mut not_fdt = vec![0u8; 64];
         not_fdt[0] = 0xab;
         assert_eq!(trim_fdt_to_extent(&not_fdt), not_fdt);
+    }
+
+    /// A vertical names neither `virt` linker script: its whole build is
+    /// one of the harness's, so the layout glue has one home.
+    #[test]
+    fn no_vertical_names_a_virt_linker_script() {
+        let verticals = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut naming = Vec::new();
+        for entry in std::fs::read_dir(&verticals).expect("tests/integration lists") {
+            let script = entry.expect("an entry").path().join("build.rs");
+            let Ok(source) = std::fs::read_to_string(&script) else {
+                continue;
+            };
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if ["aarch64-virt.ld", "riscv64-virt.ld"]
+                .iter()
+                .any(|layout| code.contains(layout))
+            {
+                naming.push(script);
+            }
+        }
+        assert!(naming.is_empty(), "re-rolled layout glue: {naming:?}");
     }
 }

@@ -15,19 +15,19 @@ use crate::hostmem::HostFrames;
 use crate::pagetable::{IoPageTable, Pte, PteFormat};
 use crate::{
     Access, DomainId, Fault, FaultReason, FaultRoute, InterruptRemapping, InterruptSource,
-    InterruptTarget, IommuError, IommuUnit, Reach, Remapped, TableMemory, UnitProfile,
-    IO_PAGE_SIZE,
+    InterruptTarget, IommuError, IommuUnit, MessageFiles, Notice, Reach, Remapped, TableMemory,
+    UnitProfile, IO_PAGE_SIZE,
 };
 
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
-const REACH: Reach = Reach {
+pub(crate) const REACH: Reach = Reach {
     input_bits: 39,
     output_bits: 46,
 };
 const LARGE: u64 = 1 << 7;
 const READ_WRITE: u64 = 0b11;
 
-struct ModelFormat;
+pub(crate) struct ModelFormat;
 
 impl PteFormat for ModelFormat {
     fn leaf_allowed(&self, level: u32) -> bool {
@@ -79,6 +79,8 @@ pub enum Behaviour {
     RefusesEnable,
     /// `route_faults` refuses.
     RefusesRoute,
+    /// `unroute_faults` refuses.
+    RefusesUnroute,
     /// `release_interrupt` leaves the copy an interrupt cached.
     StaleRelease,
     /// `enable_remapping` refuses.
@@ -87,6 +89,15 @@ pub enum Behaviour {
     EndlessFaults,
     /// `silence` refuses.
     RefusesSilence,
+    /// Its tables grant no write without a read, as a stage 1 `SMMUv3`'s do
+    /// not: `map` refuses [`Access::WRITE`] alone.
+    NoWriteOnly,
+    /// It confines streams' messages to interrupt files, taking a confined
+    /// stream's write to its doorbell as a message rather than translating it.
+    ConfinesMessages,
+    /// It has no endpoint for a stream at or past this one: `attach` answers
+    /// [`IommuError::NoEndpoint`].
+    NoEndpointFrom(u32),
 }
 
 struct State<'f> {
@@ -102,6 +113,10 @@ struct State<'f> {
     behaviour: Behaviour,
     routed: Option<FaultRoute>,
     remap: Option<Remap>,
+    /// Each confined stream's doorbell, file and notice.
+    confined: BTreeMap<u32, (u64, u64, Notice)>,
+    /// Invalidations asked of it.
+    syncs: usize,
 }
 
 /// The reference unit's remapping table: its entries, the copies an
@@ -143,6 +158,8 @@ impl<'f> ModelUnit<'f> {
                 behaviour,
                 routed: None,
                 remap: None,
+                confined: BTreeMap::new(),
+                syncs: 0,
             }),
         }
     }
@@ -187,6 +204,18 @@ impl<'f> ModelUnit<'f> {
             .is_some_and(|remap| remap.enabled)
     }
 
+    /// Invalidations asked of the unit, confirmed or not.
+    #[must_use]
+    pub fn syncs(&self) -> usize {
+        self.state.lock().syncs
+    }
+
+    /// The doorbell, file and notice `stream`'s messages were confined to.
+    #[must_use]
+    pub fn confined(&self, stream: u32) -> Option<(u64, u64, Notice)> {
+        self.state.lock().confined.get(&stream).copied()
+    }
+
     /// The domain `stream` is attached to, if any.
     #[must_use]
     pub fn attached(&self, stream: u32) -> Option<DomainId> {
@@ -202,9 +231,10 @@ impl<'f> ModelUnit<'f> {
 impl IommuUnit for ModelUnit<'_> {
     fn profile(&self) -> UnitProfile {
         UnitProfile {
-            stage: crate::Stage::Second,
+            tables: crate::Tables::Walked(crate::Stage::Second),
             reach: REACH,
             reserved: core::slice::from_ref(&crate::MESSAGE_WINDOW),
+            write_only: self.state.lock().behaviour != Behaviour::NoWriteOnly,
         }
     }
 
@@ -243,6 +273,9 @@ impl IommuUnit for ModelUnit<'_> {
         let mut state = self.state.lock();
         if !state.domains.contains_key(&domain.0) {
             return Err(IommuError::OutOfRange);
+        }
+        if matches!(state.behaviour, Behaviour::NoEndpointFrom(first) if stream >= first) {
+            return Err(IommuError::NoEndpoint);
         }
         match state.streams.get(&stream) {
             Some(&held) if held == domain.0 => return Ok(()),
@@ -286,6 +319,9 @@ impl IommuUnit for ModelUnit<'_> {
         access: Access,
     ) -> Result<(), IommuError> {
         let mut state = self.state.lock();
+        if state.behaviour == Behaviour::NoWriteOnly && !access.read() {
+            return Err(IommuError::OutOfRange);
+        }
         let table = state
             .domains
             .get_mut(&domain.0)
@@ -304,6 +340,7 @@ impl IommuUnit for ModelUnit<'_> {
 
     fn sync(&self, domain: DomainId) -> Result<(), IommuError> {
         let mut state = self.state.lock();
+        state.syncs += 1;
         match state.behaviour {
             Behaviour::UnconfirmedSync => return Err(IommuError::Unconfirmed),
             Behaviour::StaleSync => {}
@@ -326,6 +363,15 @@ impl IommuUnit for ModelUnit<'_> {
         Ok(())
     }
 
+    fn unroute_faults(&self) -> Result<(), IommuError> {
+        let mut state = self.state.lock();
+        if state.behaviour == Behaviour::RefusesUnroute {
+            return Err(IommuError::Hardware);
+        }
+        state.routed = None;
+        Ok(())
+    }
+
     fn drain_faults(&self, sink: &mut dyn FnMut(Fault)) -> bool {
         let (faults, endless) = {
             let mut state = self.state.lock();
@@ -342,6 +388,35 @@ impl IommuUnit for ModelUnit<'_> {
 
     fn interrupt_remapping(&self) -> Option<&dyn InterruptRemapping> {
         Some(self)
+    }
+
+    fn message_files(&self) -> Option<&dyn MessageFiles> {
+        (self.state.lock().behaviour == Behaviour::ConfinesMessages)
+            .then_some(self as &dyn MessageFiles)
+    }
+}
+
+impl MessageFiles for ModelUnit<'_> {
+    fn atomic_files(&self) -> bool {
+        true
+    }
+
+    fn confine_messages(
+        &self,
+        stream: u32,
+        doorbell: u64,
+        file: u64,
+        notice: Notice,
+    ) -> Result<(), IommuError> {
+        let mut state = self.state.lock();
+        if !file.is_multiple_of(crate::MESSAGE_FILE_BYTES)
+            || !doorbell.is_multiple_of(IO_PAGE_SIZE)
+            || state.confined.contains_key(&stream)
+        {
+            return Err(IommuError::OutOfRange);
+        }
+        state.confined.insert(stream, (doorbell, file, notice));
+        Ok(())
     }
 }
 
@@ -486,6 +561,13 @@ impl TranslationProbe for ModelUnit<'_> {
             None
         };
         if state.silenced.contains(&stream) {
+            return None;
+        }
+        let message = state
+            .confined
+            .get(&stream)
+            .is_some_and(|&(doorbell, _, _)| doorbell == page);
+        if write && message && state.streams.contains_key(&stream) {
             return None;
         }
         let Some(&domain) = state.streams.get(&stream) else {

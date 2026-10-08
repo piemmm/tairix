@@ -4,6 +4,8 @@
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use core::ops::Range;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_arch_api::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 use tairix_sync::SpinLock;
@@ -27,6 +29,8 @@ struct State {
     blocks: BTreeMap<u64, (u32, *mut [u64])>,
     /// Frames still allowed to be handed out, or [`None`] for no limit.
     budget: Option<usize>,
+    /// Table words reached through [`PageTableFrames::table_at`].
+    reached: usize,
 }
 
 // SAFETY: the raw table pointers are owned boxes the arena alone frees, and
@@ -44,6 +48,7 @@ impl HostFrames {
                 live: BTreeMap::new(),
                 blocks: BTreeMap::new(),
                 budget: None,
+                reached: 0,
             }),
         }
     }
@@ -63,6 +68,12 @@ impl HostFrames {
     #[must_use]
     pub fn live_blocks(&self) -> usize {
         self.state.lock().blocks.len()
+    }
+
+    /// Table words software has reached so far: what a table operation costs.
+    #[must_use]
+    pub fn reached(&self) -> usize {
+        self.state.lock().reached
     }
 
     /// Entry `index` of the table at `phys`, as a unit walking memory reads
@@ -101,8 +112,10 @@ impl HostFrames {
         let state = self.state.lock();
         let (words, index) = Self::locate(&state, address)?;
         // SAFETY: the table or block is live (the arena frees it only under
-        // this lock) and `index` lies inside it.
-        Some(unsafe { *words.add(index) })
+        // this lock) and `index` lies inside it, a word aligned as any the
+        // arena hands out; access is atomic, as the kernel's own is, so a unit
+        // on another thread never races it.
+        Some(unsafe { AtomicU64::from_ptr(words.add(index)) }.load(Ordering::Relaxed))
     }
 
     /// Store `value` at physical `address` in a live table or block, as a
@@ -112,9 +125,67 @@ impl HostFrames {
         let Some((words, index)) = Self::locate(&state, address) else {
             return false;
         };
-        // SAFETY: as `word`; the arena's lock serialises the store.
-        unsafe { *words.add(index) = value };
+        // SAFETY: as `word`.
+        unsafe { AtomicU64::from_ptr(words.add(index)) }.store(value, Ordering::Relaxed);
         true
+    }
+
+    /// Copy the `out.len()` bytes at physical `address` out of live tables or
+    /// blocks with plain accesses, as a device reads memory its driver shares
+    /// through plain accesses; `false` where one of them lies outside.
+    pub fn read_bytes(&self, address: u64, out: &mut [u8]) -> bool {
+        self.runs(address, out.len(), |at, run| {
+            let out = &mut out[run];
+            // SAFETY: `at` begins `out.len()` bytes of one live table or
+            // block, which the arena frees only under the lock `runs` holds.
+            unsafe { core::ptr::copy_nonoverlapping(at, out.as_mut_ptr(), out.len()) };
+        })
+    }
+
+    /// Copy `bytes` to physical `address` in live tables or blocks with plain
+    /// accesses, as [`Self::read_bytes`] reads them; `false` where one of
+    /// them lies outside.
+    pub fn write_bytes(&self, address: u64, bytes: &[u8]) -> bool {
+        self.runs(address, bytes.len(), |at, run| {
+            let bytes = &bytes[run];
+            // SAFETY: as `read_bytes`.
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len()) };
+        })
+    }
+
+    /// Hand `visit` each stretch of one live table or block the `len` bytes
+    /// at `address` cover, in order: its first byte and the range of the
+    /// `len` it holds. `false`, part-way, at the first byte outside them.
+    fn runs(&self, address: u64, len: usize, mut visit: impl FnMut(*mut u8, Range<usize>)) -> bool {
+        let state = self.state.lock();
+        let mut done = 0;
+        while done < len {
+            let Some((at, room)) = u64::try_from(done)
+                .ok()
+                .and_then(|done| address.checked_add(done))
+                .and_then(|byte| Self::locate_byte(&state, byte))
+            else {
+                return false;
+            };
+            let take = room.min(len - done);
+            visit(at, done..done + take);
+            done += take;
+        }
+        true
+    }
+
+    /// The live byte at `address` and how many bytes of its table or block
+    /// run from it.
+    fn locate_byte(state: &State, address: u64) -> Option<(*mut u8, usize)> {
+        let page = address & !(IO_PAGE_SIZE - 1);
+        let (start, base, len) = if let Some(&table) = state.live.get(&page) {
+            (page, table.cast::<u8>(), size_of::<Table>())
+        } else {
+            let (&start, &(_, words)) = state.blocks.range(..=address).next_back()?;
+            (start, words.cast::<u8>(), words.len() * size_of::<u64>())
+        };
+        let offset = usize::try_from(address - start).ok()?;
+        (offset < len).then(|| (base.wrapping_add(offset), len - offset))
     }
 
     fn locate(state: &State, address: u64) -> Option<(*mut u64, usize)> {
@@ -166,7 +237,9 @@ impl PageTableFrames for HostFrames {
     }
 
     fn table_at(&self, phys: u64) -> Option<*mut Table> {
-        self.state.lock().live.get(&phys).copied()
+        let mut state = self.state.lock();
+        state.reached += 1;
+        state.live.get(&phys).copied()
     }
 
     fn free_table(&self, phys: u64) {

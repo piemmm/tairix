@@ -20,8 +20,9 @@ grants and:
   `RegisterWindow` at the right offset (translating an outbound PCIe-bus BAR
   address to the mapped CPU window, `AGENTS.md` §18.1);
 - implements `VirtioHost` — it carves the device-shared DMA region with the
-  `dma_alloc` syscall, bounded by the grant's addressing constraint, and
-  returns a `DmaSlab` carrying the device-visible base;
+  `dma_alloc` syscall, bounded by the grant's addressing constraint and the
+  narrowest reach the driver declared (`narrow_dma_reach`), and returns a
+  `DmaSlab` carrying the device-visible base;
 - reports the load-time capability set and `DriverKind::UserSpace`.
 
 ## API

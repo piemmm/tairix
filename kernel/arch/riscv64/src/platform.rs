@@ -10,61 +10,144 @@
 //! translated through each ancestor bus's `ranges`, and `/memory` nodes
 //! become `Memory` nodes.
 //!
-//! What is genuinely this port's, and so lives here, is the **PLIC
-//! interrupt specifier**: the QEMU `virt` board's PLIC declares
-//! `#interrupt-cells = <1>`, so the single cell *is* the source number
-//! rather than a type-relative offset, and source `0` is the reserved
-//! "no interrupt" sentinel. The controller's discovered `riscv,ndev` source
-//! count bounds it, read once before the walk, so a device is never bound to
-//! a line the controller cannot raise.
+//! What is genuinely this port's, and so lives here, is the interrupt
+//! specifier of the tree's supervisor-level controller: a PLIC's single cell
+//! is the source number, an APLIC's two cells the source and its sense, and
+//! source `0` is "no interrupt" on both. The controller's discovered source
+//! count bounds a source, read once before the walk, so a device is never
+//! bound to a line the controller cannot raise.
 
-use crate::fdt::{plic_line, plic_ndev, plic_phandle, Fdt};
+use crate::fdt::{
+    is_aplic, is_imsic, is_plic, plic_line, plic_ndev, plic_phandle, supervisor_aplic, Fdt,
+};
+use tairix_abi::DmaCoherence;
 use tairix_arch_api::fdtwalk::FdtPlatform;
-use tairix_fdt::read_cells;
+use tairix_fdt::Node;
 
-/// This port's half of the shared device-tree walk: the PLIC interrupt
-/// specifier, carrying the controller's discovered source count.
+/// The `#interrupt-cells` sense of a rising edge.
+const SENSE_EDGE_RISING: u32 = 1;
+/// The `#interrupt-cells` sense of a high level.
+const SENSE_LEVEL_HIGH: u32 = 4;
+
+/// The supervisor-level controller a tree's devices name as their interrupt
+/// parent.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Root {
+    Plic {
+        phandle: Option<u32>,
+        sources: Option<u32>,
+    },
+    Aplic {
+        phandle: u32,
+        sources: u32,
+    },
+}
+
+/// This port's half of the shared device-tree walk.
 pub struct Riscv64Fdt {
-    /// The PLIC's `riscv,ndev` source count, or `None` when the tree
-    /// describes no PLIC or its node carries no readable count.
-    ndev: Option<u32>,
-    /// The PLIC's phandle, when the tree gives it one.
-    plic: Option<u32>,
+    root: Root,
+}
+
+/// A line a specifier names, and how it signals.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Line {
+    /// The line a granted driver binds.
+    pub line: u32,
+    /// Raised by edges rather than a level.
+    pub edge: bool,
 }
 
 impl FdtPlatform for Riscv64Fdt {
-    /// The single-cell PLIC binding the `virt` board describes interrupts
-    /// with.
-    const INTERRUPT_CELLS: usize = 1;
-
-    fn from_tree(fdt: &Fdt<'_>) -> Self {
-        Self {
-            ndev: plic_ndev(fdt),
-            plic: plic_phandle(fdt),
+    fn interrupt_cells(&self) -> usize {
+        match self.root {
+            Root::Plic { .. } => 1,
+            Root::Aplic { .. } => 2,
         }
     }
 
-    fn root_interrupt_controller(&self) -> Option<u32> {
-        self.plic
+    /// An APLIC that delivers by MSI to supervisor-level files is preferred
+    /// to a PLIC, as the controller whose messages a unit can confine.
+    fn from_tree(fdt: &Fdt<'_>) -> Self {
+        let root = match supervisor_aplic(fdt) {
+            Some(aplic) => Root::Aplic {
+                phandle: aplic.phandle,
+                sources: aplic.sources,
+            },
+            None => Root::Plic {
+                phandle: plic_phandle(fdt),
+                sources: plic_ndev(fdt),
+            },
+        };
+        Self { root }
     }
 
-    /// The cell is the PLIC source number itself. The reserved `0` sentinel
-    /// routes to no line and is refused; a source above the controller's
-    /// discovered count is refused too, so the tree never carries a line
-    /// the PLIC cannot raise. With no discovered count the upper bound
-    /// falls to the controller's own arm-time range guard, which is where
-    /// the boot path's `plic_device_source` leaves it as well.
+    fn root_interrupt_controller(&self) -> Option<u32> {
+        match self.root {
+            Root::Plic { phandle, .. } => phandle,
+            Root::Aplic { phandle, .. } => Some(phandle),
+        }
+    }
+
+    fn kernel_driven(&self, node: &Node<'_>) -> bool {
+        is_plic(node) || is_aplic(node) || is_imsic(node)
+    }
+
+    // A RISC-V tree states `dma-noncoherent` on every master that does
+    // not snoop.
+    const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Snooped;
+
     fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
-        self.line_of(u32::try_from(read_cells(specifier, 0, 1)?).ok()?)
+        self.decode(specifier).map(|line| line.line)
+    }
+
+    fn edge_triggered(&self, specifier: &[u8]) -> bool {
+        self.decode(specifier).is_some_and(|line| line.edge)
     }
 }
 
 impl Riscv64Fdt {
-    /// The line PLIC source `source` raises: [`None`] for the reserved
-    /// sentinel, or for a source past the controller's discovered count.
+    /// The line a specifier of `cells` names: [`None`] for source `0`, a
+    /// source past the controller's count, or a sense other than a high
+    /// level or a rising edge, which a grant cannot carry.
     #[must_use]
-    pub fn line_of(&self, source: u32) -> Option<u32> {
-        plic_line(source, self.ndev)
+    pub fn line(&self, cells: &[u32]) -> Option<Line> {
+        match (self.root, cells) {
+            (Root::Plic { sources, .. }, &[source]) => Some(Line {
+                line: plic_line(source, sources)?,
+                edge: false,
+            }),
+            (Root::Aplic { sources, .. }, &[source, sense]) => {
+                let edge = match sense {
+                    SENSE_EDGE_RISING => true,
+                    SENSE_LEVEL_HIGH => false,
+                    _ => return None,
+                };
+                (1..=sources)
+                    .contains(&source)
+                    .then_some(Line { line: source, edge })
+            }
+            _ => None,
+        }
+    }
+
+    /// The line `node`'s first `interrupts` specifier names.
+    #[must_use]
+    pub fn node_line(&self, node: &Node<'_>) -> Option<Line> {
+        let value = node.property("interrupts")?.value();
+        let first = value.get(..4 * self.interrupt_cells())?;
+        self.decode(first)
+    }
+
+    fn decode(&self, specifier: &[u8]) -> Option<Line> {
+        let (cells, rest) = specifier.as_chunks::<4>();
+        if !rest.is_empty() || cells.len() > 2 {
+            return None;
+        }
+        let mut values = [0; 2];
+        for (value, cell) in values.iter_mut().zip(cells) {
+            *value = u32::from_be_bytes(*cell);
+        }
+        self.line(&values[..cells.len()])
     }
 }
 
@@ -101,10 +184,93 @@ mod tests {
         );
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let plic = Riscv64Fdt::from_tree(&fdt);
-        assert_eq!(plic.line_of(0), None);
-        assert_eq!(plic.line_of(1), Some(1));
-        assert_eq!(plic.line_of(ndev), Some(ndev));
-        assert_eq!(plic.line_of(ndev + 1), None);
+        let line = |source| plic.line(&[source]).map(|line| line.line);
+        assert_eq!(line(0), None);
+        assert_eq!(line(1), Some(1));
+        assert_eq!(line(ndev), Some(ndev));
+        assert_eq!(line(ndev + 1), None);
+        assert_eq!(plic.line(&[1, 4]), None, "a PLIC specifier is one cell");
+    }
+
+    /// An APLIC's two cells are the source and its sense: a high level or a
+    /// rising edge names a line, any other sense none.
+    #[test]
+    fn an_aplic_specifier_names_its_source_and_sense() {
+        use super::{Line, Riscv64Fdt};
+        use tairix_arch_api::fdtwalk::FdtPlatform;
+        use tairix_fdt::fixture::{virt_like_aia, VIRT_APLIC_PHANDLE};
+        let blob = virt_like_aia(1, &[]);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let aplic = Riscv64Fdt::from_tree(&fdt);
+        assert_eq!(aplic.interrupt_cells(), 2);
+        assert_eq!(aplic.root_interrupt_controller(), Some(VIRT_APLIC_PHANDLE));
+        assert_eq!(
+            aplic.line(&[10, 4]),
+            Some(Line {
+                line: 10,
+                edge: false
+            })
+        );
+        assert_eq!(
+            aplic.line(&[0x24, 1]),
+            Some(Line {
+                line: 0x24,
+                edge: true
+            })
+        );
+        for refused in [[10, 2], [10, 8], [10, 0], [0, 4], [97, 4]] {
+            assert_eq!(aplic.line(&refused), None, "{refused:?}");
+        }
+        assert_eq!(aplic.line(&[10]), None, "an APLIC specifier is two cells");
+    }
+
+    /// On an AIA tree every controller is the kernel's, and each slot carries
+    /// the line and trigger its two cells name.
+    #[test]
+    fn an_aia_tree_grants_each_slot_its_source_with_its_trigger() {
+        use tairix_fdt::fixture::virt_like_aia;
+        let nodes = discover_all(&virt_like_aia(
+            1,
+            &[
+                (0x1000_1000, 8, 4),
+                (0x1000_2000, 9, 1),
+                (0x1000_3000, 10, 8),
+            ],
+        ));
+        for compatible in ["riscv,aplic", "riscv,imsics"] {
+            let wanted = tairix_abi::HwMatchKey::compatible(compatible.as_bytes()).expect("fits");
+            let controllers: std::vec::Vec<&HwNode> = nodes
+                .iter()
+                .filter(|n| n.match_keys().contains(&wanted))
+                .collect();
+            assert_eq!(controllers.len(), 2, "{compatible}: machine and supervisor");
+            assert!(
+                controllers.iter().all(|n| n.is_kernel_driven()),
+                "{compatible}"
+            );
+        }
+        let irqs = |base: u64| -> std::vec::Vec<(u64, bool)> {
+            let slot = nodes
+                .iter()
+                .find(|n| {
+                    n.resources()
+                        .iter()
+                        .any(|r| r.kind() == Some(HwResourceKind::Mmio) && r.base() == base)
+                })
+                .expect("the slot");
+            slot.resources()
+                .iter()
+                .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+                .map(|r| (r.base(), r.is_edge_triggered()))
+                .collect()
+        };
+        assert_eq!(irqs(0x1000_1000), [(8, false)]);
+        assert_eq!(irqs(0x1000_2000), [(9, true)]);
+        assert_eq!(
+            irqs(0x1000_3000),
+            [],
+            "a low level is refused, not inverted"
+        );
     }
 
     #[test]
@@ -176,7 +342,16 @@ mod tests {
         // `reg` off, now visible in the tree a tool can list.
         let plic = by_key(&nodes, "riscv,plic0");
         assert_eq!(plic.class(), Some(HwDeviceClass::InterruptController));
-        assert_eq!(plic.resources()[0].base(), 0x0c00_0000);
+        assert!(
+            plic.is_kernel_driven(),
+            "no driver may be loaded for the PLIC"
+        );
+        let window = plic
+            .resources()
+            .iter()
+            .find(|r| r.kind() == Some(tairix_abi::HwResourceKind::Mmio))
+            .expect("the PLIC's window");
+        assert_eq!(window.base(), 0x0c00_0000);
 
         // Every non-root node hangs off the root: the fixture nests no bus.
         assert!(nodes.iter().skip(1).all(|n| n.parent() == 0));

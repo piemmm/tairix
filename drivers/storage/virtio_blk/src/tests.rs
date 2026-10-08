@@ -100,19 +100,18 @@ fn build_device_with_sectors(sectors: u64) -> (MockTransport, Rc<RefCell<Vec<u8>
 /// The mock device, shared by the driver under test and the host playing it.
 type Device = Rc<RefCell<MockTransport>>;
 
-type Blk = Box<VirtioBlk<'static, Device>>;
+type Blk<'h> = Box<VirtioBlk<'h, Device>>;
 
 /// Open a driver on `t`, whose waits `host` answers by playing the device.
-fn open_played_by(t: MockTransport, host: MockHost) -> (Blk, Device, &'static MockHost) {
-    let host: &'static MockHost = Box::leak(Box::new(host));
+fn open_played_by(t: MockTransport, host: &MockHost) -> (Blk<'_>, Device) {
     let device = t.into_shared();
     host.attach(&device);
     let blk = Box::new(VirtioBlk::open(Rc::clone(&device), host).expect("open"));
-    (blk, device, host)
+    (blk, device)
 }
 
-fn open_with_autodrain(t: MockTransport) -> Blk {
-    open_played_by(t, MockHost::new()).0
+fn open_with_autodrain(t: MockTransport, host: &MockHost) -> Blk<'_> {
+    open_played_by(t, host).0
 }
 
 /// A host whose first `n` wakes come with no completion posted.
@@ -132,7 +131,8 @@ fn spurious_wakes_before_completion_still_succeed() {
     let (t, backing) = build_device();
     backing.borrow_mut()[7 * SECTOR_SIZE..8 * SECTOR_SIZE].fill(0x5A);
     // Five leading wakes deliver no completion; the sixth drains it.
-    let (mut blk, _, _) = open_played_by(t, spurious_host(5));
+    let host = spurious_host(5);
+    let (mut blk, _) = open_played_by(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     blk.read_blocks(7, &mut buf)
         .expect("read survives spurious wakes");
@@ -149,7 +149,8 @@ fn a_never_completing_device_fails_closed() {
     // More spurious wakes than the driver will tolerate: the completion
     // never lands, so the bounded loop gives up.
     let wakes = usize::try_from(MAX_COMPLETION_WAKES).unwrap_or(usize::MAX) + 1;
-    let (mut blk, _, _) = open_played_by(t, spurious_host(wakes));
+    let host = spurious_host(wakes);
+    let (mut blk, _) = open_played_by(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(0, &mut buf),
@@ -165,7 +166,8 @@ fn a_never_completing_device_fails_closed() {
 #[test]
 fn a_silent_device_fails_closed_with_device_offline() {
     let (t, _backing) = build_device();
-    let (mut blk, _, _) = open_played_by(t, MockHost::silent());
+    let host = MockHost::silent();
+    let (mut blk, _) = open_played_by(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(0, &mut buf),
@@ -206,7 +208,8 @@ fn a_dropped_device_that_confirms_its_reset_releases_every_region() {
 #[test]
 fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
     let (t, _backing) = build_device();
-    let (blk, device, host) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (blk, device) = open_played_by(t, &host);
     let held = host.slabs_outstanding();
     assert!(held > 0);
     device.borrow_mut().refuse_resets_after(0);
@@ -216,11 +219,9 @@ fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
 
 /// Open a driver whose host lets the first request's wait time out with the
 /// device still holding the chain.
-fn open_abandoning_first_request(t: MockTransport) -> (Blk, Device) {
-    let host = MockHost::new();
+fn open_abandoning_first_request(t: MockTransport, host: &MockHost) -> (Blk<'_>, Device) {
     host.script_waits([MockWait::Silent]);
-    let (blk, device, _) = open_played_by(t, host);
-    (blk, device)
+    open_played_by(t, host)
 }
 
 /// What a device that filled every device-write segment of `chain` reports.
@@ -244,10 +245,22 @@ fn a_read_whose_completion_does_not_cover_its_payload_hands_back_nothing() {
             Ok(1)
         }),
     );
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert!(buf.iter().all(|b| *b == 0), "nothing handed back");
+}
+
+/// A host with no DMA memory left refuses the open as exhausted memory.
+#[test]
+fn an_open_without_memory_for_its_rings_is_refused_as_out_of_memory() {
+    let (t, _disk) = build_device();
+    let device = t.into_shared();
+    assert!(matches!(
+        VirtioBlk::open(Rc::clone(&device), &MockHost::exhausted()),
+        Err(VirtioError::OutOfMemory)
+    ));
 }
 
 #[test]
@@ -256,6 +269,7 @@ fn a_requestq_too_shallow_for_one_request_is_refused_before_it_is_programmed() {
     t.set_config(0, &SECTORS.to_le_bytes());
     let device = t.into_shared();
     let host = MockHost::new();
+    device.borrow_mut().reach(&host);
     assert!(matches!(
         VirtioBlk::open(Rc::clone(&device), &host),
         Err(VirtioError::QueueTooShallow)
@@ -271,23 +285,21 @@ fn a_requestq_too_shallow_for_one_request_is_refused_before_it_is_programmed() {
 #[test]
 fn a_sensitive_payload_the_device_held_is_scrubbed_when_the_driver_is_dropped() {
     let (t, _backing) = build_device();
-    let (mut blk, _device) = open_abandoning_first_request(t);
+    let host = MockHost::new();
+    let (mut blk, _device) = open_abandoning_first_request(t, &host);
     let payload = vec![0xC7u8; SECTOR_SIZE];
     assert_eq!(
         blk.write_blocks_with_class(4, &payload, BufferClass::Sensitive),
         Err(DriverError::DeviceOffline)
     );
-    let (bytes, len) = blk
+    let slot = blk
         .data
         .as_ref()
-        .map(|data| (data.as_bytes().as_ptr(), data.len()))
+        .map(DmaSlab::slot)
         .expect("the staging is put back");
     drop(blk);
-    // SAFETY: the mock host leaks every slab's storage, so these bytes
-    // outlive the driver that freed them.
-    let staging = unsafe { core::slice::from_raw_parts(bytes, len) };
     assert!(
-        staging.iter().all(|b| *b == 0),
+        host.released_zeroed(slot),
         "the confirmed reset took it back"
     );
 }
@@ -312,7 +324,8 @@ fn a_completion_that_wrote_no_status_is_refused() {
             written_by(chain)
         }),
     );
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     blk.read_blocks(0, &mut buf).expect("answered");
     buf.fill(0);
@@ -328,7 +341,8 @@ fn a_late_completion_is_never_returned_as_a_later_reads_data() {
     let (t, backing) = build_device();
     backing.borrow_mut()[3 * SECTOR_SIZE..4 * SECTOR_SIZE].fill(0xAA);
     backing.borrow_mut()[5 * SECTOR_SIZE..6 * SECTOR_SIZE].fill(0x55);
-    let (mut blk, device) = open_abandoning_first_request(t);
+    let host = MockHost::new();
+    let (mut blk, device) = open_abandoning_first_request(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(3, &mut buf),
@@ -343,7 +357,8 @@ fn a_late_completion_is_never_returned_as_a_later_reads_data() {
 #[test]
 fn a_request_is_refused_while_the_device_still_holds_an_abandoned_one() {
     let (t, _backing) = build_device();
-    let (mut blk, device) = open_abandoning_first_request(t);
+    let host = MockHost::new();
+    let (mut blk, device) = open_abandoning_first_request(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(0, &mut buf),
@@ -365,7 +380,8 @@ fn a_request_is_refused_while_the_device_still_holds_an_abandoned_one() {
 fn a_sensitive_payload_the_device_held_is_scrubbed_when_it_comes_back() {
     let (t, backing) = build_device();
     backing.borrow_mut()[2 * SECTOR_SIZE..3 * SECTOR_SIZE].fill(0x5E);
-    let (mut blk, device) = open_abandoning_first_request(t);
+    let host = MockHost::new();
+    let (mut blk, device) = open_abandoning_first_request(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks_with_class(2, &mut buf, BufferClass::Sensitive),
@@ -385,7 +401,8 @@ fn an_abandoned_sensitive_write_still_carries_its_payload_to_the_device() {
     // Scrubbing staging the device has yet to read would write zeros over
     // the block the caller meant to write.
     let (t, backing) = build_device();
-    let (mut blk, device) = open_abandoning_first_request(t);
+    let host = MockHost::new();
+    let (mut blk, device) = open_abandoning_first_request(t, &host);
     let payload = vec![0xC7u8; SECTOR_SIZE];
     assert_eq!(
         blk.write_blocks_with_class(4, &payload, BufferClass::Sensitive),
@@ -406,7 +423,8 @@ fn an_abandoned_sensitive_write_still_carries_its_payload_to_the_device() {
 #[test]
 fn open_reads_geometry_from_device_config() {
     let (t, _backing) = build_device();
-    let blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let blk = open_with_autodrain(t, &host);
     assert_eq!(
         blk.geometry().unwrap(),
         BlockGeometry {
@@ -420,7 +438,8 @@ fn open_reads_geometry_from_device_config() {
 fn read_returns_planted_pattern() {
     let (t, backing) = build_device();
     backing.borrow_mut()[3 * SECTOR_SIZE..4 * SECTOR_SIZE].fill(0xA5);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     blk.read_blocks(3, &mut buf).expect("read");
     assert!(buf.iter().all(|b| *b == 0xA5));
@@ -429,7 +448,8 @@ fn read_returns_planted_pattern() {
 #[test]
 fn write_then_read_round_trip() {
     let (t, _backing) = build_device();
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let payload = vec![0xC3u8; SECTOR_SIZE];
     blk.write_blocks(5, &payload).expect("write");
     let mut readback = vec![0u8; SECTOR_SIZE];
@@ -440,7 +460,8 @@ fn write_then_read_round_trip() {
 #[test]
 fn validate_block_op_rejects_unaligned_lengths() {
     let (t, _backing) = build_device();
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut tiny = vec![0u8; 100];
     assert_eq!(
         blk.read_blocks(0, &mut tiny),
@@ -456,7 +477,8 @@ fn validate_block_op_rejects_unaligned_lengths() {
 #[test]
 fn validate_block_op_rejects_out_of_range() {
     let (t, _backing) = build_device();
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(
         blk.read_blocks(100, &mut buf),
@@ -471,7 +493,8 @@ fn validate_block_op_rejects_out_of_range() {
 #[test]
 fn sensitive_class_completes_round_trip() {
     let (t, backing) = build_device();
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let payload = vec![0xDEu8; SECTOR_SIZE];
     blk.write_blocks_with_class(2, &payload, BufferClass::Sensitive)
         .expect("write");
@@ -489,7 +512,8 @@ fn multi_block_read_concatenates_sectors() {
     let (t, backing) = build_device();
     backing.borrow_mut()[0..SECTOR_SIZE].fill(0xAA);
     backing.borrow_mut()[SECTOR_SIZE..2 * SECTOR_SIZE].fill(0xBB);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE * 2];
     blk.read_blocks(0, &mut buf).expect("read");
     assert!(buf[..SECTOR_SIZE].iter().all(|b| *b == 0xAA));
@@ -503,7 +527,8 @@ fn steady_state_io_allocates_no_new_dma() {
     // churn (and the audit-log entry it emits every request) is exactly
     // the defect this driver must not reintroduce.
     let (t, _backing) = build_device();
-    let (mut blk, _, host) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (mut blk, _) = open_played_by(t, &host);
     let after_open = host.bytes_allocated();
     let mut buf = vec![0u8; SECTOR_SIZE];
     for lba in 0..8u64 {
@@ -529,7 +554,8 @@ fn transfer_larger_than_staging_window_chunks_and_round_trips() {
     let blocks = bytes / SECTOR_SIZE;
     let sectors = u64::try_from(blocks).unwrap() + 4;
     let (t, _backing) = build_device_with_sectors(sectors);
-    let (mut blk, _, host) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (mut blk, _) = open_played_by(t, &host);
     let after_open = host.bytes_allocated();
     // A recognisable per-block pattern so a mis-chunked copy is caught.
     let mut payload = vec![0u8; bytes];
@@ -603,7 +629,8 @@ fn build_discard_device(align: u32, max: u32) -> (MockTransport, DiscardLog) {
 #[test]
 fn discard_capability_unsupported_without_feature() {
     let (t, _backing) = build_device();
-    let blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let blk = open_with_autodrain(t, &host);
     assert_eq!(
         blk.discard_capability().unwrap(),
         DiscardCapability::unsupported()
@@ -613,14 +640,16 @@ fn discard_capability_unsupported_without_feature() {
 #[test]
 fn discard_unsupported_device_refuses() {
     let (t, _backing) = build_device();
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     assert_eq!(blk.discard(0, 4), Err(DriverError::Unsupported));
 }
 
 #[test]
 fn discard_capable_device_reports_negotiated_limits() {
     let (t, _log) = build_discard_device(8, 64);
-    let (blk, device, _) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (blk, device) = open_played_by(t, &host);
     assert_eq!(
         blk.discard_capability().unwrap(),
         DiscardCapability {
@@ -638,7 +667,8 @@ fn discard_capable_device_reports_negotiated_limits() {
 #[test]
 fn discard_capable_device_records_descriptor() {
     let (t, log) = build_discard_device(1, 0);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     blk.discard(4, 3).expect("discard");
     assert_eq!(log.borrow().as_slice(), &[(4, 3)]);
 }
@@ -646,7 +676,8 @@ fn discard_capable_device_records_descriptor() {
 #[test]
 fn discard_rejects_out_of_range_and_oversized() {
     let (t, _log) = build_discard_device(1, 4);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     assert_eq!(
         blk.discard(SECTORS - 1, 4),
         Err(DriverError::LengthOutOfRange)
@@ -702,7 +733,8 @@ fn the_transport_features_are_accepted_wherever_offered() {
     const UNIMPLEMENTED: u64 = 1 << 40;
     let mut t = MockTransport::new(1, 8, tairix_virtio::TRANSPORT_FEATURES | UNIMPLEMENTED, 8);
     t.set_config(0, &SECTORS.to_le_bytes());
-    let (_blk, device, _) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (_blk, device) = open_played_by(t, &host);
     assert_eq!(
         device.borrow().negotiated_driver_features(),
         tairix_virtio::TRANSPORT_FEATURES
@@ -714,7 +746,8 @@ fn flush_without_feature_is_a_noop_success() {
     // A write-through device (no `VIRTIO_BLK_F_FLUSH`) has no volatile
     // cache: flush succeeds without issuing any request.
     let (t, _backing) = build_device();
-    let (mut blk, device, _) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (mut blk, device) = open_played_by(t, &host);
     assert_eq!(device.borrow().negotiated_driver_features(), 0);
     blk.flush()
         .expect("flush is a no-op success when write-through");
@@ -723,7 +756,8 @@ fn flush_without_feature_is_a_noop_success() {
 #[test]
 fn flush_capable_device_issues_a_flush_command() {
     let (t, log) = build_flush_device();
-    let (mut blk, device, _) = open_played_by(t, MockHost::new());
+    let host = MockHost::new();
+    let (mut blk, device) = open_played_by(t, &host);
     assert_eq!(
         device.borrow().negotiated_driver_features(),
         wire::VIRTIO_BLK_F_FLUSH
@@ -808,7 +842,8 @@ fn status_to_result_maps_every_device_status() {
 #[test]
 fn read_ioerror_surfaces_as_medium_error_not_device_fault() {
     let t = build_device_returning_read_status(wire::STATUS_IOERR);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     // A single bad-sector I/O error is a per-request `MediumError`: a
     // consumer (e.g. a RAID member) recovers around it and repairs the
@@ -826,7 +861,8 @@ fn read_ioerror_surfaces_as_medium_error_not_device_fault() {
 #[test]
 fn read_unknown_status_fails_closed_as_device_fault() {
     let t = build_device_returning_read_status(0x7F);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert!(buf.iter().all(|b| *b == 0));
@@ -835,7 +871,8 @@ fn read_unknown_status_fails_closed_as_device_fault() {
 #[test]
 fn read_unsupported_status_is_request_level_not_a_fault() {
     let t = build_device_returning_read_status(wire::STATUS_UNSUPP);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     let mut buf = vec![0u8; SECTOR_SIZE];
     assert_eq!(blk.read_blocks(0, &mut buf), Err(DriverError::Unsupported));
     assert!(buf.iter().all(|b| *b == 0));
@@ -846,7 +883,8 @@ fn flush_ioerror_fails_closed_as_medium_error() {
     // A flush the device cannot commit is a genuine I/O failure the
     // caller must see (data may not be durable), never a silent success.
     let (t, log) = build_flush_device_with_status(wire::STATUS_IOERR);
-    let mut blk = open_with_autodrain(t);
+    let host = MockHost::new();
+    let mut blk = open_with_autodrain(t, &host);
     assert_eq!(blk.flush(), Err(DriverError::MediumError));
     assert_eq!(*log.borrow(), 1, "the flush reached the device");
 }

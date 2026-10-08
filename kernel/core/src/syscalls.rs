@@ -86,9 +86,9 @@ use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
-    CrashFaultClass, CrashNamedReg, CrashRecord, GroupDirectoryRecord, IrqRecord, MountRecord,
-    ProcessRecord, SeatRecord, UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoStatsRecord, CRASH_MAX_FRAMES,
+    CrashFaultClass, CrashNamedReg, CrashRecord, DmaGroupRecord, DmaNodeRecord, DmaUnitRecord,
+    GroupDirectoryRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
+    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, CRASH_MAX_FRAMES,
 };
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_abi::time::NANOS_PER_MILLI;
@@ -474,6 +474,9 @@ where
     /// a translated driver's carves map into its node's domain, which its
     /// end revokes.
     dma_translation: Option<&'static crate::iommu::Translation>,
+    /// The units a malformed firmware table described, where one did: the
+    /// unit listing names them, as no translation stands for them.
+    malformed_units: Option<crate::iommu::MalformedUnits>,
     /// The bus mastering an untranslated driver's function follows, where
     /// the kernel owns configuration space.
     mastering: Option<crate::iommu::Mastering>,
@@ -575,6 +578,8 @@ where
     /// meets only the grants it revoked itself. Owned by the one handler set
     /// every CPU dispatches through.
     revocation: crate::sleeplock::SleepLock<()>,
+    /// The MSI vectors `msi_alloc` gave each node's drivers, kept across them.
+    msi_vectors: crate::sleeplock::SleepLock<crate::devres::NodeVectors>,
 }
 
 /// The outcome of one non-blocking read step over a byte-stream backing
@@ -663,6 +668,9 @@ impl StreamPos {
 /// The terms a DMA carve is made on.
 struct CarveTerms {
     constraint: crate::devres::DmaConstraint,
+    /// The bound the carve is placed below: its frames untranslated, its
+    /// IOVA translated.
+    limit: u64,
     custodian: DmaCustodian,
     /// The carver's function is untranslated and not yet handed to it.
     hand_over: bool,
@@ -1017,6 +1025,7 @@ where
             // binding is refused, so no carve can exist without it.
             dma_quarantine: &NULL_DMA_QUARANTINE,
             dma_translation: None,
+            malformed_units: None,
             mastering: None,
             // The MSI-alloc facility is unwired until the boot path installs
             // the arch producer: `msi_alloc` fails closed with
@@ -1066,6 +1075,7 @@ where
             // a guessed credential.
             identity: &NULL_IDENTITY,
             revocation: crate::sleeplock::SleepLock::new(()),
+            msi_vectors: crate::sleeplock::SleepLock::new(crate::devres::NodeVectors::new()),
         }
     }
 
@@ -1234,6 +1244,7 @@ where
         caller: &CallerContext<'_>,
         handle: u64,
         len: usize,
+        reach: tairix_abi::driver::DmaReach,
     ) -> Result<CarveTerms, Errno> {
         let (resource, driver) = {
             let aspaces = self.aspaces.read();
@@ -1249,6 +1260,7 @@ where
         if constraint.max_len != 0 && (len as u64) > constraint.max_len {
             return Err(Errno::OutOfRange);
         }
+        let limit = crate::devres::carve_limit(&constraint, reach)?;
         let driver = driver.ok_or(Errno::PermissionDenied)?;
         // Nothing would confine a stranded node's DMA.
         if let crate::iommu::DmaPath::Stranded { .. } = driver.dma {
@@ -1261,21 +1273,23 @@ where
             // A bus viewport rebasing an IOVA names no address the domain
             // knows.
             Some(_) if constraint.translated => return Err(Errno::NotSupported),
-            Some(translation) => DmaCustodian {
-                node: driver.node,
-                generation: driver.generation,
-                custody: translation,
-                translation: Some(translation),
-            },
-            None => DmaCustodian {
-                node: driver.node,
-                generation: driver.generation,
-                custody: self.dma_quarantine,
-                translation: None,
-            },
+            Some((translation, output_limit)) => DmaCustodian::translated(
+                driver.node,
+                driver.generation,
+                translation,
+                output_limit,
+                constraint.coherence,
+            ),
+            None => DmaCustodian::untranslated(
+                driver.node,
+                driver.generation,
+                self.dma_quarantine,
+                constraint.coherence,
+            ),
         };
         Ok(CarveTerms {
             constraint,
+            limit,
             custodian,
             hand_over,
         })
@@ -1304,10 +1318,18 @@ where
         drop(aspaces);
     }
 
-    /// The translation `driver`'s node is carved through, if it is.
-    fn translation_of(&self, driver: &LoadedDriver) -> Option<&'static crate::iommu::Translation> {
-        self.dma_translation
-            .filter(|_| driver.dma == crate::iommu::DmaPath::Translated)
+    /// The translation `driver`'s node is carved through, if it is, with its
+    /// unit's output limit.
+    fn translation_of(
+        &self,
+        driver: &LoadedDriver,
+    ) -> Option<(&'static crate::iommu::Translation, u64)> {
+        match driver.dma {
+            crate::iommu::DmaPath::Translated { output_limit } => self
+                .dma_translation
+                .map(|translation| (translation, output_limit)),
+            _ => None,
+        }
     }
 
     /// Undo what `caller` just mapped under a grant revoked while it was
@@ -1809,6 +1831,14 @@ where
         translation: &'static crate::iommu::Translation,
     ) -> Self {
         self.dma_translation = Some(translation);
+        self
+    }
+
+    /// Record the units a malformed firmware table described, consuming and
+    /// returning `self`.
+    #[must_use]
+    pub const fn with_malformed_units(mut self, units: crate::iommu::MalformedUnits) -> Self {
+        self.malformed_units = Some(units);
         self
     }
 
@@ -5258,7 +5288,44 @@ fn records_that_fit(out_cap: usize, record_len: usize) -> Result<usize, Errno> {
     Ok(out_cap / record_len)
 }
 
-/// The number of whole pages a `bytes`-byte region spans.
+/// Up to the records of DMA translation `domain` that fit `out_cap`, from
+/// the `first`th: what `dma` records of its units, groups and nodes, or, on
+/// a machine that has none because its table was `malformed`, the units that
+/// table described.
+fn dma_records(
+    dma: Option<&crate::iommu::Translation>,
+    malformed: Option<&crate::iommu::MalformedUnits>,
+    domain: IntrospectDomain,
+    first: u64,
+    out_cap: usize,
+) -> Result<Vec<u8>, Errno> {
+    match domain {
+        IntrospectDomain::DmaUnits => {
+            let max = records_that_fit(out_cap, DmaUnitRecord::WIRE_LEN)?;
+            match (dma, malformed) {
+                (Some(dma), _) => dma.unit_records(first, max),
+                (None, Some(units)) if first == 0 && max > 0 => {
+                    let mut page = Vec::new();
+                    page.try_reserve_exact(DmaUnitRecord::WIRE_LEN)
+                        .map_err(|_| Errno::OutOfMemory)?;
+                    page.extend_from_slice(&units.record().to_le_bytes());
+                    Ok(page)
+                }
+                (None, _) => Ok(Vec::new()),
+            }
+        }
+        IntrospectDomain::DmaGroups => {
+            let max = records_that_fit(out_cap, DmaGroupRecord::WIRE_LEN)?;
+            dma.map_or(Ok(Vec::new()), |dma| dma.group_records(first, max))
+        }
+        IntrospectDomain::DmaNodes => {
+            let max = records_that_fit(out_cap, DmaNodeRecord::WIRE_LEN)?;
+            dma.map_or(Ok(Vec::new()), |dma| dma.node_records(first, max))
+        }
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
 /// Fold a refused region record onto the stable [`Errno`] a mapping call
 /// reports: an overlap is a collision with the caller's own live mapping, and
 /// an extent that covers nothing or runs past the address space is a malformed
@@ -6015,6 +6082,9 @@ where
             }
             aspaces.irq_trigger(process, line)
         };
+        self.irq_controller
+            .activate(line)
+            .map_err(tairix_kernel_irq::ActivationError::to_errno)?;
         // Before the line is first unmasked, or a pulse arriving while it is
         // masked is lost.
         self.irq_controller
@@ -7506,26 +7576,24 @@ where
         caller: &CallerContext<'_>,
         handle: u64,
         len: usize,
+        reach: tairix_abi::driver::DmaReach,
         device_out: u64,
     ) -> SyscallResult {
         // The dispatcher enforced `CAP_MEM_DMA`.
-        let terms = self.dma_carve_terms(caller, handle, len)?;
+        let terms = self.dma_carve_terms(caller, handle, len, reach)?;
         let constraint = &terms.constraint;
-        // Mechanism: the installed producer carves a physically-contiguous,
-        // zeroed, coherent block bounded by the grant's `addr_limit` into the
-        // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
-        // fails closed with `NotImplemented`; frame
-        // exhaustion surfaces as `OutOfMemory` (deterministic OOM).
+        // The default `NULL_DMA_ALLOC_FACILITY` fails closed with
+        // `NotImplemented`; frame exhaustion surfaces as `OutOfMemory`.
         let carve = self
             .dma_alloc_facility
-            .alloc(len, constraint.addr_limit, terms.custodian)?;
+            .alloc(len, terms.limit, terms.custodian)?;
         // Resolve the device-visible base the driver programs into its
         // hardware. For a coherent (untranslated) constraint it is the carved
         // CPU-physical base; for a translating inbound viewport
         // (`dma_translated`, e.g. the Pi 4's
         // `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`) it is that base re-based
         // onto the far side of the viewport — checked, never wrapped. The carve
-        // already lies below `addr_limit`, so this only re-bases it; a base
+        // already lies below the limit, so this only re-bases it; a base
         // below the viewport's CPU window fails closed.
         let device_addr = match translate_device_addr(constraint, carve.device_addr) {
             Ok(device_addr) => device_addr,
@@ -8408,10 +8476,11 @@ where
         // buffer through the one shared `records_that_fit` helper, so a
         // truncated window is always a whole number of records and the
         // fail-closed-when-none-fits check lives in one place. The
-        // seat/IRQ/crash domains are served from the kernel's own registries
-        // in this crate (the one definition), the rest from the introspect
-        // seam; every list is stably ordered and an offset past the end
-        // returns the empty terminator.
+        // seat/IRQ/crash domains and the DMA translation lists are served
+        // from the kernel's own registries in this crate (the one
+        // definition), the rest from the introspect seam; every list is
+        // stably ordered and an offset past the end returns the empty
+        // terminator.
         let blob = match domain {
             IntrospectDomain::Processes => self
                 .introspect
@@ -8478,6 +8547,17 @@ where
             IntrospectDomain::Crashes => self
                 .crashes
                 .page(arg, records_that_fit(out_cap, CrashRecord::WIRE_LEN)?),
+            // A machine with no unit discovered has nothing to list but the
+            // units a malformed table described.
+            IntrospectDomain::DmaUnits
+            | IntrospectDomain::DmaGroups
+            | IntrospectDomain::DmaNodes => dma_records(
+                self.dma_translation,
+                self.malformed_units.as_ref(),
+                domain,
+                arg,
+                out_cap,
+            )?,
             IntrospectDomain::TaskLimits => {
                 // The 128-bit target `ProcId` does not fit in the `u64` `arg`,
                 // so the caller writes it into the output buffer on entry; the
@@ -9610,15 +9690,19 @@ where
         }) {
             return Err(Errno::PermissionDenied);
         }
-        // A translation unit and the windows it keeps are the kernel's own
-        // discovery: a published one would hand its registers to a driver. A
-        // driver passes on only its own streams, which the coverage below
-        // holds it to.
+        // A translation unit, the windows it keeps and the doorbells every
+        // domain maps are the kernel's own discovery: a published one would
+        // hand a driver the unit's registers, or map memory of its choosing
+        // into its child's domain. A driver passes on only its own streams,
+        // which the coverage below holds it to.
         if decoded.class() == Some(tairix_abi::hwtree::HwDeviceClass::Iommu)
-            || decoded
-                .resources()
-                .iter()
-                .any(|resource| resource.kind() == Some(HwResourceKind::IommuReserved))
+            || decoded.is_kernel_driven()
+            || decoded.resources().iter().any(|resource| {
+                matches!(
+                    resource.kind(),
+                    Some(HwResourceKind::IommuReserved | HwResourceKind::MsiDoorbell)
+                )
+            })
         {
             return Err(Errno::PermissionDenied);
         }
@@ -9935,21 +10019,28 @@ where
         if out_len < tairix_abi::MsiAllocation::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let node = self.aspaces.read().loaded_node(caller.process());
-        if node.is_some_and(|node| !self.hw_tree.is_live(node)) {
+        // A vector serves a device, and only a node's driver drives one.
+        let Some(node) = self.aspaces.read().loaded_node(caller.process()) else {
+            return Err(Errno::PermissionDenied);
+        };
+        if !self.hw_tree.is_live(node) {
             return Err(Errno::DeviceOffline);
         }
-        // Mechanism: the installed arch producer mints a free MSI vector,
-        // brings the platform's MSI controller up if it is not already, and
-        // builds the doorbell. The default `NULL_MSI_ALLOC_FACILITY` fails
-        // closed with `NotImplemented` (a platform with no MSI controller);
-        // an exhausted vector space surfaces as `OutOfRange`.
-        let allocation = self.msi_alloc_facility.allocate()?;
-        // Copy the encoded record out through the validated `copy_to_user`
-        // boundary *before* minting the grant: a faulting `out` pointer fails
-        // closed with `BadAddress` and the caller never learns the line, so
-        // leaving the grant unminted keeps a faulting call from widening the
-        // caller's authority.
+        // A node keeps its vectors across its drivers, so this driver is
+        // given back one an earlier driver of its node held before the arch
+        // producer mints another (the default `NULL_MSI_ALLOC_FACILITY` fails
+        // closed with `NotImplemented`, an exhausted space with `OutOfRange`).
+        let allocation = self.msi_vectors.lock().claim(
+            node,
+            |vector| {
+                self.aspaces
+                    .read()
+                    .holds_irq_line(caller.process(), vector.line)
+            },
+            self.msi_alloc_facility,
+        )?;
+        // Copied out before the grant is minted, so a faulting `out` widens
+        // nothing; the vector stays the node's, for the next claim.
         let bytes = allocation.to_le_bytes();
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(out), &bytes)
@@ -9959,16 +10050,11 @@ where
             None => return Err(Errno::BadAddress),
         }
         // Granted as the allocation names it, so the caller may bind the line
-        // and forward that same resource onto a child it publishes.
-        let vector = allocation.resource();
-        // A vector allocated for a driver's device ends with that device.
-        let Some(node) = node else {
-            self.aspaces.write().mint_grant(caller.process(), vector);
-            return Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64);
-        };
+        // and forward that same resource onto a child it publishes; the grant
+        // ends with the node's device.
         self.aspaces
             .write()
-            .mint_node_grant(caller.process(), vector, node);
+            .mint_node_grant(caller.process(), allocation.resource(), node);
         // A removal whose walk ran before the mint missed this grant.
         if !self.hw_tree.is_live(node) {
             let revoked = {
@@ -10099,6 +10185,7 @@ where
         caller: &CallerContext<'_>,
         handle: u64,
         len: usize,
+        reach: tairix_abi::driver::DmaReach,
         id_out: u64,
         device_out: u64,
     ) -> SyscallResult {
@@ -10107,14 +10194,14 @@ where
         if !caller.caps.has(tairix_abi::CapabilityId::SHM) {
             return Err(Errno::PermissionDenied);
         }
-        let terms = self.dma_carve_terms(caller, handle, len)?;
+        let terms = self.dma_carve_terms(caller, handle, len, reach)?;
         let pages = (len as u64).div_ceil(PAGE_SIZE as u64);
         let made = crate::sharedreg::create_dma(
             self.shared_mem_facility,
             caller.process(),
             terms.custodian,
             pages,
-            terms.constraint.addr_limit,
+            terms.limit,
         )?;
         // A block the grant's bus window cannot name is released before the
         // caller learns anything about it.
@@ -13255,7 +13342,7 @@ pub(crate) fn end_driver_dma(
         return false;
     };
     if let Some(translation) =
-        translation.filter(|_| driver.dma == crate::iommu::DmaPath::Translated)
+        translation.filter(|_| matches!(driver.dma, crate::iommu::DmaPath::Translated { .. }))
     {
         translation.revoke(driver.node, driver.generation);
         return true;
@@ -14350,6 +14437,15 @@ where
     #[must_use]
     pub fn with_dma_translation(mut self, translation: &'static crate::iommu::Translation) -> Self {
         self.handlers = self.handlers.with_dma_translation(translation);
+        self
+    }
+
+    /// Record the units a malformed firmware table described, consuming and
+    /// returning `self`: the hook-level mirror of
+    /// [`KernelSyscallHandlers::with_malformed_units`].
+    #[must_use]
+    pub fn with_malformed_units(mut self, units: crate::iommu::MalformedUnits) -> Self {
+        self.handlers = self.handlers.with_malformed_units(units);
         self
     }
 
@@ -17151,6 +17247,62 @@ mod tests {
                 ]
             );
         }
+    }
+
+    /// Gives a vector to lines below `vectors` and none above, recording
+    /// every line it is asked for.
+    struct Activating {
+        vectors: u32,
+        asked: tairix_sync::SpinLock<alloc::vec::Vec<u32>>,
+    }
+
+    impl IrqController for Activating {
+        fn mask(&self, _line: u32) -> Result<(), tairix_kernel_irq::MaskError> {
+            Ok(())
+        }
+
+        fn activate(&self, line: u32) -> Result<(), tairix_kernel_irq::ActivationError> {
+            self.asked.lock().push(line);
+            if line < self.vectors {
+                Ok(())
+            } else {
+                Err(tairix_kernel_irq::ActivationError::Exhausted)
+            }
+        }
+    }
+
+    /// A line is claimed at the controller before it is bound, and one the
+    /// controller has no vector for is refused as the vector space's
+    /// exhaustion, never bound to deliver nothing.
+    #[test]
+    fn irq_bind_activates_its_line_first_and_refuses_one_with_no_vector() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = Activating {
+            vectors: 6,
+            asked: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+        };
+        let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(7),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        grant_line(&aspaces, &ctx, 5);
+        grant_line(&aspaces, &ctx, 9);
+        h.irq_bind(&ctx, 5).expect("a line with a vector binds");
+        assert_eq!(h.irq_bind(&ctx, 9), Err(Errno::OutOfRange));
+        assert_eq!(irq.owner_of_line(9), None);
+        assert_eq!(ctl.asked.lock().as_slice(), [5, 9]);
     }
 
     /// `irq_bind` succeeds for an in-range line, mints a non-zero
@@ -20722,7 +20874,7 @@ mod tests {
         // a DMA constraint. These originate kernel-side (the driver-spawn
         // path threads the discovered node's requests), never a caller.
         let regs = HwResource::mmio(0x0a00_0000, 0x1000);
-        let dma = HwResource::dma(0, 0x1000);
+        let dma = HwResource::dma(0, 0x1000, tairix_abi::DmaCoherence::Snooped);
         let requested = [regs, dma];
 
         // Set the arch's monotonic counter to a known value so the admit
@@ -20846,7 +20998,11 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let requested = [HwResource::dma(0, 0x1000)];
+        let requested = [HwResource::dma(
+            0,
+            0x1000,
+            tairix_abi::DmaCoherence::Snooped,
+        )];
         let driver_for = |node| {
             KernelSpawnCtx::new(
                 sink,
@@ -21172,7 +21328,11 @@ mod tests {
     ) -> KernelSpawnCtx<'static, TestArch> {
         let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
         let sched: &'static Scheduler<TestArch> = Box::leak(Box::new(make_sched(arch.clone())));
-        let requested: &'static [HwResource] = Box::leak(Box::new([HwResource::dma(0, 0x1000)]));
+        let requested: &'static [HwResource] = Box::leak(Box::new([HwResource::dma(
+            0,
+            0x1000,
+            tairix_abi::DmaCoherence::Snooped,
+        )]));
         KernelSpawnCtx::new(
             make_sink(),
             sched,
@@ -29409,6 +29569,9 @@ mod tests {
         ) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
+        fn shared_room(&self, _pages: u64) -> bool {
+            true
+        }
         fn unmap_shared(&mut self, _base: u64, _len: usize) -> Result<(), LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         }
@@ -30603,7 +30766,7 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0, tairix_abi::DmaCoherence::Snooped),
         );
         let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
             last: tairix_sync::SpinLock::new(None),
@@ -30723,7 +30886,10 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.dma_alloc(&ctx, 7, 0x1000, 0x1234), Err(Errno::NotFound));
+        assert_eq!(
+            h.dma_alloc(&ctx, 7, 0x1000, tairix_abi::driver::DmaReach::FULL, 0x1234),
+            Err(Errno::NotFound)
+        );
     }
 
     /// The DMA grant is owner-bound: a handle minted for another task, or an
@@ -30739,7 +30905,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: tairix_sync::SpinLock::new(None),
@@ -30761,7 +30931,13 @@ mod tests {
             caps: &caps,
         };
         assert_eq!(
-            h.dma_alloc(&owner, handle + 1, 0x1000, 0x1234),
+            h.dma_alloc(
+                &owner,
+                handle + 1,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::NotFound)
         );
         // Right handle value, foreign *process* → NotFound. The foreign
@@ -30773,7 +30949,13 @@ mod tests {
             caps: &foreign_caps,
         };
         assert_eq!(
-            h.dma_alloc(&foreign, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &foreign,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::NotFound)
         );
         // Neither refusal touched the carve mechanism.
@@ -30814,7 +30996,13 @@ mod tests {
         .with_dma_alloc_facility(facility);
 
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::OutOfRange)
         );
         assert!(facility.last.lock().is_none());
@@ -30847,6 +31035,7 @@ mod tests {
                 0x2_0000_0000,
                 0x2_0000_0000,
                 0x4_0000_0000,
+                tairix_abi::DmaCoherence::Snooped,
             ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
@@ -30871,7 +31060,13 @@ mod tests {
         // device-address copy-out fails closed; the point is the carve ran
         // rather than the grant being rejected pre-carve.
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::BadAddress)
         );
         // The carve ran with the request length and the grant's CPU-side
@@ -30901,7 +31096,12 @@ mod tests {
         // CPU window `[0x4000_0000, 0x8000_0000)` onto bus `0xC000_0000`.
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma_translated(0x8000_0000, 0x4000_0000, 0xC000_0000),
+            tairix_abi::hwtree::HwResource::dma_translated(
+                0x8000_0000,
+                0x4000_0000,
+                0xC000_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: tairix_sync::SpinLock::new(None),
@@ -30922,7 +31122,13 @@ mod tests {
             .expect("the node has no live driver");
 
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::OutOfRange)
         );
         assert_eq!(*facility.freed.lock(), Some(0xD000_0000), "released");
@@ -30953,7 +31159,11 @@ mod tests {
         // The grant declares a 0x1_0000-byte maximum extent.
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: tairix_sync::SpinLock::new(None),
@@ -30970,11 +31180,17 @@ mod tests {
         .with_dma_alloc_facility(facility);
 
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0, 0x1234),
+            h.dma_alloc(&ctx, handle, 0, tairix_abi::driver::DmaReach::FULL, 0x1234),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1_0001, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1_0001,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::OutOfRange)
         );
         assert!(facility.last.lock().is_none());
@@ -30997,7 +31213,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -31008,7 +31228,13 @@ mod tests {
             .expect("the node has no live driver");
 
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -31028,7 +31254,11 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility = recording_dma_facility();
         let h = KernelSyscallHandlers::new(
@@ -31037,7 +31267,13 @@ mod tests {
         .with_dma_alloc_facility(facility);
 
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::PermissionDenied)
         );
         assert!(
@@ -31066,7 +31302,11 @@ mod tests {
 
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: tairix_sync::SpinLock::new(None),
@@ -31089,7 +31329,13 @@ mod tests {
         // No address space is registered for task 2, so the device-address
         // copy-out fails closed with `BadAddress`.
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::BadAddress)
         );
         // The carve nonetheless ran with the request length and the grant's
@@ -31104,6 +31350,52 @@ mod tests {
             Some(0x1000),
             "the carve is tallied for the teardown record"
         );
+    }
+
+    #[test]
+    fn dma_alloc_narrows_the_grant_to_the_device_s_reach_and_never_widens_it() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
+            ret: Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x10_0000,
+                len: 0x1000,
+            }),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility);
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+
+        for (reach, limit) in [
+            (tairix_abi::driver::DmaReach::of::<24>(), 1 << 24),
+            (tairix_abi::driver::DmaReach::of::<32>(), 0x4000_0000),
+        ] {
+            let _ = h.dma_alloc(&ctx, handle, 0x1000, reach, 0x1234);
+            assert_eq!(*facility.last.lock(), Some((0x1000, limit, 0x44, 1)));
+        }
     }
 
     /// A port recording each bus-mastering change it is asked for — the node
@@ -31197,7 +31489,11 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let port = RecordingMastering::leaked();
         let h = KernelSyscallHandlers::new(
@@ -31213,7 +31509,13 @@ mod tests {
         // No address space is registered for task 2, so the copy-out fails
         // after the carve was made.
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::BadAddress)
         );
         let epoch = aspaces
@@ -31223,7 +31525,13 @@ mod tests {
             .expect("handed over");
         assert_eq!(port.calls(), [(Some(0x44), true, epoch)]);
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::BadAddress)
         );
         assert_eq!(
@@ -31372,7 +31680,11 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let port = RecordingMastering::watching(Some(aspaces));
         let h = KernelSyscallHandlers::new(
@@ -31384,7 +31696,13 @@ mod tests {
             .write()
             .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Untranslated)
             .expect("the node has no live driver");
-        let _ = h.dma_alloc(&ctx, handle, 0x1000, 0x1234);
+        let _ = h.dma_alloc(
+            &ctx,
+            handle,
+            0x1000,
+            tairix_abi::driver::DmaReach::FULL,
+            0x1234,
+        );
         assert_eq!(*port.registry_free.lock(), [false]);
     }
 
@@ -31401,7 +31719,11 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
             last: tairix_sync::SpinLock::new(None),
@@ -31419,7 +31741,13 @@ mod tests {
             .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Untranslated)
             .expect("the node has no live driver");
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::OutOfMemory)
         );
         assert!(port.calls().is_empty());
@@ -31445,9 +31773,10 @@ mod tests {
             sink,
             Some(port),
         );
-        let handle = aspaces
-            .write()
-            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::dma(0, 0));
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
+        );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31457,9 +31786,21 @@ mod tests {
         .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Translated)
+            .admit_driver(
+                ProcessId(2),
+                0x44,
+                crate::iommu::DmaPath::Translated {
+                    output_limit: u64::MAX,
+                },
+            )
             .expect("the node has no live driver");
-        let _ = h.dma_alloc(&ctx, handle, 0x1000, 0x1234);
+        let _ = h.dma_alloc(
+            &ctx,
+            handle,
+            0x1000,
+            tairix_abi::driver::DmaReach::FULL,
+            0x1234,
+        );
         assert!(
             port.calls().is_empty(),
             "a translated carve is handed over by its domain, not the syscall"
@@ -31470,7 +31811,7 @@ mod tests {
             .expect("loaded")
             .generation;
         translation
-            .map(0x44, generation, translated_block(0x8000_0000), 0)
+            .map(0x44, generation, &[translated_block(0x8000_0000)], 0)
             .expect("the first carve makes the domain");
         let _ = h.reclaim_process_resources(ProcessId(2));
         let flips: Vec<bool> = port.calls().iter().map(|call| call.1).collect();
@@ -31516,7 +31857,11 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility = recording_dma_facility();
         let h = KernelSyscallHandlers::new(
@@ -31564,7 +31909,11 @@ mod tests {
         let caps = make_caps_record(2, &[], sink);
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let facility = recording_dma_facility();
         let h = KernelSyscallHandlers::new(
@@ -31642,7 +31991,11 @@ mod tests {
         };
         let handle = aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -31722,7 +32075,11 @@ mod tests {
         );
         aspaces.write().mint_grant(
             ProcessId(2),
-            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+            tairix_abi::hwtree::HwResource::dma(
+                0x4000_0000,
+                0x1_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -35722,6 +36079,115 @@ mod tests {
         );
     }
 
+    /// An MSI producer minting a new vector on each call, of three.
+    struct CountingMsi(core::sync::atomic::AtomicU32);
+
+    impl CountingMsi {
+        const VECTORS: u32 = 3;
+
+        fn minted(&self) -> u32 {
+            self.0.load(core::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl crate::devres::MsiAllocFacility for CountingMsi {
+        fn allocate(&self) -> Result<tairix_abi::MsiAllocation, Errno> {
+            let at = self.minted();
+            if at == Self::VECTORS {
+                return Err(Errno::OutOfRange);
+            }
+            self.0.store(at + 1, core::sync::atomic::Ordering::Relaxed);
+            Ok(tairix_abi::MsiAllocation::new(
+                0xFEE0_0000,
+                0x41 + at,
+                77 + at,
+            ))
+        }
+    }
+
+    /// A node keeps its vectors across its drivers: a restarted driver is
+    /// given back what the last one held before a vector is minted, so
+    /// restarts drain nothing however many there are; one driver asking twice
+    /// is given two; a copy-out that faults keeps its vector for the next
+    /// claim; and a caller with no node is given none.
+    #[test]
+    fn a_node_keeps_its_msi_vectors_across_its_drivers() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let tree: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let msi: &'static CountingMsi =
+            Box::leak(Box::new(CountingMsi(core::sync::atomic::AtomicU32::new(0))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree)
+        .with_msi_alloc_facility(msi);
+        let load = |node: Option<u32>| {
+            let driver = crate::test_boot::claim_peer_task();
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+            let mut aspaces = aspaces.write();
+            aspaces
+                .register(ProcessId(driver), space, physmap)
+                .expect("registers");
+            if let Some(node) = node {
+                aspaces
+                    .admit_driver(ProcessId(driver), node, crate::iommu::DmaPath::Untranslated)
+                    .expect("the node is free");
+            }
+            driver
+        };
+        let alloc = |driver: u64, out: u64| {
+            let caps = make_caps_record(driver, &[CapabilityId::IRQ_BIND], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(driver),
+                caps: &caps,
+            };
+            h.msi_alloc(&ctx, out, tairix_abi::MsiAllocation::WIRE_LEN)
+        };
+        let holds = |driver: u64, line: u32| aspaces.read().holds_irq_line(ProcessId(driver), line);
+        let granted = Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64);
+
+        let first = load(Some(9));
+        assert_eq!(alloc(first, 0x1000), granted);
+        assert_eq!(alloc(first, 0x1000), granted);
+        assert!(holds(first, 77) && holds(first, 78));
+        assert_eq!(msi.minted(), 2);
+        assert!(aspaces.write().withdraw(ProcessId(first)));
+        for _ in 0..8 {
+            let restarted = load(Some(9));
+            assert_eq!(alloc(restarted, 0x1000), granted);
+            assert!(holds(restarted, 77));
+            assert!(aspaces.write().withdraw(ProcessId(restarted)));
+        }
+        assert_eq!(msi.minted(), 2, "restarts mint nothing");
+
+        let second = load(Some(9));
+        assert_eq!(alloc(second, 0x5000), Err(Errno::BadAddress));
+        assert!(!holds(second, 77), "a faulting copy-out grants nothing");
+        assert_eq!(alloc(second, 0x1000), granted);
+        assert_eq!(alloc(second, 0x1000), granted);
+        assert!(holds(second, 77) && holds(second, 78));
+        assert_eq!(msi.minted(), 2);
+        assert_eq!(alloc(second, 0x1000), granted);
+        assert!(holds(second, 79));
+        assert_eq!(msi.minted(), 3, "only a third is new");
+        assert_eq!(alloc(second, 0x1000), Err(Errno::OutOfRange));
+
+        let nodeless = load(None);
+        assert_eq!(alloc(nodeless, 0x1000), Err(Errno::PermissionDenied));
+        assert_eq!(msi.minted(), 3);
+    }
+
     /// A bus driver forwards its vector onto a child only as the allocation
     /// names it: described as a wire, the child's driver binding it would
     /// raise a pin on the child's function.
@@ -36815,7 +37281,7 @@ mod tests {
             Ok(())
         }
         fn unreserve(&self, _node: u32) {}
-        fn hold(&self, _node: u32, _generation: u64, _block: tairix_kernel_mem::DmaBlock) {}
+        fn hold(&self, _node: u32, _generation: u64, _block: tairix_kernel_mem::FrameBlock) {}
     }
 
     impl DmaQuarantineFacility for RecordingQuarantine {
@@ -37057,7 +37523,9 @@ mod tests {
             node: TRANSLATION_UNIT_NODE,
             unit: model,
             reserved: alloc::vec::Vec::new(),
-            faults: None,
+            faults: crate::iommu::FaultSignal::Message,
+            family: tairix_abi::sysinfo::DmaUnitFamily::Vtd,
+            counts: crate::iommu::FaultCounts::default(),
         };
         let (translation, outcomes) = crate::iommu::Translation::started(
             alloc::vec![unit],
@@ -37072,7 +37540,7 @@ mod tests {
                 TRANSLATION_UNIT_NODE,
                 crate::iommu::UnitOutcome::Translating(
                     crate::iommu::Quiesced::default(),
-                    tairix_kernel_iommu_api::Stage::Second,
+                    tairix_kernel_iommu_api::Tables::Walked(tairix_kernel_iommu_api::Stage::Second),
                 )
             )],
             "the reference unit enables"
@@ -37080,8 +37548,130 @@ mod tests {
         (Box::leak(Box::new(translation)), model, tree)
     }
 
-    fn translated_block(phys: u64) -> tairix_kernel_mem::DmaBlock {
-        tairix_kernel_mem::DmaBlock {
+    #[test]
+    fn sysinfo_introspect_lists_the_dma_units_and_nothing_on_a_machine_with_none() {
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let bare = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        for domain in [
+            IntrospectDomain::DmaUnits,
+            IntrospectDomain::DmaGroups,
+            IntrospectDomain::DmaNodes,
+        ] {
+            assert_eq!(
+                bare.sysinfo_introspect(&ctx, domain.as_u32(), 0, 0x1000, 4096),
+                Ok(0)
+            );
+        }
+        let (translation, _, _) =
+            translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_translation(translation);
+        assert_eq!(
+            h.sysinfo_introspect(
+                &ctx,
+                IntrospectDomain::DmaUnits.as_u32(),
+                0,
+                0x1000,
+                DmaUnitRecord::WIRE_LEN - 1
+            ),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, IntrospectDomain::DmaUnits.as_u32(), 0, 0x1000, 4096),
+            Ok(DmaUnitRecord::WIRE_LEN as u64)
+        );
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; DmaUnitRecord::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let unit = DmaUnitRecord::from_bytes(&delivered).expect("valid record");
+        assert_eq!(unit.node, TRANSLATION_UNIT_NODE);
+        assert_eq!(unit.state, tairix_abi::sysinfo::DmaUnitState::Translating);
+    }
+
+    /// A machine whose firmware described its units in a malformed table
+    /// lists them, under the family the table describes, as withheld; the
+    /// listing past them is empty.
+    #[test]
+    fn sysinfo_introspect_lists_the_units_of_a_malformed_table() {
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::SYSINFO_INTROSPECT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let units = crate::iommu::MalformedUnits {
+            family: tairix_abi::sysinfo::DmaUnitFamily::Vtd,
+            unconfined: false,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_malformed_units(units);
+        let units_domain = IntrospectDomain::DmaUnits.as_u32();
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, units_domain, 0, 0x1000, 4096),
+            Ok(DmaUnitRecord::WIRE_LEN as u64)
+        );
+        let delivered = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; DmaUnitRecord::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        assert_eq!(DmaUnitRecord::from_bytes(&delivered), Ok(units.record()));
+        assert_eq!(
+            units.record().state,
+            tairix_abi::sysinfo::DmaUnitState::Withheld
+        );
+        assert_eq!(
+            h.sysinfo_introspect(&ctx, units_domain, 1, 0x1000, 4096),
+            Ok(0),
+            "nothing past them"
+        );
+    }
+
+    fn translated_block(phys: u64) -> tairix_kernel_mem::FrameBlock {
+        tairix_kernel_mem::FrameBlock {
             frame: Frame::containing(PhysAddr::new(phys)),
             order: 0,
         }
@@ -37135,9 +37725,10 @@ mod tests {
             task_id: SecTaskId(5),
             caps: &caps,
         };
-        let handle = aspaces
-            .write()
-            .mint_grant(ProcessId(5), tairix_abi::hwtree::HwResource::dma(0, 0));
+        let handle = aspaces.write().mint_grant(
+            ProcessId(5),
+            tairix_abi::hwtree::HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
+        );
         aspaces
             .write()
             .admit_driver(
@@ -37149,7 +37740,13 @@ mod tests {
             )
             .expect("the node has no live driver");
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::PermissionDenied),
             "nothing would confine its DMA"
         );
@@ -37173,7 +37770,12 @@ mod tests {
         .with_hw_tree(tree)
         .with_dma_translation(translation);
         for (task, dma) in [
-            (2, crate::iommu::DmaPath::Translated),
+            (
+                2,
+                crate::iommu::DmaPath::Translated {
+                    output_limit: u64::MAX,
+                },
+            ),
             (3, crate::iommu::DmaPath::Untranslated),
         ] {
             let caps = make_caps_record(task, &[], sink);
@@ -37181,28 +37783,35 @@ mod tests {
                 task_id: SecTaskId(task),
                 caps: &caps,
             };
-            let handle = aspaces
-                .write()
-                .mint_grant(ProcessId(task), tairix_abi::hwtree::HwResource::dma(0, 0));
+            let handle = aspaces.write().mint_grant(
+                ProcessId(task),
+                tairix_abi::hwtree::HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
+            );
             aspaces
                 .write()
                 .admit_driver(ProcessId(task), 0x44 + u32::try_from(task).unwrap(), dma)
                 .expect("the node has no live driver");
             assert_eq!(
-                h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+                h.dma_alloc(
+                    &ctx,
+                    handle,
+                    0x1000,
+                    tairix_abi::driver::DmaReach::FULL,
+                    0x1234
+                ),
                 Err(Errno::BadAddress),
                 "the carve ran; only the copy-out found no space"
             );
             let custodian = probe.0.lock().take().expect("the carve ran");
-            let translated = dma == crate::iommu::DmaPath::Translated;
+            let translated = matches!(dma, crate::iommu::DmaPath::Translated { .. });
             assert_eq!(
                 custodian
-                    .translation
+                    .translation()
                     .is_some_and(|domains| core::ptr::addr_eq(domains, translation)),
                 translated
             );
             assert_eq!(
-                core::ptr::addr_eq(custodian.custody, translation),
+                core::ptr::addr_eq(custodian.custody(), translation),
                 translated
             );
         }
@@ -37230,7 +37839,13 @@ mod tests {
         .with_dma_translation(translation);
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Translated)
+            .admit_driver(
+                ProcessId(2),
+                0x44,
+                crate::iommu::DmaPath::Translated {
+                    output_limit: u64::MAX,
+                },
+            )
             .expect("the node has no live driver");
 
         assert_eq!(h.dma_quiesced(&ctx), Ok(0));
@@ -37271,14 +37886,27 @@ mod tests {
                 0x2_0000_0000,
                 0x2_0000_0000,
                 0x4_0000_0000,
+                tairix_abi::DmaCoherence::Snooped,
             ),
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Translated)
+            .admit_driver(
+                ProcessId(2),
+                0x44,
+                crate::iommu::DmaPath::Translated {
+                    output_limit: u64::MAX,
+                },
+            )
             .expect("the node has no live driver");
         assert_eq!(
-            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            h.dma_alloc(
+                &ctx,
+                handle,
+                0x1000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x1234
+            ),
             Err(Errno::NotSupported)
         );
         assert!(probe.0.lock().is_none(), "nothing was carved");
@@ -37301,7 +37929,13 @@ mod tests {
         .with_dma_translation(translation);
         aspaces
             .write()
-            .admit_driver(ProcessId(6), 0x51, crate::iommu::DmaPath::Translated)
+            .admit_driver(
+                ProcessId(6),
+                0x51,
+                crate::iommu::DmaPath::Translated {
+                    output_limit: u64::MAX,
+                },
+            )
             .expect("the node has no live driver");
         let generation = aspaces
             .read()
@@ -37309,7 +37943,7 @@ mod tests {
             .expect("loaded")
             .generation;
         translation
-            .map(0x51, generation, translated_block(0x8000_0000), 0)
+            .map(0x51, generation, &[translated_block(0x8000_0000)], 0)
             .expect("the driver's first carve makes its domain");
         aspaces.write().note_dma_carved(ProcessId(6), 0x1000);
         assert!(model.attached(FIRST_TRANSLATED_STREAM).is_some());
@@ -37347,7 +37981,13 @@ mod tests {
         .with_dma_translation(translation);
         aspaces
             .write()
-            .admit_driver(ProcessId(7), 0x52, crate::iommu::DmaPath::Translated)
+            .admit_driver(
+                ProcessId(7),
+                0x52,
+                crate::iommu::DmaPath::Translated {
+                    output_limit: u64::MAX,
+                },
+            )
             .expect("the node has no live driver");
         let generation = aspaces
             .read()
@@ -37355,7 +37995,7 @@ mod tests {
             .expect("loaded")
             .generation;
         translation
-            .map(0x52, generation, translated_block(0x8000_0000), 0)
+            .map(0x52, generation, &[translated_block(0x8000_0000)], 0)
             .expect("the driver's first carve makes its domain");
 
         let _ = h.reclaim_process_resources(ProcessId(7));
@@ -37407,19 +38047,19 @@ mod tests {
         .with_hw_tree(tree)
         .with_dma_translation(translation);
         let iova = translation
-            .map(42, 5, translated_block(0x8000_0000), 0)
+            .map(42, 5, &[translated_block(0x8000_0000)], 0)
             .expect("the child's driver carved");
 
         assert_eq!(h.hw_remove_node(&ctx, 42, 0), Ok(0));
         assert_eq!(model.attached(FIRST_TRANSLATED_STREAM), None);
         assert_eq!(model.domains(), 0);
         assert_eq!(
-            translation.unmap(42, 5, iova, translated_block(0x8000_0000)),
+            translation.unmap(42, 5, iova),
             Ok(()),
             "the carve is out of the device's reach"
         );
         assert_eq!(
-            translation.map(42, 5, translated_block(0x9000_0000), 0),
+            translation.map(42, 5, &[translated_block(0x9000_0000)], 0),
             Err(DmaError::DeviceGone)
         );
     }
@@ -37457,9 +38097,22 @@ mod tests {
     }
 
     #[test]
-    fn hw_emit_node_refuses_a_translation_unit_and_a_neighbour_s_stream() {
+    fn hw_emit_node_refuses_a_translation_unit_a_kernel_driven_node_a_doorbell_and_a_neighbour_s_stream(
+    ) {
         let unit = {
             let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Iommu);
+            node.push_resource(tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000))
+                .expect("resource fits");
+            node
+        };
+        let controller = {
+            let mut node =
+                tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::InterruptController);
+            node.push_resource(tairix_abi::HwResource::property(
+                tairix_abi::HwProperty::KernelDriven,
+                1,
+            ))
+            .expect("resource fits");
             node.push_resource(tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000))
                 .expect("resource fits");
             node
@@ -37477,8 +38130,18 @@ mod tests {
             node.push_resource(stream).expect("resource fits");
             node
         };
+        let doorbell = {
+            let mut node = child_with(own);
+            node.push_resource(
+                tairix_abi::HwResource::msi_doorbell(0x4000_0000, 0x1000).expect("a page"),
+            )
+            .expect("resource fits");
+            node
+        };
         for (node, published) in [
             (unit, false),
+            (controller, false),
+            (doorbell, false),
             (child_with(neighbour), false),
             (child_with(own), true),
         ] {
@@ -38887,18 +39550,22 @@ mod tests {
         fn alloc_dma_region(
             &self,
             pages: u64,
-            addr_limit: u64,
-        ) -> Result<crate::devres::SharedChunk, Errno> {
+            backing: crate::devres::DmaBacking,
+        ) -> Result<alloc::vec::Vec<crate::devres::SharedChunk>, Errno> {
+            let limit = match backing {
+                crate::devres::DmaBacking::Contiguous { limit } => limit,
+                crate::devres::DmaBacking::Scattered { output_limit } => output_limit,
+            };
             let chunk = crate::devres::SharedChunk {
                 phys_base: RECORDING_DMA_REGION_PHYS,
                 order: pages.next_power_of_two().trailing_zeros(),
                 pages: pages.next_power_of_two(),
             };
             let end = chunk.phys_base + chunk.pages * tairix_kernel_mem::PAGE_SIZE as u64;
-            if addr_limit != 0 && end > addr_limit {
+            if limit != 0 && end > limit {
                 return Err(Errno::OutOfRange);
             }
-            Ok(chunk)
+            Ok(alloc::vec![chunk])
         }
         fn map_region(
             &self,
@@ -41253,7 +41920,12 @@ mod tests {
     }
 
     fn legacy_dma_window() -> tairix_abi::HwResource {
-        tairix_abi::HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000)
+        tairix_abi::HwResource::dma_translated(
+            0x4000_0000,
+            0x4000_0000,
+            0xC000_0000,
+            tairix_abi::DmaCoherence::Snooped,
+        )
     }
 
     #[test]
@@ -41285,7 +41957,14 @@ mod tests {
         .with_dma_quarantine(&QUARANTINE);
 
         let va = h
-            .shm_create_dma(&ctx, handle, 3000, 0x2000, 0x2008)
+            .shm_create_dma(
+                &ctx,
+                handle,
+                3000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x2000,
+                0x2008,
+            )
             .expect("carves");
         assert_eq!(va, 0x2_0000_3000);
         let out = read_reply_page(
@@ -41341,7 +42020,14 @@ mod tests {
         .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
 
         let va = h
-            .shm_create_dma(&ctx, handle, 3000, 0x2000, 0x2008)
+            .shm_create_dma(
+                &ctx,
+                handle,
+                3000,
+                tairix_abi::driver::DmaReach::FULL,
+                0x2000,
+                0x2008,
+            )
             .expect("carves");
         let epoch = scene
             .aspaces
@@ -41380,6 +42066,16 @@ mod tests {
             task_id: SecTaskId(scene.task),
             caps: &caps,
         };
+        let create = |ctx: &CallerContext<'_>, grant: u64, len: usize| {
+            h.shm_create_dma(
+                ctx,
+                grant,
+                len,
+                tairix_abi::driver::DmaReach::FULL,
+                0x2000,
+                0x2008,
+            )
+        };
 
         // A shared region takes `CAP_SHM` beside the dispatcher's `MEM_DMA`.
         let bare = make_caps_record(scene.task, &[], sink);
@@ -41388,48 +42084,39 @@ mod tests {
             caps: &bare,
         };
         assert_eq!(
-            h.shm_create_dma(&bare_ctx, handle, 4096, 0x2000, 0x2008),
+            create(&bare_ctx, handle, 4096),
             Err(Errno::PermissionDenied)
         );
-        assert_eq!(
-            h.shm_create_dma(&ctx, handle + 99, 4096, 0x2000, 0x2008),
-            Err(Errno::NotFound)
-        );
+        assert_eq!(create(&ctx, handle + 99, 4096), Err(Errno::NotFound));
         let window = scene.aspaces.write().mint_grant(
             ProcessId(scene.task),
             tairix_abi::HwResource::mmio(0xFE00_7000, 0xB00),
         );
-        assert_eq!(
-            h.shm_create_dma(&ctx, window, 4096, 0x2000, 0x2008),
-            Err(Errno::OutOfRange)
-        );
-        assert_eq!(
-            h.shm_create_dma(&ctx, handle, 0, 0x2000, 0x2008),
-            Err(Errno::LengthOutOfRange)
-        );
-        assert_eq!(
-            h.shm_create_dma(&ctx, handle, 0x4000_0001, 0x2000, 0x2008),
-            Err(Errno::OutOfRange)
-        );
+        assert_eq!(create(&ctx, window, 4096), Err(Errno::OutOfRange));
+        assert_eq!(create(&ctx, handle, 0), Err(Errno::LengthOutOfRange));
+        assert_eq!(create(&ctx, handle, 0x4000_0001), Err(Errno::OutOfRange));
         // Below the reach of a 256 MiB limit the block at 0x3000_0000 lies
         // past it.
         let low = scene.aspaces.write().mint_grant(
             ProcessId(scene.task),
-            tairix_abi::HwResource::dma(0x1000_0000, 0x1000_0000),
+            tairix_abi::HwResource::dma(
+                0x1000_0000,
+                0x1000_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
-        assert_eq!(
-            h.shm_create_dma(&ctx, low, 4096, 0x2000, 0x2008),
-            Err(Errno::OutOfRange)
-        );
+        assert_eq!(create(&ctx, low, 4096), Err(Errno::OutOfRange));
         // A window whose bus side cannot name the block releases it unseen.
         let high = scene.aspaces.write().mint_grant(
             ProcessId(scene.task),
-            tairix_abi::HwResource::dma_translated(0x8000_0000, 0x1000_0000, 0xC000_0000),
+            tairix_abi::HwResource::dma_translated(
+                0x8000_0000,
+                0x1000_0000,
+                0xC000_0000,
+                tairix_abi::DmaCoherence::Snooped,
+            ),
         );
-        assert_eq!(
-            h.shm_create_dma(&ctx, high, 4096, 0x2000, 0x2008),
-            Err(Errno::OutOfRange)
-        );
+        assert_eq!(create(&ctx, high, 4096), Err(Errno::OutOfRange));
         // A caller not loaded for a node has no custody to bind.
         scene.aspaces.write().withdraw(ProcessId(scene.task));
         let (space, physmap) = call_aspace(b"");
@@ -41442,10 +42129,7 @@ mod tests {
             .aspaces
             .write()
             .mint_grant(ProcessId(scene.task), legacy_dma_window());
-        assert_eq!(
-            h.shm_create_dma(&ctx, regrant, 4096, 0x2000, 0x2008),
-            Err(Errno::PermissionDenied)
-        );
+        assert_eq!(create(&ctx, regrant, 4096), Err(Errno::PermissionDenied));
     }
 
     #[test]
@@ -41474,7 +42158,14 @@ mod tests {
             caps: &caps,
         };
         assert_eq!(
-            h.shm_create_dma(&ctx, handle, 4096, 0x2000, 0x2008),
+            h.shm_create_dma(
+                &ctx,
+                handle,
+                4096,
+                tairix_abi::driver::DmaReach::FULL,
+                0x2000,
+                0x2008
+            ),
             Err(Errno::NotImplemented)
         );
     }
@@ -41508,8 +42199,15 @@ mod tests {
             task_id: SecTaskId(scene.task),
             caps: &caps,
         };
-        h.shm_create_dma(&ctx, handle, 3 * 4096, 0x2000, 0x2008)
-            .expect("carves");
+        h.shm_create_dma(
+            &ctx,
+            handle,
+            3 * 4096,
+            tairix_abi::driver::DmaReach::FULL,
+            0x2000,
+            0x2008,
+        )
+        .expect("carves");
         let _ = h.reclaim_process_resources(ProcessId(scene.task));
         let record = sink
             .snapshot()
@@ -48100,11 +48798,11 @@ mod tests {
         // and one-time wait-queue capacity growth). A real leak of even one
         // byte per iteration overshoots it four-fold.
         const SLACK_BYTES: isize = 1024;
+        static COUNTER: crate::test_alloc::LiveBytes = crate::test_alloc::LiveBytes::new();
 
         let _registry = crate::callreg::registry_guard();
         install_trace_filter();
-        let counter: &'static crate::test_alloc::LiveBytes =
-            Box::leak(Box::new(crate::test_alloc::LiveBytes::new()));
+        let counter = &COUNTER;
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());

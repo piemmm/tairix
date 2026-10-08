@@ -21,7 +21,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
-use tairix_abi::driver::pci::INTERRUPT_DISABLE;
+use tairix_abi::driver::pci::{PciBus, BUS_MASTER_ENABLE, INTERRUPT_DISABLE};
 use tairix_abi::driver::virtio_pci::{
     VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
@@ -419,6 +419,33 @@ fn capabilities_walker_decodes_pm_and_msix_in_order() {
         }
         ref other => panic!("expected MSI-X cap second, got {other:?}"),
     }
+}
+
+#[test]
+fn a_capability_header_is_its_first_dword_and_an_absent_one_is_not_found() {
+    let pci = Pci::new(q35_fixture(), None);
+    let bdf = |device| {
+        ConfigAddress {
+            bus: 0,
+            device,
+            function: 0,
+            register: 0,
+        }
+        .pack_bdf()
+        .unwrap()
+    };
+    let msix = PciBus::capability_header(&pci, bdf(3), 0x11).expect("the MSI-X capability");
+    assert_eq!(msix & 0xFF, 0x11);
+    assert_eq!((msix >> 16) & 0x7FF, 3, "its table size field");
+    assert_eq!(
+        PciBus::capability_header(&pci, bdf(3), 0x0F),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        PciBus::capability_header(&pci, bdf(0x1F), 0x01),
+        Err(DriverError::NotFound),
+        "no capability list"
+    );
 }
 
 #[test]
@@ -923,6 +950,24 @@ fn msix_io_table_bdf() -> u64 {
     .unwrap()
 }
 
+/// A function's MSI-X table size is read from its capability; one with no
+/// capability has none to name.
+#[test]
+fn msix_entries_reads_the_table_size_the_capability_states() {
+    let pci = Pci::new(q35_fixture(), None);
+    let bus: &dyn crate::MsixBus = &pci;
+    assert_eq!(bus.msix_entries(virtio_bdf()), Ok(4));
+    let host_bridge = ConfigAddress {
+        bus: 0,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+    .unwrap();
+    assert_eq!(bus.msix_entries(host_bridge), Err(DriverError::NotFound));
+}
+
 #[test]
 fn route_msix_programs_entry_and_enables_function() {
     let config = q35_fixture();
@@ -957,6 +1002,77 @@ fn route_msix_programs_entry_and_enables_function() {
         .rev()
         .find(|(a, _)| a.bus == 0 && a.device == 3 && a.function == 0 && a.register == 20);
     assert_eq!(enable.map(|(_, v)| *v), Some(0x8003_0011));
+}
+
+/// Configuration space reading back what was last written to `register`.
+struct Sticky {
+    config: MockConfigSpace,
+    register: ConfigAddress,
+    written: RefCell<Option<u32>>,
+}
+
+impl ConfigSpace for Sticky {
+    fn read32(&self, addr: ConfigAddress) -> u32 {
+        match *self.written.borrow() {
+            Some(value) if addr == self.register => value,
+            _ => self.config.read32(addr),
+        }
+    }
+
+    fn write32(&self, addr: ConfigAddress, value: u32) {
+        self.config.write32(addr, value);
+        if addr == self.register {
+            *self.written.borrow_mut() = Some(value);
+        }
+    }
+}
+
+/// The function mask is set and cleared in the MSI-X capability's Message
+/// Control, a route clears it, and one that does not read back is refused.
+#[test]
+fn the_msix_function_mask_reads_back_as_written() {
+    const MASK: u32 = 1 << 30;
+    let mut header = virtio_address();
+    header.register = 20;
+    let pci = Pci::new(
+        Sticky {
+            config: q35_fixture(),
+            register: header,
+            written: RefCell::new(None),
+        },
+        None,
+    );
+    let control = |pci: &Pci<Sticky>| pci.config_space().read32(header);
+    pci.mask_msix(virtio_bdf(), true).expect("masks");
+    assert_eq!(control(&pci), 0x4003_0011, "only the mask bit changes");
+    let message = MsiMessage {
+        address: 0xFEE0_1000,
+        data: 0x30,
+    };
+    pci.route_msix(virtio_bdf(), 0, message, &MockMapper::new(true))
+        .expect("routes");
+    assert_eq!(control(&pci) & MASK, 0, "a route unmasks");
+    pci.mask_msix(virtio_bdf(), true).expect("masks");
+    pci.mask_msix(virtio_bdf(), false).expect("unmasks");
+    assert_eq!(control(&pci) & MASK, 0);
+
+    let ignoring = Pci::new(q35_fixture(), None);
+    assert_eq!(
+        ignoring.mask_msix(virtio_bdf(), true),
+        Err(DriverError::DeviceFault)
+    );
+    let host_bridge = ConfigAddress {
+        bus: 0,
+        device: 0,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+    .unwrap();
+    assert_eq!(
+        ignoring.mask_msix(host_bridge, true),
+        Err(DriverError::NotFound)
+    );
 }
 
 /// An entry is masked before its address and data change and unmasked
@@ -1126,11 +1242,21 @@ fn route_msix_propagates_capability_denial() {
 /// register is present, so tests can exercise both data-register placements
 /// and the optional device-side MSI mask.
 fn msi_fixture(addr64: bool, per_vector_masking: bool) -> MockConfigSpace {
+    msi_fixture_at(0x50, addr64, per_vector_masking)
+}
+
+/// A function whose one capability, MSI, sits at byte `at`.
+fn msi_fixture_at(at: u8, addr64: bool, per_vector_masking: bool) -> MockConfigSpace {
     // Message Control occupies the high 16 bits of the header dword;
     // bit 7 advertises 64-bit addressing and bit 8 advertises per-vector
     // mask/pending registers.
     let msg_ctrl: u32 =
         (if addr64 { 0x0080 } else { 0x0000 }) | if per_vector_masking { 0x0100 } else { 0x0000 };
+    capability_fixture(at, (msg_ctrl << 16) | 0x05)
+}
+
+/// A function whose one capability, headed by `header`, sits at byte `at`.
+fn capability_fixture(at: u8, header_dword: u32) -> MockConfigSpace {
     let func = MockFunction {
         bus: 0,
         device: 6,
@@ -1140,13 +1266,42 @@ fn msi_fixture(addr64: bool, per_vector_masking: bool) -> MockConfigSpace {
             status_with_caplist(),
             class(0x0C03),
             header(0x00),
-            cap_pointer(0x50),
-            // MSI cap @ 0x50 (dword 20): id=0x05, next=0, Message Control.
-            (20, (msg_ctrl << 16) | 0x05),
+            cap_pointer(at),
+            (u16::from(at >> 2), header_dword),
         ],
         sizing: vec![],
     };
     MockConfigSpace::new(vec![func])
+}
+
+/// A capability placed where its registers would run past the 256 bytes of
+/// configuration space is refused, never wrapped onto the registers at the
+/// start of it.
+#[test]
+fn a_capability_running_past_the_space_is_no_structure_of_its_kind() {
+    let config = msi_fixture_at(0xF8, true, true);
+    let state = config.shared_state();
+    let pci = Pci::new(config, None);
+    let message = MsiMessage {
+        address: 0xFFFF_FFFC,
+        data: 0x6540,
+    };
+    assert_eq!(
+        pci.route_msi(msi_bdf(), message),
+        Err(DriverError::OutOfRange)
+    );
+    assert!(state.borrow().writes.is_empty(), "nothing was written");
+
+    let pci = Pci::new(capability_fixture(0xFC, 0x11), None);
+    let mut out = [Capability::Other { offset: 0, id: 0 }; 2];
+    assert_eq!(pci.capabilities(msi_bdf(), &mut out), Ok(1));
+    assert_eq!(
+        out[0],
+        Capability::Other {
+            offset: 0xFC,
+            id: 0x11
+        }
+    );
 }
 
 fn msi_bdf() -> u64 {
@@ -1372,6 +1527,12 @@ fn put_ecam(backing: &mut [u32], bus: u8, device: u8, function: u8, register: u1
 /// bridge at 00:00.0 and the VL805 xHCI at 01:00.0, plus the heap
 /// `Vec` that owns it (returned so it outlives the window).
 fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
+    vl805_ecam_planted(|_| {})
+}
+
+/// [`vl805_ecam_region`], with `plant` writing more of its registers before
+/// the window over them is taken.
+fn vl805_ecam_planted(plant: impl FnOnce(&mut Vec<u32>)) -> (Vec<u32>, RegisterWindow) {
     // Two buses × 1 MiB = 2 MiB region. An absent function's
     // configuration space reads all-ones on real hardware (the host
     // bridge master-aborts), so the region starts filled with the
@@ -1401,6 +1562,7 @@ fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
     put_ecam(&mut backing, 1, 0, 0, 32, (0x0007u32 << 16) | 0x11);
     put_ecam(&mut backing, 1, 0, 0, 33, 0x0000_1000); // table_bar=0, offset 0x1000.
     put_ecam(&mut backing, 1, 0, 0, 34, 0x0000_2000); // pba_bar=0, offset 0x2000.
+    plant(&mut backing);
 
     let base = NonNull::new(backing.as_mut_ptr().cast::<u8>()).expect("non-null heap buffer");
     let len = backing.len() * 4;
@@ -1505,6 +1667,85 @@ fn mechanism_ecam_exposes_the_frozen_bus_seams() {
     let (_backing, window) = vl805_ecam_region();
     let bus = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     assert_seams(&bus, &bus, &bus);
+}
+
+/// The VL805 with a PCI Express capability after its MSI-X one, its Device
+/// Control dword `control`.
+fn vl805_with_device_control(control: u32) -> (Vec<u32>, RegisterWindow) {
+    vl805_ecam_planted(|backing| {
+        // MSI-X's next pointer -> the Express capability at byte 0x90.
+        put_ecam(backing, 1, 0, 0, 32, (0x0007u32 << 16) | (0x90 << 8) | 0x11);
+        put_ecam(backing, 1, 0, 0, 36, 0x0002_0010);
+        put_ecam(backing, 1, 0, 0, 38, control);
+    })
+}
+
+/// Configuration space deaf to writes of one register.
+struct Deaf<C> {
+    config: C,
+    deaf: ConfigAddress,
+}
+
+impl<C: ConfigSpace> ConfigSpace for Deaf<C> {
+    fn read32(&self, addr: ConfigAddress) -> u32 {
+        self.config.read32(addr)
+    }
+
+    fn write32(&self, addr: ConfigAddress, value: u32) {
+        if addr != self.deaf {
+            self.config.write32(addr, value);
+        }
+    }
+}
+
+/// A function masters only once its Enable No Snoop is clear, Device Status
+/// written as zero so its write-one-to-clear bits survive; one whose bit will
+/// not clear never masters.
+#[test]
+fn a_function_masters_only_with_no_snoop_forbidden() {
+    const NO_SNOOP: u32 = 1 << 11;
+    const STATUS: u32 = 0x0001_0000;
+    let vl805 = ConfigAddress {
+        bus: 1,
+        device: 0,
+        function: 0,
+        register: 0,
+    };
+    let at = |register| {
+        ConfigAddress { register, ..vl805 }
+            .ecam_offset()
+            .expect("address in range")
+            / 4
+    };
+    let bdf = vl805.pack_bdf().unwrap();
+
+    let (backing, window) = vl805_with_device_control(STATUS | NO_SNOOP | 0x2010);
+    let pci = Pci::new(
+        EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
+        Some(everywhere()),
+    );
+    let bus: &dyn PciBus = &pci;
+    bus.set_bus_master(bdf, true).expect("master");
+    assert_eq!(
+        backing[at(38)],
+        0x2010,
+        "No Snoop alone cleared, Device Status written as zero"
+    );
+    assert_ne!(backing[at(1)] & BUS_MASTER_ENABLE, 0);
+
+    let (backing, window) = vl805_with_device_control(NO_SNOOP);
+    let pci = Pci::new(
+        Deaf {
+            config: EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
+            deaf: ConfigAddress {
+                register: 38,
+                ..vl805
+            },
+        },
+        Some(everywhere()),
+    );
+    pci.set_bus_master(bdf, true);
+    assert_eq!(backing[at(1)] & BUS_MASTER_ENABLE, 0, "left stopped");
 }
 
 /// The ECAM constructor's value is also reachable through the

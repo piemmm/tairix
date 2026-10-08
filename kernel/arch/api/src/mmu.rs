@@ -84,26 +84,26 @@ impl PageFlags {
     /// Page maps Device / strongly-ordered memory (MMIO), not cacheable
     /// Normal RAM.
     pub const DEVICE: Self = Self(0b0001_0000);
-    /// Page backs a buffer **shared with a DMA-capable device** that must
-    /// stay coherent with that device without per-access cache maintenance.
+    /// Page backs a buffer shared with a DMA master that **does not snoop**
+    /// the CPU's caches, which must stay coherent with it without
+    /// per-access cache maintenance.
     ///
-    /// On a platform whose DMA masters snoop the CPU caches (x86_64,
-    /// riscv64, the QEMU `virt` boards) this is ordinary cacheable Normal
-    /// memory and a port may ignore the bit. On a platform whose DMA path is
-    /// **not** I/O-coherent (the Raspberry Pi 4 BCM2711 PCIe root complex
-    /// does not snoop the CPU caches), a port maps it Normal **Non-Cacheable**
-    /// so a descriptor the CPU writes is visible to the device — and an event
-    /// the device writes is visible to the CPU — with no `dc civac` dance.
-    /// It is distinct from [`Self::DEVICE`]: a DMA buffer holds ring and
-    /// context structures the driver accesses with ordinary (possibly
-    /// unaligned) loads/stores, which Device-nGnRE memory forbids
-    /// (the kernel owns the platform coherency, so
-    /// the user-space driver stays arch-neutral).
+    /// A port maps it Normal **Non-Cacheable**, so a descriptor the CPU
+    /// writes is visible to the device and an event the device writes is
+    /// visible to the CPU, or refuses it with [`MapError::Unsupported`] where
+    /// it cannot. A buffer a snooping master shares is ordinary memory and
+    /// carries no such bit. Distinct from [`Self::DEVICE`]: a DMA buffer
+    /// holds ring and context structures accessed with ordinary, possibly
+    /// unaligned, loads and stores, which Device memory forbids.
     pub const DMA_COHERENT: Self = Self(0b0010_0000);
     /// Page is a write-mostly framebuffer aperture. CPU stores may be
     /// gathered and combined, reads remain valid, and the mapping is never
     /// executable. Distinct from bidirectional [`Self::DMA_COHERENT`].
     pub const WRITE_COMBINE: Self = Self(0b0100_0000);
+    /// Page backs a buffer a DMA master reads or writes, whatever its memory
+    /// type: a mark the hardware ignores, kept in a bit the port's leaf
+    /// leaves to software, so nothing that moves ordinary memory takes it.
+    pub const DMA: Self = Self(0b1000_0000);
 
     /// The empty set.
     #[must_use]
@@ -121,27 +121,6 @@ impl PageFlags {
     #[must_use]
     pub const fn bits(self) -> u8 {
         self.0
-    }
-
-    /// Reconstruct a flag set from raw bits, rejecting unknown bits.
-    ///
-    /// Returns `None` if `bits` sets any bit outside the defined flags,
-    /// so a corrupt or forward-versioned value fails closed rather than
-    /// being silently reinterpreted.
-    #[must_use]
-    pub const fn from_bits(bits: u8) -> Option<Self> {
-        const ALL: u8 = PageFlags::READ.0
-            | PageFlags::WRITE.0
-            | PageFlags::EXEC.0
-            | PageFlags::USER.0
-            | PageFlags::DEVICE.0
-            | PageFlags::DMA_COHERENT.0
-            | PageFlags::WRITE_COMBINE.0;
-        if bits & !ALL == 0 {
-            Some(Self(bits))
-        } else {
-            None
-        }
     }
 
     /// The union of two sets — the `const` counterpart of
@@ -904,21 +883,6 @@ mod tests {
         let masked = rwx & PageFlags::READ;
         assert_eq!(masked.bits(), PageFlags::READ.bits());
         assert_eq!(PageFlags::empty().bits(), 0);
-    }
-
-    #[test]
-    fn page_flags_from_bits_rejects_unknown_bits() {
-        assert_eq!(
-            PageFlags::from_bits(PageFlags::READ.bits()),
-            Some(PageFlags::READ)
-        );
-        let all = PageFlags::READ
-            | PageFlags::WRITE
-            | PageFlags::EXEC
-            | PageFlags::USER
-            | PageFlags::DEVICE;
-        assert_eq!(PageFlags::from_bits(all.bits()), Some(all));
-        assert_eq!(PageFlags::from_bits(0b1000_0000), None);
     }
 
     #[test]

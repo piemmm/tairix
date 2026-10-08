@@ -386,7 +386,7 @@ mod kernel {
         TIMER_INTERVAL.store(interval, Ordering::Relaxed);
         unsafe {
             exceptions::init_vectors();
-            gic::init();
+            tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
             preempt::enable_ipi();
             // `init_local_preempt` records the interval + enables the PPI
             // but leaves the timer disarmed (tickless); arm the first

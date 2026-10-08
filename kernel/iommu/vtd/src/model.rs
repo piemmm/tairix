@@ -205,6 +205,15 @@ impl<'f> Model<'f> {
         self.state.lock().processed.get(&kind).copied().unwrap_or(0)
     }
 
+    /// Whether the IOTLB holds `domain`'s translation of the page at `iova`.
+    pub(crate) fn caches(&self, domain: u16, iova: u64) -> bool {
+        self.state
+            .lock()
+            .iotlb
+            .get(&(domain, iova & !(PAGE - 1)))
+            .is_some_and(Option::is_some)
+    }
+
     fn caching_mode(&self) -> bool {
         self.cap & (1 << 7) != 0
     }
@@ -351,8 +360,23 @@ impl<'f> Model<'f> {
                         *sticky |= u64::from(regs::FSTS_IQE);
                         return;
                     }
+                    let page_selective = self.cap & (1 << 39) != 0;
                     match granularity {
                         0b01 => state.iotlb.clear(),
+                        0b11 if page_selective => {
+                            let mask = high & 0x3F;
+                            if mask > (self.cap >> 48) & 0x3F {
+                                let sticky = state.regs.entry(regs::FSTS).or_insert(0);
+                                *sticky |= u64::from(regs::FSTS_IQE);
+                                return;
+                            }
+                            // The unit ignores the address bits the mask spans.
+                            let size = PAGE << mask;
+                            let base = high & !(size - 1);
+                            state.iotlb.retain(|&(d, page), _| {
+                                d != domain || page < base || page - base >= size
+                            });
+                        }
                         _ => state.iotlb.retain(|&(d, _), _| d != domain),
                     }
                 }

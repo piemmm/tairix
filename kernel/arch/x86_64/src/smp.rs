@@ -777,6 +777,9 @@ pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), Sta
     while frame.load_ready() == 0 {
         spins += 1;
         if spins > AP_READY_SPIN_BUDGET {
+            // Back to waiting for a start-up, so a CPU that never answered
+            // cannot run late on the frame the next start reuses.
+            lapic.send_ipi(target_apic_id, DeliveryMode::Init, 0);
             return Err(StartCpuError::StartTimedOut);
         }
         core::hint::spin_loop();

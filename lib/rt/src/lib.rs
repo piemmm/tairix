@@ -58,6 +58,7 @@
 extern crate alloc;
 
 use tairix_abi::cpufreq::{CpuFreqLimits, CpuFreqTarget};
+use tairix_abi::driver::DmaReach;
 use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
@@ -956,12 +957,17 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
 /// the line and forward that resource onto a child node it publishes — never
 /// ambient authority.
 ///
+/// The vector is the caller's node's: a later driver of the node is given
+/// back the vectors an earlier one held, in the order they were allocated,
+/// before a new one is minted.
+///
 /// # Errors
 ///
 /// Returns the raw negative kernel result (`-errno`) on failure — most
-/// commonly `NotImplemented` on a platform with no MSI controller, or
-/// `OutOfRange` when the vector space is exhausted — and treats a malformed
-/// short reply as a fail-closed error rather than a usable value.
+/// commonly `NotImplemented` on a platform with no MSI controller,
+/// `OutOfRange` when the vector space is exhausted, or `PermissionDenied`
+/// for a caller loaded for no node — and treats a malformed short reply as a
+/// fail-closed error rather than a usable value.
 pub fn msi_alloc() -> Result<tairix_abi::MsiAllocation, i64> {
     let mut buf = [0u8; tairix_abi::MsiAllocation::WIRE_LEN];
     let ptr = buf.as_mut_ptr() as usize as u64;
@@ -2172,9 +2178,10 @@ pub fn port_write(handle: u64, port: u16, width: PortWidth, value: u32) -> i64 {
 /// `handle` is an unforgeable, kernel-issued device-resource grant handle —
 /// never a raw physical address: the kernel resolves it
 /// **owner-checked against the calling task**, confirms it names a DMA
-/// constraint, carves a physically-contiguous, zeroed, coherent buffer of
-/// `len` bytes whose physical extent lies within the grant's addressing
-/// limit, maps it `RW`, non-executable,
+/// constraint, carves a zeroed, coherent buffer of `len` bytes the device
+/// reaches at contiguous addresses within the grant's addressing limit and the
+/// `reach` address bits the device drives (`64` for all of them), maps it
+/// `RW`, non-executable,
 /// guard-bracketed into the caller's own address space, writes the buffer's
 /// **device-visible** base address to `device_out`, and returns the base
 /// **user virtual address** the driver's CPU accesses go through. The call
@@ -2190,7 +2197,7 @@ pub fn port_write(handle: u64, port: u16, width: PortWidth, value: u32) -> i64 {
 /// no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 dma_alloc-result encoding (base ≥ 0, else -errno).
-pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
+pub fn dma_alloc(handle: u64, len: usize, reach: DmaReach, device_out: &mut u64) -> i64 {
     let ptr = core::ptr::from_mut::<u64>(device_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap. `device_out`
@@ -2198,7 +2205,12 @@ pub fn dma_alloc(handle: u64, len: usize, device_out: &mut u64) -> i64 {
     // pointer denotes writable memory the kernel may fill with the
     // device-visible base; the kernel validates it against the caller's own
     // address space before writing.
-    let ret = unsafe { raw_syscall(NUM_DMA_ALLOC, [handle, len as u64, ptr, 0, 0, 0]) };
+    let ret = unsafe {
+        raw_syscall(
+            NUM_DMA_ALLOC,
+            [handle, len as u64, u64::from(reach.bits()), ptr, 0, 0],
+        )
+    };
     ret as i64
 }
 
@@ -4458,18 +4470,24 @@ pub fn call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> i64 {
     ret as i64
 }
 
-/// Carve a shared region a DMA master may reach under the caller's `Dma` grant
-/// `handle` (`SyscallNumber::SHM_CREATE_DMA`).
+/// Carve a shared region a DMA master driving `reach` address bits may reach
+/// under the caller's `Dma` grant `handle` (`SyscallNumber::SHM_CREATE_DMA`).
 ///
 /// Returns the base virtual address of the caller's coherent mapping, or
-/// `-errno`. On success the region id and the block's device address —
+/// `-errno`. On success the region id and the region's device address —
 /// translated through the grant's bus window — are written to `id_out` and
 /// `device_out`. The kernel demands `CAP_MEM_DMA`,
 /// `CAP_SHM`, and a caller loaded for a node, whose quarantine the region
 /// binds.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 base-or-errno encoding (base ≥ 0, else -errno).
-pub fn shm_create_dma(handle: u64, len: usize, id_out: &mut u64, device_out: &mut u64) -> i64 {
+pub fn shm_create_dma(
+    handle: u64,
+    len: usize,
+    reach: DmaReach,
+    id_out: &mut u64,
+    device_out: &mut u64,
+) -> i64 {
     let id_ptr = core::ptr::from_mut::<u64>(id_out) as usize as u64;
     let device_ptr = core::ptr::from_mut::<u64>(device_out) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
@@ -4479,7 +4497,14 @@ pub fn shm_create_dma(handle: u64, len: usize, id_out: &mut u64, device_out: &mu
     let ret = unsafe {
         raw_syscall(
             NUM_SHM_CREATE_DMA,
-            [handle, len as u64, id_ptr, device_ptr, 0, 0],
+            [
+                handle,
+                len as u64,
+                u64::from(reach.bits()),
+                id_ptr,
+                device_ptr,
+                0,
+            ],
         )
     };
     ret as i64
@@ -7213,16 +7238,33 @@ mod tests {
     }
 
     #[test]
-    fn shm_create_dma_marshals_the_grant_length_and_both_out_pointers() {
+    fn shm_create_dma_marshals_the_grant_length_reach_and_both_out_pointers() {
         let mut id = 0u64;
         let mut device = 0u64;
         let (number, args) = capture(0x7000, || {
-            assert_eq!(shm_create_dma(3, 0x2000, &mut id, &mut device), 0x7000);
+            assert_eq!(
+                shm_create_dma(3, 0x2000, DmaReach::of::<32>(), &mut id, &mut device),
+                0x7000
+            );
         });
         assert_eq!(number, NUM_SHM_CREATE_DMA);
-        assert_eq!(args[0], 3);
-        assert_eq!(args[1], 0x2000);
-        assert_eq!(args[2], core::ptr::addr_of_mut!(id) as usize as u64);
+        assert_eq!(&args[..3], &[3, 0x2000, 32]);
+        assert_eq!(args[3], core::ptr::addr_of_mut!(id) as usize as u64);
+        assert_eq!(args[4], core::ptr::addr_of_mut!(device) as usize as u64);
+        assert_eq!(args[5], 0);
+    }
+
+    #[test]
+    fn dma_alloc_marshals_the_grant_length_reach_and_out_pointer() {
+        let mut device = 0u64;
+        let (number, args) = capture(0x9000, || {
+            assert_eq!(
+                dma_alloc(5, 0x3000, DmaReach::of::<40>(), &mut device),
+                0x9000
+            );
+        });
+        assert_eq!(number, NUM_DMA_ALLOC);
+        assert_eq!(&args[..3], &[5, 0x3000, 40]);
         assert_eq!(args[3], core::ptr::addr_of_mut!(device) as usize as u64);
         assert_eq!(&args[4..], &[0, 0]);
     }

@@ -51,9 +51,27 @@ use core::sync::atomic::{fence, Ordering};
 use tairix_arch_x86_64::apic::{
     compatibility_entry, IoApic, IoApicMmio, PinWiring, IOAPIC_EOI_VERSION, REDIRECTION_MASKED,
 };
+use tairix_arch_x86_64::irq::Routing;
 use tairix_arch_x86_64::msr::halves;
-use tairix_kernel_irq::{IrqController, MaskError};
-use tairix_sync::{InterruptControl, IrqSafeSpinLock};
+use tairix_kernel_core::iommu::InterruptTarget;
+use tairix_kernel_irq::{ActivationError, IrqController, MaskError};
+use tairix_sync::{InterruptControl, IrqSafeSpinLock, SpinLock};
+
+use crate::x86_64::vectors::VectorPool;
+
+/// Interrupt remapping as a pin's activation meets it.
+pub trait PinRemapping {
+    /// The redirection entry raising `target` from the IO-APIC whose APIC id
+    /// is `ioapic`, its remapping entry made for the boot; [`None`] while
+    /// remapping is off, when a pin raises its vector in compatibility
+    /// format.
+    ///
+    /// # Errors
+    ///
+    /// [`ActivationError::Unroutable`] where remapping is on and makes the pin no
+    /// entry.
+    fn entry(&self, ioapic: u8, target: InterruptTarget) -> Result<Option<u64>, ActivationError>;
+}
 
 /// Set-once typed publication of the production
 /// `IoApicController<VolatileIoApicMmio>` constructed by
@@ -65,18 +83,11 @@ use tairix_sync::{InterruptControl, IrqSafeSpinLock};
 ///
 /// Published alongside the [`crate::x86_64::arch_wrapper`] controller slot
 /// (which carries the same controller as a `dyn IrqController` trait
-/// object). The typed slot exposes [`IoApicController::program_pin`]
-/// and [`IoApicController::read_pin_low`] — methods that are *not*
-/// part of the [`IrqController`] trait surface because they are
-/// architecture-specific and have no analogue on every port.
-///
-/// Stage 4.D Item 2-tail.2 QEMU validation. The
-/// `tests/integration/irq_qemu_x86_64` integration test reads this
-/// slot to unmask a real IO-APIC pin (`program_pin(masked=false)`)
-/// and to re-read the redirection-entry mask state after
-/// [`tairix_kernel_irq::IrqTable::fire`] runs. The slot is set-once per
-/// boot, and the typed accessor is a *read* of already-published state, not
-/// a new writable surface.
+/// object). The typed slot exposes [`IoApicController::unmask`] and
+/// [`IoApicController::read_pin_low`], which have no analogue on every port:
+/// the `irq_qemu_x86_64` and `ps2_input_qemu_x86_64` verticals unmask a
+/// activated pin through it and re-read its mask after
+/// [`tairix_kernel_irq::IrqTable::fire`] runs.
 #[cfg(freestanding)]
 static PUBLISHED_TYPED: tairix_sync::once::OnceCell<
     &'static IoApicController<tairix_arch_x86_64::apic::VolatileIoApicMmio>,
@@ -212,6 +223,10 @@ pub struct ProgrammedPin {
 /// advertises, addressed by global system interrupt.
 pub struct IoApicController<M: IoApicMmio + Send + 'static, I: InterruptControl = BlockIrqs> {
     blocks: Vec<Block<M, I>>,
+    /// Held across an activation, so two never give one pin two vectors; a block's
+    /// own lock is held only to read and write it, never across a remapping
+    /// unit's work.
+    activating: SpinLock<()>,
 }
 
 // SAFETY: every block's state is reached only under its lock, and `IoApic<M>`
@@ -250,24 +265,99 @@ impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I>
                 }),
             });
         }
-        Some(Self { blocks: built })
+        Some(Self {
+            blocks: built,
+            activating: SpinLock::new(()),
+        })
     }
 
-    /// Program `gsi` to deliver `vector` to the APIC at `dest_apic_id` in
-    /// compatibility format, wired as the firmware says, masked where
-    /// `masked` says so: the boot's setup, before interrupt remapping takes
-    /// the pin over and refuses that format.
+    /// Mask every pin no activation has programmed: firmware may have left
+    /// one delivering, and none does until its activation gives it a vector.
+    pub fn quiesce(&self) {
+        for block in &self.blocks {
+            let mut inner = block.inner.lock();
+            for pin in 0..block.pin_count {
+                let slot = pin as usize;
+                if inner.pin_cache[slot].is_none() {
+                    let entry = REDIRECTION_MASKED | inner.wiring[slot].bits();
+                    // As `write_pin`.
+                    #[allow(clippy::cast_possible_truncation)]
+                    inner.ioapic.write_redirection_entry(pin as u8, entry);
+                }
+            }
+        }
+    }
+
+    /// Give `gsi` a vector of its own from `vectors`, recorded in `routing`,
+    /// and program it masked to raise it at the pool's CPU: through the entry
+    /// `remapping` makes once remapping is on, else in compatibility format.
+    /// A pin active already keeps the vector it has, for the boot: nothing
+    /// proves an interrupt it raised has left every CPU, so its vector is
+    /// never handed on.
     ///
     /// # Errors
     ///
-    /// [`ProgramError::GsiOutOfRange`] for a GSI no block owns.
-    pub fn program_pin(
+    /// [`ActivationError::OutOfRange`] for a GSI no block owns,
+    /// [`ActivationError::Exhausted`] with no vector free, and
+    /// [`ActivationError::Unroutable`] where remapping makes the pin no entry or,
+    /// remapping off, compatibility format cannot name the pool's CPU. The pin
+    /// is then left inactive.
+    pub fn activate_pin(
         &self,
         gsi: u32,
-        vector: u8,
-        dest_apic_id: u8,
-        masked: bool,
-    ) -> Result<(), ProgramError> {
+        vectors: &VectorPool,
+        routing: &Routing,
+        remapping: &dyn PinRemapping,
+    ) -> Result<(), ActivationError> {
+        let (idx, pin) = self.locate(gsi).ok_or(ActivationError::OutOfRange)?;
+        let block = &self.blocks[idx];
+        let _activating = self.activating.lock();
+        let wiring = {
+            let inner = block.inner.lock();
+            if inner.pin_cache[pin as usize].is_some() {
+                return Ok(());
+            }
+            inner.wiring[pin as usize]
+        };
+        let destination = vectors.destination();
+        let vector = vectors.claim().ok_or(ActivationError::Exhausted)?;
+        // A free vector's route is always unmapped, since a vector is given
+        // back only after its route goes; one found otherwise stays claimed,
+        // never handed on.
+        routing
+            .install(gsi, vector)
+            .map_err(|_| ActivationError::Exhausted)?;
+        let target = InterruptTarget {
+            vector,
+            destination,
+            level: wiring.level,
+        };
+        let refuse = |refused| {
+            routing.remove(gsi, vector);
+            vectors.release(vector);
+            refused
+        };
+        // Nothing past the remapping entry can fail, so none is ever made for
+        // a pin left inactive.
+        let programmed =
+            if let Some(redirection) = remapping.entry(block.id, target).map_err(refuse)? {
+                self.write_pin(
+                    gsi,
+                    |wiring, _| (remapped(redirection, wiring), destination),
+                    Some(true),
+                )
+            } else {
+                let destination = tairix_arch_x86_64::apic::xapic_id(destination)
+                    .ok_or_else(|| refuse(ActivationError::Unroutable))?;
+                self.program_pin(gsi, vector, destination)
+            };
+        programmed.map_err(|_| refuse(ActivationError::OutOfRange))
+    }
+
+    /// Program `gsi` masked to deliver `vector` to the APIC at `dest_apic_id`
+    /// in compatibility format, wired as the firmware says: how a pin raises
+    /// its vector while remapping is off.
+    fn program_pin(&self, gsi: u32, vector: u8, dest_apic_id: u8) -> Result<(), ProgramError> {
         self.write_pin(
             gsi,
             |wiring, _| {
@@ -276,7 +366,7 @@ impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I>
                     u32::from(dest_apic_id),
                 )
             },
-            Some(masked),
+            Some(true),
         )
     }
 
@@ -289,16 +379,11 @@ impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I>
     /// [`ProgramError::GsiOutOfRange`] for a GSI no block owns or one never
     /// programmed.
     pub fn remap_pin(&self, gsi: u32, redirection: u64) -> Result<(), ProgramError> {
-        let wiring_bits = PinWiring {
-            level: true,
-            active_low: true,
-        }
-        .bits();
         self.write_pin(
             gsi,
             |wiring, current| {
                 (
-                    (redirection & !wiring_bits & !REDIRECTION_MASKED) | wiring.bits(),
+                    remapped(redirection, wiring),
                     current.map_or(0, |settings| settings.destination),
                 )
             },
@@ -436,6 +521,20 @@ impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I>
         self.blocks.len()
     }
 
+    /// The APIC id of every IO-APIC the controller owns.
+    pub fn ioapic_ids(&self) -> impl Iterator<Item = u8> + '_ {
+        self.blocks.iter().map(|block| block.id)
+    }
+
+    /// The highest GSI a pin owns, or [`None`] with no pins.
+    #[must_use]
+    pub fn last_gsi(&self) -> Option<u32> {
+        self.blocks
+            .iter()
+            .filter_map(|block| block.gsi_base.checked_add(block.pin_count.checked_sub(1)?))
+            .max()
+    }
+
     /// Unmask `gsi`.
     ///
     /// # Errors
@@ -456,6 +555,17 @@ impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I>
         #[allow(clippy::cast_possible_truncation)]
         Some(inner.ioapic.read_redirection_entry_low(pin as u8))
     }
+}
+
+/// A pin's entry raising the remapping entry `redirection` names, wired as
+/// `wiring` says and unmasked.
+fn remapped(redirection: u64, wiring: PinWiring) -> u64 {
+    let wiring_bits = PinWiring {
+        level: true,
+        active_low: true,
+    }
+    .bits();
+    (redirection & !wiring_bits & !REDIRECTION_MASKED) | wiring.bits()
 }
 
 impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IrqController for IoApicController<M, I> {
@@ -518,6 +628,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::vec::Vec as StdVec;
     use tairix_arch_x86_64::apic::IoApicMmio;
+    use tairix_arch_x86_64::irq::EXTERNAL_VECTOR_COUNT;
 
     /// Recording mock IO-APIC MMIO. Captures every write in a
     /// shared log so tests can assert the order of operations, and
@@ -650,7 +761,7 @@ mod tests {
         wired.wiring[9] = PinWiring::of(9, Some(0b1111));
         let controller = IoApicController::<_, Masking>::new(alloc::vec![wired]).unwrap();
         mmio.unmasked.store(0, Ordering::Relaxed);
-        controller.program_pin(9, 0x39, 0, true).unwrap();
+        controller.program_pin(9, 0x39, 0).unwrap();
         IrqController::mask(&controller, 9).unwrap();
         IrqController::rearm(&controller, 9).unwrap();
         controller.unmask(9).unwrap();
@@ -668,8 +779,8 @@ mod tests {
         let mut wired = block(0, 0, 24, &mmio);
         wired.wiring[9] = PinWiring::of(9, Some(0b1111));
         let controller = Controller::new(alloc::vec![wired]).unwrap();
-        controller.program_pin(9, 0x39, 0, true).unwrap();
-        controller.program_pin(4, 0x34, 0, true).unwrap();
+        controller.program_pin(9, 0x39, 0).unwrap();
+        controller.program_pin(4, 0x34, 0).unwrap();
         let low = |gsi| controller.read_pin_low(gsi).unwrap();
         assert_eq!(
             low(9) & (1 << 15 | 1 << 13),
@@ -691,7 +802,7 @@ mod tests {
         let mut wired = block(2, 0, 24, &mmio);
         wired.wiring[9] = PinWiring::of(9, Some(0b1111));
         let controller = Controller::new(alloc::vec![wired]).unwrap();
-        controller.program_pin(9, 0x39, 3, true).unwrap();
+        controller.program_pin(9, 0x39, 3).unwrap();
         let mut programmed = StdVec::new();
         controller.programmed(&mut |pin| programmed.push(pin));
         let pin = ProgrammedPin {
@@ -742,9 +853,7 @@ mod tests {
     #[test]
     fn program_pin_records_settings_and_writes_low_then_high() {
         let (controller, mmio) = fresh_controller(0, 24);
-        controller
-            .program_pin(7, 0x30, 0xAB, true)
-            .expect("program");
+        controller.program_pin(7, 0x30, 0xAB).expect("program");
         let writes = mmio.snapshot();
         // The IoApic driver writes low (reg 0x10 + 2*pin) then high
         // (reg 0x10 + 2*pin + 1). For pin 7 that's regs 0x1E and 0x1F.
@@ -762,7 +871,7 @@ mod tests {
     fn program_pin_rejects_gsi_out_of_range() {
         let (controller, _mmio) = fresh_controller(0, 24);
         assert_eq!(
-            controller.program_pin(24, 0x30, 0xAB, true),
+            controller.program_pin(24, 0x30, 0xAB),
             Err(ProgramError::GsiOutOfRange),
         );
     }
@@ -771,9 +880,8 @@ mod tests {
     fn mask_rewrites_redirection_entry_with_masked_bit_set() {
         let (controller, mmio) = fresh_controller(0, 24);
         // Program pin 7 initially *unmasked*.
-        controller
-            .program_pin(7, 0x30, 0xAB, false)
-            .expect("program");
+        controller.program_pin(7, 0x30, 0xAB).expect("program");
+        controller.unmask(7).expect("unmask");
         // Clear the install-time writes from the log so the assertions
         // below cover only the `mask` call's writes.
         mmio.log.lock().unwrap().clear();
@@ -836,8 +944,8 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(controller.block_count(), 2);
-        controller.program_pin(5, 0x40, 1, true).expect("block 0");
-        controller.program_pin(27, 0x41, 2, true).expect("block 1");
+        controller.program_pin(5, 0x40, 1).expect("block 0");
+        controller.program_pin(27, 0x41, 2).expect("block 1");
         assert!(!mmio0.snapshot().is_empty(), "block 0 received writes");
         assert!(!mmio1.snapshot().is_empty(), "block 1 received writes");
     }
@@ -852,7 +960,7 @@ mod tests {
     fn ioapic_controller_passes_arch_hal_irq_conformance() {
         let (controller, _mmio) = fresh_controller(0, 24);
         controller
-            .program_pin(7, 0x30, 0xAB, true)
+            .program_pin(7, 0x30, 0xAB)
             .expect("program the line so it is addressable");
         tairix_arch_api::irq::conformance::run_controller(&controller, 7, 99);
     }
@@ -873,7 +981,8 @@ mod tests {
         use tairix_kernel_sec::{ProcessId, TaskId};
 
         let (controller, mmio) = fresh_controller(0, 24);
-        controller.program_pin(7, 0x30, 0xAB, false).expect("prog");
+        controller.program_pin(7, 0x30, 0xAB).expect("prog");
+        controller.unmask(7).expect("unmask");
         // Clear the install-time writes.
         mmio.log.lock().unwrap().clear();
 
@@ -923,9 +1032,10 @@ mod tests {
         // Out-of-range GSI → None.
         assert!(controller.read_pin_low(99).is_none());
 
-        // After `program_pin(masked=false)` the low half carries
-        // the vector but not the mask bit.
-        controller.program_pin(7, 0x42, 0xAB, false).expect("prog");
+        // Programmed and unmasked, the low half carries the vector but not
+        // the mask bit.
+        controller.program_pin(7, 0x42, 0xAB).expect("prog");
+        controller.unmask(7).expect("unmask");
         let low = controller.read_pin_low(7).expect("pin 7 readable");
         assert_eq!(low & 0xFF, 0x42, "vector preserved in low byte");
         assert_eq!(low & (1 << 16), 0, "mask bit clear after unmasked program");
@@ -942,15 +1052,13 @@ mod tests {
         );
     }
 
-    /// Stage 4.D Item 2-tail.2 QEMU validation — [`unmask`] clears
-    /// the mask bit while preserving the cached vector + destination.
-    /// The QEMU integration test calls this on the legacy IRQ-0 GSI
-    /// the boot pipeline programmed `masked = true`.
+    /// [`unmask`] clears the mask bit while preserving the cached vector and
+    /// destination: what the QEMU integration test does to the legacy IRQ-0
+    /// GSI once it has activated it.
     #[test]
     fn unmask_clears_mask_bit_and_preserves_vector() {
         let (controller, _mmio) = fresh_controller(0, 24);
-        // Boot pipeline analogue: pin 7 programmed masked.
-        controller.program_pin(7, 0x55, 0xCD, true).expect("prog");
+        controller.program_pin(7, 0x55, 0xCD).expect("prog");
         let low_before = controller.read_pin_low(7).expect("readable");
         assert!(low_before & (1 << 16) != 0, "pre-unmask: masked");
         // Unmask.
@@ -986,7 +1094,8 @@ mod tests {
     #[test]
     fn rearm_clears_the_mask_bit_after_a_masking_fire() {
         let (controller, _mmio) = fresh_controller(0, 24);
-        controller.program_pin(7, 0x61, 0x0C, false).expect("prog");
+        controller.program_pin(7, 0x61, 0x0C).expect("prog");
+        controller.unmask(7).expect("unmask");
         // A `fire`-time mask leaves the pin masked.
         IrqController::mask(&controller, 7).expect("mask");
         assert!(
@@ -1007,8 +1116,10 @@ mod tests {
     fn rearm_ends_a_level_pin_s_interrupt_before_unmasking() {
         let mmio = RecordingMmio::versioned(IOAPIC_EOI_VERSION);
         let controller = Controller::new(alloc::vec![block(0, 0, 24, &mmio)]).unwrap();
-        controller.program_pin(20, 0x07, 0, false).unwrap();
-        controller.program_pin(4, 0x08, 0, false).unwrap();
+        controller.program_pin(20, 0x07, 0).unwrap();
+        controller.program_pin(4, 0x08, 0).unwrap();
+        controller.unmask(20).unwrap();
+        controller.unmask(4).unwrap();
         IrqController::rearm(&controller, 20).unwrap();
         assert!(
             mmio.eois().is_empty(),
@@ -1030,7 +1141,7 @@ mod tests {
     fn rearm_takes_an_old_io_apic_s_level_pin_through_edge() {
         let mmio = RecordingMmio::versioned(0x11);
         let controller = Controller::new(alloc::vec![block(0, 0, 24, &mmio)]).unwrap();
-        controller.program_pin(20, 0x07, 0, true).unwrap();
+        controller.program_pin(20, 0x07, 0).unwrap();
         let writes = mmio.snapshot().len();
         IrqController::rearm(&controller, 20).unwrap();
         assert!(mmio.eois().is_empty());
@@ -1055,5 +1166,228 @@ mod tests {
             IrqController::rearm(&controller, 99),
             Err(MaskError::OutOfRange)
         );
+    }
+
+    /// Remapping as a test sees it: off, refusing, or making `redirection`
+    /// for every pin, recording each target it was asked for.
+    struct Remapping {
+        made: Option<Result<u64, ActivationError>>,
+        asked: Mutex<StdVec<(u8, InterruptTarget)>>,
+    }
+
+    impl Remapping {
+        fn off() -> Self {
+            Self::making(None)
+        }
+
+        fn making(made: Option<Result<u64, ActivationError>>) -> Self {
+            Self {
+                made,
+                asked: Mutex::new(StdVec::new()),
+            }
+        }
+    }
+
+    impl PinRemapping for Remapping {
+        fn entry(
+            &self,
+            ioapic: u8,
+            target: InterruptTarget,
+        ) -> Result<Option<u64>, ActivationError> {
+            self.asked.lock().unwrap().push((ioapic, target));
+            self.made.map_or(Ok(None), |made| made.map(Some))
+        }
+    }
+
+    /// A pin takes a vector the first time it is activated, routed to it and
+    /// programmed masked at the pool's CPU, and keeps it however often it is
+    /// activated again.
+    #[test]
+    fn a_pin_takes_a_vector_when_first_activated_and_keeps_it() {
+        let (controller, mmio) = fresh_controller(0, 24);
+        let (vectors, routing, off) = (VectorPool::new(0xAB), Routing::new(), Remapping::off());
+        assert_eq!(
+            IrqController::mask(&controller, 7),
+            Err(MaskError::OutOfRange)
+        );
+        controller
+            .activate_pin(7, &vectors, &routing, &off)
+            .expect("activates");
+        assert_eq!(routing.gsi_for_vector(0x30), Some(7));
+        let low = controller.read_pin_low(7).expect("readable");
+        assert_eq!(low & 0xFF, 0x30);
+        assert_ne!(low & (1 << 16), 0, "masked until bound");
+        assert_eq!(
+            mmio.last_writes.lock().unwrap().get(&0x1F),
+            Some(&(0xAB << 24))
+        );
+        controller
+            .activate_pin(7, &vectors, &routing, &off)
+            .expect("active already");
+        controller
+            .activate_pin(9, &vectors, &routing, &off)
+            .expect("activates");
+        assert_eq!(routing.gsi_for_vector(0x31), Some(9), "pin 7 kept its own");
+        assert_eq!(routing.vector_for_gsi(7), Some(0x30));
+    }
+
+    /// The defect a boot-time vector per pin had: IO-APICs carrying more pins
+    /// than there are vectors left nothing for message-signalled sources, and
+    /// failed to boot. Pins now cost vectors only as they are activated.
+    #[test]
+    fn more_pins_than_vectors_cost_only_the_active_ones() {
+        let mmios = [
+            RecordingMmio::new(),
+            RecordingMmio::new(),
+            RecordingMmio::new(),
+        ];
+        let controller = Controller::new(
+            (0u8..3)
+                .zip(&mmios)
+                .map(|(id, mmio)| block(id, u32::from(id) * 120, 120, mmio))
+                .collect(),
+        )
+        .expect("360 pins");
+        controller.quiesce();
+        for mmio in &mmios {
+            assert!(
+                mmio.snapshot()
+                    .iter()
+                    .filter(|(reg, _)| reg % 2 == 0)
+                    .all(|(_, low)| low & (1 << 16) != 0),
+                "every pin masked"
+            );
+        }
+        let (vectors, routing, off) = (VectorPool::new(0), Routing::new(), Remapping::off());
+        for gsi in [0, 121, 359] {
+            controller
+                .activate_pin(gsi, &vectors, &routing, &off)
+                .expect("activates");
+        }
+        let mut free = 0;
+        while vectors.claim().is_some() {
+            free += 1;
+        }
+        assert_eq!(free, EXTERNAL_VECTOR_COUNT - 3);
+        assert_eq!(
+            controller.activate_pin(200, &vectors, &routing, &off),
+            Err(ActivationError::Exhausted)
+        );
+        assert_eq!(
+            IrqController::mask(&controller, 200),
+            Err(MaskError::OutOfRange),
+            "unactivated"
+        );
+        assert_eq!(controller.last_gsi(), Some(359));
+        assert_eq!(controller.ioapic_ids().collect::<StdVec<_>>(), [0, 1, 2]);
+    }
+
+    /// Quiescing leaves an active pin as its activation programmed it.
+    #[test]
+    fn quiescing_leaves_an_active_pin_alone() {
+        let (controller, mmio) = fresh_controller(0, 24);
+        let (vectors, routing, off) = (VectorPool::new(0), Routing::new(), Remapping::off());
+        controller
+            .activate_pin(4, &vectors, &routing, &off)
+            .expect("activates");
+        controller.unmask(4).expect("unmask");
+        mmio.log.lock().unwrap().clear();
+        controller.quiesce();
+        assert_eq!(
+            mmio.snapshot().len(),
+            2 * 23,
+            "every other pin, both halves"
+        );
+        assert_eq!(
+            controller.read_pin_low(4).map(|low| low & (1 << 16)),
+            Some(0)
+        );
+    }
+
+    /// Once remapping is on, a pin raises the entry its unit made for the
+    /// target of its own vector, CPU and trigger, masked.
+    #[test]
+    fn a_pin_activated_under_remapping_raises_its_remapping_entry() {
+        let mmio = RecordingMmio::new();
+        let mut wired = block(2, 0, 24, &mmio);
+        wired.wiring[9] = PinWiring::of(9, Some(0b1111));
+        let controller = Controller::new(alloc::vec![wired]).unwrap();
+        let remappable = (5 << 49) | (1 << 48) | 0x30;
+        let remapping = Remapping::making(Some(Ok(remappable)));
+        let (vectors, routing) = (VectorPool::new(0x1_0000), Routing::new());
+        controller
+            .activate_pin(9, &vectors, &routing, &remapping)
+            .expect("activates");
+        let target = InterruptTarget {
+            vector: 0x30,
+            destination: 0x1_0000,
+            level: true,
+        };
+        assert_eq!(*remapping.asked.lock().unwrap(), [(2, target)]);
+        let low = u64::from(controller.read_pin_low(9).unwrap());
+        let high = u64::from(*mmio.last_writes.lock().unwrap().get(&0x23).unwrap());
+        let wiring = 1 << 15 | 1 << 13;
+        assert_eq!(low | high << 32, remappable | wiring | REDIRECTION_MASKED);
+        let mut programmed = StdVec::new();
+        controller.programmed(&mut |pin| programmed.push(pin));
+        assert_eq!(programmed[0].destination, 0x1_0000);
+    }
+
+    /// A pin no entry can be made for, or whose CPU compatibility format
+    /// cannot name — past its eight bits, or the broadcast id, which would
+    /// reach every CPU — is left inactive, its vector unrouted and free.
+    #[test]
+    fn a_pin_that_cannot_reach_its_cpu_is_left_inactive() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        let routing = Routing::new();
+        let refusing = Remapping::making(Some(Err(ActivationError::Unroutable)));
+        let off = Remapping::off();
+        for (vectors, remapping) in [
+            (VectorPool::new(0), &refusing),
+            (VectorPool::new(0x100), &off),
+            (VectorPool::new(0xFF), &off),
+        ] {
+            assert_eq!(
+                controller.activate_pin(7, &vectors, &routing, remapping),
+                Err(ActivationError::Unroutable)
+            );
+            assert_eq!(routing.gsi_for_vector(0x30), None);
+            assert_eq!(vectors.claim(), Some(0x30), "free again");
+            assert_eq!(
+                IrqController::mask(&controller, 7),
+                Err(MaskError::OutOfRange)
+            );
+        }
+    }
+
+    /// A vector whose route another line holds is never handed to a pin, nor
+    /// given back: it stays claimed, and the pin inactive.
+    #[test]
+    fn a_vector_routed_elsewhere_is_never_a_pin_s() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        let (vectors, routing, off) = (VectorPool::new(0), Routing::new(), Remapping::off());
+        routing.install(4096, 0x30).expect("a stray route");
+        assert_eq!(
+            controller.activate_pin(7, &vectors, &routing, &off),
+            Err(ActivationError::Exhausted)
+        );
+        assert_eq!(routing.gsi_for_vector(0x30), Some(4096));
+        assert_eq!(
+            vectors.claim(),
+            Some(0x31),
+            "the stray vector stays claimed"
+        );
+        assert_eq!(off.asked.lock().unwrap().len(), 0, "nothing was remapped");
+    }
+
+    #[test]
+    fn a_gsi_no_block_owns_activates_nothing() {
+        let (controller, _mmio) = fresh_controller(0, 24);
+        let (vectors, routing, off) = (VectorPool::new(0), Routing::new(), Remapping::off());
+        assert_eq!(
+            controller.activate_pin(24, &vectors, &routing, &off),
+            Err(ActivationError::OutOfRange)
+        );
+        assert_eq!(vectors.claim(), Some(0x30));
     }
 }

@@ -15,7 +15,10 @@ Começa nos processos do próprio chamador; a vista de todo o sistema só
 `CAP_SYSINFO_GLOBAL`.
 
 O ecrã atualiza-se a cada intervalo de atraso (3,0 segundos salvo se
-`-d` o mudar), e `r` atualiza-o imediatamente.
+`-d` o mudar), e `r` atualiza-o imediatamente. Uma atualização que o
+serviço de informação do sistema não conseguiu terminar sob carga mantém a
+última lista, a linha de estado di-lo, e a atualização seguinte volta a
+ler a lista.
 
 O visualizador não aceita operandos: controla-se com teclas premidas
 dentro da sessão.

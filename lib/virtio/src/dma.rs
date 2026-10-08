@@ -32,7 +32,7 @@ use tairix_abi::DriverError;
 // name them without inverting the dependency direction. Their unit tests stay in this module against the
 // re-export so they keep exercising the same call sites and continue
 // to enjoy `alloc` access (`lib/abi` is no-alloc).
-pub use tairix_abi::driver::{DmaSlab, PoolId, SlabFreeFn};
+pub use tairix_abi::driver::{DmaSlab, PoolId, SlabEnd, SlabFreeFn};
 
 /// Zero every byte of `slab`: the one scrub staging that held a sensitive
 /// payload gets once the device has handed it back.
@@ -231,6 +231,7 @@ mod tests {
             _cpu: core::ptr::NonNull<u8>,
             slot: usize,
             len: usize,
+            _end: super::super::SlabEnd,
         ) {
             FREED.fetch_add(1, Ordering::SeqCst);
             LAST_SLOT.store(slot, Ordering::SeqCst);
@@ -312,7 +313,16 @@ mod tests {
         /// # Safety
         ///
         /// `pool` must point at a live `Cell<usize>`.
-        unsafe fn count(pool: *const (), _cpu: NonNull<u8>, _slot: usize, _len: usize) {
+        unsafe fn count(
+            pool: *const (),
+            _cpu: NonNull<u8>,
+            _slot: usize,
+            _len: usize,
+            end: super::SlabEnd,
+        ) {
+            if end == super::SlabEnd::Withheld {
+                return;
+            }
             // SAFETY: per the function contract.
             let frees = unsafe { &*pool.cast::<core::cell::Cell<usize>>() };
             frees.set(frees.get() + 1);

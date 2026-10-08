@@ -289,7 +289,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // enabled (the address-space build switched it on).
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
     syscall_entry::set_dispatch_callback(dispatch);
 
@@ -352,7 +352,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         // its saved EL0 trap context, not this body, so exactly one SGI fires.
         // SAFETY: the GIC is initialised and the reschedule SGI is enabled
         // (`enable_ipi`), so `send_sgi` posts a deliverable INTID 0.
-        gic::send_sgi(BOOT_CPU);
+        gic::send_sgi(BOOT_CPU).expect("the boot CPU's interface is up");
         // SAFETY: the entered space is active (the `pre_resume` hook just
         // reactivated it) and the EL1 trap vector + dispatch callback are
         // installed, so the program's `exit` `svc` is handled and the pending

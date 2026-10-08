@@ -29,6 +29,10 @@ workspace = true
 name = "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64"
 path = "src/main.rs"
 
+[[bin]]
+name = "tairix-test-cross-cpu-tlb-shootdown-x2apic-qemu-x86-64"
+path = "src/x2apic.rs"
+
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }

@@ -23,6 +23,10 @@
 //! 7. A `ByteQueue` agrees with a plain byte vector over lengths a remote peer
 //!    declares, including ones far past its bound, which it never exceeds —
 //!    neither in what it holds nor in the storage it commits.
+//! 8. A `RadixTree` agrees with an ordered map — membership, successor,
+//!    predecessor and its tagged walk — over keys crowding one leaf, spread
+//!    across the whole key space and clustered at both of its ends, and drops
+//!    every value exactly once.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -32,7 +36,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use tairix_collections::{
-    ByteQueue, HashMap, LruMap, QueueError, RangeError, RangeKey, RangeMap, RangeSet, SmallVec,
+    ByteQueue, HashMap, LruMap, QueueError, RadixTree, RangeError, RangeKey, RangeMap, RangeSet,
+    SmallVec,
 };
 use tairix_fuzzseed::Prng;
 use tairix_hash::{BuildSipHash13, HashSeed};
@@ -540,6 +545,66 @@ fn sweep_range_map(rng: &mut Prng, base: u64, live: &Rc<Cell<i64>>) {
     assert_eq!(live.get(), 0, "every value must be dropped exactly once");
 }
 
+/// A key crowding one leaf, anywhere in the key space, or near either end.
+fn draw_radix_key(rng: &mut Prng) -> u64 {
+    match rng.below(4) {
+        0 => rng.below(64) as u64,
+        1 => u64::MAX - rng.below(4096) as u64,
+        2 => rng.next_u64() >> rng.below(64),
+        _ => draw_key(rng, 4096),
+    }
+}
+
+/// Drive a `RadixTree` with one tag against an ordered map of `(value,
+/// tagged)`, checking a successor, a predecessor and a tagged successor after
+/// every operation.
+fn sweep_radix(rng: &mut Prng, live: &Rc<Cell<i64>>) {
+    let mut tree: RadixTree<Tracked, 1> = RadixTree::new();
+    let mut model: std::collections::BTreeMap<u64, bool> = std::collections::BTreeMap::new();
+    for _ in 0..OPS_PER_ROUND {
+        let key = draw_radix_key(rng);
+        match rng.below(6) {
+            0 | 1 => {
+                let replaced = tree
+                    .try_insert(key, Tracked::new(key, live))
+                    .expect("the host allocator supplies a node");
+                let tagged = model.get(&key).copied().unwrap_or(false);
+                assert_eq!(replaced.is_some(), model.insert(key, tagged).is_some());
+            }
+            2 => assert_eq!(tree.remove(key).is_some(), model.remove(&key).is_some()),
+            3 => {
+                let present = model.get_mut(&key).map(|tag| *tag = true).is_some();
+                assert_eq!(tree.set_tag(key, 0), present);
+            }
+            4 => {
+                let tagged = model
+                    .get_mut(&key)
+                    .is_some_and(|tag| core::mem::replace(tag, false));
+                assert_eq!(tree.clear_tag(key, 0), tagged);
+            }
+            _ => {}
+        }
+        assert_eq!(tree.len(), model.len());
+        let probe = draw_radix_key(rng);
+        assert_eq!(
+            tree.next(probe).map(|(k, v)| (k, v.key)),
+            model.range(probe..).next().map(|(&k, _)| (k, k))
+        );
+        assert_eq!(
+            tree.prev(probe).map(|(k, _)| k),
+            model.range(..=probe).next_back().map(|(&k, _)| k)
+        );
+        assert_eq!(
+            tree.next_tagged(probe, 0).map(|(k, _)| k),
+            model
+                .range(probe..)
+                .find(|(_, &tagged)| tagged)
+                .map(|(&k, _)| k)
+        );
+    }
+    assert!(tree.iter().map(|(k, _)| k).eq(model.keys().copied()));
+}
+
 #[test]
 fn heap_backed_containers_agree_with_their_models() {
     let mut rng = Prng::new(tairix_fuzzseed::start(
@@ -569,6 +634,10 @@ fn heap_backed_containers_agree_with_their_models() {
             assert_eq!(live.get(), 0, "a `RangeMap` leaked or double-dropped");
 
             sweep_byte_queue(&mut rng);
+
+            let live = Rc::new(Cell::new(0i64));
+            sweep_radix(&mut rng, &live);
+            assert_eq!(live.get(), 0, "a `RadixTree` leaked or double-dropped");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

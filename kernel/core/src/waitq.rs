@@ -678,6 +678,28 @@ impl WaitQueue {
             .map(|&(deadline, _seq)| deadline)
     }
 
+    /// Re-arm `task` for the deadline `scan` reads from the state it waits
+    /// on, disarmed while it reads: a [`Self::wake_by`] for a deadline
+    /// published after the read then wakes the task, where the deadline this
+    /// pass replaces would have been taken as covering it.
+    pub fn rearm(&self, task: TaskId, scan: impl FnOnce() -> Option<u64>) {
+        self.register(task, NO_DEADLINE);
+        let due = scan();
+        self.register(task, due.unwrap_or(NO_DEADLINE));
+    }
+
+    /// Wake the queue's waiters so they re-arm for `deadline_ns`, unless one
+    /// is armed for that moment or sooner already, which covers it: a later
+    /// deadline costs no task switch. Lock-free past the deadline read, so a
+    /// caller under another lock may raise it. Sound only for a waiter that
+    /// arms through [`Self::rearm`].
+    pub fn wake_by(&self, deadline_ns: u64) {
+        match self.earliest_deadline() {
+            Some(armed) if armed <= deadline_ns => {}
+            _ => self.request_wake(),
+        }
+    }
+
     /// `true` if no task is currently waiting. Diagnostic / test observer.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1025,14 +1047,57 @@ pub static WRITEBACK_WAITQ: WaitQueue = WaitQueue::new();
 /// it only flags the queue ([`WaitQueue::request_wake`]) and the real
 /// `unpark` runs at the next dispatcher-context [`drain_pending_wakes`].
 pub fn writeback_wake(deadline_ns: Option<u64>) {
-    let Some(deadline) = deadline_ns else {
-        // Nothing to publish: whatever the flusher is armed for still
-        // covers it, and it will re-park on `NO_DEADLINE` when it next runs.
-        return;
-    };
-    match WRITEBACK_WAITQ.earliest_deadline() {
-        Some(armed) if armed <= deadline => {}
-        _ => WRITEBACK_WAITQ.request_wake(),
+    // With nothing to publish, whatever the flusher is armed for still covers
+    // it, and it re-parks on `NO_DEADLINE` when it next runs.
+    if let Some(deadline) = deadline_ns {
+        WRITEBACK_WAITQ.wake_by(deadline);
+    }
+}
+
+/// The wait-queue the IOMMU facility's deferred-free flusher parks on
+/// (`plans/IOMMU.md` IOM20.1): released by the timed sweep when the batch's
+/// window closes, and by [`WaitQueue::wake_by`] when a batch fills or opens
+/// sooner than the flusher is armed for. An empty batch arms nothing.
+pub static DEFERRED_FREE_WAITQ: WaitQueue = WaitQueue::new();
+
+/// The calling task, proven able to wait: the wait hook is installed and the
+/// task is one it can wake. A kernel service proves it once and parks for
+/// good, so no later registration can fail.
+#[derive(Clone, Copy)]
+pub struct Parker {
+    arch: &'static (dyn WaitQueueArch + 'static),
+    task: TaskId,
+}
+
+impl Parker {
+    /// The calling task, or [`None`] before the wait hook is installed or
+    /// outside a task.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        let arch = wait_arch()?;
+        let task = WaitQueueArch::current_task(arch, arch.current_cpu()?)?;
+        Some(Self { arch, task })
+    }
+
+    /// Register on `queue` until `due` (or with no deadline) and re-point the
+    /// timed one-shot: registered before it parks, the task cannot sleep
+    /// through a wake raised in between.
+    pub fn register(&self, queue: &WaitQueue, due: Option<u64>) {
+        queue.register(self.task, due.unwrap_or(NO_DEADLINE));
+        self.arch.set_wakeup(nearest_timed_deadline());
+    }
+
+    /// [`WaitQueue::rearm`] the task on `queue` for the deadline `scan`
+    /// answers at the current time, and re-point the timed one-shot.
+    pub fn rearm(&self, queue: &WaitQueue, scan: impl FnOnce(u64) -> Option<u64>) {
+        queue.rearm(self.task, || scan(self.now_ns()));
+        self.arch.set_wakeup(nearest_timed_deadline());
+    }
+
+    /// The monotonic clock deadlines are set against.
+    #[must_use]
+    pub fn now_ns(&self) -> u64 {
+        self.arch.now_ns()
     }
 }
 
@@ -1341,6 +1406,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     },
     GlobalQueue {
         queue: &CPUFREQ_WAITQ,
+        timed: true,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &DEFERRED_FREE_WAITQ,
         timed: true,
         deferred: true,
     },
@@ -2020,6 +2090,31 @@ mod tests {
         // On its next park it re-registers a fresh deadline cleanly.
         q.register(1, 500);
         assert_eq!(q.earliest_deadline(), Some(500));
+    }
+
+    /// An edge wake leaves the woken waiter's deadline indexed, so a deadline
+    /// published while it reads its state must find it disarmed: `wake_by`
+    /// then raises a wake rather than taking the deadline about to be replaced
+    /// as covering the new one.
+    #[test]
+    fn a_deadline_published_while_the_waiter_reads_raises_a_wake() {
+        let arch = MockArch::new();
+        let q = WaitQueue::new();
+        q.register(1, 100);
+        q.wake_all(&arch);
+        assert_eq!(q.earliest_deadline(), Some(100), "an edge wake leaves it");
+        q.rearm(1, || {
+            q.wake_by(150);
+            None
+        });
+        assert!(
+            q.take_wake_pending(),
+            "the later deadline is not slept through"
+        );
+        assert_eq!(q.earliest_deadline(), None);
+        q.rearm(1, || Some(300));
+        assert_eq!(q.earliest_deadline(), Some(300));
+        assert!(!q.take_wake_pending());
     }
 
     #[test]

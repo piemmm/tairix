@@ -15,7 +15,7 @@
 use core::sync::atomic::Ordering;
 
 use tairix_kernel_iommu_api::{
-    InterruptRemapping, InterruptSource, InterruptTarget, IommuError, Remapped,
+    InterruptRemapping, InterruptSource, InterruptTarget, IommuError, Notice, Remapped,
 };
 
 use super::Translation;
@@ -57,6 +57,16 @@ pub enum InterruptRouting {
 }
 
 impl InterruptRouting {
+    /// Remapping on, `unrouted` sources given no entry.
+    #[must_use]
+    pub const fn with_unrouted(unrouted: u32) -> Self {
+        if unrouted == 0 {
+            Self::Remapped
+        } else {
+            Self::Unrouted(unrouted)
+        }
+    }
+
     /// The audit trail's name for the outcome.
     #[must_use]
     pub const fn outcome(self) -> &'static str {
@@ -202,5 +212,63 @@ impl Translation {
             }
         }
         Ok(())
+    }
+}
+
+/// Message confinement into interrupt files, as the port drives it.
+impl Translation {
+    /// Confine the messages of every stream `node` names, its aliases
+    /// included, to the interrupt file at `file`, each written to the page at
+    /// `doorbell` and answered by `notice`, on the unit each stream crosses.
+    ///
+    /// # Errors
+    ///
+    /// [`RemapError::Unsupported`] for a node naming no stream, or a stream
+    /// whose unit translates here and cannot confine messages;
+    /// [`RemapError::UnknownUnit`] for a unit not translating here; else the
+    /// unit's refusal. A node refused part-way keeps the streams already
+    /// confined, which reach only its own file.
+    pub fn confine_messages(
+        &self,
+        node: u32,
+        doorbell: u64,
+        file: u64,
+        notice: Notice,
+    ) -> Result<(), RemapError> {
+        let entry = self
+            .tree
+            .node(node)
+            .ok()
+            .flatten()
+            .ok_or(RemapError::Unsupported)?;
+        // A bridged function's messages arrive as its alias.
+        let ranges = || {
+            entry
+                .resources()
+                .iter()
+                .filter_map(|r| r.iommu_streams().or_else(|_| r.iommu_aliases()).ok())
+        };
+        let mut confined = false;
+        for (at, streams) in ranges().enumerate() {
+            let index = self
+                .unit_index(streams.unit())
+                .ok_or(RemapError::UnknownUnit)?;
+            let files = self.units[index]
+                .unit
+                .message_files()
+                .ok_or(RemapError::Unsupported)?;
+            for stream in super::stream_ids(streams) {
+                let named_before = ranges().take(at).any(|earlier| {
+                    earlier.unit() == streams.unit() && super::stream_ids(earlier).contains(&stream)
+                });
+                if !named_before {
+                    files
+                        .confine_messages(stream, doorbell, file, notice)
+                        .map_err(RemapError::Unit)?;
+                    confined = true;
+                }
+            }
+        }
+        confined.then_some(()).ok_or(RemapError::Unsupported)
     }
 }

@@ -368,7 +368,7 @@ fn reaches_leaf(
 /// above it (so a comma split would miss the first entry of each block),
 /// and the comments themselves contain stray brackets (e.g. ``[lib]`` /
 /// ``[[bin]]``) that would otherwise be mistaken for the array's close.
-fn workspace_members(root: &Path) -> Result<Vec<String>, String> {
+pub(super) fn workspace_members(root: &Path) -> Result<Vec<String>, String> {
     let manifest = root.join("Cargo.toml");
     let text = std::fs::read_to_string(&manifest)
         .map_err(|e| format!("deps-check: cannot read {}: {e}", manifest.display()))?;
@@ -414,7 +414,7 @@ fn push_member(fragment: &str, members: &mut Vec<String>) {
 }
 
 /// Extract the `[package] name = "..."` value.
-fn package_name(manifest: &str) -> Option<String> {
+pub(super) fn package_name(manifest: &str) -> Option<String> {
     let mut in_package = false;
     for line in manifest.lines() {
         let trimmed = line.trim();
@@ -467,7 +467,7 @@ fn is_build_dependency_header(header: &str) -> bool {
 }
 
 /// Extract the value of a `path = "..."` key if present on the line.
-fn extract_path_value(line: &str) -> Option<String> {
+pub(super) fn extract_path_value(line: &str) -> Option<String> {
     let idx = line.find("path")?;
     let after = line[idx + "path".len()..].trim_start();
     let after = after.strip_prefix('=')?.trim_start();
@@ -475,7 +475,7 @@ fn extract_path_value(line: &str) -> Option<String> {
 }
 
 /// Parse a leading `"..."` string literal, ignoring any trailing tokens.
-fn string_literal(s: &str) -> Option<String> {
+pub(super) fn string_literal(s: &str) -> Option<String> {
     let s = s.trim();
     let rest = s.strip_prefix('"')?;
     let end = rest.find('"')?;
@@ -484,7 +484,7 @@ fn string_literal(s: &str) -> Option<String> {
 
 /// Join `base` (a workspace-relative dir) with a relative `path` and
 /// normalize `.`/`..` segments into a clean `/`-separated dir.
-fn normalize_join(base: &str, path: &str) -> Option<String> {
+pub(super) fn normalize_join(base: &str, path: &str) -> Option<String> {
     let mut segments: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
     for part in path.split('/') {
         match part {
@@ -546,12 +546,9 @@ mod tests {
 
     #[test]
     fn kernel_virtio_has_no_edge_to_drvhost() {
-        // Burn-down regression: the `VirtioHostFactory` seam was hoisted into
-        // `lib/virtio`, so the kernel-side factory crate (`kernel/virtio`) and
-        // the userland driver host (`drvhost`) both depend on `lib/*` instead
-        // of on each other. The former `kernel/virtio -> userland/drvhost` edge
-        // (a `KernelSubsystem -> Userland` inversion) must stay gone, not be
-        // re-grandfathered.
+        // `kernel/virtio` and the userland driver host both depend on `lib/*`
+        // rather than on each other: a `kernel/virtio -> userland/drvhost`
+        // edge would be a `KernelSubsystem -> Userland` inversion.
         let root = workspace_root();
         let crates = build_graph(&root).expect("graph");
         let kernel_virtio = crates
@@ -568,7 +565,7 @@ mod tests {
         );
         assert!(
             kernel_virtio.deps.iter().any(|d| d == "tairix-virtio"),
-            "kernel/virtio must consume the VirtioHostFactory seam from lib/virtio"
+            "kernel/virtio must reach the virtio protocol through lib/virtio"
         );
     }
 

@@ -54,28 +54,28 @@ use tairix_abi::sysinfo::SYSINFO_QUERIES;
 use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DirChange,
     DirChangeBatch, DirEntry, DirWatchStatus, DriverBindKey, DriverError, DriverHandle, DriverKind,
-    DriverManifest, DriverRegisterReply, Duration64, Errno, GroupDirectoryRecord,
-    GroupDirectoryRequest, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty, HwResource,
-    HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope,
-    LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader, MapFlags, MountAvailability,
-    MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, NoticeTopic, OpenFlags,
-    PeerWatchOp, PointerButtonCode, PointerInput, PortName, PowerAction, ProcessListRequest,
-    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode, ResourceLimit,
-    ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity,
-    Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader,
-    SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest,
-    WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
-    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE,
-    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS,
-    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
-    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
-    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
-    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX,
-    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    DriverManifest, DriverRegisterReply, Duration64, Errno, GroupDirectoryRecord, HwDeviceClass,
+    HwMatchKey, HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind, IpcMessageHeader,
+    KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage,
+    LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountRecord, NamedKeyCode,
+    NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PointerButtonCode,
+    PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader, ProcessState,
+    RandomFlags, RealpathMode, ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority,
+    Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot,
+    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
+    UserDirectoryRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
+    APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
+    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
+    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
+    CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
+    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
+    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
+    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
+    GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
+    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
+    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
+    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX,
+    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
     LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
     LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
@@ -189,6 +189,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("ALREADY_EXISTS", DriverError::AlreadyExists),
     ("DIRECTORY_NOT_EMPTY", DriverError::DirectoryNotEmpty),
     ("DIRECTORY_CYCLE", DriverError::DirectoryCycle),
+    ("OUT_OF_MEMORY", DriverError::OutOfMemory),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -646,10 +647,19 @@ fn generate_hwtree() -> String {
         "#define TAIRIX_HW_RESOURCE_WIRE_LEN {}u",
         HwResource::WIRE_LEN
     );
+    out.push_str(
+        "/* Resource flags, each meaningful within its own resource kind alone: a\n \
+         * DMA flag and an IRQ flag may share a value. */\n",
+    );
     let _ = writeln!(
         out,
         "#define TAIRIX_HW_RES_FLAG_DMA_TRANSLATED {}u",
         HwResource::DMA_TRANSLATED
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_HW_RES_FLAG_DMA_SNOOPED {}u",
+        HwResource::DMA_SNOOPED
     );
     let _ = writeln!(
         out,
@@ -769,6 +779,7 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::Property => "PROPERTY",
         HwResourceKind::IommuAlias => "IOMMU_ALIAS",
         HwResourceKind::IommuGroup => "IOMMU_GROUP",
+        HwResourceKind::MsiDoorbell => "MSI_DOORBELL",
     }
 }
 
@@ -778,6 +789,7 @@ fn property_name(key: HwProperty) -> &'static str {
     match key {
         HwProperty::UsbInterface => "USB_INTERFACE",
         HwProperty::FaultInterrupt => "FAULT_INTERRUPT",
+        HwProperty::KernelDriven => "KERNEL_DRIVEN",
     }
 }
 
@@ -1648,10 +1660,9 @@ fn generate_process() -> String {
 /// the [`ProcessState`] `#[repr(u8)]` discriminants, the inline-buffer size
 /// limits (`TAIRIX_PROCESS_NAME_MAX`, `TAIRIX_MACHINE_ID_LEN`, `TAIRIX_HOSTNAME_MAX`,
 /// `TAIRIX_MOUNT_*_MAX`), and a `#[repr(C)]` C struct mirror plus a packed
-/// `*_WIRE_LEN` macro for each of the nine wire types
-/// ([`SysinfoRequestHeader`], [`ProcessListRequest`], [`ProcessRecord`],
-/// [`KernelMemoryStats`], [`Uptime`], [`SystemIdentity`], [`MountListRequest`],
-/// [`MountRecord`], [`ResourceLimitRecord`]). [`Uptime`]'s members are the
+/// `*_WIRE_LEN` macro for each wire type: the [`SysinfoRequestHeader`]
+/// envelope, the one [`PageRequest`] every list query's payload begins with,
+/// and the records the queries answer. [`Uptime`]'s members are the
 /// `tairix_duration64_t` / `tairix_time64_t` types from `tairix_time.h`; a
 /// [`ResourceLimitRecord`]'s `limit` is the `tairix_resource_limit_t` from
 /// `tairix_rlimit.h`. Every numeric value and
@@ -1832,6 +1843,79 @@ fn sysinfo_emit_mount_media(out: &mut String) {
     }
 }
 
+/// Emit the discriminants the DMA translation records carry: every value each
+/// `#[repr(u8)]` enum in `lib/abi` decodes, spelled by an exhaustive match, so
+/// a variant added there fails this build until it is named here.
+fn sysinfo_emit_dma_states(out: &mut String) {
+    use tairix_abi::sysinfo::{
+        DmaFaultSignal, DmaOwnerState, DmaTables, DmaUnitFamily, DmaUnitState,
+    };
+    out.push_str("/* What a DMA translation record says of a unit and its owners (uint8_t). */\n");
+    emit_u8_discriminants(out, "TAIRIX_DMA_UNIT_FAMILY", |raw| {
+        DmaUnitFamily::from_u8(raw).ok().map(|family| match family {
+            DmaUnitFamily::Unmatched => "UNMATCHED",
+            DmaUnitFamily::Vtd => "VTD",
+            DmaUnitFamily::AmdVi => "AMDVI",
+            DmaUnitFamily::Smmuv3 => "SMMUV3",
+            DmaUnitFamily::Riscv => "RISCV",
+            DmaUnitFamily::VirtioPci => "VIRTIO_PCI",
+            DmaUnitFamily::VirtioMmio => "VIRTIO_MMIO",
+        })
+    });
+    emit_u8_discriminants(out, "TAIRIX_DMA_UNIT_STATE", |raw| {
+        DmaUnitState::from_u8(raw).ok().map(|state| match state {
+            DmaUnitState::Translating => "TRANSLATING",
+            DmaUnitState::Unmatched => "UNMATCHED",
+            DmaUnitState::NoRegisters => "NO_REGISTERS",
+            DmaUnitState::Failed => "FAILED",
+            DmaUnitState::Withheld => "WITHHELD",
+            DmaUnitState::Unconfined => "UNCONFINED",
+            DmaUnitState::Unsnooped => "UNSNOOPED",
+        })
+    });
+    emit_u8_discriminants(out, "TAIRIX_DMA_FAULT_SIGNAL", |raw| {
+        DmaFaultSignal::from_u8(raw)
+            .ok()
+            .map(|signal| match signal {
+                DmaFaultSignal::None => "NONE",
+                DmaFaultSignal::Wired => "WIRED",
+                DmaFaultSignal::Message => "MESSAGE",
+                DmaFaultSignal::Unheard => "UNHEARD",
+            })
+    });
+    emit_u8_discriminants(out, "TAIRIX_DMA_TABLES", |raw| {
+        DmaTables::from_u8(raw).ok().map(|tables| match tables {
+            DmaTables::None => "NONE",
+            DmaTables::FirstStage => "FIRST_STAGE",
+            DmaTables::SecondStage => "SECOND_STAGE",
+            DmaTables::Kept => "KEPT",
+        })
+    });
+    emit_u8_discriminants(out, "TAIRIX_DMA_OWNER_STATE", |raw| {
+        DmaOwnerState::from_u8(raw).ok().map(|state| match state {
+            DmaOwnerState::Adopting => "ADOPTING",
+            DmaOwnerState::Live => "LIVE",
+            DmaOwnerState::Unadopted => "UNADOPTED",
+            DmaOwnerState::Ended => "ENDED",
+            DmaOwnerState::Unconfirmed => "UNCONFIRMED",
+        })
+    });
+}
+
+/// Emit `#define {prefix}_{NAME} ((uint8_t)Nu)` for every byte `name` decodes.
+fn emit_u8_discriminants(
+    out: &mut String,
+    prefix: &str,
+    name: impl Fn(u8) -> Option<&'static str>,
+) {
+    use std::fmt::Write as _;
+    for raw in 0..=u8::MAX {
+        if let Some(name) = name(raw) {
+            let _ = writeln!(out, "#define {prefix}_{name} ((uint8_t){raw}u)");
+        }
+    }
+}
+
 /// Emit the account-record field bounds every directory and account
 /// frame is sized by, and the password bound every prompt and wire holds:
 /// the one `lib/abi` definition the databases share.
@@ -1892,18 +1976,21 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     }
     sysinfo_emit_mount_media(out);
     sysinfo_emit_account_bounds(out);
+    sysinfo_emit_dma_states(out);
     out.push('\n');
+    sysinfo_emit_wire_lens(out);
+}
 
+/// Emit the per-record packed wire sizes and the paging constants.
+fn sysinfo_emit_wire_lens(out: &mut String) {
+    use std::fmt::Write as _;
     out.push_str("/* Packed little-endian wire size of each sysinfo record type, in bytes. */\n");
     let wire_lens = [
         (
             "TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN",
             SysinfoRequestHeader::WIRE_LEN,
         ),
-        (
-            "TAIRIX_PROCESS_LIST_REQUEST_WIRE_LEN",
-            ProcessListRequest::WIRE_LEN,
-        ),
+        ("TAIRIX_PAGE_REQUEST_WIRE_LEN", PageRequest::WIRE_LEN),
         ("TAIRIX_PROCESS_RECORD_WIRE_LEN", ProcessRecord::WIRE_LEN),
         (
             "TAIRIX_KERNEL_MEMORY_STATS_WIRE_LEN",
@@ -1912,26 +1999,14 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
         ("TAIRIX_UPTIME_WIRE_LEN", Uptime::WIRE_LEN),
         ("TAIRIX_LOAD_AVERAGE_WIRE_LEN", LoadAverage::WIRE_LEN),
         ("TAIRIX_SYSTEM_IDENTITY_WIRE_LEN", SystemIdentity::WIRE_LEN),
-        (
-            "TAIRIX_MOUNT_LIST_REQUEST_WIRE_LEN",
-            MountListRequest::WIRE_LEN,
-        ),
         ("TAIRIX_MOUNT_RECORD_WIRE_LEN", MountRecord::WIRE_LEN),
         (
             "TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN",
             ResourceLimitRecord::WIRE_LEN,
         ),
         (
-            "TAIRIX_USER_DIRECTORY_REQUEST_WIRE_LEN",
-            UserDirectoryRequest::WIRE_LEN,
-        ),
-        (
             "TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN",
             UserDirectoryRecord::WIRE_LEN,
-        ),
-        (
-            "TAIRIX_GROUP_DIRECTORY_REQUEST_WIRE_LEN",
-            GroupDirectoryRequest::WIRE_LEN,
         ),
         (
             "TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN",
@@ -1941,10 +2016,29 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
             "TAIRIX_SELF_ACCOUNT_RECORD_WIRE_LEN",
             SelfAccountRecord::WIRE_LEN,
         ),
+        (
+            "TAIRIX_DMA_UNIT_RECORD_WIRE_LEN",
+            tairix_abi::sysinfo::DmaUnitRecord::WIRE_LEN,
+        ),
+        (
+            "TAIRIX_DMA_GROUP_RECORD_WIRE_LEN",
+            tairix_abi::sysinfo::DmaGroupRecord::WIRE_LEN,
+        ),
+        (
+            "TAIRIX_DMA_NODE_RECORD_WIRE_LEN",
+            tairix_abi::sysinfo::DmaNodeRecord::WIRE_LEN,
+        ),
     ];
     for (name, len) in wire_lens {
         let _ = writeln!(out, "#define {name} {len}u");
     }
+    out.push('\n');
+    out.push_str("/* The `walk` of a page part of no walk. */\n");
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_PAGE_REQUEST_FRESH {}u",
+        PageRequest::FRESH
+    );
     out.push('\n');
     out.push_str(
         "/* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */\n",
@@ -1956,8 +2050,8 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
     out.push('\n');
 }
 
-/// The C struct mirrors of the eleven `#[repr(C)]` System Information wire
-/// types, as static text (the field names/order are part of the frozen ABI
+/// The C struct mirrors of the `#[repr(C)]` System Information wire types,
+/// as static text (the field names/order are part of the frozen ABI
 /// view; the in-module pinning test checks the layout against `lib/abi`).
 const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
     "/* Envelope prefixing every sysinfo request; encoded little-endian on the wire. */\n\
@@ -1968,14 +2062,19 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint16_t query;\n\
          \x20   uint16_t reserved;\n\
          \x20   uint32_t payload_len;\n\
-         \x20   uint64_t request_id;\n\
          } tairix_sysinfo_request_header_t;\n\n",
-    "/* Process-list request payload (offset/limit paging). */\n\
-         typedef struct tairix_process_list_request {\n\
+    "/* What every paged list query's payload begins with: skip `offset` records\n\
+         * and answer at most `limit` whole ones, `limit` non-zero. `flags` is\n\
+         * reserved zero. Every page of one walk names the same `walk`, distinct\n\
+         * among the caller's own, and is answered from the list as the walk's\n\
+         * first page read it; TAIRIX_PAGE_REQUEST_FRESH reads afresh per page.\n\
+         * A walk the service let go is answered TAIRIX_E_INTERRUPTED. */\n\
+         typedef struct tairix_page_request {\n\
          \x20   uint32_t offset;\n\
          \x20   uint16_t limit;\n\
          \x20   uint16_t flags;\n\
-         } tairix_process_list_request_t;\n\n",
+         \x20   uint32_t walk;\n\
+         } tairix_page_request_t;\n\n",
     "/* One process entry. The numeric pid/parent_pid are reused across process\n\
          * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused\n\
          * process-instance identities (correlate on those, not the numeric ids).\n\
@@ -2041,12 +2140,6 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t hostname_len;\n\
          \x20   uint8_t hostname[TAIRIX_HOSTNAME_MAX];\n\
          } tairix_system_identity_t;\n\n",
-    "/* Mount-list request payload (offset/limit paging). */\n\
-         typedef struct tairix_mount_list_request {\n\
-         \x20   uint32_t offset;\n\
-         \x20   uint16_t limit;\n\
-         \x20   uint16_t flags;\n\
-         } tairix_mount_list_request_t;\n\n",
     "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
          * its flag bits are defined by the filesystem driver ABI. `availability` is\n\
          * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).\n\
@@ -2081,12 +2174,6 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   tairix_resource_limit_t limit;\n\
          \x20   uint64_t usage;\n\
          } tairix_resource_limit_record_t;\n\n",
-    "/* User-directory request payload (offset/limit paging). */\n\
-         typedef struct tairix_user_directory_request {\n\
-         \x20   uint32_t offset;\n\
-         \x20   uint16_t limit;\n\
-         \x20   uint16_t flags;\n\
-         } tairix_user_directory_request_t;\n\n",
     "/* One account entry: the uid + username pairing, and nothing else (no\n\
          * credential material). The inline name is valid for name_len bytes. */\n\
          typedef struct tairix_user_directory_record {\n\
@@ -2094,12 +2181,6 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t name_len;\n\
          \x20   uint8_t name[TAIRIX_MAX_USERNAME_LEN];\n\
          } tairix_user_directory_record_t;\n\n",
-    "/* Group-directory request payload (offset/limit paging). */\n\
-         typedef struct tairix_group_directory_request {\n\
-         \x20   uint32_t offset;\n\
-         \x20   uint16_t limit;\n\
-         \x20   uint16_t flags;\n\
-         } tairix_group_directory_request_t;\n\n",
     "/* One group entry: the gid + group-name pairing, and nothing else (no\n\
          * membership list, ACL, or grant). Valid for name_len bytes. */\n\
          typedef struct tairix_group_directory_record {\n\
@@ -2124,6 +2205,48 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t home[TAIRIX_MAX_PATH_LEN];\n\
          \x20   uint8_t shell[TAIRIX_MAX_PATH_LEN];\n\
          } tairix_self_account_record_t;\n\n",
+    "/* One DMA translation unit: its hardware-tree node, its TAIRIX_DMA_UNIT_FAMILY_*,\n\
+         * TAIRIX_DMA_UNIT_STATE_*, TAIRIX_DMA_FAULT_SIGNAL_* and TAIRIX_DMA_TABLES_*,\n\
+         * the owners and firmware streams it holds, and its fault counters since\n\
+         * boot. */\n\
+         typedef struct tairix_dma_unit_record {\n\
+         \x20   uint32_t node;\n\
+         \x20   uint8_t family;\n\
+         \x20   uint8_t state;\n\
+         \x20   uint8_t faults;\n\
+         \x20   uint8_t tables;\n\
+         \x20   uint32_t owners;\n\
+         \x20   uint32_t firmware_streams;\n\
+         \x20   uint64_t faults_recorded;\n\
+         \x20   uint64_t faults_dropped;\n\
+         \x20   uint64_t streams_silenced;\n\
+         } tairix_dma_unit_record_t;\n\n",
+    "/* One isolation group an owner holds: its unit, group and holding node, and\n\
+         * the owner's TAIRIX_DMA_OWNER_STATE_* and generation. reserved0 is zero. */\n\
+         typedef struct tairix_dma_group_record {\n\
+         \x20   uint32_t unit;\n\
+         \x20   uint32_t group;\n\
+         \x20   uint32_t holder;\n\
+         \x20   uint8_t state;\n\
+         \x20   uint8_t reserved0[3];\n\
+         \x20   uint64_t generation;\n\
+         } tairix_dma_group_record_t;\n\n",
+    "/* One node a unit translates for an owner: its unit and group, the owner's\n\
+         * TAIRIX_DMA_OWNER_STATE_* and generation, the streams it masters through,\n\
+         * and its domain's mappings and the bytes they map. The reserved fields are\n\
+         * zero. */\n\
+         typedef struct tairix_dma_node_record {\n\
+         \x20   uint32_t node;\n\
+         \x20   uint32_t unit;\n\
+         \x20   uint32_t group;\n\
+         \x20   uint8_t state;\n\
+         \x20   uint8_t reserved0;\n\
+         \x20   uint16_t streams;\n\
+         \x20   uint64_t generation;\n\
+         \x20   uint32_t mappings;\n\
+         \x20   uint32_t reserved1;\n\
+         \x20   uint64_t mapped_bytes;\n\
+         } tairix_dma_node_record_t;\n\n",
 );
 
 /// Emit the driver-manifest magic / count / key-length / wire-size constants
@@ -4097,6 +4220,8 @@ mod tests {
             "resource kind macro: {h}"
         );
         for (name, flag) in [
+            ("DMA_TRANSLATED", HwResource::DMA_TRANSLATED),
+            ("DMA_SNOOPED", HwResource::DMA_SNOOPED),
             ("IRQ_MESSAGE", tairix_abi::hwtree::IRQ_MESSAGE),
             ("IRQ_EDGE", tairix_abi::hwtree::IRQ_EDGE),
         ] {
@@ -4632,13 +4757,13 @@ mod tests {
     #[test]
     fn sysinfo_header_pins_layout_constants_and_discriminants() {
         use tairix_abi::{
-            KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-            ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
-            SystemIdentity, Uptime, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN,
-            MEMORY_CLASS_COUNT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
-            PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN,
-            SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
-            SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
+            KernelMemoryStats, MountRecord, PageRequest, ProcessRecord, ProcessState,
+            ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+            ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN, MEMORY_CLASS_COUNT,
+            MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX,
+            RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+            SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
+            SYSINFO_VERSION_V1,
         };
         let h = body("tairix_sysinfo.h");
         assert!(h.contains("#ifndef TAIRIX_SYSINFO_H"), "guard present");
@@ -4692,9 +4817,10 @@ mod tests {
                 SysinfoRequestHeader::WIRE_LEN
             ),
             format!(
-                "#define TAIRIX_PROCESS_LIST_REQUEST_WIRE_LEN {}u",
-                ProcessListRequest::WIRE_LEN
+                "#define TAIRIX_PAGE_REQUEST_WIRE_LEN {}u",
+                PageRequest::WIRE_LEN
             ),
+            format!("#define TAIRIX_PAGE_REQUEST_FRESH {}u", PageRequest::FRESH),
             format!(
                 "#define TAIRIX_PROCESS_RECORD_WIRE_LEN {}u",
                 ProcessRecord::WIRE_LEN
@@ -4707,10 +4833,6 @@ mod tests {
             format!(
                 "#define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN {}u",
                 SystemIdentity::WIRE_LEN
-            ),
-            format!(
-                "#define TAIRIX_MOUNT_LIST_REQUEST_WIRE_LEN {}u",
-                MountListRequest::WIRE_LEN
             ),
             format!(
                 "#define TAIRIX_MOUNT_RECORD_WIRE_LEN {}u",
@@ -4730,6 +4852,178 @@ mod tests {
         ];
         for line in &expected {
             assert!(h.contains(line), "missing `{line}` in:\n{h}");
+        }
+    }
+
+    /// Each record's C fields lie where `lib/abi` lays them out, in its
+    /// order: size and alignment alone would not notice two fields of one
+    /// width swapped.
+    #[test]
+    fn sysinfo_record_fields_lie_where_lib_abi_lays_them_out() {
+        use core::mem::offset_of;
+        use tairix_abi::sysinfo::{
+            DmaGroupRecord, DmaNodeRecord, DmaUnitRecord, PageRequest, SysinfoRequestHeader,
+        };
+        let h = body("tairix_sysinfo.h");
+        let expect = |fields: &[(&str, usize)]| -> Vec<(String, usize)> {
+            fields
+                .iter()
+                .map(|&(name, at)| (name.to_owned(), at))
+                .collect()
+        };
+        assert_eq!(
+            c_field_offsets(&h, "tairix_sysinfo_request_header"),
+            expect(&[
+                ("magic", offset_of!(SysinfoRequestHeader, magic)),
+                ("version", offset_of!(SysinfoRequestHeader, version)),
+                ("flags", offset_of!(SysinfoRequestHeader, flags)),
+                ("query", offset_of!(SysinfoRequestHeader, query)),
+                ("payload_len", offset_of!(SysinfoRequestHeader, payload_len)),
+            ])
+        );
+        assert_eq!(
+            c_field_offsets(&h, "tairix_page_request"),
+            expect(&[
+                ("offset", offset_of!(PageRequest, offset)),
+                ("limit", offset_of!(PageRequest, limit)),
+                ("flags", offset_of!(PageRequest, flags)),
+                ("walk", offset_of!(PageRequest, walk)),
+            ])
+        );
+        assert_eq!(
+            c_field_offsets(&h, "tairix_dma_unit_record"),
+            expect(&[
+                ("node", offset_of!(DmaUnitRecord, node)),
+                ("family", offset_of!(DmaUnitRecord, family)),
+                ("state", offset_of!(DmaUnitRecord, state)),
+                ("faults", offset_of!(DmaUnitRecord, faults)),
+                ("tables", offset_of!(DmaUnitRecord, tables)),
+                ("owners", offset_of!(DmaUnitRecord, owners)),
+                (
+                    "firmware_streams",
+                    offset_of!(DmaUnitRecord, firmware_streams)
+                ),
+                (
+                    "faults_recorded",
+                    offset_of!(DmaUnitRecord, faults_recorded)
+                ),
+                ("faults_dropped", offset_of!(DmaUnitRecord, faults_dropped)),
+                (
+                    "streams_silenced",
+                    offset_of!(DmaUnitRecord, streams_silenced)
+                ),
+            ])
+        );
+        assert_eq!(
+            c_field_offsets(&h, "tairix_dma_group_record"),
+            expect(&[
+                ("unit", offset_of!(DmaGroupRecord, unit)),
+                ("group", offset_of!(DmaGroupRecord, group)),
+                ("holder", offset_of!(DmaGroupRecord, holder)),
+                ("state", offset_of!(DmaGroupRecord, state)),
+                ("generation", offset_of!(DmaGroupRecord, generation)),
+            ])
+        );
+        assert_eq!(
+            c_field_offsets(&h, "tairix_dma_node_record"),
+            expect(&[
+                ("node", offset_of!(DmaNodeRecord, node)),
+                ("unit", offset_of!(DmaNodeRecord, unit)),
+                ("group", offset_of!(DmaNodeRecord, group)),
+                ("state", offset_of!(DmaNodeRecord, state)),
+                ("streams", offset_of!(DmaNodeRecord, streams)),
+                ("generation", offset_of!(DmaNodeRecord, generation)),
+                ("mappings", offset_of!(DmaNodeRecord, mappings)),
+                ("mapped_bytes", offset_of!(DmaNodeRecord, mapped_bytes)),
+            ])
+        );
+    }
+
+    /// The fields of `typedef struct <tag>` in `header`, reserved padding left
+    /// out, at the offsets a C compiler lays them out at. The struct may name
+    /// only fixed-width unsigned integers and arrays of them.
+    fn c_field_offsets(header: &str, tag: &str) -> Vec<(String, usize)> {
+        let open = format!("typedef struct {tag} {{");
+        let start = header.find(&open).expect("the typedef is published") + open.len();
+        let end = start + header[start..].find('}').expect("the typedef closes");
+        let mut at = 0;
+        let mut fields = Vec::new();
+        for decl in header[start..end].split(';').map(str::trim) {
+            let Some((ty, name)) = decl.split_once(' ') else {
+                continue;
+            };
+            let width = match ty {
+                "uint8_t" => 1,
+                "uint16_t" => 2,
+                "uint32_t" => 4,
+                "uint64_t" => 8,
+                other => panic!("`{other}` in {tag} is not a fixed-width integer"),
+            };
+            let (name, count) = name.split_once('[').map_or((name, 1), |(name, count)| {
+                let count = count.trim_end_matches(']').parse().expect("array length");
+                (name, count)
+            });
+            at = usize::next_multiple_of(at, width);
+            if !name.starts_with("reserved") {
+                fields.push((name.to_owned(), at));
+            }
+            at += width * count;
+        }
+        fields
+    }
+
+    /// The DMA records' wire sizes and discriminants are read from `lib/abi`,
+    /// and each record's wire image is its in-memory one, so a C client reads
+    /// a reply by casting it.
+    #[test]
+    fn sysinfo_header_publishes_the_dma_records() {
+        use tairix_abi::sysinfo::{
+            DmaGroupRecord, DmaNodeRecord, DmaOwnerState, DmaUnitFamily, DmaUnitRecord,
+        };
+        let h = body("tairix_sysinfo.h");
+        for line in [
+            format!(
+                "#define TAIRIX_DMA_UNIT_RECORD_WIRE_LEN {}u",
+                DmaUnitRecord::WIRE_LEN
+            ),
+            format!(
+                "#define TAIRIX_DMA_GROUP_RECORD_WIRE_LEN {}u",
+                DmaGroupRecord::WIRE_LEN
+            ),
+            format!(
+                "#define TAIRIX_DMA_NODE_RECORD_WIRE_LEN {}u",
+                DmaNodeRecord::WIRE_LEN
+            ),
+            format!(
+                "#define TAIRIX_DMA_UNIT_FAMILY_VIRTIO_MMIO ((uint8_t){}u)",
+                DmaUnitFamily::VirtioMmio as u8
+            ),
+            format!(
+                "#define TAIRIX_DMA_OWNER_STATE_UNCONFIRMED ((uint8_t){}u)",
+                DmaOwnerState::Unconfirmed as u8
+            ),
+            format!(
+                "#define TAIRIX_DMA_UNIT_STATE_UNSNOOPED ((uint8_t){}u)",
+                tairix_abi::sysinfo::DmaUnitState::Unsnooped as u8
+            ),
+        ] {
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
+        for (size, wire) in [
+            (
+                core::mem::size_of::<DmaUnitRecord>(),
+                DmaUnitRecord::WIRE_LEN,
+            ),
+            (
+                core::mem::size_of::<DmaGroupRecord>(),
+                DmaGroupRecord::WIRE_LEN,
+            ),
+            (
+                core::mem::size_of::<DmaNodeRecord>(),
+                DmaNodeRecord::WIRE_LEN,
+            ),
+        ] {
+            assert_eq!(size, wire, "a DMA record's wire image is its layout");
         }
     }
 
@@ -4755,15 +5049,13 @@ mod tests {
         let h = body("tairix_sysinfo.h");
         for typedef in [
             "typedef struct tairix_sysinfo_request_header {",
-            "typedef struct tairix_process_list_request {",
+            "typedef struct tairix_page_request {",
             "typedef struct tairix_process_record {",
             "typedef struct tairix_kernel_memory_stats {",
             "typedef struct tairix_uptime {",
             "typedef struct tairix_system_identity {",
-            "typedef struct tairix_mount_list_request {",
             "typedef struct tairix_mount_record {",
             "typedef struct tairix_resource_limit_record {",
-            "typedef struct tairix_user_directory_request {",
             "typedef struct tairix_user_directory_record {",
         ] {
             assert!(h.contains(typedef), "missing `{typedef}` in:\n{h}");
@@ -4833,25 +5125,24 @@ mod tests {
     /// The naturally-aligned `#[repr(C)]` in-memory pins for the sysinfo
     /// wire types (the separate `*_WIRE_LEN` macros give the packed wire
     /// size), shared by `sysinfo_header_struct_layout_matches_lib_abi`.
-    fn sysinfo_struct_pins() -> [(&'static str, usize, usize, usize, usize); 11] {
+    fn sysinfo_struct_pins() -> [(&'static str, usize, usize, usize, usize); 9] {
         use tairix_abi::{
-            KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-            ResourceLimitRecord, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-            UserDirectoryRequest,
+            KernelMemoryStats, MountRecord, PageRequest, ProcessRecord, ResourceLimitRecord,
+            SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
         };
         [
             (
                 "SysinfoRequestHeader",
                 core::mem::size_of::<SysinfoRequestHeader>(),
-                24,
+                16,
                 core::mem::align_of::<SysinfoRequestHeader>(),
-                8,
+                4,
             ),
             (
-                "ProcessListRequest",
-                core::mem::size_of::<ProcessListRequest>(),
-                8,
-                core::mem::align_of::<ProcessListRequest>(),
+                "PageRequest",
+                core::mem::size_of::<PageRequest>(),
+                12,
+                core::mem::align_of::<PageRequest>(),
                 4,
             ),
             (
@@ -4883,13 +5174,6 @@ mod tests {
                 2,
             ),
             (
-                "MountListRequest",
-                core::mem::size_of::<MountListRequest>(),
-                8,
-                core::mem::align_of::<MountListRequest>(),
-                4,
-            ),
-            (
                 "MountRecord",
                 core::mem::size_of::<MountRecord>(),
                 224,
@@ -4904,13 +5188,6 @@ mod tests {
                 8,
             ),
             (
-                "UserDirectoryRequest",
-                core::mem::size_of::<UserDirectoryRequest>(),
-                8,
-                core::mem::align_of::<UserDirectoryRequest>(),
-                4,
-            ),
-            (
                 "UserDirectoryRecord",
                 core::mem::size_of::<UserDirectoryRecord>(),
                 40,
@@ -4922,16 +5199,9 @@ mod tests {
 
     /// The directory and account frames' in-memory pins, split out so
     /// neither table outgrows the function-length bar.
-    fn account_struct_pins() -> [(&'static str, usize, usize, usize, usize); 3] {
-        use tairix_abi::{GroupDirectoryRecord, GroupDirectoryRequest, SelfAccountRecord};
+    fn account_struct_pins() -> [(&'static str, usize, usize, usize, usize); 2] {
+        use tairix_abi::{GroupDirectoryRecord, SelfAccountRecord};
         [
-            (
-                "GroupDirectoryRequest",
-                core::mem::size_of::<GroupDirectoryRequest>(),
-                8,
-                core::mem::align_of::<GroupDirectoryRequest>(),
-                4,
-            ),
             (
                 "GroupDirectoryRecord",
                 core::mem::size_of::<GroupDirectoryRecord>(),
@@ -5169,11 +5439,12 @@ mod tests {
         use tairix_abi::driver::filesystem::{DirEntry, NodeInfo, NodeTimes, VolumeStats};
         use tairix_abi::driver::input::InputEvent;
         use tairix_abi::driver::net::MacAddress;
+        use tairix_abi::sysinfo::{DmaGroupRecord, DmaNodeRecord, DmaUnitRecord};
         use tairix_abi::{
             AppInfoHeader, DriverBindKey, DriverManifest, Duration64, IpcMessageHeader,
-            KernelMemoryStats, LoadHeader, ManifestHeader, MountListRequest, MountRecord, PortName,
-            ProcessListRequest, ProcessRecord, ProcessStartHeader, ResourceLimit,
-            ResourceLimitRecord, StringSlot, SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
+            KernelMemoryStats, LoadHeader, ManifestHeader, MountRecord, PageRequest, PortName,
+            ProcessRecord, ProcessStartHeader, ResourceLimit, ResourceLimitRecord, StringSlot,
+            SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
         };
 
         // (header file, typedef-closing line, type, frozen size, frozen align).
@@ -5190,14 +5461,13 @@ mod tests {
             ("tairix_rxe.h", "} tairix_load_header_t;", size_of::<LoadHeader>(), 56, align_of::<LoadHeader>(), 8),
             ("tairix_process.h", "} tairix_process_start_header_t;", size_of::<ProcessStartHeader>(), 40, align_of::<ProcessStartHeader>(), 8),
             ("tairix_process.h", "} tairix_string_slot_t;", size_of::<StringSlot>(), 8, align_of::<StringSlot>(), 4),
-            ("tairix_sysinfo.h", "} tairix_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
-            ("tairix_sysinfo.h", "} tairix_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
+            ("tairix_sysinfo.h", "} tairix_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 16, align_of::<SysinfoRequestHeader>(), 4),
+            ("tairix_sysinfo.h", "} tairix_page_request_t;", size_of::<PageRequest>(), 12, align_of::<PageRequest>(), 4),
             ("tairix_sysinfo.h", "} tairix_process_record_t;", size_of::<ProcessRecord>(), 136, align_of::<ProcessRecord>(), 8),
             ("tairix_sysinfo.h", "} tairix_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 88, align_of::<KernelMemoryStats>(), 8),
             ("tairix_sysinfo.h", "} tairix_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
-            ("tairix_sysinfo.h", "} tairix_mount_list_request_t;", size_of::<MountListRequest>(), 8, align_of::<MountListRequest>(), 4),
             ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 224, align_of::<MountRecord>(), 8),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("tairix_driver.h", "} tairix_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
@@ -5216,8 +5486,10 @@ mod tests {
             ("tairix_driver.h", "} tairix_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),
             ("tairix_rlimit.h", "} tairix_resource_limit_t;", size_of::<ResourceLimit>(), 16, align_of::<ResourceLimit>(), 8),
             ("tairix_sysinfo.h", "} tairix_resource_limit_record_t;", size_of::<ResourceLimitRecord>(), 32, align_of::<ResourceLimitRecord>(), 8),
-            ("tairix_sysinfo.h", "} tairix_user_directory_request_t;", size_of::<UserDirectoryRequest>(), 8, align_of::<UserDirectoryRequest>(), 4),
             ("tairix_sysinfo.h", "} tairix_user_directory_record_t;", size_of::<UserDirectoryRecord>(), 40, align_of::<UserDirectoryRecord>(), 4),
+            ("tairix_sysinfo.h", "} tairix_dma_unit_record_t;", size_of::<DmaUnitRecord>(), 40, align_of::<DmaUnitRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_dma_group_record_t;", size_of::<DmaGroupRecord>(), 24, align_of::<DmaGroupRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_dma_node_record_t;", size_of::<DmaNodeRecord>(), 40, align_of::<DmaNodeRecord>(), 8),
         ];
         for &(header, typedef, size, want_size, align, want_align) in registry {
             let h = body(header);

@@ -24,10 +24,8 @@ use alloc::boxed::Box;
 use core::num::NonZeroU16;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use tairix_abi::{CapabilityId, IrqHandle};
-use tairix_arch_aarch64::gic::{
-    self, GicController, Gicv2, VolatileGicMmio, MAX_INTID, MIN_SPI_INTID,
-};
+use tairix_abi::{CapabilityId, DmaCoherence, IrqHandle};
+use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID, MIN_SPI_INTID};
 use tairix_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use tairix_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
@@ -44,11 +42,11 @@ use tairix_kernel_mem::{
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{
-    provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
-    KernelVirtioHost,
+    first_virtio_slot, provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost,
 };
 use tairix_log::{Event, EventId, Level, Sink};
-use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
+use tairix_virtio::transport_mmio::{regs, COMPATIBLE};
+use tairix_virtio::{PoolId, VirtioHost};
 
 use crate::common::{drive_driver_lifecycle, QemuEnv, ScenarioConfig, IDENTITY_LIMIT};
 use tairix_itest_finisher::fail_point;
@@ -142,8 +140,8 @@ const MMIO_VBASE: u64 = 0x6000_0000;
 /// Capacity, in pages, of the MMIO register-window map.
 const MMIO_CAP_PAGES: usize = 64;
 
-/// CPU-interface target bitmask routing the device SPI to the boot CPU.
-const CPU0_TARGET: u8 = 0b0000_0001;
+/// The CPU the device SPI is routed to: the boot CPU.
+const IRQ_CPU: tairix_arch_api::CpuId = 0;
 
 /// Gigapages the boot identity map covers (`0..2 GiB`): GiB 0 holds the
 /// device MMIO (GIC, PL011, virtio-mmio) as Device memory, GiB 1 the
@@ -154,15 +152,6 @@ const IDENTITY_GIB: usize = 2;
 /// page tables outlive the (diverging) scenario and the MMU keeps reading
 /// them.
 static PT_POOL: PageTablePool = PageTablePool::new();
-
-/// virtio-MMIO transport `compatible` string.
-const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
-
-/// virtio-MMIO `InterruptStatus` register offset (virtio 1.1 §4.2.2).
-const VIRTIO_MMIO_INTERRUPT_STATUS: u64 = 0x060;
-
-/// virtio-MMIO `InterruptACK` register offset (virtio 1.1 §4.2.2).
-const VIRTIO_MMIO_INTERRUPT_ACK: u64 = 0x064;
 
 // --- QEMU environment ------------------------------------------------
 
@@ -252,7 +241,7 @@ pub fn bring_up_el1_identity_mmu(env: &dyn QemuEnv) {
 fn device_spi_number(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
     for node in dtb.nodes() {
         let node = node.ok()?;
-        if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+        if !node.is_compatible(COMPATIBLE) {
             continue;
         }
         let reg = node.property("reg")?;
@@ -282,14 +271,14 @@ fn device_spi_number(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
 /// distributor enable bit and emits the `SeqCst` mask-before-wake fence);
 /// [`GicBridge::unmask`] re-enables the line for the next completion.
 struct GicBridge {
-    ctrl: GicController<VolatileGicMmio>,
+    ctrl: GicController<ActiveGic>,
 }
 
 /// The bridge instance. Const-constructible (the GIC controller holds a
 /// zero-sized MMIO handle and the max-INTID bound), so it lives in a
 /// `static` the interrupt-context dispatch and the waiter reference.
 static BRIDGE: GicBridge = GicBridge {
-    ctrl: GicController::new(Gicv2::new(VolatileGicMmio), MAX_INTID),
+    ctrl: GicController::new(ActiveGic, MAX_INTID),
 };
 
 impl IrqController for GicBridge {
@@ -344,8 +333,8 @@ extern "C" fn device_dispatch(intid: u32) {
         // guest; both registers are 4-byte aligned.
         unsafe {
             let isr =
-                core::ptr::read_volatile((dev_base + VIRTIO_MMIO_INTERRUPT_STATUS) as *const u32);
-            core::ptr::write_volatile((dev_base + VIRTIO_MMIO_INTERRUPT_ACK) as *mut u32, isr);
+                core::ptr::read_volatile((dev_base + regs::INTERRUPT_STATUS as u64) as *const u32);
+            core::ptr::write_volatile((dev_base + regs::INTERRUPT_ACK as u64) as *mut u32, isr);
         }
     }
     // SAFETY: `table_ptr` was published once, before IRQs were unmasked,
@@ -432,8 +421,8 @@ fn arm_external_irq(
     // installed by the scenario before the MMU switch. Bring up the GICv2
     // distributor + CPU interface and route the device SPI to CPU 0.
     unsafe {
-        gic::init();
-        gic::route_spi(source, CPU0_TARGET);
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
+        gic::route_spi(source, IRQ_CPU).expect("the boot CPU's interface is up");
     }
     BRIDGE.unmask(source);
     // SAFETY: the vectors, dispatch, and GIC routing are in place, so an
@@ -509,7 +498,10 @@ where
     };
     let (transport, slot_base) = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
-        let Ok(prov) = provision_virtio_mmio(&bus, device_id, &mapper, MmioTransport::new) else {
+        let slot = first_virtio_slot(&bus, device_id);
+        let Ok(prov) = slot.and_then(|slot| {
+            provision_virtio_mmio(&bus, device_id, slot, &mapper, MmioTransport::new)
+        }) else {
             env.fail("virtio-MMIO provisioning walk");
         };
         (prov.transport, prov.base)
@@ -523,8 +515,14 @@ where
 
     // 6. Mint the per-device DMA host the driver allocates through.
     let space = AddressSpace::new(HostPageTable::new());
-    let Ok(pool) = DmaPool::new(space, VirtAddr::new(POOL_VBASE), POOL_PAGES, &frames, &phys)
-    else {
+    let Ok(pool) = DmaPool::new(
+        space,
+        VirtAddr::new(POOL_VBASE),
+        POOL_PAGES,
+        &frames,
+        &phys,
+        DmaCoherence::Snooped,
+    ) else {
         env.fail("DMA pool construct");
     };
     let waiter = WfiWaiter {
@@ -542,24 +540,8 @@ where
         &waiter,
     );
 
-    // 7. Mint the per-driver factory, then drive the shared lifecycle
-    //    with `body` against the reloaded driver.
-    let factory = KernelVirtioFactory::new(
-        KernelVirtioFactoryConfig {
-            frames: &frames,
-            phys: &phys,
-            caller: &caller,
-            audit: &SERIAL_SINK,
-            irq: table,
-            irq_handle: handle,
-            waiter: &waiter,
-            pool_base: VirtAddr::new(POOL_VBASE),
-            pool_pages: POOL_PAGES,
-        },
-        HostPageTable::new,
-    );
-    let factory: &dyn VirtioHostFactory = &factory;
-    drive_driver_lifecycle(&env, cfg, factory, transport, &vhost, body)
+    // 7. Drive the shared lifecycle with `body` against the reloaded driver.
+    drive_driver_lifecycle(&env, cfg, transport, &vhost, body)
 }
 
 // --- Boot harness ----------------------------------------------------

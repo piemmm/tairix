@@ -34,9 +34,11 @@ fn facility(model: &'static ModelUnit<'static>) -> Translation {
             node: UNIT,
             unit: model,
             reserved: Vec::new(),
-            faults: None,
+            faults: tairix_kernel_core::iommu::FaultSignal::Message,
+            family: tairix_abi::sysinfo::DmaUnitFamily::Vtd,
+            counts: tairix_kernel_core::iommu::FaultCounts::default(),
         }],
-        &[],
+        Vec::new(),
         Vec::new(),
         &tairix_kernel_core::NullHwTreeSource,
         &AUDIT,
@@ -113,7 +115,7 @@ fn every_source_a_unit_sees_raises_only_its_own_entry() {
         route(9, 0x62, Some(function(0x2800, true, None))),
         route(10, 0x63, None),
     ];
-    let (routing, plan) = plan(&translation, &pins, &[IOAPIC], &functions, false, 207);
+    let (routing, plan) = plan(&translation, &pins, &[2], &[IOAPIC], &functions, false, 207);
     assert_eq!(routing, InterruptRouting::Unrouted(1));
     assert!(model.remapping());
     assert_eq!(plan.pins.len(), 2);
@@ -154,6 +156,7 @@ fn an_io_apic_no_unit_names_keeps_the_machine_unremapped() {
     let (routing, plan) = plan(
         &translation,
         &[pin(1, 0x31, false), stray],
+        &[2, 9],
         &[IOAPIC],
         &[],
         false,
@@ -163,6 +166,26 @@ fn an_io_apic_no_unit_names_keeps_the_machine_unremapped() {
     assert_eq!(plan, Plan::default());
     assert!(!model.remapping());
     assert!(model.interrupt(DEVICE, 0xFEE0_0000, 0x41).is_some());
+}
+
+/// The same holds of an I/O APIC with no pin active yet: one activated on it
+/// later would have nothing to raise.
+#[test]
+fn an_io_apic_no_unit_names_keeps_the_machine_unremapped_with_no_pin_active() {
+    let model = model!(Behaviour::Correct);
+    let translation = facility(model);
+    let (routing, plan) = plan(
+        &translation,
+        &[pin(1, 0x31, false)],
+        &[2, 9],
+        &[IOAPIC],
+        &[],
+        false,
+        207,
+    );
+    assert_eq!(routing, InterruptRouting::Unremapped);
+    assert_eq!(plan, Plan::default());
+    assert!(!model.remapping());
 }
 
 /// An I/O APIC named by a unit that is not translating cannot be remapped,
@@ -183,6 +206,7 @@ fn an_io_apic_behind_a_unit_that_does_not_translate_keeps_the_machine_unremapped
     let (routing, _) = plan(
         &translation,
         &[pin(1, 0x31, false), other],
+        &[2, 3],
         &[IOAPIC, elsewhere],
         &[],
         false,
@@ -210,6 +234,7 @@ fn a_unit_refusing_to_remap_leaves_every_source_as_it_was() {
     let (routing, plan) = plan(
         &translation,
         &[pin(1, 0x31, false)],
+        &[2],
         &[IOAPIC],
         &functions,
         false,
@@ -230,7 +255,7 @@ fn a_unit_refusing_to_remap_leaves_every_source_as_it_was() {
 fn a_machine_whose_units_cannot_remap_keeps_compatibility_delivery() {
     let translation = Translation::start(
         Vec::new(),
-        &[],
+        Vec::new(),
         Vec::new(),
         &tairix_kernel_core::NullHwTreeSource,
         &AUDIT,
@@ -240,6 +265,7 @@ fn a_machine_whose_units_cannot_remap_keeps_compatibility_delivery() {
     let (routing, plan) = plan(
         &translation,
         &[pin(1, 0x31, false)],
+        &[2],
         &[IOAPIC],
         &[],
         false,

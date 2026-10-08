@@ -8,7 +8,7 @@
 
 use core::num::NonZeroU32;
 
-use tairix_abi::driver::dma::{DmaHost, DmaSlab};
+use tairix_abi::driver::dma::{DmaHost, DmaReach, DmaSlab};
 use tairix_abi::driver::dmaengine::{
     CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine,
     DmaRequestLine, Halted, DMA_CYCLIC_MIN_PERIODS,
@@ -90,8 +90,12 @@ pub const MAX_BLOCKS: usize = PAGE_SIZE / BLOCK_BYTES;
 /// reset goes ahead regardless.
 const DRAIN_BUDGET: u32 = 1_000;
 
+/// Reads a reset is given to leave the channel idle before it is taken to
+/// have been ignored.
+const RESET_BUDGET: u32 = 1_000;
+
 /// The engines' address registers are 32 bits wide.
-const BUS_LIMIT: u64 = 1 << 32;
+pub const REACH: DmaReach = DmaReach::of::<32>();
 
 /// How a request line asks to be served: its one specifier cell, validated.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -196,7 +200,7 @@ struct Shape {
 /// the engines' reach.
 fn bus_address(address: u64, span: u64) -> Result<u32, DriverError> {
     match address.checked_add(span) {
-        Some(end) if end <= BUS_LIMIT => {
+        Some(end) if REACH.end().is_none_or(|limit| end <= limit) => {
             u32::try_from(address).map_err(|_| DriverError::OutOfRange)
         }
         _ => Err(DriverError::OutOfRange),
@@ -321,6 +325,17 @@ impl<S: BlockStore> Channel<'_, S> {
         }
         Ok(false)
     }
+
+    /// Whether the channel reads back idle, as only a reset it took leaves it:
+    /// no block loaded and not active.
+    fn idles(&self) -> Result<bool, DriverError> {
+        for _ in 0..RESET_BUDGET {
+            if self.read(CONBLK_AD)? == 0 && self.read(CS)? & CS_ACTIVE == 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl<S: BlockStore> DmaChannel for Channel<'_, S> {
@@ -342,10 +357,7 @@ impl<S: BlockStore> DmaChannel for Channel<'_, S> {
         }
         let table_bytes =
             u32::try_from(shape.blocks * BLOCK_BYTES).map_err(|_| DriverError::LengthOutOfRange)?;
-        let mut table = self
-            .store
-            .carve(shape.blocks * BLOCK_BYTES)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let mut table = self.store.carve(shape.blocks * BLOCK_BYTES)?;
         let table_base = bus_address(table.bus_address(), u64::from(table_bytes))?;
         if !table_base.is_multiple_of(BLOCK_LEN) {
             return Err(DriverError::OutOfRange);
@@ -419,8 +431,11 @@ impl<S: BlockStore> DmaChannel for Channel<'_, S> {
     fn stop(&mut self) -> Result<Halted, DriverError> {
         let drained = matches!(self.pause(), Ok(true));
         self.write(CS, CS_RESET)?;
-        // Only an issued reset idles the channel: until then a new chain may
-        // not replace the one it could still be fetching.
+        // A channel that ignored the reset may still fetch its chain, which
+        // nothing may then replace or free.
+        if !self.idles()? {
+            return Err(DriverError::DeviceFault);
+        }
         self.running = false;
         let cleared = self.write(DEBUG, DEBUG_ERRORS).is_ok();
         Ok(if drained && cleared {

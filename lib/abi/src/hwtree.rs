@@ -460,6 +460,28 @@ impl HwMatchKey {
     }
 }
 
+/// Whether a DMA master's accesses snoop the CPU's caches: what decides how
+/// the memory it shares is mapped.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum DmaCoherence {
+    /// They do: memory it shares is ordinary cached RAM.
+    Snooped,
+    /// They do not: memory it shares is mapped uncached, where the platform
+    /// can, and refused where it cannot.
+    Unsnooped,
+}
+
+impl DmaCoherence {
+    /// The [`HwResource`] flag bits stating it.
+    #[must_use]
+    pub const fn flags(self) -> u32 {
+        match self {
+            Self::Snooped => HwResource::DMA_SNOOPED,
+            Self::Unsnooped => 0,
+        }
+    }
+}
+
 /// The kind of resource a device exposes.
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -605,6 +627,14 @@ pub enum HwResourceKind {
     ///
     /// A fact: the kernel lets one owner at a time carve through a group.
     IommuGroup = 16,
+    /// The node's **interrupt messages are written to `[base, base + len)`**,
+    /// an interrupt translation service's doorbell that a translation unit
+    /// translates like any other write. Recovered through
+    /// [`HwResource::msi_doorbell`].
+    ///
+    /// A fact only discovery states: the kernel maps it, at its own address,
+    /// into every domain translating the node's DMA, so its messages arrive.
+    MsiDoorbell = 17,
 }
 
 /// What a [`HwResourceKind::Property`] states.
@@ -617,12 +647,19 @@ pub enum HwProperty {
     /// The node is a translation unit: the place in its `interrupts` list of
     /// the wired line it raises its faults on.
     FaultInterrupt = 2,
+    /// The kernel drives the device itself — an interrupt controller or
+    /// interrupt translation service, whoever programs which routes any
+    /// device's interrupts anywhere — so it is never a driver's load target
+    /// and its registers are never a grant. The value is `1`; only discovery
+    /// states it, a driver never publishes it.
+    KernelDriven = 3,
 }
 
 impl HwProperty {
     /// Every key, so the C view is generated from the ABI rather than a
     /// hand-kept list.
-    pub const ALL: &'static [Self] = &[Self::UsbInterface, Self::FaultInterrupt];
+    pub const ALL: &'static [Self] =
+        &[Self::UsbInterface, Self::FaultInterrupt, Self::KernelDriven];
 
     /// Raw on-wire key.
     #[must_use]
@@ -636,6 +673,7 @@ impl HwProperty {
         match v {
             1 => Some(Self::UsbInterface),
             2 => Some(Self::FaultInterrupt),
+            3 => Some(Self::KernelDriven),
             _ => None,
         }
     }
@@ -745,6 +783,7 @@ impl HwResourceKind {
         Self::Property,
         Self::IommuAlias,
         Self::IommuGroup,
+        Self::MsiDoorbell,
     ];
 
     /// Raw on-wire discriminant.
@@ -774,6 +813,7 @@ impl HwResourceKind {
             14 => Some(Self::Property),
             15 => Some(Self::IommuAlias),
             16 => Some(Self::IommuGroup),
+            17 => Some(Self::MsiDoorbell),
             _ => None,
         }
     }
@@ -807,7 +847,8 @@ impl HwResourceKind {
             | Self::IommuReserved
             | Self::Property
             | Self::IommuAlias
-            | Self::IommuGroup => return None,
+            | Self::IommuGroup
+            | Self::MsiDoorbell => return None,
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
             Self::BusChild | Self::DmaController => CapabilityId::IPC_BIND_PRIVILEGED,
@@ -851,6 +892,16 @@ pub struct HwResource {
     base: u64,
     len: u64,
     xlate: u64,
+}
+
+/// A plain DMA constraint's ceiling or extent, `0` declaring none, as the
+/// bound it is.
+const fn unbounded_as_max(bound: u64) -> u64 {
+    if bound == 0 {
+        u64::MAX
+    } else {
+        bound
+    }
 }
 
 /// Returns `true` iff the half-open window `[child_base, child_base+child_len)`
@@ -1203,10 +1254,11 @@ impl HwResource {
     }
 
     /// A DMA capability requirement (`0`, `0` for "no constraint
-    /// declared").
+    /// declared") of a master whose accesses are `coherence` with the CPU's
+    /// caches.
     #[must_use]
-    pub fn dma(addr_limit: u64, len: u64) -> Self {
-        Self::new(HwResourceKind::Dma, addr_limit, len, 0)
+    pub fn dma(addr_limit: u64, len: u64, coherence: DmaCoherence) -> Self {
+        Self::new(HwResourceKind::Dma, addr_limit, len, coherence.flags())
     }
 
     /// A DMA capability requirement for an inbound bus viewport that
@@ -1221,12 +1273,17 @@ impl HwResource {
     /// `addr_limit`. Recovered through
     /// [`translated_base`](Self::translated_base).
     #[must_use]
-    pub fn dma_translated(addr_limit: u64, len: u64, bus_base: u64) -> Self {
+    pub fn dma_translated(
+        addr_limit: u64,
+        len: u64,
+        bus_base: u64,
+        coherence: DmaCoherence,
+    ) -> Self {
         Self::new_xlate(
             HwResourceKind::Dma,
             addr_limit,
             len,
-            Self::DMA_TRANSLATED,
+            Self::DMA_TRANSLATED | coherence.flags(),
             bus_base,
         )
     }
@@ -1237,6 +1294,23 @@ impl HwResource {
     /// extent and its [`translated_base`](Self::translated_base) the bus
     /// address the window starts at, which may be `0`.
     pub const DMA_TRANSLATED: u32 = 1;
+
+    /// The [`flags`](Self::flags) bit marking a [`Dma`](HwResourceKind::Dma)
+    /// resource's master as [`DmaCoherence::Snooped`].
+    pub const DMA_SNOOPED: u32 = 1 << 1;
+
+    /// How the master of this [`Dma`](HwResourceKind::Dma) resource's
+    /// accesses meet the CPU's caches, or [`None`] for any other kind.
+    #[must_use]
+    pub fn dma_coherence(&self) -> Option<DmaCoherence> {
+        (self.kind() == Some(HwResourceKind::Dma)).then_some(
+            if self.flags & Self::DMA_SNOOPED != 0 {
+                DmaCoherence::Snooped
+            } else {
+                DmaCoherence::Unsnooped
+            },
+        )
+    }
 
     /// Whether this is a translated [`Dma`](HwResourceKind::Dma) window
     /// rather than a plain addressing constraint.
@@ -1507,6 +1581,49 @@ impl HwResource {
         }
     }
 
+    /// The fact that a node's interrupt messages are written to the doorbell
+    /// `[base, base + len)` ([`HwResourceKind::MsiDoorbell`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a window that is empty, not whole
+    /// pages (a unit maps nothing finer), or whose end overflows.
+    pub fn msi_doorbell(base: u64, len: u64) -> Result<Self, Errno> {
+        let page = crate::memory::PAGE_SIZE as u64;
+        if len == 0
+            || !base.is_multiple_of(page)
+            || !len.is_multiple_of(page)
+            || base.checked_add(len).is_none()
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self::new_xlate(
+            HwResourceKind::MsiDoorbell,
+            base,
+            len,
+            0,
+            0,
+        ))
+    }
+
+    /// The doorbell window a [`HwResourceKind::MsiDoorbell`] resource carries.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// capability, flag or translation the kind does not carry, or a window
+    /// [`Self::msi_doorbell`] would not make.
+    pub fn doorbell_window(&self) -> Result<core::ops::Range<u64>, Errno> {
+        if self.kind() != Some(HwResourceKind::MsiDoorbell) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.capability != 0 || self.flags != 0 || self.xlate != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Self::msi_doorbell(self.base, self.len).map_err(|_| Errno::BadMagic)?;
+        Ok(self.base..self.base + self.len)
+    }
+
     /// A firmware reserved window on a translation unit
     /// ([`HwResourceKind::IommuReserved`]).
     #[must_use]
@@ -1754,8 +1871,8 @@ impl HwResource {
         interval_contains(self.base, self.len, base, len)
     }
 
-    /// Per-resource flags: [`Self::DMA_TRANSLATED`] on a translated DMA
-    /// window, and the kind's own bits on a duty or request record.
+    /// Per-resource flags: [`Self::DMA_TRANSLATED`] and [`Self::DMA_SNOOPED`]
+    /// on a DMA window, and the kind's own bits on a duty or request record.
     #[must_use]
     pub const fn flags(&self) -> u32 {
         self.flags
@@ -1841,7 +1958,8 @@ impl HwResource {
     /// * [`Dma`](HwResourceKind::Dma) is an addressing *constraint* (an
     ///   exclusive address ceiling `base` and an extent `len`), not a mapped
     ///   window: the child may be no more permissive — no higher ceiling, no
-    ///   larger extent. A translated window's child must also lie within its
+    ///   larger extent, a `0` declaring none being the widest of either. A
+    ///   translated window's child must also lie within its
     ///   CPU side, `[base - len, base)`, with the identical CPU↔bus offset.
     /// * [`DmaController`](HwResourceKind::DmaController) and
     ///   [`DmaRequest`](HwResourceKind::DmaRequest) cover only themselves,
@@ -1880,7 +1998,9 @@ impl HwResource {
                     && interval_contains(parent_start, self.len, child_start, child.len)
             }
             (HwResourceKind::Dma, HwResourceKind::Dma) => {
-                self.xlate == child.xlate && child.base <= self.base && child.len <= self.len
+                self.xlate == child.xlate
+                    && unbounded_as_max(child.base) <= unbounded_as_max(self.base)
+                    && unbounded_as_max(child.len) <= unbounded_as_max(self.len)
             }
             (HwResourceKind::BusWindow, HwResourceKind::BusWindow) => {
                 // The CPU↔bus translation delta must match exactly so the
@@ -2431,6 +2551,14 @@ impl HwNode {
     #[must_use]
     pub fn resources(&self) -> &[HwResource] {
         &self.resources[..usize::from(self.resource_count)]
+    }
+
+    /// Whether the node states [`HwProperty::KernelDriven`].
+    #[must_use]
+    pub fn is_kernel_driven(&self) -> bool {
+        self.resources()
+            .iter()
+            .any(|resource| matches!(resource.property_value(), Ok((HwProperty::KernelDriven, _))))
     }
 
     /// The live recovery health of the fault domain this node owns
@@ -3047,6 +3175,51 @@ mod tests {
     }
 
     #[test]
+    fn a_doorbell_is_whole_pages_survives_the_wire_and_covers_nothing() {
+        let doorbell = HwResource::msi_doorbell(0x0809_0000, 0x1000).expect("a page");
+        assert_eq!(doorbell.kind(), Some(HwResourceKind::MsiDoorbell));
+        assert_eq!(doorbell.doorbell_window(), Ok(0x0809_0000..0x0809_1000));
+        assert_eq!(HwResourceKind::MsiDoorbell.required_capability(), None);
+        let wire = HwResource::from_bytes(&doorbell.to_le_bytes()).expect("decodes");
+        assert_eq!(wire.doorbell_window(), Ok(0x0809_0000..0x0809_1000));
+        for (base, len) in [(0x0809_0040, 0x1000), (0x0809_0000, 0x40), (0x0809_0000, 0)] {
+            assert_eq!(
+                HwResource::msi_doorbell(base, len),
+                Err(Errno::LengthOutOfRange),
+                "{base:#x}+{len:#x}"
+            );
+        }
+        assert_eq!(
+            HwResource::msi_doorbell(!0xFFF, 0x2000),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            HwResource::mmio(0x0809_0000, 0x1000).doorbell_window(),
+            Err(Errno::OutOfRange)
+        );
+        assert!(
+            !doorbell.covers(&doorbell),
+            "only discovery states a doorbell, so no publisher's grant covers one"
+        );
+    }
+
+    #[test]
+    fn a_kernel_driven_node_says_so_and_no_other_does() {
+        let mut node = HwNode::new(4, HW_NODE_ROOT_ID, HwDeviceClass::InterruptController);
+        assert!(!node.is_kernel_driven());
+        node.push_resource(HwResource::property(HwProperty::UsbInterface, 3))
+            .unwrap();
+        assert!(!node.is_kernel_driven());
+        node.push_resource(HwResource::property(HwProperty::KernelDriven, 1))
+            .unwrap();
+        assert!(node.is_kernel_driven());
+        assert_eq!(
+            HwNode::from_bytes(&node.to_le_bytes()).map(|n| n.is_kernel_driven()),
+            Ok(true)
+        );
+    }
+
+    #[test]
     fn a_property_refuses_every_non_canonical_field() {
         let good = HwResource::property(HwProperty::UsbInterface, 0);
         for (at, value) in [(2, 1u8), (4, 1), (16, 2), (8, 9)] {
@@ -3115,7 +3288,7 @@ mod tests {
         assert!(!parent.covers(&neighbour));
         assert!(!parent.covers(&other_unit));
         assert!(!inside.covers(&parent));
-        assert!(!parent.covers(&HwResource::dma(0, 0)));
+        assert!(!parent.covers(&HwResource::dma(0, 0, crate::DmaCoherence::Snooped)));
     }
 
     #[test]
@@ -3171,7 +3344,10 @@ mod tests {
                 "byte {at}"
             );
         }
-        assert_eq!(HwResource::dma(0, 0).iommu_group(), Err(Errno::OutOfRange));
+        assert_eq!(
+            HwResource::dma(0, 0, crate::DmaCoherence::Snooped).iommu_group(),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -3205,7 +3381,7 @@ mod tests {
             );
         }
         assert_eq!(
-            HwResource::dma(0, 0).iommu_reserved(),
+            HwResource::dma(0, 0, crate::DmaCoherence::Snooped).iommu_reserved(),
             Err(Errno::OutOfRange)
         );
     }
@@ -3314,7 +3490,10 @@ mod tests {
             Some(0x4000_0000)
         );
         // Non-window resources are not mappable register windows.
-        assert_eq!(HwResource::dma(0x8000_0000, 0).register_window_base(), None);
+        assert_eq!(
+            HwResource::dma(0x8000_0000, 0, crate::DmaCoherence::Snooped).register_window_base(),
+            None
+        );
         assert_eq!(HwResource::irq(33, 1).register_window_base(), None);
         assert_eq!(HwResource::port(0x60, 8).register_window_base(), None);
     }
@@ -3871,7 +4050,8 @@ mod tests {
         // extent. The reachability bound is `base`/`len` (so the existing
         // DMA consumer is unchanged) and the far-side PCIe base rides
         // `translated_base`.
-        let dma = HwResource::dma_translated(0xc000_0000, 0xc000_0000, 0);
+        let dma =
+            HwResource::dma_translated(0xc000_0000, 0xc000_0000, 0, crate::DmaCoherence::Snooped);
         assert_eq!(dma.kind(), Some(HwResourceKind::Dma));
         assert_eq!(dma.base(), 0xc000_0000);
         assert_eq!(dma.length(), 0xc000_0000);
@@ -3882,14 +4062,22 @@ mod tests {
 
         // A non-zero far-side base survives too (a viewport not anchored
         // at PCIe address 0).
-        let offset = HwResource::dma_translated(0x8000_0000, 0x8000_0000, 0x4000_0000);
+        let offset = HwResource::dma_translated(
+            0x8000_0000,
+            0x8000_0000,
+            0x4000_0000,
+            crate::DmaCoherence::Snooped,
+        );
         assert_eq!(offset.translated_base(), 0x4000_0000);
         assert_eq!(
             HwResource::from_bytes(&offset.to_le_bytes()).unwrap(),
             offset
         );
         // An untranslated DMA constraint still reads back a zero far-side.
-        assert_eq!(HwResource::dma(0, 0).translated_base(), 0);
+        assert_eq!(
+            HwResource::dma(0, 0, crate::DmaCoherence::Snooped).translated_base(),
+            0
+        );
     }
 
     #[test]
@@ -3907,7 +4095,7 @@ mod tests {
         assert_eq!(irq.required_capability(), Ok(Some(CapabilityId::IRQ_BIND)));
         assert_eq!(HwResource::from_bytes(&irq.to_le_bytes()).unwrap(), irq);
 
-        let dma = HwResource::dma(0, 0);
+        let dma = HwResource::dma(0, 0, crate::DmaCoherence::Snooped);
         assert_eq!(dma.required_capability(), Ok(Some(CapabilityId::MEM_DMA)));
         assert_eq!(HwResource::from_bytes(&dma.to_le_bytes()).unwrap(), dma);
     }
@@ -3991,34 +4179,90 @@ mod tests {
     fn covers_treats_dma_as_a_no_wider_constraint() {
         // A plain constraint covers a child with no higher ceiling and no
         // larger extent.
-        let limit = HwResource::dma(0xC000_0000, 0x4000_0000);
-        assert!(limit.covers(&HwResource::dma(0xB000_0000, 0x1000_0000)));
-        assert!(!limit.covers(&HwResource::dma(0xC100_0000, 0x1000)));
-        assert!(!limit.covers(&HwResource::dma(0xC000_0000, 0x5000_0000)));
+        let limit = HwResource::dma(0xC000_0000, 0x4000_0000, crate::DmaCoherence::Snooped);
+        assert!(limit.covers(&HwResource::dma(
+            0xB000_0000,
+            0x1000_0000,
+            crate::DmaCoherence::Snooped
+        )));
+        assert!(!limit.covers(&HwResource::dma(
+            0xC100_0000,
+            0x1000,
+            crate::DmaCoherence::Snooped
+        )));
+        assert!(!limit.covers(&HwResource::dma(
+            0xC000_0000,
+            0x5000_0000,
+            crate::DmaCoherence::Snooped
+        )));
+    }
+
+    /// `0` declares no ceiling or no extent: a bounded parent never covers an
+    /// unbounded child, and an unbounded parent covers any narrower one.
+    #[test]
+    fn an_undeclared_dma_bound_is_the_widest_not_the_narrowest() {
+        let snooped = crate::DmaCoherence::Snooped;
+        let bounded = HwResource::dma(0x4000_0000, 0x1000, snooped);
+        let unbounded = HwResource::dma(0, 0, snooped);
+        assert!(!bounded.covers(&unbounded));
+        assert!(
+            !bounded.covers(&HwResource::dma(0, 0x1000, snooped)),
+            "no ceiling"
+        );
+        assert!(
+            !bounded.covers(&HwResource::dma(0x4000_0000, 0, snooped)),
+            "no extent"
+        );
+        assert!(unbounded.covers(&bounded));
+        assert!(unbounded.covers(&unbounded));
+        assert!(unbounded.covers(&HwResource::dma(0, 0x1000, snooped)));
+        assert!(
+            !HwResource::dma(0, 0x1000, snooped).covers(&unbounded),
+            "a no wider extent"
+        );
     }
 
     #[test]
     fn a_translated_dma_window_covers_only_a_sub_window_with_its_own_offset() {
         // CPU 0x8000_0000..0xC000_0000, reached at bus 0..0x4000_0000.
-        let parent = HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0x0);
+        let parent =
+            HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0x0, crate::DmaCoherence::Snooped);
         assert!(parent.covers(&parent));
         assert!(parent.covers(&HwResource::dma_translated(
             0xB000_0000,
             0x1000_0000,
-            0x2000_0000
+            0x2000_0000,
+            crate::DmaCoherence::Snooped
         )));
         // The same bus base at a later CPU start re-points the device: its bus
         // 0 is really CPU 0x8000_0000, not 0xA000_0000.
-        assert!(!parent.covers(&HwResource::dma_translated(0xB000_0000, 0x1000_0000, 0x0)));
+        assert!(!parent.covers(&HwResource::dma_translated(
+            0xB000_0000,
+            0x1000_0000,
+            0x0,
+            crate::DmaCoherence::Snooped
+        )));
         assert!(!parent.covers(&HwResource::dma_translated(
             0xC100_0000,
             0x1000,
-            0x4100_0000
+            0x4100_0000,
+            crate::DmaCoherence::Snooped
         )));
-        assert!(!parent.covers(&HwResource::dma_translated(0xC000_0000, 0x5000_0000, 0x0)));
-        assert!(!parent.covers(&HwResource::dma_translated(0xC000_0000, 0x1000, 0x1_0000)));
+        assert!(!parent.covers(&HwResource::dma_translated(
+            0xC000_0000,
+            0x5000_0000,
+            0x0,
+            crate::DmaCoherence::Snooped
+        )));
+        assert!(!parent.covers(&HwResource::dma_translated(
+            0xC000_0000,
+            0x1000,
+            0x1_0000,
+            crate::DmaCoherence::Snooped
+        )));
         // A window claiming more than lies below its ceiling covers nothing.
-        let malformed = HwResource::dma_translated(0x1000, 0x2000, 0x0);
+        let malformed =
+            HwResource::dma_translated(0x1000, 0x2000, 0x0, crate::DmaCoherence::Snooped);
         assert!(!malformed.covers(&malformed));
     }
 
@@ -4026,7 +4270,12 @@ mod tests {
     fn a_translated_window_rebases_only_a_range_wholly_inside_its_cpu_side() {
         // The legacy Pi 4 engines' peripheral window: CPU 0xfc00_0000 up to
         // 0xff80_0000, reached at bus 0x7c00_0000.
-        let peripherals = HwResource::dma_translated(0xff80_0000, 0x0380_0000, 0x7c00_0000);
+        let peripherals = HwResource::dma_translated(
+            0xff80_0000,
+            0x0380_0000,
+            0x7c00_0000,
+            crate::DmaCoherence::Snooped,
+        );
         assert_eq!(
             peripherals.dma_bus_address(0xfe20_3004, 4),
             Some(0x7e20_3004)
@@ -4044,11 +4293,13 @@ mod tests {
         assert_eq!(peripherals.dma_bus_address(0xfbff_fffc, 4), None);
         assert_eq!(peripherals.dma_bus_address(u64::MAX - 1, 4), None);
         // A window starting at bus 0 is a real translation, not a limit.
-        let at_zero = HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0);
+        let at_zero =
+            HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0, crate::DmaCoherence::Snooped);
         assert_eq!(at_zero.dma_bus_address(0x8000_0010, 4), Some(0x10));
         // Only a translated window translates.
         assert_eq!(
-            HwResource::dma(0x4000_0000, 0x4000_0000).dma_bus_address(0, 4),
+            HwResource::dma(0x4000_0000, 0x4000_0000, crate::DmaCoherence::Snooped)
+                .dma_bus_address(0, 4),
             None
         );
         assert_eq!(HwResource::mmio(0, 0x1000).dma_bus_address(0, 4), None);

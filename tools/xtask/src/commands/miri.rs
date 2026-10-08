@@ -227,21 +227,28 @@ pub const TARGETS: &[Target] = &[
                       physical map's provenance root",
         features: &[],
         scope: Scope::LibExcept {
-            skip: &["dma::tests::a_full_span_window_serves_a_multi_device_enclosure_lazily"],
-            reason: "that one test reserves a full gigabyte of window and streams thirteen \
-                     32-page device regions through it, zeroed on carve and volatile-cleared on \
-                     release; interpreted, the per-byte aliasing bookkeeping over that volume \
-                     costs four hours. It passes when run, and what it proves beyond the rest of \
-                     the module is slot *capacity* — the `unsafe` it reaches is the same \
-                     direct-map slice the other twenty-five dma tests reach. Its own integration \
-                     targets are excluded with it: the loom model does not build under the \
-                     interpreter and the fuzz harnesses are budgeted elsewhere",
+            skip: &[
+                "dma::tests::a_full_span_window_serves_a_multi_device_enclosure_lazily",
+                "dma::tests::a_translated_carve_may_exceed_the_largest_block",
+            ],
+            reason: "the first reserves a full gigabyte of window and streams thirteen 32-page \
+                     device regions through it; the second carves one page past the largest \
+                     buddy block, 32 MiB. Both are zeroed on carve and volatile-cleared on \
+                     release; interpreted, the per-byte aliasing bookkeeping costs four hours for \
+                     the first and, at that rate, some twenty times as long for the second. Each \
+                     passes when run, and what each proves beyond the rest of the module is \
+                     *capacity*: the `unsafe` they reach is the same direct-map slice the other \
+                     dma tests reach, \
+                     and `a_translated_carve_is_served_from_scattered_blocks` drives the same \
+                     multi-block mapping over a fragmented pool small enough to interpret. The \
+                     crate's integration targets are excluded too: the loom model does not build \
+                     under the interpreter and the fuzz harnesses are budgeted elsewhere",
         },
         spread: Spread::PerCore(
-            "465 tests, and interpreted they cost twenty minutes end to end — half the \
-             pipeline's whole wall clock in one single-core process, against a budget only \
-             twice that. The runner overran it. Dealt across the host's cores the work is \
-             unchanged and the makespan falls to the longest single test",
+            "over five hundred tests, and interpreted they cost twenty minutes and more end to \
+             end — half the pipeline's whole wall clock in one single-core process, against a \
+             budget only twice that. The runner overran it. Dealt across the host's cores the \
+             work is unchanged and the makespan falls to the longest single test",
         ),
     },
     Target {
@@ -314,14 +321,25 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-arch-aarch64",
         description: "the page-table walk's recovery of each level through its frame source, \
-                      and the initial-frame write into a task's kernel stack",
+                      the initial-frame write into a task's kernel stack, and the command \
+                      queue and LPI tables the ITS and the redistributors read from memory",
         features: &[],
-        scope: Scope::LibOnly(
-            "its `real_dtb_probe` integration test reads the downloaded Pi 4 firmware blob \
-             from disk, which the interpreter refuses under isolation before the test's own \
-             absent-file skip can run",
+        scope: Scope::LibExcept {
+            skip: &["gicv3::tests::a_redistributor_that_never_wakes_is_unresponsive"],
+            reason: "that test spins the redistributor wake's whole million-poll budget out \
+                     through the model's locked register file: interpreted, that costs half an \
+                     hour. It passes when run and reaches no `unsafe`, and every other GICv3 \
+                     test drives the same driver over the same model. The crate's `real_dtb_probe` \
+                     integration test is excluded too: it reads the downloaded Pi 4 firmware \
+                     blob from disk, which the interpreter refuses under isolation before the \
+                     test's own absent-file skip can run",
+        },
+        spread: Spread::PerCore(
+            "interpreted, its tests cost eleven minutes in one process, most of it the \
+             interrupt controllers' models walking their register files and the tables they \
+             read from memory. Dealt across the host's cores the work is unchanged and the \
+             makespan falls to the longest single test",
         ),
-        spread: Spread::OneProcess,
     },
     Target {
         package: "tairix-arch-riscv64",
@@ -345,8 +363,9 @@ pub const TARGETS: &[Target] = &[
                      interpreting hundreds of thousands of allocating steps; the port's \
                      `unsafe` there is target-only asm the host run never compiles, the \
                      layout, init-image and state-machine tests beside them stay enrolled, \
-                     and both sweeps run in full under the ordinary test matrix. The crate \
-                     builds no test target but its lib",
+                     and both sweeps run in full under the ordinary test matrix. The \
+                     `fuzz_acpi` harness beside the lib drives only the safe firmware-table \
+                     parsers, which the fuzz stage runs",
         },
         spread: Spread::OneProcess,
     },
@@ -419,6 +438,91 @@ pub const TARGETS: &[Target] = &[
             "interpreted, the kept tests take tens of minutes in one process, most of it the \
              conformance suites and the one remapping switch kept; dealt across the host's \
              cores the work is unchanged and the makespan falls to the longest single test",
+        ),
+    },
+    Target {
+        package: "tairix-kernel-iommu-virtio",
+        description: "the request, probe and report buffers and both rings the virtio-iommu \
+                      family builds as ring slabs over its frame source's blocks, and the \
+                      domain shadows the engine walks",
+        features: &[],
+        scope: Scope::LibOnly(
+            "the library is the crate's only test target; naming it is what lets its tests be \
+             dealt across cores",
+        ),
+        spread: Spread::PerCore(
+            "interpreted, its tests cost four and a half minutes in one process, most of it \
+             the two conformance suites and the report queue's repeated rounds. Dealt across \
+             the host's cores the work is unchanged and the makespan falls to the longest \
+             single test",
+        ),
+    },
+    Target {
+        package: "tairix-virtio",
+        description: "the split and packed rings' device-side views, which the mock device \
+                      reaches by device address through each DMA slab's own pointer, and the \
+                      bounce buffers' scrub of what a device held",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-drv-storage-virtio-blk",
+        description: "`lib/virtio`'s rings and slabs along a block driver's own paths: staging \
+                      a sensitive payload, abandoning a chain the device still holds, and \
+                      scrubbing what it gives back",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-drv-accelerator-virtio-crypto",
+        description: "`lib/virtio`'s rings and slabs along a crypto driver's own paths: a key \
+                      the device reads, a session it may still hold, and the key's scrub once \
+                      it comes back",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-virtio-net",
+        description: "`lib/virtio`'s rings and slabs along a network driver's own paths: the \
+                      receive pool the device fills, the transmit chains it reads, and the \
+                      control queue a refused command resets",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-virtio-input",
+        description: "`lib/virtio`'s rings and slabs along an input driver's own paths: the \
+                      event buffers posted before the device is armed, and the status queue",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-drv-audio-virtio-snd",
+        description: "`lib/virtio`'s rings and slabs along a sound driver's own paths: the \
+                      periods lent to the device and freed only once it hands them back, and \
+                      the control and event queues",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-drv-network-genet",
+        description: "the frame carve the descriptor engines master, its release only once \
+                      both engines stopped, and the shared frame rings' atomic headers",
+        features: &[],
+        scope: Scope::LibOnly(
+            "the library holds every test; naming it is what lets its tests be dealt across \
+             cores",
+        ),
+        spread: Spread::PerCore(
+            "interpreted, its tests cost six minutes in one process, each bringing a device up \
+             over a frame carve of half a mebibyte. Dealt across the host's cores the work is \
+             unchanged and the makespan falls to the longest single test",
         ),
     },
 ];

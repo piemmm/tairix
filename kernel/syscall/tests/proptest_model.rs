@@ -492,6 +492,7 @@ impl SyscallHandlers for CountingHandlers {
         _c: &CallerContext<'_>,
         _handle: u64,
         _len: usize,
+        _reach: tairix_abi::driver::DmaReach,
         _device_out: u64,
     ) -> SyscallResult {
         self.bump();
@@ -510,6 +511,7 @@ impl SyscallHandlers for CountingHandlers {
         _c: &CallerContext<'_>,
         _handle: u64,
         _len: usize,
+        _reach: tairix_abi::driver::DmaReach,
         _id_out: u64,
         _device_out: u64,
     ) -> SyscallResult {

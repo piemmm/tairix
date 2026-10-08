@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-dma-translation-qemu-x86-64"
-description = "QEMU integration test (plans/IOMMU.md MI0, MI2): boot the production x86_64 pipeline on q35 behind an intel-iommu, or in the AMD binary an amd-iommu, every virtio-pci function iommu_platform=on and the keyboard behind a PCIe-to-PCI bridge. PASS via isa-debug-exit once a key is delivered after the unit audited translating, interrupts remapped and the keyboard granted bus mastering; any other unit outcome, a translation fault, or a key first fails the run."
+description = "QEMU integration test (plans/IOMMU.md MI0, MI2, MI3): boot the production x86_64 pipeline on q35 behind an intel-iommu, or in the AMD binary an amd-iommu, or in the virtio binary a virtio-iommu-pci the ACPI VIOT describes, every virtio-pci function iommu_platform=on and the keyboard behind a PCIe-to-PCI bridge. PASS via isa-debug-exit once a key is delivered after the unit audited translating, interrupts routed as the unit leads them and the keyboard granted bus mastering; any other unit outcome, a translation fault, or a key first fails the run."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,10 @@ path = "src/main.rs"
 [[bin]]
 name = "tairix-test-dma-translation-amd-qemu-x86-64"
 path = "src/amd.rs"
+
+[[bin]]
+name = "tairix-test-dma-translation-virtio-qemu-x86-64"
+path = "src/virtio.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }

@@ -17,8 +17,10 @@
 //! [`AcpiDiscovery`](crate::platform::AcpiDiscovery); this module takes the
 //! already-located table bytes.
 
-use crate::acpi::{Madt, MadtEntry};
-use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use crate::acpi::{processor_id, Madt, MadtEntry};
+use tairix_abi::{
+    HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID,
+};
 use tairix_arch_api::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// The MMIO window size of an I/O APIC register block (one 4 KiB page:
@@ -36,36 +38,6 @@ const CMOS_RTC_PORT_BASE: u64 = 0x70;
 
 /// Ports of I/O space the index/data pair occupies.
 const CMOS_RTC_PORT_COUNT: u64 = 2;
-
-/// The `enabled` bit of a Local APIC entry's flags (ACPI 6.5 §5.2.12.2):
-/// a processor whose Local APIC is not enabled (and not
-/// online-capable) is not brought up.
-const LAPIC_FLAG_ENABLED: u32 = 1 << 0;
-
-/// An id a Local APIC or Local x2APIC entry carries as a placeholder for no
-/// processor.
-const NO_XAPIC: u8 = 0xFF;
-const NO_X2APIC: u32 = 0xFFFF_FFFF;
-
-/// Whether `entry` names a processor to bring up, once each: firmware lists
-/// one whose id fits xAPIC in a Local APIC entry, and may repeat it as a Local
-/// x2APIC one, which then names it only with an id xAPIC cannot hold (ACPI
-/// 6.5 §5.2.12.12).
-fn names_processor(entry: &MadtEntry, xapic_listed: bool) -> bool {
-    match *entry {
-        MadtEntry::LocalApic { apic_id, flags, .. } => {
-            flags & LAPIC_FLAG_ENABLED != 0 && apic_id != NO_XAPIC
-        }
-        MadtEntry::LocalX2Apic {
-            x2apic_id, flags, ..
-        } => {
-            flags & LAPIC_FLAG_ENABLED != 0
-                && x2apic_id != NO_X2APIC
-                && !(xapic_listed && x2apic_id < u32::from(NO_XAPIC))
-        }
-        _ => false,
-    }
-}
 
 /// Builds the hardware tree from a located ACPI MADT.
 pub struct AcpiDiscovery<'a> {
@@ -92,14 +64,12 @@ impl PlatformDiscovery for AcpiDiscovery<'_> {
         ))?;
         let madt = Madt::parse(self.madt).map_err(|_| DiscoveryError::MalformedSource)?;
 
-        let xapic_listed = madt.entries().any(|entry| {
-            matches!(entry, MadtEntry::LocalApic { .. }) && names_processor(&entry, false)
-        });
+        let xapic_listed = madt.lists_xapic_processors();
         let mut next_id: u32 = 1;
         for entry in madt.entries() {
             match entry {
                 MadtEntry::LocalApic { .. } | MadtEntry::LocalX2Apic { .. }
-                    if names_processor(&entry, xapic_listed) =>
+                    if processor_id(&entry, xapic_listed).is_some() =>
                 {
                     sink.emit(HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Cpu))?;
                     next_id += 1;
@@ -107,6 +77,8 @@ impl PlatformDiscovery for AcpiDiscovery<'_> {
                 MadtEntry::IoApic { address, .. } => {
                     let mut node =
                         HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::InterruptController);
+                    node.push_resource(HwResource::property(HwProperty::KernelDriven, 1))
+                        .map_err(|_| DiscoveryError::MalformedSource)?;
                     node.push_resource(HwResource::mmio(u64::from(address), IOAPIC_WINDOW_LEN))
                         .map_err(|_| DiscoveryError::MalformedSource)?;
                     sink.emit(node)?;
@@ -202,7 +174,15 @@ mod tests {
                 Some(HwDeviceClass::Cpu) => self.cpus += 1,
                 Some(HwDeviceClass::InterruptController) => {
                     self.intctrls += 1;
-                    if let Some(res) = node.resources().first() {
+                    assert!(
+                        node.is_kernel_driven(),
+                        "no driver may be loaded for an IO-APIC"
+                    );
+                    if let Some(res) = node
+                        .resources()
+                        .iter()
+                        .find(|r| r.kind() == Some(tairix_abi::HwResourceKind::Mmio))
+                    {
                         self.ioapic_base = res.base();
                     }
                 }

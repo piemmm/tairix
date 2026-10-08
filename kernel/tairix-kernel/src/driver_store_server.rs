@@ -752,8 +752,12 @@ mod tests {
         node.push_match_key(key).expect("key fits");
         node.push_resource(HwResource::mmio(0x0a00_0000, 0x200))
             .expect("mmio fits");
-        node.push_resource(HwResource::dma(0x3fff_ffff, 0x1000))
-            .expect("dma fits");
+        node.push_resource(HwResource::dma(
+            0x3fff_ffff,
+            0x1000,
+            tairix_abi::DmaCoherence::Snooped,
+        ))
+        .expect("dma fits");
         node
     }
 
@@ -921,7 +925,7 @@ mod tests {
             calls[0].2,
             alloc::vec![
                 HwResource::mmio(0x0a00_0000, 0x200),
-                HwResource::dma(0x3fff_ffff, 0x1000)
+                HwResource::dma(0x3fff_ffff, 0x1000, tairix_abi::DmaCoherence::Snooped)
             ],
             "the matched node's resource requests are minted, and nothing more"
         );
@@ -975,7 +979,11 @@ mod tests {
             .push_resource(HwResource::mmio(0x0a00_0000, 0x200))
             .expect("mmio fits");
         emitted
-            .push_resource(HwResource::dma(0x3fff_ffff, 0x1000))
+            .push_resource(HwResource::dma(
+                0x3fff_ffff,
+                0x1000,
+                tairix_abi::DmaCoherence::Snooped,
+            ))
             .expect("dma fits");
         let node_id = live.publish_child(1, emitted).expect("an id is free");
 
@@ -997,7 +1005,7 @@ mod tests {
             calls[0].2,
             alloc::vec![
                 HwResource::mmio(0x0a00_0000, 0x200),
-                HwResource::dma(0x3fff_ffff, 0x1000)
+                HwResource::dma(0x3fff_ffff, 0x1000, tairix_abi::DmaCoherence::Snooped)
             ],
             "the runtime-emitted node's grants are minted from the live tree, not a snapshot"
         );

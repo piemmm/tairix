@@ -1,218 +1,229 @@
-//! riscv64 external-interrupt (PLIC) dispatch wiring (`plans/NETWORK.md`
-//! N4e-riscv64).
+//! riscv64 external-interrupt dispatch: the supervisor-level controller the
+//! firmware tree describes — a PLIC, or an APLIC delivering by MSI to the
+//! boot hart's IMSIC file (`plans/IOMMU.md` IOM18.3) — built once, published
+//! beside the kernel-core [`IrqTable`], and wired to the trap path.
 //!
-//! The production boot path runs [`tairix_arch_riscv64::trap::install_trap_vector`]
-//! (the synchronous-trap half), which routes the `ecall` syscall path and
-//! catches faults but arms **no** interrupt source. This module adds the
-//! asynchronous half the interrupt-driven bootstrap-floor bring-up needs: it
-//! builds the single-context S-mode PLIC controller over the
-//! device-tree-discovered register base + source count ([`record_plic`],
-//! called from the boot path where the firmware tree is in hand), publishes
-//! it alongside the kernel-core [`IrqTable`], installs the S-mode
-//! external-interrupt dispatcher (claim → [`IrqTable::fire`] → complete), and
-//! enables `sie.SEIE` — leaving `sstatus.SIE` to the dispatch loop's
-//! [`tairix_arch_riscv64::trap::set_supervisor_interrupts`] so no interrupt
-//! is *taken* until the scheduler runs a task.
-//!
-//! It is the riscv64 analogue of the aarch64
-//! [`crate::aarch64::gic_irq::install_device_irq_dispatch`], but far simpler:
-//! the bare PLIC, no MSI controller and no composite fan-out (the `virt`
-//! board has none). The in-kernel root-unlock kthread ([`crate::riscv64::root_unlock`])
-//! binds and blocks on a device's line through [`published_irq_table`] and
-//! [`plic_controller`], exactly as the aarch64 kthread does through its own
-//! published table.
+//! The boot path records what it discovered while it holds the tree
+//! ([`record`]); the core's `Irq` phase sizes the table to it ([`routing`])
+//! and installs the dispatcher ([`install_dispatch`]). `sstatus.SIE` stays
+//! the dispatch loop's, so nothing is taken until the scheduler runs a task.
 
 use alloc::boxed::Box;
 
+use tairix_arch_riscv64::aplic::{Aplic, VolatileAplicMmio};
+use tairix_arch_riscv64::fdt::Aia;
+use tairix_arch_riscv64::imsic::{HartFile, Imsic};
 use tairix_arch_riscv64::plic::{s_mode_context, Plic, PlicController, VolatilePlicMmio};
 use tairix_arch_riscv64::{halt_current_hart, trap};
 use tairix_kernel_core::IrqRouting;
 use tairix_kernel_irq::{IrqController, IrqTable};
 use tairix_sync::once::OnceCell;
 
+use crate::riscv64_aia_irq::{AiaIrqController, FilePage, MESSAGE_LINE_BASE};
 use crate::riscv64_plic_irq::PlicIrqController;
 
-/// Set-once PLIC parameters discovered from the firmware device tree:
-/// `(register base, riscv,ndev source count)`. Recorded by the boot path
-/// ([`record_plic`]) while the tree is in hand, and read by
-/// [`install_dispatch`] to build the controller (which has no device tree).
-static PLIC_INFO: OnceCell<(u64, u32)> = OnceCell::new();
+/// The AIA controller as the production kernel builds it.
+pub type AiaController = AiaIrqController<VolatileAplicMmio, HartFile, FilePage>;
 
-/// Set-once slot for the kernel-core [`IrqTable`] the external-interrupt
-/// dispatcher fires into. The in-kernel root-unlock kthread binds its
-/// device line on **this** table (the one [`production_external_dispatch`]
-/// fires into), reached through [`published_irq_table`].
-static IRQ_TABLE_SLOT: OnceCell<&'static IrqTable> = OnceCell::new();
-
-/// Set-once slot for the `'static` PLIC controller the dispatcher
-/// claims/masks/completes through and the park path re-arms through.
-static PLIC_CONTROLLER: OnceCell<&'static PlicIrqController<VolatilePlicMmio>> = OnceCell::new();
-
-/// Record the device-tree-discovered PLIC register base and `riscv,ndev`
-/// source count for [`install_dispatch`].
-///
-/// Called once from the boot path's hardware-tree seeding, where the
-/// firmware device tree is parsed. Idempotent (set-once); a board with no
-/// PLIC never calls it, and [`install_dispatch`] then wires no external-IRQ
-/// dispatch (fail closed — interrupt-driven bring-up refuses rather than
-/// parks forever on a line that can never fire).
-pub fn record_plic(base: u64, ndev: u32) {
-    let _ = PLIC_INFO.set((base, ndev));
+/// The controller the tree describes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Discovered {
+    /// A PLIC at `base` of `sources` sources.
+    Plic {
+        /// Its registers.
+        base: u64,
+        /// Their length.
+        len: u64,
+        /// Its sources, `1..=sources`.
+        sources: u32,
+    },
+    /// An APLIC and the boot hart's IMSIC file, and the device message files
+    /// the boot planned.
+    Aia {
+        /// The domain and the file.
+        aia: Aia,
+        /// Message files planned, each one line from [`MESSAGE_LINE_BASE`].
+        files: u32,
+    },
 }
 
-/// The `'static` [`IrqTable`] published by [`install_dispatch`], or [`None`]
-/// before it is published.
-///
-/// An in-kernel service kthread (the root-unlock kthread) that must bind and
-/// block on a device's PLIC source binds on **this** table — the one
-/// [`production_external_dispatch`] fires into — never a fresh table the trap
-/// vector would never reach.
+#[derive(Copy, Clone)]
+enum Controller {
+    Plic(&'static PlicIrqController<VolatilePlicMmio>),
+    Aia(&'static AiaController),
+}
+
+impl Controller {
+    fn as_dyn(self) -> &'static (dyn IrqController + Send + Sync) {
+        match self {
+            Self::Plic(plic) => plic,
+            Self::Aia(aia) => aia,
+        }
+    }
+}
+
+static DISCOVERED: OnceCell<Discovered> = OnceCell::new();
+static IRQ_TABLE: OnceCell<&'static IrqTable> = OnceCell::new();
+static CONTROLLER: OnceCell<Controller> = OnceCell::new();
+
+/// Record the controller the boot path discovered; the first record wins.
+pub fn record(discovered: Discovered) {
+    let _ = DISCOVERED.set(discovered);
+}
+
+/// The [`IrqTable`] [`install_dispatch`] published, which an in-kernel
+/// service binds its device's line on.
 #[must_use]
 pub fn published_irq_table() -> Option<&'static IrqTable> {
-    IRQ_TABLE_SLOT.get().ok().flatten().copied()
+    IRQ_TABLE.get().ok().flatten().copied()
 }
 
-/// The `'static` PLIC controller published by [`install_dispatch`], or
-/// [`None`] before it is published (no PLIC discovered).
-///
-/// The root-unlock kthread arms its device's source and re-arms it after
-/// each completion through this controller (the driver holds no PLIC
-/// access), and hands it to its [`tairix_kernel_core::IrqParkWaiter`] as the
-/// re-arm controller.
+/// The published controller, through which a line is armed and re-armed.
 #[must_use]
-pub fn plic_controller() -> Option<&'static PlicIrqController<VolatilePlicMmio>> {
-    PLIC_CONTROLLER.get().ok().flatten().copied()
+pub fn controller() -> Option<&'static (dyn IrqController + Send + Sync)> {
+    ensure_controller().map(Controller::as_dyn)
 }
 
-/// The S-mode external-interrupt dispatcher the arch trap handler invokes for
-/// each acknowledged supervisor external interrupt.
-///
-/// Claims the pending PLIC source, forwards it to [`IrqTable::fire`] (which
-/// masks the source before any waiter observes `ready` — mask-before-wake),
-/// completes the claim, then wakes any parked `irq_wait` caller and latches a
-/// reschedule so the woken work is dispatched. The device-level interrupt
-/// acknowledgement is the *driver's* job (the transport's `InterruptACK`),
-/// not the trap dispatch — mirroring the aarch64
-/// [`crate::aarch64::gic_irq::production_device_irq_dispatch`], which does
-/// `fire` only.
-///
-/// Wait-free and allocation-free, safe from interrupt context. A delivery
-/// before the table/controller are published (impossible in production — the
-/// core installs them before any line is armed) returns silently.
-extern "C" fn production_external_dispatch() {
-    let (Some(plic), Some(table)) = (plic_controller(), published_irq_table()) else {
+/// The published AIA controller, which takes the device message files.
+#[must_use]
+pub fn aia_controller() -> Option<&'static AiaController> {
+    match ensure_controller()? {
+        Controller::Aia(aia) => Some(aia),
+        Controller::Plic(_) => None,
+    }
+}
+
+/// The page of the boot hart's interrupt file, where the AIA was discovered.
+#[must_use]
+pub fn file_page() -> Option<u64> {
+    match discovered()? {
+        Discovered::Aia { aia, .. } => Some(aia.imsic.page),
+        Discovered::Plic { .. } => None,
+    }
+}
+
+/// Where the kernel reaches the registers at `[base, base + len)` in every
+/// root, or [`None`] where it cannot.
+fn registers(base: u64, len: u64) -> Option<usize> {
+    crate::riscv64::boot::device_registers(base, usize::try_from(len).ok()?)
+        .map(|at| at.as_ptr().addr())
+}
+
+fn discovered() -> Option<Discovered> {
+    DISCOVERED.get().ok().flatten().copied()
+}
+
+/// Build the discovered controller once and publish it.
+fn ensure_controller() -> Option<Controller> {
+    if let Some(controller) = CONTROLLER.get().ok().flatten().copied() {
+        return Some(controller);
+    }
+    let controller = match discovered()? {
+        Discovered::Plic { base, len, sources } => {
+            let base = registers(base, len)?;
+            // SAFETY: the PLIC's registers from the firmware tree, mapped in
+            // every root, driven by this controller alone. `s_mode_context(0)`
+            // is the boot hart's supervisor context.
+            let mmio = unsafe { VolatilePlicMmio::new(base) };
+            let plic = PlicController::new(Plic::new(mmio, s_mode_context(0)), sources);
+            Controller::Plic(Box::leak(Box::new(PlicIrqController::new(plic))))
+        }
+        Discovered::Aia { aia, .. } => {
+            let (base, page) = (
+                registers(aia.aplic.base, aia.aplic.len)?,
+                registers(aia.imsic.page, tairix_arch_riscv64::fdt::FILE_PAGE)?,
+            );
+            // SAFETY: the supervisor domain's registers from the firmware
+            // tree, mapped in every root, driven by this controller alone.
+            let aplic =
+                Aplic::take_msi(unsafe { VolatileAplicMmio::new(base) }, aia.aplic.sources).ok()?;
+            // Built in the core's `Irq` phase on the boot hart, whose file
+            // `HartFile` reaches.
+            let imsic = Imsic::take(HartFile, aia.imsic.ids)?;
+            // SAFETY: the boot hart's file page from the firmware tree, mapped
+            // in every root.
+            let doorbell = unsafe { FilePage::new(page) };
+            let aia = AiaIrqController::new(aplic, imsic, doorbell, aia.imsic.hart_index)?;
+            Controller::Aia(Box::leak(Box::new(aia)))
+        }
+    };
+    match CONTROLLER.set(controller) {
+        Ok(()) => Some(controller),
+        Err(_) => CONTROLLER.get().ok().flatten().copied(),
+    }
+}
+
+/// The routing the core sizes its [`IrqTable`] to: every source the
+/// controller has and every planned message line. Unsupported where the tree
+/// describes no controller the kernel can take.
+#[must_use]
+pub fn routing() -> IrqRouting {
+    let (Some(controller), Some(discovered)) = (ensure_controller(), discovered()) else {
+        return IrqRouting::unsupported();
+    };
+    let max_line = match discovered {
+        Discovered::Plic { sources, .. } => sources,
+        Discovered::Aia { files: 0, aia } => aia.aplic.sources,
+        Discovered::Aia { files, .. } => MESSAGE_LINE_BASE + files - 1,
+    };
+    IrqRouting {
+        max_line,
+        controller: controller.as_dyn(),
+    }
+}
+
+/// One supervisor external interrupt: the PLIC's claimed source.
+extern "C" fn plic_dispatch() {
+    let (Some(Controller::Plic(plic)), Some(table)) = (ensure_controller(), published_irq_table())
+    else {
         return;
     };
     let source = plic.claim();
     if source != 0 {
         let _ = table.fire(source, plic as &dyn IrqController);
         plic.complete(source);
-        // Wake any `irq_wait` caller parked on the bound line (`fire` set the
-        // per-line ready flag after masking — mask-before-wake holds), and
-        // latch a reschedule so a task this interrupt woke is dispatched on
-        // the next return-to-user preemption point (or, on an idle S-mode
-        // hart, by the dispatch loop's wake drain). A spurious wake is
-        // harmless — the waiter re-checks its own line and re-parks.
-        tairix_kernel_core::irq_wake();
-        tairix_kernel_core::note_preempt_tick(tairix_arch_riscv64::smp::current_hartid());
+        woke();
     }
 }
 
-/// Build the single-context S-mode PLIC controller from the discovered
-/// [`PLIC_INFO`] and publish it into [`PLIC_CONTROLLER`], or return the
-/// already-published one; [`None`] when no PLIC was discovered.
-///
-/// The one place the `'static` [`PlicIrqController`] is constructed, so the
-/// kernel-core [`IrqTable`]'s masking seam ([`plic_routing`], run in
-/// `Phase::Irq`) and the external-interrupt dispatch install
-/// ([`install_dispatch`], run immediately after) share **one** controller
-/// instance rather than each minting its own.
-fn ensure_controller() -> Option<&'static PlicIrqController<VolatilePlicMmio>> {
-    if let Some(controller) = PLIC_CONTROLLER.get().ok().flatten().copied() {
-        return Some(controller);
-    }
-    let (base, ndev) = PLIC_INFO.get().ok().flatten().copied()?;
-    let base = usize::try_from(base).ok()?;
-    // SAFETY: `base` is the PLIC register-block base read from the firmware
-    // device tree, identity-mapped (the boot path enabled the Sv39 identity
-    // MMU before discovery) and exclusively the controller's to access on the
-    // single-hart `virt` slice. `s_mode_context(0)` is the boot hart's
-    // supervisor interrupt context.
-    let controller = PlicIrqController::new(PlicController::new(
-        Plic::new(unsafe { VolatilePlicMmio::new(base) }, s_mode_context(0)),
-        ndev,
-    ));
-    // Boot-leaked to `'static`: the controller is shared for the life of the
-    // system by the trap dispatcher, the root-unlock kthread, and every
-    // interrupt-driven driver's park path (kernel state is never freed).
-    let controller: &'static PlicIrqController<VolatilePlicMmio> = Box::leak(Box::new(controller));
-    match PLIC_CONTROLLER.set(controller) {
-        Ok(()) => Some(controller),
-        // A concurrent publisher won the set-once race (not possible on the
-        // single-hart boot slice, but fail safe): use the winner.
-        Err(_) => PLIC_CONTROLLER.get().ok().flatten().copied(),
-    }
-}
-
-/// The kernel-core IRQ routing this port hands the core in `Phase::Irq`: the
-/// inclusive PLIC source ceiling as `max_line` (so the core [`IrqTable`] can
-/// bind any discovered device source) and the shared [`PlicIrqController`] as
-/// the mask/re-arm seam.
-///
-/// Without this the core would fall back to [`IrqRouting::unsupported`]
-/// (`max_line = 0`), and every device-source `bind` — the root-unlock block
-/// completion line, an autoloaded driver's line — would fail closed as
-/// out-of-range. With no PLIC discovered it returns the unsupported routing,
-/// and interrupt-driven bring-up fails closed rather than binding a line that
-/// can never fire.
-#[must_use]
-pub fn plic_routing() -> IrqRouting {
-    match (ensure_controller(), PLIC_INFO.get().ok().flatten().copied()) {
-        (Some(controller), Some((_, ndev))) => IrqRouting {
-            max_line: ndev,
-            controller,
-        },
-        _ => IrqRouting::unsupported(),
-    }
-}
-
-/// Publish `table`, install the external-interrupt dispatcher over the shared
-/// PLIC controller ([`ensure_controller`]), and enable `sie.SEIE`.
-///
-/// Called once per boot from
-/// [`RiscvBinArch::install_irq_dispatch`](crate::riscv64::boot::RiscvBinArch),
-/// in the kernel-core `Irq` phase — immediately after `plic_routing` sized the
-/// core [`IrqTable`] and built the controller, so this only publishes the
-/// table and arms the trap path. A second publish (a stray re-call) fails
-/// closed by halting the hart; the boot pipeline calls it exactly once.
-///
-/// With no PLIC discovered ([`PLIC_INFO`] empty — a bare part with no
-/// interrupt controller, or an unreadable tree) it publishes the table but
-/// wires no dispatch and returns: interrupt-driven bring-up then fails closed
-/// (the root-unlock kthread refuses rather than parking forever on a line that
-/// can never fire).
-pub fn install_dispatch(table: &'static IrqTable) {
-    if IRQ_TABLE_SLOT.set(table).is_err() {
-        halt_current_hart();
-    }
-    // Reuse the one controller `plic_routing` already built and published in
-    // `Phase::Irq` (or build it now if this port ever installs without a
-    // routing step); no PLIC discovered leaves the dispatch unwired.
-    let Some(_controller) = ensure_controller() else {
+/// One supervisor external interrupt: every identity pending in the boot
+/// hart's file.
+extern "C" fn aia_dispatch() {
+    let (Some(Controller::Aia(aia)), Some(table)) = (ensure_controller(), published_irq_table())
+    else {
         return;
     };
-    if trap::set_trap_dispatch(production_external_dispatch).is_err() {
+    if aia.dispatch(table) {
+        woke();
+    }
+}
+
+/// Wake any `irq_wait` caller a fire marked ready, and reschedule at the next
+/// preemption point so the woken work runs.
+fn woke() {
+    tairix_kernel_core::irq_wake();
+    tairix_kernel_core::note_preempt_tick(tairix_arch_riscv64::smp::current_hartid());
+}
+
+/// Publish `table` and wire the discovered controller's dispatcher, then
+/// enable `sie.SEIE`. With no controller the table is published and nothing
+/// is wired, so interrupt-driven bring-up fails closed. A second publication
+/// halts the hart.
+pub fn install_dispatch(table: &'static IrqTable) {
+    if IRQ_TABLE.set(table).is_err() {
         halt_current_hart();
     }
-    // Enable supervisor external interrupts. The production boot ran
-    // `install_trap_vector` (not `init_traps`), so `sie.SEIE` is not yet set;
-    // `sstatus.SIE` is toggled by the dispatch loop's `set_device_irqs`, so
-    // no interrupt is *taken* until the scheduler runs a task.
-    //
-    // SAFETY: the trap vector is installed (boot `enable_mmu_and_vectors`) and
-    // the dispatcher is published (above), so a taken external interrupt
-    // reaches a valid handler; `csrs sie` sets only `SIE_SEIE`, with no memory
-    // side effects.
+    let dispatch = match ensure_controller() {
+        Some(Controller::Plic(_)) => plic_dispatch as trap::TrapDispatchFn,
+        Some(Controller::Aia(_)) => aia_dispatch,
+        None => return,
+    };
+    if trap::set_trap_dispatch(dispatch).is_err() {
+        halt_current_hart();
+    }
+    // SAFETY: the trap vector is installed and the dispatcher published, so
+    // a taken external interrupt reaches a handler; this sets `sie.SEIE`
+    // alone.
     unsafe {
         core::arch::asm!("csrs sie, {}", in(reg) trap::SIE_SEIE, options(nomem, nostack));
     }

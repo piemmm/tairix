@@ -49,10 +49,10 @@ use tairix_abi::net_ipc::{
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
-    reclaim_class_from_name, CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord,
-    IrqRecord, KernelMemoryStats, MemoryPressureStats, NetInterfaceListRequest,
-    NetInterfaceRatesRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
+    reclaim_class_from_name, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, IrqRecord,
+    KernelMemoryStats, MemoryPressureStats, NetInterfaceRatesRequest, PageRequest, RamzipStats,
+    ReclaimClassRecord, ResourceLimitRecord, SysinfoQueryId, SystemIdentity, Uptime,
+    PRESSURE_BAND_NAMES, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
@@ -62,7 +62,7 @@ use crate::cputime::for_each_cpu_time;
 use crate::human::cpu_feature_flags;
 use crate::kstats;
 use crate::kstats::{for_each_net_bond_member, for_each_net_interface};
-use crate::list::{field_lossy, ListError, WalkStep};
+use crate::list::{field_lossy, walk_pages_with, ListError, WalkStep};
 use crate::netaddr::{render_if_addr, render_server};
 use crate::netservers::{for_each_resolver_server, for_each_time_server};
 use crate::request::{call, CallError};
@@ -1035,6 +1035,10 @@ pub fn hostname(transport: &dyn Transport) -> Result<String, ResolveInfoError> {
     Ok(field_lossy(query_identity(transport)?.hostname_bytes()))
 }
 
+/// Records [`cpu_info`] asks for per page: as many as one reply holds, which
+/// bounds the reply without bounding how many CPUs the machine may have.
+pub const CPU_INFO_PAGE: u16 = tairix_abi::reply_page(CpuInfoRecord::WIRE_LEN);
+
 /// Every online core's processor-info record, paged through the ungated
 /// `CPU_INFO` query and returned in ascending CPU order.
 ///
@@ -1043,32 +1047,19 @@ pub fn hostname(transport: &dyn Transport) -> Result<String, ResolveInfoError> {
 /// the machine rather than from a constant — reads it here rather than re-deriving
 /// the paging.
 pub fn cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, ResolveInfoError> {
-    /// Records requested per page: bounds the reply without bounding how
-    /// many CPUs the machine may have.
-    const PAGE: u16 = 64;
     let mut records = Vec::new();
-    let mut offset: u32 = 0;
-    loop {
-        let request = CpuInfoListRequest {
-            offset,
-            limit: PAGE,
-            flags: 0,
-        };
-        let reply = call(transport, SysinfoQueryId::CPU_INFO, &request.to_le_bytes())
-            .map_err(|err| map_call_error(SysinfoQueryId::CPU_INFO, err))?;
-        if reply.len() % CpuInfoRecord::WIRE_LEN != 0 {
-            return Err(ResolveInfoError::Malformed);
-        }
-        let count = reply.len() / CpuInfoRecord::WIRE_LEN;
-        for chunk in reply.as_chunks::<{ CpuInfoRecord::WIRE_LEN }>().0 {
-            records
-                .push(CpuInfoRecord::from_bytes(chunk).map_err(|_| ResolveInfoError::Malformed)?);
-        }
-        if count < PAGE as usize {
-            return Ok(records);
-        }
-        offset = offset.saturating_add(u32::from(PAGE));
-    }
+    walk_resolved(
+        transport,
+        SysinfoQueryId::CPU_INFO,
+        (CpuInfoRecord::WIRE_LEN, CPU_INFO_PAGE),
+        PageRequest::to_le_bytes,
+        CpuInfoRecord::from_bytes,
+        |record| {
+            records.push(record);
+            WalkStep::Continue
+        },
+    )?;
+    Ok(records)
 }
 
 /// The performance-class topology string: the online core count and the
@@ -1631,37 +1622,20 @@ fn net_rates_for(
     iface: &str,
     window: Duration64,
 ) -> Result<NetInterfaceRatesRecord, ResolveInfoError> {
-    let record_len = NetInterfaceRatesRecord::WIRE_LEN;
-    let mut offset: u32 = 0;
-    loop {
-        let request = NetInterfaceRatesRequest {
-            offset,
-            limit: NET_PAGE_LIMIT,
-            flags: 0,
-            window,
-        };
-        let reply = call(
-            transport,
-            SysinfoQueryId::NET_INTERFACE_RATES,
-            &request.to_le_bytes(),
-        )
-        .map_err(|err| map_call_error(SysinfoQueryId::NET_INTERFACE_RATES, err))?;
-        if reply.len() % record_len != 0 {
-            return Err(ResolveInfoError::Malformed);
-        }
-        let count = reply.len() / record_len;
-        for chunk in reply.chunks_exact(record_len) {
-            let record = NetInterfaceRatesRecord::from_bytes(chunk)
-                .map_err(|_| ResolveInfoError::Malformed)?;
-            if if_name_matches(&record.name, iface) {
-                return Ok(record);
+    find_resolved(
+        transport,
+        SysinfoQueryId::NET_INTERFACE_RATES,
+        NetInterfaceRatesRecord::WIRE_LEN,
+        |page| {
+            NetInterfaceRatesRequest {
+                page: *page,
+                window,
             }
-        }
-        if count < NET_PAGE_LIMIT as usize {
-            return Err(ResolveInfoError::UnknownSelector);
-        }
-        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
-    }
+            .to_le_bytes()
+        },
+        NetInterfaceRatesRecord::from_bytes,
+        |record| if_name_matches(&record.name, iface),
+    )
 }
 
 /// Collect every interface's counters record (for a stack-wide sum).
@@ -1669,35 +1643,18 @@ fn all_net_counters(
     transport: &dyn Transport,
 ) -> Result<Vec<NetInterfaceCountersRecord>, ResolveInfoError> {
     let mut records = Vec::new();
-    let mut offset: u32 = 0;
-    loop {
-        let request = NetInterfaceListRequest {
-            offset,
-            limit: NET_PAGE_LIMIT,
-            flags: 0,
-        };
-        let reply = call(
-            transport,
-            SysinfoQueryId::NET_INTERFACE_COUNTERS,
-            &request.to_le_bytes(),
-        )
-        .map_err(|err| map_call_error(SysinfoQueryId::NET_INTERFACE_COUNTERS, err))?;
-        let record_len = NetInterfaceCountersRecord::WIRE_LEN;
-        if reply.len() % record_len != 0 {
-            return Err(ResolveInfoError::Malformed);
-        }
-        let count = reply.len() / record_len;
-        for chunk in reply.chunks_exact(record_len) {
-            records.push(
-                NetInterfaceCountersRecord::from_bytes(chunk)
-                    .map_err(|_| ResolveInfoError::Malformed)?,
-            );
-        }
-        if count < NET_PAGE_LIMIT as usize {
-            return Ok(records);
-        }
-        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
-    }
+    walk_resolved(
+        transport,
+        SysinfoQueryId::NET_INTERFACE_COUNTERS,
+        (NetInterfaceCountersRecord::WIRE_LEN, NET_PAGE_LIMIT),
+        PageRequest::to_le_bytes,
+        NetInterfaceCountersRecord::from_bytes,
+        |record| {
+            records.push(record);
+            WalkStep::Continue
+        },
+    )?;
+    Ok(records)
 }
 
 /// Page one interface-record query until `matches` selects a record; an
@@ -1709,32 +1666,66 @@ fn find_net_record<R>(
     decode: impl Fn(&[u8]) -> Result<R, Errno>,
     matches: impl Fn(&R) -> bool,
 ) -> Result<R, ResolveInfoError> {
-    let mut offset: u32 = 0;
-    loop {
-        let request = NetInterfaceListRequest {
-            offset,
-            limit: NET_PAGE_LIMIT,
-            flags: 0,
-        };
-        let reply = call(transport, query, &request.to_le_bytes())
-            .map_err(|err| map_call_error(query, err))?;
-        if reply.len() % record_len != 0 {
-            return Err(ResolveInfoError::Malformed);
-        }
-        let count = reply.len() / record_len;
-        for chunk in reply.chunks_exact(record_len) {
-            let record = decode(chunk).map_err(|_| ResolveInfoError::Malformed)?;
+    find_resolved(
+        transport,
+        query,
+        record_len,
+        PageRequest::to_le_bytes,
+        decode,
+        matches,
+    )
+}
+
+/// [`find_net_record`] for a query whose payload `make_request` encodes.
+fn find_resolved<R, const N: usize>(
+    transport: &dyn Transport,
+    query: SysinfoQueryId,
+    record_len: usize,
+    make_request: impl Fn(&PageRequest) -> [u8; N],
+    decode: impl Fn(&[u8]) -> Result<R, Errno>,
+    matches: impl Fn(&R) -> bool,
+) -> Result<R, ResolveInfoError> {
+    let mut found = None;
+    walk_resolved(
+        transport,
+        query,
+        (record_len, NET_PAGE_LIMIT),
+        make_request,
+        decode,
+        |record| {
             if matches(&record) {
-                return Ok(record);
+                found = Some(record);
+                WalkStep::Stop
+            } else {
+                WalkStep::Continue
             }
+        },
+    )?;
+    found.ok_or(ResolveInfoError::UnknownSelector)
+}
+
+/// Walk `query`'s pages of records `shape` sizes as `(record bytes, records
+/// a page)`, handing each `decode` reads to `visit`, with the walk's failures
+/// in the resolver's terms: a reply or record that does not decode is
+/// malformed, and the service's own refusal is itself.
+fn walk_resolved<R, const N: usize>(
+    transport: &dyn Transport,
+    query: SysinfoQueryId,
+    shape: (usize, u16),
+    make_request: impl Fn(&PageRequest) -> [u8; N],
+    decode: impl Fn(&[u8]) -> Result<R, Errno>,
+    mut visit: impl FnMut(R) -> WalkStep,
+) -> Result<(), ResolveInfoError> {
+    let (record_len, page) = shape;
+    walk_pages_with(transport, query, record_len, page, make_request, |chunk| {
+        decode(chunk).map(&mut visit).map_err(ListError::Sink)
+    })
+    .map_err(|err| match err {
+        ListError::Sink(_) | ListError::Call(CallError::Service(Errno::BadMagic)) => {
+            ResolveInfoError::Malformed
         }
-        if count < NET_PAGE_LIMIT as usize {
-            return Err(ResolveInfoError::UnknownSelector);
-        }
-        // The loop only continues on a full page, so the next window
-        // starts exactly one page further on.
-        offset = offset.saturating_add(u32::from(NET_PAGE_LIMIT));
-    }
+        ListError::Call(call) => map_call_error(query, call),
+    })
 }
 
 /// The display name of an interface's link kind.
@@ -1920,10 +1911,10 @@ mod tests {
     };
     use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
     use tairix_abi::sysinfo::{
-        CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-        IrqListRequest, IrqRecord, KernelMemoryStats, MemoryPressureStats, NetInterfaceListRequest,
-        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
+        CpuCoreClass, CpuInfoRecord, CpuLoadRecord, IrqRecord, KernelMemoryStats,
+        MemoryPressureStats, PageRequest, RamzipStats, ReclaimClassRecord, ResourceLimitRecord,
+        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, IRQ_FLAG_QUARANTINED,
+        RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit, MEMORY_CLASS_COUNT};
@@ -2242,7 +2233,7 @@ mod tests {
                     Ok(fixture_net_defence().to_le_bytes().to_vec())
                 }
                 SysinfoQueryId::RECLAIM_STATS => {
-                    let req = ReclaimListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .reclaim
                         .iter()
@@ -2251,7 +2242,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::CPU_LOAD => {
-                    let req = CpuLoadRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .cpu_loads
                         .iter()
@@ -2260,7 +2251,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::CPU_TIME_STATS => {
-                    let req = tairix_abi::sysinfo::CpuTimeListRequest::from_bytes(payload)?;
+                    let req = tairix_abi::sysinfo::PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .cpu_times
                         .iter()
@@ -2269,7 +2260,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::CPU_INFO => {
-                    let req = CpuInfoListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .cpu_infos
                         .iter()
@@ -2278,7 +2269,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::IRQ_LIST => {
-                    let req = IrqListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .irqs
                         .iter()
@@ -2287,7 +2278,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::NET_INTERFACE_FACTS => {
-                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let records = alloc::vec![fixture_net_facts()];
                     let encoders: Vec<_> = records
                         .iter()
@@ -2296,7 +2287,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::NET_INTERFACE_STATE => {
-                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let records = alloc::vec![fixture_net_state()];
                     let encoders: Vec<_> = records
                         .iter()
@@ -2305,7 +2296,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::NET_INTERFACE_COUNTERS => {
-                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let records = alloc::vec![fixture_net_counters()];
                     let encoders: Vec<_> = records
                         .iter()
@@ -2322,10 +2313,10 @@ mod tests {
                         .iter()
                         .map(|record| move || record.to_le_bytes())
                         .collect();
-                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                    Ok(Self::page_reply(&encoders, req.page.offset, req.page.limit))
                 }
                 SysinfoQueryId::NET_BOND_MEMBERS => {
-                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let records = fixture_bond_members();
                     let encoders: Vec<_> = records
                         .iter()
@@ -2334,7 +2325,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::NET_RESOLVER_SERVERS => {
-                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .resolver_servers
                         .iter()
@@ -2343,7 +2334,7 @@ mod tests {
                     Ok(Self::page_reply(&encoders, req.offset, req.limit))
                 }
                 SysinfoQueryId::NET_TIME_SERVERS => {
-                    let req = NetInterfaceListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     let encoders: Vec<_> = self
                         .time_servers
                         .iter()
@@ -3440,7 +3431,7 @@ mod tests {
         fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
             let header = SysinfoRequestHeader::from_bytes(request)?;
             let payload = &request[SysinfoRequestHeader::WIRE_LEN..];
-            let req = NetInterfaceListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             *self.pages.borrow_mut() += 1;
             let start = (req.offset as usize).min(self.count);
             let end = start.saturating_add(usize::from(req.limit)).min(self.count);

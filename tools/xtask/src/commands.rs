@@ -22,6 +22,7 @@ mod charter_cite;
 mod ci_long;
 mod deps_check;
 mod devids;
+mod feature_lane;
 mod font_atlas;
 mod font_store;
 mod fssoak;
@@ -763,6 +764,10 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
                 (false, None) => "test".to_string(),
             };
             ctx.run(&label, cmd)?;
+            ctx.run(
+                &format!("{label} (debug-image kernel diagnostics)"),
+                diagnostics_test(ctx, &opts.forward, order)?,
+            )?;
         }
 
         if opts.run_qemu {
@@ -773,6 +778,37 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// The host tests of every package the debug image's kernel diagnostics turn
+/// a feature on in, built with exactly those features: the workspace pass
+/// builds none of them, so without this lane their gated tests never run.
+fn diagnostics_test(
+    ctx: &Context,
+    forward: &[OsString],
+    order: Option<u64>,
+) -> Result<std::process::Command, String> {
+    let features: Vec<&str> = KERNEL_DIAGNOSTICS_FEATURES.split(',').collect();
+    let reach = feature_lane::reach(&ctx.workspace_root, KERNEL_PACKAGE, &features)?;
+    let mut cmd = ctx.cargo();
+    cmd.args(["test", "--all-targets", "--locked"]);
+    for package in reach.keys() {
+        cmd.args(["-p", package]);
+    }
+    let enabled: Vec<String> = reach
+        .iter()
+        .flat_map(|(package, features)| {
+            features
+                .iter()
+                .map(move |feature| format!("{package}/{feature}"))
+        })
+        .collect();
+    cmd.arg("--features").arg(enabled.join(","));
+    cmd.args(forward);
+    if let Some(order) = order {
+        cmd.args(host_order_args(forward, order));
+    }
+    Ok(cmd)
 }
 
 /// The libtest arguments that start a host pass in `seed`'s order.
@@ -1650,6 +1686,10 @@ fn kernel_build_profile(
 /// SD-card bring-up trace (`storage-trace`, `plans/PI.md` P8).
 pub(crate) const KERNEL_DIAGNOSTICS_FEATURES: &str = "watchdog-diagnostics,storage-trace";
 
+/// The package the kernel image is built from, where its diagnostics are
+/// switched on.
+pub(crate) const KERNEL_PACKAGE: &str = "tairix-kernel";
+
 /// The extra `cargo` arguments that turn [`KERNEL_DIAGNOSTICS_FEATURES`] on
 /// for the **non-shippable** `debug` image and leave them fully compiled out
 /// of the shippable `installer` image.
@@ -1848,7 +1888,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     let mut cmd = ctx.cargo();
     cmd.arg("build").arg("--locked");
     cmd.args(build_profile_args);
-    cmd.args(["-p", "tairix-kernel", "--target", "aarch64-unknown-none"]);
+    cmd.args(["-p", KERNEL_PACKAGE, "--target", "aarch64-unknown-none"]);
     cmd.args(kernel_diag_feature_args(profile));
     cmd.env("CARGO_ENCODED_RUSTFLAGS", floor.encoded_rustflags());
     // A bare-metal kernel build from a clean `target/` can legitimately

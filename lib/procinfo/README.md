@@ -21,10 +21,16 @@ The crate provides:
   and mapping a capability denial onto a distinguished error.
 - `ListError` — the shared error type for the paged-list walks, returned by
   both `for_each_process` and `for_each_mount`.
-- `walk_pages` / `WalkStep` — the generic paging loop every `for_each_*` walk
-  is built on, public so a consumer with its own bound or cadence policy (the
+- `walk_pages` / `WalkStep` — the generic paging loop every list walk is
+  built on, asking each page with a `PageRequest` naming the walk's one id,
+  so the service answers every page from one reading of the list; a walk the
+  service let go of fails with `Interrupted` for its caller to start again,
+  since records already handed to the sink cannot be taken back. `walk_records` decodes each
+  record for a sink, and is what every `for_each_*` walk is; `walk_pages_with`
+  is the same loop for a query whose payload carries more than its page. All
+  are public so a consumer with its own bound or cadence policy (the
   Switchboard sampler, which caps how many records one reading may
-  accumulate) drives it directly rather than re-implementing it.
+  accumulate) drives them directly rather than re-implementing one.
 - `WalkStep` is how *every* walk is bounded on the caller's side: each
   `for_each_*` sink answers `WalkStep::Continue` for the next record or
   `WalkStep::Stop` to end the walk there, and stopping returns `Ok`, so a

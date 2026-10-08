@@ -316,7 +316,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // enabled (the address-space build switched it on).
     unsafe {
         exceptions::init_vectors();
-        gic::init();
+        tairix_itest_gic::init_boot_cpu().expect("the GIC comes up");
     }
     syscall_entry::set_dispatch_callback(dispatch);
 

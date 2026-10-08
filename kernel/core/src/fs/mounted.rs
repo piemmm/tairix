@@ -206,9 +206,9 @@ pub struct LateFilesystem<F: 'static> {
     /// no transaction is ever deferred without a timer to fire it.
     writeback_host: OnceCell<&'static dyn WritebackHost>,
     /// Whether the flusher is live and will publish what a driver defers
-    /// ([`Self::set_writeback_armed`]). While it is `false` the host declines
-    /// to read its clock, so every driver publishes at each operation: the
-    /// batching window exists only for as long as something can fire it.
+    /// ([`Self::arm_writeback`]). Until it is, the host declines to read its
+    /// clock, so every driver publishes at each operation: the batching window
+    /// exists only once something can fire it.
     writeback_armed: AtomicBool,
 }
 
@@ -335,15 +335,12 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .map_err(|_| FilesystemAlreadyInstalled)
     }
 
-    /// Record whether the write-back flusher is live and will publish what a
-    /// driver defers.
-    ///
-    /// Set once the flusher has proved it can park and be woken, and cleared
-    /// if it ever stops. Clearing it is the fail-closed lever: from that
-    /// moment the host reads no clock, so every driver's next operation
-    /// publishes rather than deferring against a timer that will not fire.
-    pub fn set_writeback_armed(&self, armed: bool) {
-        self.writeback_armed.store(armed, Ordering::Release);
+    /// Record that the write-back flusher is live and will publish what a
+    /// driver defers: it has proved it can park and be woken, and parks for
+    /// good. Until then the host reads no clock, so every driver publishes
+    /// rather than deferring against a timer that would not fire.
+    pub fn arm_writeback(&self) {
+        self.writeback_armed.store(true, Ordering::Release);
     }
 
     /// Record the write-back deadline volume `handle` just published, and ask

@@ -183,6 +183,210 @@ fn a_page_maps_translates_and_unmaps_leaving_only_the_root() {
 }
 
 #[test]
+fn an_unmap_costs_its_walk_not_a_read_of_every_table_it_leaves() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = tree(&frames, 4, false);
+    for page in 0..512 {
+        table
+            .map(
+                page * PAGE,
+                0x8_0000_0000 + page * PAGE,
+                PAGE,
+                Access::READ_WRITE,
+            )
+            .unwrap();
+    }
+    let before = frames.reached();
+    table.unmap(5 * PAGE, PAGE).unwrap();
+    // One read per level down, and the leaf's clear.
+    assert!(
+        frames.reached() - before <= 8,
+        "{}",
+        frames.reached() - before
+    );
+    assert!(!table.has_retired(), "the table still maps 511 pages");
+    for page in (0..512).filter(|&page| page != 5) {
+        table.unmap(page * PAGE, PAGE).unwrap();
+    }
+    assert!(
+        table.has_retired(),
+        "the last unmap empties every table below the root"
+    );
+    table.release_retired();
+    assert_eq!(frames.live(), 1);
+}
+
+#[test]
+fn a_range_sync_frees_only_the_tables_its_own_unmap_emptied() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = tree(&frames, 4, false);
+    let far = 1 << 39;
+    for iova in [0x7000, far] {
+        table
+            .map(iova, 0x8_0000_0000, PAGE, Access::READ_WRITE)
+            .unwrap();
+    }
+    table.unmap(0x7000, PAGE).unwrap();
+    table.unmap(far, PAGE).unwrap();
+    assert_eq!(frames.live(), 7, "both walks' tables wait for a sync");
+    table.tag_retired(Some((0x7000, PAGE)), 1);
+    table.release_tagged(1);
+    assert_eq!(frames.live(), 4, "the first range's three are free");
+    assert!(table.has_retired());
+    table.tag_retired(Some((far, PAGE)), 2);
+    table.release_tagged(2);
+    assert!(!table.has_retired());
+    assert_eq!(frames.live(), 1);
+}
+
+/// A table is freed only by the batch it was tagged with: one retired while
+/// that batch was outstanding waits for the next, and a batch that failed
+/// hands its tables back untagged.
+#[test]
+fn a_retired_table_is_freed_only_by_the_batch_confirming_it() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = tree(&frames, 4, false);
+    let far = 1 << 39;
+    for iova in [0x7000, far] {
+        table
+            .map(iova, 0x8_0000_0000, PAGE, Access::READ_WRITE)
+            .unwrap();
+    }
+    table.unmap(0x7000, PAGE).unwrap();
+    table.tag_retired(None, 1);
+    table.unmap(far, PAGE).unwrap();
+    table.tag_retired(None, 2);
+    table.untag(2);
+    table.release_tagged(1);
+    assert_eq!(frames.live(), 4, "only the first batch's tables went");
+    table.release_tagged(2);
+    assert_eq!(frames.live(), 4, "the failed batch freed nothing");
+    table.tag_retired(None, 3);
+    table.release_tagged(3);
+    assert_eq!(
+        frames.live(),
+        1,
+        "the next batch covers what the failed one held"
+    );
+}
+
+/// A map into a table's span after an unmap retired it relinks that table,
+/// which a unit's walk cache may still reach, and lays no leaf over its entry
+/// until it is released.
+#[test]
+fn a_map_into_a_retired_table_s_span_relinks_it() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = tree(&frames, 4, true);
+    table
+        .map(0x7000, 0x8_0000_0000, PAGE, Access::READ_WRITE)
+        .unwrap();
+    let live = frames.live();
+    table.unmap(0x7000, PAGE).unwrap();
+    assert!(table.has_retired());
+    table
+        .map(0x3000, 0x8_0000_1000, PAGE, Access::READ_WRITE)
+        .unwrap();
+    assert_eq!(frames.live(), live, "no fresh table was drawn");
+    assert!(!table.has_retired(), "every retired table is linked again");
+    assert_eq!(
+        table.translate(0x3000),
+        Some((0x8_0000_1000, Access::READ_WRITE))
+    );
+
+    table.unmap(0x3000, PAGE).unwrap();
+    table
+        .map(0, 0x8_0000_0000, MIB2, Access::READ_WRITE)
+        .unwrap();
+    assert_eq!(table.leaf_at(0).map(|leaf| leaf.len), Some(PAGE));
+    assert_eq!(frames.live(), live);
+    table.unmap(0, MIB2).unwrap();
+    table.release_retired();
+    table
+        .map(0, 0x8_0000_0000, MIB2, Access::READ_WRITE)
+        .unwrap();
+    assert_eq!(
+        table.leaf_at(0).map(|leaf| leaf.len),
+        Some(MIB2),
+        "once released, the large leaf"
+    );
+}
+
+/// A leaf is named whole, from any address inside it, whatever level it sits
+/// at.
+#[test]
+fn every_leaf_is_found_from_inside_it() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = tree(&frames, 4, true);
+    table
+        .map(GIB - PAGE, 0x40_0000_0000, PAGE, Access::READ)
+        .unwrap();
+    table
+        .map(GIB, 0x80_0000_0000, MIB2 + PAGE, Access::READ_WRITE)
+        .unwrap();
+    table
+        .map(4 * GIB, 0xC0_0000_0000, GIB, Access::WRITE)
+        .unwrap();
+    assert_eq!(
+        table.leaf_at(GIB + 0x1_2345),
+        Some(Leaf {
+            iova: GIB,
+            len: MIB2,
+            phys: 0x80_0000_0000,
+            access: Access::READ_WRITE,
+        })
+    );
+    assert_eq!(table.leaf_at(GIB + MIB2 + PAGE), None);
+    assert_eq!(table.leaf_at(u64::MAX), None, "past the reach");
+    for (inside, iova, len, phys) in [
+        (GIB - 1, GIB - PAGE, PAGE, 0x40_0000_0000),
+        (GIB + MIB2 + 0x10, GIB + MIB2, PAGE, 0x80_0020_0000),
+        (5 * GIB - 1, 4 * GIB, GIB, 0xC0_0000_0000),
+    ] {
+        let leaf = table.leaf_at(inside).expect("inside a leaf");
+        assert_eq!((leaf.iova, leaf.len, leaf.phys), (iova, len, phys));
+    }
+}
+
+/// Six levels for a 64-bit input range: a page just below the top of the
+/// address space maps and is named, though the root spans past the top.
+#[test]
+fn a_tree_reaching_the_top_of_the_address_space_maps_its_last_pages() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = IoPageTable::new(
+        TestFormat { large_leaves: true },
+        6,
+        TableMemory::new(&frames, None),
+        Reach {
+            input_bits: 64,
+            output_bits: 52,
+        },
+    )
+    .unwrap();
+    let high = 0u64.wrapping_sub(2 * PAGE);
+    table.map(PAGE, 0x40_0000_0000, PAGE, Access::READ).unwrap();
+    table
+        .map(high, 0x80_0000_0000, PAGE, Access::WRITE)
+        .unwrap();
+    assert_eq!(
+        table.map(high + PAGE, 0x80_0000_1000, PAGE, Access::WRITE),
+        Err(IommuError::OutOfRange),
+        "the top page ends past the address space"
+    );
+    assert_eq!(
+        table.translate(high + 0x123),
+        Some((0x80_0000_0123, Access::WRITE))
+    );
+    assert_eq!(
+        table
+            .leaf_at(high + 0x123)
+            .map(|leaf| (leaf.iova, leaf.phys)),
+        Some((high, 0x80_0000_0000))
+    );
+    table.unmap(high, PAGE).unwrap();
+    assert_eq!(table.translate(high), None);
+}
+
+#[test]
 fn an_aligned_range_takes_the_largest_leaves_the_format_allows() {
     let frames = HostFrames::new(0x1000_0000);
     let mut table = tree(&frames, 4, true);
@@ -296,6 +500,32 @@ fn running_out_of_tables_undoes_what_the_map_installed() {
         Err(IommuError::Exhausted)
     );
     assert_eq!(table.translate(MIB2 - PAGE), None);
+    table.release_retired();
+    assert_eq!(frames.live(), 1);
+}
+
+/// A carve of several runs whose later run cannot be installed takes back
+/// every run before it, so the device is left reaching none of the carve.
+#[test]
+fn a_carve_whose_later_run_fails_takes_back_the_runs_before_it() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = tree(&frames, 4, false);
+    frames.limit(3);
+    let runs = [
+        crate::FrameRun {
+            phys: 0x9000_0000,
+            order: 0,
+        },
+        crate::FrameRun {
+            phys: 0x9100_0000,
+            order: 0,
+        },
+    ];
+    assert_eq!(
+        table.map_runs(MIB2 - PAGE, &runs, Access::READ_WRITE),
+        Err(IommuError::Exhausted)
+    );
+    assert_eq!(table.translate(MIB2 - PAGE), None, "the first run is gone");
     table.release_retired();
     assert_eq!(frames.live(), 1);
 }

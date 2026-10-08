@@ -36,8 +36,7 @@ use tairix_itest_harness::pie::PieArch;
 const ARCH: PieArch = PieArch::Riscv64;
 
 fn main() {
-    tairix_itest_harness::emit_target_cfg();
-    println!("cargo:rerun-if-changed=build.rs");
+    tairix_itest_harness::riscv64_virt_guest_build();
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
@@ -47,12 +46,6 @@ fn main() {
 
     let target = env::var("TARGET").unwrap_or_default();
     if target == ARCH.target_triple() {
-        // The test kernel itself links with the riscv64 `virt` script the
-        // architecture port owns (the single per-board script).
-        let linker = format!("{manifest_dir}/../../../kernel/arch/riscv64/link/riscv64-virt.ld");
-        println!("cargo:rerun-if-changed={linker}");
-        println!("cargo:rustc-link-arg=-T{linker}");
-
         let rxe = tairix_itest_harness::program_fixture::GuestBuild {
             manifest_dir,
             out_dir: &out_dir,

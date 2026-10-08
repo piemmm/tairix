@@ -577,7 +577,7 @@ mod tests {
             HwResource::irq(11, 1),
             virtio_pci_window_resource(VIRTIO_PCI_CFG_DEVICE, 0xC000_4000, 0x8, 0),
             virtio_pci_window_resource(VIRTIO_PCI_CFG_NOTIFY, 0xC000_1000, 0x10, 4),
-            HwResource::dma(0, 0),
+            HwResource::dma(0, 0, crate::DmaCoherence::Snooped),
             virtio_pci_window_resource(VIRTIO_PCI_CFG_ISR, 0xC000_2000, 0x4, 0),
             virtio_pci_window_resource(VIRTIO_PCI_CFG_COMMON, 0xC000_0000, 0x38, 0),
         ]

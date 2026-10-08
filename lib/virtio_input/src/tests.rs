@@ -81,13 +81,8 @@ fn build_device_reporting(relative: &'static [u16]) -> (MockTransport, EventQueu
 /// The mock device, shared by the driver under test and the host playing it.
 type Device = Rc<RefCell<MockTransport>>;
 
-fn auto_host() -> &'static MockHost {
-    Box::leak(Box::new(MockHost::new()))
-}
-
-/// Open a driver on `t`, whose waits a host answers by playing the device.
-fn open_input(t: MockTransport) -> (Box<VirtioInput<'static, Device>>, Device) {
-    let host = auto_host();
+/// Open a driver on `t`, whose waits `host` answers by playing the device.
+fn open_input(t: MockTransport, host: &MockHost) -> (Box<VirtioInput<'_, Device>>, Device) {
     let device = t.into_shared();
     host.attach(&device);
     let dev = Box::new(VirtioInput::open(Rc::clone(&device), host).expect("open"));
@@ -267,7 +262,8 @@ fn decode_discards_frame_markers_and_unmodelled_events() {
 #[test]
 fn poll_returns_queued_key_press() {
     let (t, events) = build_device();
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     let mut buf = [InputEvent {
         kind: InputEventKind::Key,
@@ -284,7 +280,8 @@ fn poll_returns_queued_key_press() {
 #[test]
 fn poll_drains_press_then_release_in_order() {
     let (t, events) = build_device();
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 0));
     let mut buf = [InputEvent {
@@ -302,7 +299,8 @@ fn poll_drains_press_then_release_in_order() {
 #[test]
 fn poll_skips_frame_marker_as_no_event() {
     let (t, events) = build_device();
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     // An EV_SYN completion is consumed but surfaces no event.
     events.borrow_mut().push_back((wire::EV_SYN, 0, 0));
     let mut buf = [InputEvent {
@@ -322,7 +320,8 @@ fn a_device_offering_fine_codes_is_read_from_them_alone() {
         wire::REL_WHEEL,
         wire::REL_WHEEL_HI_RES,
     ]);
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     // One detent as a hi-res device reports it: the fine code, its detent
     // twin, and the frame separator.
     events.borrow_mut().extend([
@@ -341,7 +340,8 @@ fn a_device_offering_fine_codes_is_read_from_them_alone() {
 #[test]
 fn a_device_stating_no_event_bitmap_is_read_at_detents() {
     let (t, events) = build_device_reporting(&[]);
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     events.borrow_mut().extend([
         (wire::EV_REL, wire::REL_HWHEEL, -1),
         (wire::EV_REL, wire::REL_WHEEL_HI_RES, 60),
@@ -357,7 +357,8 @@ fn a_device_stating_no_event_bitmap_is_read_at_detents() {
 #[test]
 fn poll_with_no_pending_event_returns_zero() {
     let (t, _events) = build_device();
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     let mut buf = [InputEvent {
         kind: InputEventKind::Key,
         reserved0: 0,
@@ -374,7 +375,8 @@ fn poll_acknowledges_the_device_interrupt_each_cycle() {
     // asserted and every subsequent wait wakes immediately — the busy loop
     // that pegged a core under the curses login screen.
     let (t, events) = build_device();
-    let (mut dev, device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, device) = open_input(t, host);
     let mut buf = [InputEvent {
         kind: InputEventKind::Key,
         reserved0: 0,
@@ -395,7 +397,8 @@ fn poll_acknowledges_the_device_interrupt_each_cycle() {
 fn a_device_capping_its_queue_below_a_power_of_two_comes_up_on_the_next_one_down() {
     // Pre-clamped to the device's 12, the request was no ring size at all.
     let (t, events) = build_device_with_queue_max(12);
-    let (mut dev, device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, device) = open_input(t, host);
     assert_eq!(
         device
             .borrow_mut()
@@ -429,7 +432,8 @@ fn one_drain_takes_no_more_than_a_ring_of_completions() {
     // so a device completing them as fast as they are reposted would hold
     // the drain for ever.
     let (t, _events) = build_device();
-    let (mut dev, device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, device) = open_input(t, host);
     let ring = dev.eventq.size();
     // Head 0 is reposted under head 0 each time it comes back.
     for _ in 0..2 * ring {
@@ -456,7 +460,8 @@ fn one_drain_takes_no_more_than_a_ring_of_completions() {
 fn an_event_slot_completed_without_a_write_is_not_decoded_again() {
     // Decoded again, a stale key press is a keystroke nobody typed.
     let (t, events) = build_device();
-    let (mut dev, device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, device) = open_input(t, host);
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     let mut buf = batch::<4>();
     assert_eq!(dev.poll(&mut buf), Ok(1));
@@ -479,7 +484,7 @@ fn a_wait_that_cannot_be_made_fails_the_poll_rather_than_spinning() {
     // A revoked binding times every wait out at once: returning no events
     // would have the caller poll again at once, for ever.
     let (t, _events) = build_device();
-    let host = auto_host();
+    let host = &MockHost::new();
     host.script_waits([MockWait::Refused]);
     let device = t.into_shared();
     host.attach(&device);
@@ -491,7 +496,8 @@ fn a_wait_that_cannot_be_made_fails_the_poll_rather_than_spinning() {
 #[test]
 fn poll_rejects_empty_buffer() {
     let (t, _events) = build_device();
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     let mut empty: [InputEvent; 0] = [];
     assert_eq!(dev.poll(&mut empty), Err(DriverError::BufferTooSmall));
 }
@@ -549,8 +555,9 @@ fn open_armed_arms_only_after_the_event_queue_is_live() {
     // in that window was silently dropped — the flaky autoload-input
     // vertical's lost keypress.
     let (t, events) = build_device();
-    let host = auto_host();
+    let host = &MockHost::new();
     let device = t.into_shared();
+    device.borrow_mut().reach(host);
     // A keystroke is already pending at the device when the arm step runs.
     events.borrow_mut().push_back((wire::EV_KEY, KEY_A, 1));
     let armed = core::cell::Cell::new(0u32);
@@ -634,6 +641,9 @@ impl Transport for ResetProbe {
     fn notify(&mut self, queue: u16) {
         self.inner.notify(queue);
     }
+    fn config_len(&self) -> usize {
+        self.inner.config_len()
+    }
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         self.inner.read_config(offset, buf);
     }
@@ -656,7 +666,7 @@ fn open_armed_surfaces_the_arm_error_and_resets_the_device() {
         inner: t,
         resets: Rc::clone(&resets),
     };
-    let host = auto_host();
+    let host = &MockHost::new();
     let Err(err) = VirtioInput::open_armed(probe, host, |_| Err(DriverError::PermissionDenied))
     else {
         panic!("arm failure must surface");
@@ -738,7 +748,7 @@ fn touching(slot: i32, id: i32, x: i32, y: i32) -> [RawEvent; 4] {
 const REPORT: RawEvent = (wire::EV_SYN, wire::SYN_REPORT, 0);
 
 /// Every touch frame the device has queued.
-fn frames(dev: &mut VirtioInput<'static, Device>) -> alloc::vec::Vec<TouchFrame> {
+fn frames(dev: &mut VirtioInput<'_, Device>) -> alloc::vec::Vec<TouchFrame> {
     let mut reports = [Report::Event(batch::<1>()[0]); 16];
     let mut out = alloc::vec::Vec::new();
     while let Ok(count @ 1..) = dev.poll_reports(&mut reports) {
@@ -763,7 +773,8 @@ fn contacts(frame: &TouchFrame) -> alloc::vec::Vec<(u16, u16, u16)> {
 fn a_slotted_device_frames_every_contact_down_on_each_report() {
     use tairix_abi::touch::TouchSurface;
     let (t, events) = build_touch_device(0, 1_000, 0, None);
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     let mut queue = events.borrow_mut();
     queue.extend(touching(0, 5, 0, 0));
     queue.push_back(REPORT);
@@ -796,7 +807,8 @@ fn a_slotted_device_frames_every_contact_down_on_each_report() {
 #[test]
 fn a_position_is_normalised_over_the_stated_range_and_held_to_it() {
     let (t, events) = build_touch_device(100, 1_100, 0, None);
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     events.borrow_mut().extend(touching(0, 1, 600, 2_000));
     events.borrow_mut().extend(touching(1, 2, 50, -7));
     events.borrow_mut().push_back(REPORT);
@@ -822,7 +834,8 @@ fn the_properties_say_what_kind_of_surface_it_is() {
         ),
     ] {
         let (t, _events) = build_touch_device(0, 1_000, 0, properties);
-        let (dev, _device) = open_input(t);
+        let host = &MockHost::new();
+        let (dev, _device) = open_input(t, host);
         assert_eq!(
             dev.touch_lifted().map(|frame| frame.surface()),
             Some(surface),
@@ -835,7 +848,8 @@ fn the_properties_say_what_kind_of_surface_it_is() {
 fn a_stated_resolution_gives_the_surface_its_size() {
     use tairix_abi::touch::TouchExtent;
     let (t, _events) = build_touch_device(0, 1_000, 10, None);
-    let (dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (dev, _device) = open_input(t, host);
     assert_eq!(
         dev.touch_lifted().map(|frame| frame.extent()),
         Some(TouchExtent {
@@ -849,7 +863,8 @@ fn a_stated_resolution_gives_the_surface_its_size() {
 #[test]
 fn lost_events_are_discarded_to_the_report_and_every_contact_lifts() {
     let (t, events) = build_touch_device(0, 1_000, 0, None);
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     let mut queue = events.borrow_mut();
     queue.extend(touching(0, 5, 10, 10));
     queue.push_back(REPORT);
@@ -868,7 +883,8 @@ fn lost_events_are_discarded_to_the_report_and_every_contact_lifts() {
 #[test]
 fn a_slot_past_what_a_frame_carries_and_a_repeated_id_are_not_followed() {
     let (t, events) = build_touch_device(0, 1_000, 0, None);
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     let mut queue = events.borrow_mut();
     queue.extend(touching(12, 9, 10, 10));
     queue.extend(touching(0, 4, 20, 20));
@@ -887,7 +903,8 @@ fn a_slot_past_what_a_frame_carries_and_a_repeated_id_are_not_followed() {
 fn a_touchpads_buttons_and_palms_ride_the_frame() {
     use tairix_abi::touch::{ContactKind, TouchButtons};
     let (t, events) = build_touch_device(0, 1_000, 0, Some(1 << wire::INPUT_PROP_POINTER));
-    let (mut dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (mut dev, _device) = open_input(t, host);
     let mut queue = events.borrow_mut();
     queue.extend(touching(0, 1, 10, 10));
     queue.push_back((wire::EV_ABS, wire::ABS_MT_TOOL_TYPE, wire::MT_TOOL_PALM));
@@ -905,6 +922,7 @@ fn a_touchpads_buttons_and_palms_ride_the_frame() {
 #[test]
 fn a_device_with_no_slotted_axes_is_no_touch_surface() {
     let (t, _events) = build_device_reporting(&[wire::REL_X, wire::REL_Y]);
-    let (dev, _device) = open_input(t);
+    let host = &MockHost::new();
+    let (dev, _device) = open_input(t, host);
     assert!(dev.touch_lifted().is_none());
 }

@@ -6,7 +6,9 @@ that block a stream until a domain is attached; stage 2 translation wherever
 otherwise, both over 4 KiB-granule AArch64 tables with 2 MiB and 1 GiB leaves,
 a stage-2 walk on a unit whose output is narrower than 44 bits starting at
 level 1 over up to sixteen concatenated tables; the command queue, every removal confirmed by a `CMD_SYNC` before it is
-reported done and a rejected command replaced by one so the queue consumes on;
+reported done, a carve's free invalidated a page at a time up to half a ring
+and its domain beyond, and a rejected command replaced by one so the queue
+consumes on;
 and the event queue, drained in batches outside the unit's lock, an overflow
 acknowledged. Bound by discovery to nodes keyed `compatible "arm,smmu-v3"`
 (`COMPATIBLE`). The design is `plans/IOMMU.md` IOM15.

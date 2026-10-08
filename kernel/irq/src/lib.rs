@@ -28,7 +28,7 @@ mod error;
 mod table;
 mod wait;
 
-pub use error::{IrqError, MaskError};
+pub use error::{ActivationError, IrqError, MaskError};
 pub use table::{
     BindOutcome, FireOutcome, IrqController, IrqDispatchObserver, IrqEntry, IrqTable,
     MonotonicClock, ObserverAlreadyInstalled, ReleaseOutcome, Trigger, UnsupportedController,

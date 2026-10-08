@@ -43,15 +43,12 @@ use tairix_virtio::{
     ChainSegment, Direction, DmaHost, DmaSlab, MockHost, MockTransport, SplitQueue, VirtioError,
 };
 
-const SMOKE_ITERATIONS: u64 = 20_000;
+/// Interpreted, a sweep samples the paths for undefined behaviour rather than
+/// searching inputs, and a thousand rounds reach each many times over.
+const SMOKE_ITERATIONS: u64 = if cfg!(miri) { 1_000 } else { 20_000 };
 const QUEUE_SIZE: u16 = 16;
 /// Longest chain the harness publishes.
 const MAX_CHAIN: u16 = 4;
-
-/// Build a `'static` `MockHost` the queue can borrow for the process.
-fn static_host() -> &'static MockHost {
-    Box::leak(Box::new(MockHost::new()))
-}
 
 #[test]
 fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
@@ -60,7 +57,8 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut t = MockTransport::new(1, QUEUE_SIZE, 0, 0);
-    let host = static_host();
+    let host = &MockHost::new();
+    t.reach(host);
     let mut q = SplitQueue::new(&mut t, host, 0, QUEUE_SIZE, MAX_CHAIN).expect("queue setup");
     let region: DmaSlab = host.alloc_dma_zeroed(64).expect("dma");
     // Chain head -> its descriptors, for every chain the device holds.

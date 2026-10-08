@@ -27,19 +27,17 @@ mod tests;
 
 pub use tairix_kernel_iommu_api::Registers;
 
-use core::cell::Cell;
-
 use tairix_arch_api::PageTableFrames;
 use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
 use tairix_inline::ArrayVec;
 use tairix_kernel_iommu_api::{
     drain_in_batches, reach_bits, wait_for, Access, Binding, Bindings, Block, Clock, Command,
-    CommandQueue, Completion, DomainId, Fault, FaultBatch, FaultRoute, Ids, IoPageTable,
-    IommuError, IommuUnit, QueueRegisters, Reach, Stage, Table, TableMemory, UnitProfile,
-    FAULT_QUEUE_RECORDS, MAX_ROOT_ORDER, TABLE_BYTES,
+    CommandQueue, Completion, DomainId, DomainMap, Fault, FaultBatch, FaultRoute, Ids, Invalidator,
+    IoPageTable, IommuError, IommuUnit, PageSpan, QueueRegisters, Reach, Stage, Table, TableMemory,
+    Tables, UnitProfile, FAULT_QUEUE_RECORDS, MAX_ROOT_ORDER, PAGE_INVALIDATIONS, TABLE_BYTES,
 };
-use tairix_sync::SpinLock;
+use tairix_sync::{SpinLock, SpinLockGuard};
 
 use crate::format::{ArmTables, Entry, EVENT_WORDS, SPLIT, STE_WORDS};
 use crate::regs::{Idr0, Idr1, Idr5};
@@ -100,8 +98,12 @@ const fn frame_order(entries: u32, entry_bytes: usize) -> u32 {
 
 /// One `SMMUv3`.
 ///
-/// Its stream tables, queues and context descriptors are never freed:
-/// nothing proves the unit stopped reading them.
+/// Its stream tables and queues are never freed: nothing proves the unit
+/// stopped reading them. A domain's context descriptor goes once no stream
+/// names it and an invalidation confirms the unit forgot it. Its state is split so a
+/// domain's maps and syncs wait on neither another domain nor a stream's
+/// attach: the lifecycle lock, then the domain map and a domain, then the
+/// command queue's ring, then the register window, never the reverse.
 pub struct Smmuv3Unit<'f, R: Registers> {
     memory: TableMemory<'f>,
     clock: &'f dyn Clock,
@@ -118,24 +120,48 @@ pub struct Smmuv3Unit<'f, R: Registers> {
     stalls: bool,
     msi: bool,
     profile: UnitProfile,
-    state: SpinLock<State<'f, R>>,
+    regs: Regs<R>,
+    queue: CommandQueue,
+    lifecycle: SpinLock<Lifecycle>,
+    domains: DomainMap<DomainState<'f>>,
+    events: SpinLock<EventQueue>,
 }
 
-struct State<'f, R> {
+/// The register window, held for one access or one handshake, with what this
+/// family last wrote to the two registers it must not read back.
+struct Regs<R> {
+    window: SpinLock<Window<R>>,
+    /// The unit confirms a batch by storing its token, not only by consuming
+    /// its `CMD_SYNC`.
+    msi: bool,
+}
+
+struct Window<R> {
     regs: R,
-    streams: StreamTable,
-    queue: CommandQueue,
     /// The command queue's producer index as last written, wrap included.
-    prod: Cell<u32>,
+    prod: u32,
     /// `SMMU_GERRORN` as last written: only this family writes it.
-    acked: Cell<u32>,
-    events: Block,
-    /// The event queue's consumer index, wrap and overflow acknowledgement
-    /// included.
-    cons: u32,
-    domains: HashMap<u16, DomainState<'f>, BuildFastHash>,
+    acked: u32,
+}
+
+impl<R> Regs<R> {
+    fn lock(&self) -> SpinLockGuard<'_, Window<R>> {
+        self.window.lock()
+    }
+}
+
+/// What attaching a stream and silencing one change.
+struct Lifecycle {
+    streams: StreamTable,
     bindings: Bindings,
     ids: Ids,
+}
+
+/// The event queue, which the one drain at a time reads.
+struct EventQueue {
+    events: Block,
+    /// Its consumer index, wrap and overflow acknowledgement included.
+    cons: u32,
 }
 
 enum StreamTable {
@@ -159,6 +185,12 @@ struct DomainState<'f> {
     table: IoPageTable<'f, ArmTables>,
     /// A stage 1 domain's context descriptor.
     descriptor: Option<Table>,
+}
+
+impl<'f> DomainState<'f> {
+    fn table(&mut self) -> &mut IoPageTable<'f, ArmTables> {
+        &mut self.table
+    }
 }
 
 /// The stage a unit translates at, the input its tables take, and where
@@ -296,25 +328,32 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
             stalls: idr0.stall_model() == 0b00,
             msi: idr0.msi(),
             profile: UnitProfile {
-                stage,
+                tables: Tables::Walked(stage),
                 reach: Reach {
                     input_bits,
                     output_bits,
                 },
                 reserved: &[],
+                // Only stage 2's access permissions name a write without a
+                // read.
+                write_only: stage == Stage::Second,
             },
-            state: SpinLock::new(State {
-                regs,
+            regs: Regs {
+                window: SpinLock::new(Window {
+                    regs,
+                    prod: 0,
+                    acked: 0,
+                }),
+                msi: idr0.msi(),
+            },
+            queue,
+            lifecycle: SpinLock::new(Lifecycle {
                 streams,
-                queue,
-                prod: Cell::new(0),
-                acked: Cell::new(0),
-                events,
-                cons: 0,
-                domains: HashMap::with_hasher(BuildFastHash::new()),
                 bindings: Bindings::new(),
                 ids,
             }),
+            domains: DomainMap::new(),
+            events: SpinLock::new(EventQueue { events, cons: 0 }),
         };
         // From here the unit may hold the tables' addresses, so a failure
         // keeps them.
@@ -323,8 +362,11 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
     }
 
     fn take_over(&self) -> Result<(), IommuError> {
-        let mut state = self.state.lock();
-        let regs = &state.regs;
+        let (base, config) = self.lifecycle.lock().streams.registers(self.stream_bits);
+        let events = self.events.lock().events.phys();
+        let mut window = self.regs.lock();
+        let Window { regs, acked, .. } = &mut *window;
+        let regs = &*regs;
         // Firmware may have left the unit translating, or bypassing; from here
         // to the end of the hand-off every transaction is aborted instead. A
         // write while an update is still under way would be ignored.
@@ -343,27 +385,27 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
             return Err(IommuError::Hardware);
         }
         regs.write32(regs::GERRORN, errors)?;
-        state.acked.set(errors);
+        *acked = errors;
         regs.write32(regs::CR1, format::CR1)?;
         regs.write32(regs::CR2, regs::CR2_PTM | regs::CR2_RECINVSID)?;
-        let (base, config) = state.streams.registers(self.stream_bits);
         regs.write64(regs::STRTAB_BASE, base | regs::BASE_ALLOCATE)?;
         regs.write32(regs::STRTAB_BASE_CFG, config)?;
         regs.write64(
             regs::CMDQ_BASE,
-            state.queue.ring() | regs::BASE_ALLOCATE | u64::from(COMMAND_BITS),
+            self.queue.ring() | regs::BASE_ALLOCATE | u64::from(COMMAND_BITS),
         )?;
         regs.write32(regs::CMDQ_PROD, 0)?;
         regs.write32(regs::CMDQ_CONS, 0)?;
         regs.write64(
             regs::EVENTQ_BASE,
-            state.events.phys() | regs::BASE_ALLOCATE | u64::from(self.event_bits),
+            events | regs::BASE_ALLOCATE | u64::from(self.event_bits),
         )?;
         regs.write32(regs::EVENTQ_PROD, 0)?;
         regs.write32(regs::EVENTQ_CONS, 0)?;
         self.control(regs, regs::CR0_CMDQEN | regs::CR0_EVENTQEN)?;
+        drop(window);
         // Nothing firmware's configuration left cached may be read again.
-        self.run(&mut state, [format::cfgi_all(), format::tlbi_all()])
+        self.run([format::cfgi_all(), format::tlbi_all()])
     }
 
     /// Write `SMMU_CR0` and wait for the unit to take it.
@@ -372,31 +414,23 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
         wait_for(self.clock, || Ok(regs.read32(regs::CR0ACK)? == value))
     }
 
+    fn invalidator(&self) -> Invalidator<'_> {
+        Invalidator {
+            queue: &self.queue,
+            memory: self.memory,
+            clock: self.clock,
+            regs: &self.regs,
+            completion: match self.regs.completion() {
+                Completion::Stored => format::sync_stored,
+                Completion::Consumed => format::sync_consumed,
+            },
+        }
+    }
+
     /// Queue `commands` and a `CMD_SYNC` behind them, and return once the unit
     /// confirms every one is done.
-    fn run(
-        &self,
-        state: &mut State<'f, R>,
-        commands: impl IntoIterator<Item = Command>,
-    ) -> Result<(), IommuError> {
-        let State {
-            regs,
-            queue,
-            prod,
-            acked,
-            ..
-        } = state;
-        let registers = Queue {
-            regs,
-            prod,
-            acked,
-            msi: self.msi,
-        };
-        let sync = match registers.completion() {
-            Completion::Stored => format::sync_stored,
-            Completion::Consumed => format::sync_consumed,
-        };
-        queue.run(&self.memory, self.clock, &registers, commands, sync)
+    fn run(&self, commands: impl IntoIterator<Item = Command>) -> Result<(), IommuError> {
+        self.invalidator().run(commands)
     }
 
     /// What forgets everything the unit cached of `stream`'s configuration:
@@ -416,6 +450,13 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
         match self.stage {
             Stage::Second => format::tlbi_vmid(id),
             Stage::First => format::tlbi_asid(id),
+        }
+    }
+
+    fn forget_page(&self, id: u16, iova: u64) -> Command {
+        match self.stage {
+            Stage::Second => format::tlbi_ipa(id, iova),
+            Stage::First => format::tlbi_va(id, iova),
         }
     }
 
@@ -448,11 +489,11 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
     /// word. Whether a level-1 descriptor had to be written to reach it.
     fn write_entry(
         &self,
-        state: &mut State<'f, R>,
+        life: &mut Lifecycle,
         stream: u32,
         entry: &Entry,
     ) -> Result<bool, IommuError> {
-        let (slot, linked) = state.streams.slot(&self.memory, stream)?;
+        let (slot, linked) = life.streams.slot(&self.memory, stream)?;
         if format::translates(entry) {
             // The unit reads an entry 64 bits at a time in no set order, so
             // every fetch already under way is finished with the old words
@@ -463,9 +504,9 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
             slot.publish(&self.memory);
             tairix_dma_barrier::dma_wmb();
             let forget = self.forget_stream(stream, linked);
-            self.run(state, forget)?;
+            self.run(forget)?;
         }
-        let (slot, _) = state.streams.slot(&self.memory, stream)?;
+        let (slot, _) = life.streams.slot(&self.memory, stream)?;
         slot.write(&self.memory, 0, entry[0])?;
         slot.publish(&self.memory);
         Ok(linked)
@@ -473,12 +514,12 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
 
     /// Point `stream` at a blocking entry and confirm the unit forgot what it
     /// translated through, which it holds until then.
-    fn block_stream(&self, state: &mut State<'f, R>, stream: u32) -> Result<(), IommuError> {
-        let linked = self.write_entry(state, stream, &[0; STE_WORDS])?;
-        state.bindings.unbind(stream);
+    fn block_stream(&self, life: &mut Lifecycle, stream: u32) -> Result<(), IommuError> {
+        let linked = self.write_entry(life, stream, &[0; STE_WORDS])?;
+        life.bindings.unbind(stream);
         let forget = self.forget_stream(stream, linked);
-        self.run(state, forget)?;
-        state.bindings.release(stream);
+        self.run(forget)?;
+        life.bindings.release(stream);
         Ok(())
     }
 
@@ -486,20 +527,20 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
     /// more remain. An overflow is acknowledged: the events it dropped are
     /// gone.
     fn take_events(&self, batch: &mut FaultBatch) -> bool {
-        let mut state = self.state.lock();
-        let Ok(prod) = state.regs.read32(regs::EVENTQ_PROD) else {
+        let mut queue = self.events.lock();
+        let Ok(prod) = self.regs.lock().regs.read32(regs::EVENTQ_PROD) else {
             return false;
         };
         // The records the index announces are read only after it.
         tairix_dma_barrier::dma_rmb();
         let wrap = 1u32 << self.event_bits;
         let index = (wrap << 1) - 1;
-        let mut cons = (state.cons & index) | (prod & regs::EVENTQ_OVERFLOW);
+        let mut cons = (queue.cons & index) | (prod & regs::EVENTQ_OVERFLOW);
         while cons & index != prod & index && !batch.is_full() {
             let slot = (cons & (wrap - 1)) as usize * EVENT_WORDS;
             let mut record = [0u64; EVENT_WORDS];
             for (word, value) in record.iter_mut().enumerate() {
-                match self.memory.read_block(&state.events, slot + word) {
+                match self.memory.read_block(&queue.events, slot + word) {
                     Ok(read) => *value = read,
                     Err(_) => return false,
                 }
@@ -509,25 +550,26 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
             }
             cons = (((cons & index) + 1) & index) | (cons & regs::EVENTQ_OVERFLOW);
         }
-        state.cons = cons;
+        queue.cons = cons;
         // Every slot is read before it is handed back to the unit to fill.
         tairix_dma_barrier::dma_rmb();
-        if state.regs.write32(regs::EVENTQ_CONS, cons).is_err() {
+        let mut window = self.regs.lock();
+        if window.regs.write32(regs::EVENTQ_CONS, cons).is_err() {
             return false;
         }
         // A record lost to an aborted queue write is gone; the queue runs on.
-        if let Ok(errors) = state.regs.read32(regs::GERROR) {
-            let acked = state.acked.get();
+        if let Ok(errors) = window.regs.read32(regs::GERROR) {
+            let acked = window.acked;
             if (errors ^ acked) & regs::GERROR_EVENTQ_ABT != 0 {
                 let acked = acked ^ regs::GERROR_EVENTQ_ABT;
-                if state.regs.write32(regs::GERRORN, acked).is_ok() {
-                    state.acked.set(acked);
+                if window.regs.write32(regs::GERRORN, acked).is_ok() {
+                    window.acked = acked;
                 }
             }
         }
         // A record landing after the drain read the index raises no
         // interrupt of its own, so the index is read again.
-        state
+        window
             .regs
             .read32(regs::EVENTQ_PROD)
             .is_ok_and(|prod| cons & index != prod & index)
@@ -537,50 +579,66 @@ impl<'f, R: Registers> Smmuv3Unit<'f, R> {
 /// The command queue's registers as the shared queue reads them: the slot
 /// in the consumer index, and the producer index written with the wrap a
 /// lap past slot 0 flips.
-struct Queue<'r, R> {
-    regs: &'r R,
-    prod: &'r Cell<u32>,
-    acked: &'r Cell<u32>,
-    msi: bool,
-}
-
-impl<R: Registers> QueueRegisters for Queue<'_, R> {
+impl<R: Registers> QueueRegisters for Regs<R> {
     fn head(&self) -> Result<usize, IommuError> {
-        Ok((self.regs.read32(regs::CMDQ_CONS)? & (COMMAND_SLOTS - 1)) as usize)
+        Ok((self.lock().regs.read32(regs::CMDQ_CONS)? & (COMMAND_SLOTS - 1)) as usize)
     }
 
     fn set_tail(&self, tail: usize) -> Result<(), IommuError> {
         let tail = u32::try_from(tail).map_err(|_| IommuError::Hardware)?;
-        let last = self.prod.get();
+        let mut window = self.lock();
+        let last = window.prod;
         let lapped = if tail < last & (COMMAND_SLOTS - 1) {
             COMMAND_SLOTS
         } else {
             0
         };
         let next = tail | ((last & COMMAND_SLOTS) ^ lapped);
-        self.regs.write32(regs::CMDQ_PROD, next)?;
-        self.prod.set(next);
+        window.regs.write32(regs::CMDQ_PROD, next)?;
+        window.prod = next;
         Ok(())
+    }
+
+    /// A rejected command stops the unit at the consumer index; one in
+    /// service-failure mode runs no command again. A completion message the
+    /// unit could not write fails the waiter that finds it, rather than once
+    /// its budget is spent; a later batch's message still confirms the
+    /// batches before it.
+    fn stopped_at(&self) -> Result<Option<usize>, IommuError> {
+        let mut window = self.lock();
+        let active = window.regs.read32(regs::GERROR)? ^ window.acked;
+        if active & regs::GERROR_SFM != 0 {
+            return Err(IommuError::Hardware);
+        }
+        if active & regs::GERROR_MSI_CMDQ_ABT != 0 {
+            let acked = window.acked ^ regs::GERROR_MSI_CMDQ_ABT;
+            window.regs.write32(regs::GERRORN, acked)?;
+            window.acked = acked;
+            return Err(IommuError::Hardware);
+        }
+        if active & regs::GERROR_CMDQ == 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            (window.regs.read32(regs::CMDQ_CONS)? & (COMMAND_SLOTS - 1)) as usize,
+        ))
     }
 
     /// A rejected command is replaced by a `CMD_SYNC`, and the error
     /// acknowledged, which lets the unit consume on.
-    fn stopped(&self, queue: &CommandQueue, memory: &TableMemory<'_>) -> Result<bool, IommuError> {
-        let acked = self.acked.get();
-        let active = self.regs.read32(regs::GERROR)? ^ acked;
-        if active & regs::GERROR_SFM != 0 {
-            return Err(IommuError::Hardware);
-        }
-        if active & regs::GERROR_CMDQ == 0 {
-            return Ok(false);
-        }
-        let head = (self.regs.read32(regs::CMDQ_CONS)? & (COMMAND_SLOTS - 1)) as usize;
-        queue.replace(memory, head, format::sync_consumed(0, 0))?;
+    fn resume(
+        &self,
+        queue: &CommandQueue,
+        memory: &TableMemory<'_>,
+        slot: usize,
+    ) -> Result<(), IommuError> {
+        let mut window = self.lock();
+        queue.replace(memory, slot, format::sync_consumed(0, 0))?;
         tairix_dma_barrier::dma_wmb();
-        self.regs
-            .write32(regs::GERRORN, acked ^ regs::GERROR_CMDQ)?;
-        self.acked.set(acked ^ regs::GERROR_CMDQ);
-        Ok(true)
+        let acked = window.acked ^ regs::GERROR_CMDQ;
+        window.regs.write32(regs::GERRORN, acked)?;
+        window.acked = acked;
+        Ok(())
     }
 
     fn completion(&self) -> Completion {
@@ -691,20 +749,15 @@ impl<R: Registers> IommuUnit for Smmuv3Unit<'_, R> {
     }
 
     fn enable(&self) -> Result<(), IommuError> {
-        let state = self.state.lock();
         self.control(
-            &state.regs,
+            &self.regs.lock().regs,
             regs::CR0_CMDQEN | regs::CR0_EVENTQEN | regs::CR0_SMMUEN,
         )
     }
 
     fn create_domain(&self) -> Result<DomainId, IommuError> {
-        let mut state = self.state.lock();
-        state
-            .domains
-            .try_reserve(1)
-            .map_err(|_| IommuError::Exhausted)?;
-        let id = state.ids.take_sixteen_bits()?;
+        let mut life = self.lifecycle.lock();
+        let id = life.ids.take_sixteen_bits()?;
         let built = IoPageTable::new(
             ArmTables {
                 stage: self.stage,
@@ -720,58 +773,66 @@ impl<R: Registers> IommuUnit for Smmuv3Unit<'_, R> {
                 Stage::First => Some(self.descriptor(id, table.root())?),
             };
             Ok(DomainState { table, descriptor })
+        })
+        .and_then(|domain| {
+            self.domains
+                .insert(u32::from(id), domain)
+                .map_err(|(err, refused)| {
+                    // A descriptor's handle frees nothing when dropped, and no
+                    // unit has seen this one yet.
+                    if let Some(descriptor) = refused.descriptor {
+                        self.memory.free(descriptor);
+                    }
+                    err
+                })
         });
-        match built {
-            Ok(domain) => {
-                let _ = state.domains.try_insert(id, domain);
-                Ok(DomainId(u32::from(id)))
-            }
-            Err(err) => {
-                state.ids.release(u32::from(id), true);
-                Err(err)
-            }
+        if let Err(err) = built {
+            life.ids.release(u32::from(id), true);
+            return Err(err);
         }
+        Ok(DomainId(u32::from(id)))
     }
 
     fn destroy_domain(&self, domain: DomainId) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        if !state.domains.contains_key(&id) {
+        let mut life = self.lifecycle.lock();
+        if !self.domains.contains(u32::from(id)) {
             return Err(IommuError::OutOfRange);
         }
-        if state.bindings.holders(u32::from(id)) != 0 {
+        if life.bindings.holders(u32::from(id)) != 0 {
             return Err(IommuError::DomainBusy);
         }
         // Nothing the unit cached for the id may outlive its tables, or
         // survive into the id's next owner.
-        let forget = [self.forget_domain(id)];
-        self.run(&mut state, forget)
+        self.run([self.forget_domain(id)])
             .map_err(|_| IommuError::Unconfirmed)?;
-        if let Some(gone) = state.domains.remove(&id) {
+        if let Some(gone) = self.domains.remove(u32::from(id)) {
             if let Some(descriptor) = gone.descriptor {
                 self.memory.free(descriptor);
             }
         }
-        state.ids.release(u32::from(id), true);
+        life.ids.release(u32::from(id), true);
         Ok(())
     }
 
     fn attach(&self, stream: u32, domain: DomainId) -> Result<(), IommuError> {
         self.check_stream(stream)?;
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        let entry = self.entry_for(id, state.domains.get(&id).ok_or(IommuError::OutOfRange)?)?;
-        let Some(reserved) = state.bindings.prepare_attach(stream, u32::from(id))? else {
+        let mut life = self.lifecycle.lock();
+        let entry = self
+            .domains
+            .with(u32::from(id), |domain| self.entry_for(id, domain))?;
+        let Some(reserved) = life.bindings.prepare_attach(stream, u32::from(id))? else {
             return Ok(());
         };
-        let linked = self.write_entry(&mut state, stream, &entry)?;
+        let linked = self.write_entry(&mut life, stream, &entry)?;
         // From the write on the unit may translate the stream through the
         // domain, so it holds the domain whether or not the unit confirms.
-        state.bindings.hold(reserved, stream, u32::from(id));
+        life.bindings.hold(reserved, stream, u32::from(id));
         let forget = self.forget_stream(stream, linked);
-        if let Err(err) = self.run(&mut state, forget) {
+        if let Err(err) = self.run(forget) {
             // Taken back, and held until the unit confirms it forgot.
-            let _ = self.block_stream(&mut state, stream);
+            let _ = self.block_stream(&mut life, stream);
             return Err(err);
         }
         Ok(())
@@ -779,27 +840,27 @@ impl<R: Registers> IommuUnit for Smmuv3Unit<'_, R> {
 
     fn block(&self, stream: u32) -> Result<(), IommuError> {
         self.check_stream(stream)?;
-        let mut state = self.state.lock();
+        let mut life = self.lifecycle.lock();
         // Only an attach ends silence.
-        if !state.bindings.holds_domain(stream) {
+        if !life.bindings.holds_domain(stream) {
             return Ok(());
         }
-        self.block_stream(&mut state, stream)
+        self.block_stream(&mut life, stream)
     }
 
     fn silence(&self, stream: u32) -> Result<(), IommuError> {
         self.check_stream(stream)?;
-        let mut state = self.state.lock();
-        if state.bindings.get(stream) == Some(Binding::Silenced) {
+        let mut life = self.lifecycle.lock();
+        if life.bindings.get(stream) == Some(Binding::Silenced) {
             return Ok(());
         }
-        let reserved = state.bindings.reserve()?;
-        let linked = self.write_entry(&mut state, stream, &format::silent_ste())?;
-        state.bindings.unbind(stream);
-        state.bindings.silence(reserved, stream);
+        let reserved = life.bindings.reserve()?;
+        let linked = self.write_entry(&mut life, stream, &format::silent_ste())?;
+        life.bindings.unbind(stream);
+        life.bindings.silence(reserved, stream);
         let forget = self.forget_stream(stream, linked);
-        self.run(&mut state, forget)?;
-        state.bindings.release(stream);
+        self.run(forget)?;
+        life.bindings.release(stream);
         Ok(())
     }
 
@@ -816,37 +877,48 @@ impl<R: Registers> IommuUnit for Smmuv3Unit<'_, R> {
             return Err(IommuError::OutOfRange);
         }
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        let domain = state.domains.get_mut(&id).ok_or(IommuError::OutOfRange)?;
         // The unit caches no translation it faulted on, so a new mapping
         // needs no invalidation to be used.
-        domain.table.map(iova, phys, len, access)
+        self.domains.with(u32::from(id), |domain| {
+            domain.table.map(iova, phys, len, access)
+        })
     }
 
     fn unmap(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        state
-            .domains
-            .get_mut(&id)
-            .ok_or(IommuError::OutOfRange)?
-            .table
-            .unmap(iova, len)
+        self.domains
+            .with(u32::from(id), |domain| domain.table.unmap(iova, len))
     }
 
     fn sync(&self, domain: DomainId) -> Result<(), IommuError> {
         let id = domain.sixteen_bits()?;
-        let mut state = self.state.lock();
-        if !state.domains.contains_key(&id) {
-            return Err(IommuError::OutOfRange);
-        }
         let forget = [self.forget_domain(id)];
-        self.run(&mut state, forget)
-            .map_err(|_| IommuError::Unconfirmed)?;
-        if let Some(domain) = state.domains.get_mut(&id) {
-            domain.table.release_retired();
+        self.domains.confirm(
+            u32::from(id),
+            DomainState::table,
+            &self.invalidator(),
+            |_| Ok((forget, None)),
+        )
+    }
+
+    /// A page at a time, walk caches included, while the range holds few
+    /// enough pages; the domain otherwise.
+    fn sync_range(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
+        let id = domain.sixteen_bits()?;
+        let span = PageSpan::of(iova, len)?;
+        let unit = self.invalidator();
+        if span.pages() <= PAGE_INVALIDATIONS {
+            self.domains
+                .confirm(u32::from(id), DomainState::table, &unit, |_| {
+                    let forget = span.addresses().map(|page| self.forget_page(id, page));
+                    Ok((forget, Some((iova, len))))
+                })
+        } else {
+            self.domains
+                .confirm(u32::from(id), DomainState::table, &unit, |_| {
+                    Ok(([self.forget_domain(id)], None))
+                })
         }
-        Ok(())
     }
 
     /// Faults are the event queue's records; the global-error interrupt is
@@ -857,8 +929,8 @@ impl<R: Registers> IommuUnit for Smmuv3Unit<'_, R> {
                 return Err(IommuError::OutOfRange);
             }
         }
-        let state = self.state.lock();
-        let regs = &state.regs;
+        let window = self.regs.lock();
+        let regs = &window.regs;
         // An interrupt's configuration may change only while it is off.
         regs.write32(regs::IRQ_CTRL, 0)?;
         wait_for(self.clock, || Ok(regs.read32(regs::IRQ_CTRLACK)? == 0))?;
@@ -895,6 +967,13 @@ impl<R: Registers> IommuUnit for Smmuv3Unit<'_, R> {
             self.clock,
             || Ok(regs.read32(regs::IRQ_CTRLACK)? == enabled),
         )
+    }
+
+    fn unroute_faults(&self) -> Result<(), IommuError> {
+        let window = self.regs.lock();
+        let regs = &window.regs;
+        regs.write32(regs::IRQ_CTRL, 0)?;
+        wait_for(self.clock, || Ok(regs.read32(regs::IRQ_CTRLACK)? == 0))
     }
 
     /// At most one queue's worth of events per call, each batch reaching

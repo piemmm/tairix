@@ -34,19 +34,7 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x22; 32];
 
 fn main() {
-    tairix_itest_harness::emit_target_cfg();
-    println!("cargo:rerun-if-changed=build.rs");
-
-    let target = std::env::var("TARGET").unwrap_or_default();
-    if target == "riscv64gc-unknown-none-elf" {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let linker_script = format!(
-            "{}/../../../kernel/arch/riscv64/link/riscv64-virt.ld",
-            manifest_dir.trim_end_matches('/')
-        );
-        println!("cargo:rerun-if-changed={linker_script}");
-        println!("cargo:rustc-link-arg=-T{linker_script}");
-    }
+    tairix_itest_harness::riscv64_virt_guest_build();
 
     let signing_key = Ed25519SecretKey::from_seed(&TEST_SEED);
     let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();

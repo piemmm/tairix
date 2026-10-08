@@ -36,31 +36,39 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tairix_abi::driver::DriverBindKey;
+use tairix_abi::sysinfo::{
+    DmaFaultSignal, DmaGroupRecord, DmaNodeRecord, DmaOwnerState, DmaTables, DmaUnitFamily,
+    DmaUnitRecord, DmaUnitState,
+};
 use tairix_abi::{
-    HwMatchKey, HwNode, HwProperty, HwResourceKind, IommuReservedWindow, IommuStreams,
-    RegisterWindow, ReservedAccess, HW_NODE_MAX_RESOURCES,
+    DmaCoherence, Errno, HwMatchKey, HwNode, HwProperty, HwResource, HwResourceKind,
+    IommuReservedWindow, IommuStreams, RegisterWindow, ReservedAccess, HW_NODE_MAX_RESOURCES,
 };
 use tairix_arch_api::PageTableFrames;
-use tairix_collections::HashMap;
+use tairix_collections::{HashMap, SmallVec};
 use tairix_devmatch::{DriverCandidate, MatchResolution};
 use tairix_hash::BuildFastHash;
 use tairix_inline::ArrayVec;
 use tairix_kernel_iommu_api::{
-    Access, Clock, Domain, IdentityWindow, IommuError, IommuUnit, TableCoherence,
+    Access, Clock, Domain, FrameRun, IdentityWindow, IommuError, IommuUnit, Signalling, Stage,
+    TableCoherence, Tables, IO_PAGE_SIZE,
 };
-use tairix_kernel_mem::{AllocError, DeviceTranslation, DmaBlock, DmaCustody, DmaError};
+use tairix_kernel_mem::{AllocError, Chunks, DeviceTranslation, DmaCustody, DmaError, FrameBlock};
 use tairix_log::{Field, FieldValue, Level, Sink};
 use tairix_sync::SpinLock;
 
 use crate::audit::{emit, AuditEvent};
 use crate::hwtree::HwTreeSource;
 
+mod deferred;
 mod faults;
 mod mastering;
 mod remap;
+
+pub use deferred::{Release, BATCH_CARVES, BATCH_WINDOW_NS};
 
 pub use faults::{FaultEnv, FAULT_LIMITS, FAULT_OWNER};
 pub use mastering::{BusMastering, MasterChange, MasterOwner, MasterTarget, Mastering, Quiesced};
@@ -79,9 +87,58 @@ pub struct Unit {
     pub unit: &'static dyn IommuUnit,
     /// The firmware reserved windows it keeps.
     pub reserved: Vec<IommuReservedWindow>,
-    /// The wired line its node names for its faults; [`None`] for a unit
-    /// that raises them as a message.
-    pub faults: Option<WiredFaults>,
+    /// How it raises its faults.
+    pub faults: FaultSignal,
+    /// The family driving it.
+    pub family: DmaUnitFamily,
+    /// What its faults came to since boot.
+    pub counts: FaultCounts,
+}
+
+/// What a unit's faults came to since boot, for an administrator: counts
+/// alone, read and written relaxed.
+#[derive(Debug, Default)]
+pub struct FaultCounts {
+    recorded: AtomicU64,
+    dropped: AtomicU64,
+    silenced: AtomicU64,
+    /// A task drains them: set before it is admitted, cleared whenever their
+    /// routing fails or the task stops.
+    heard: AtomicBool,
+}
+
+impl FaultCounts {
+    pub(crate) fn note_heard(&self, heard: bool) {
+        self.heard.store(heard, Ordering::Relaxed);
+    }
+
+    pub(crate) fn heard(&self) -> bool {
+        self.heard.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_recorded(&self) {
+        self.recorded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_silenced(&self) {
+        self.silenced.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// How a unit raises its faults.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FaultSignal {
+    /// On the wired line its node names.
+    Wired(WiredFaults),
+    /// As a message the kernel gives it.
+    Message,
+    /// Nowhere the kernel hears: on a line the platform does not describe,
+    /// the unit raising no message. It translates with its faults unrouted.
+    Unheard,
 }
 
 /// The wired line a unit raises its faults on.
@@ -147,8 +204,21 @@ pub enum Refusal {
     Unmatched,
     /// Its node names no register window, or one the port cannot map.
     NoRegisters,
+    /// Its node does not say it snoops the CPU's caches, through which every
+    /// family writes its tables and reads its queues and records.
+    Unsnooped,
     /// Its family could not take it over or enable it.
     Unit(IommuError),
+}
+
+/// Whether a unit's node states that its own DMA snoops the CPU's caches, and
+/// states nothing else.
+fn snoops(node: &HwNode) -> bool {
+    let mut stated = node
+        .resources()
+        .iter()
+        .filter_map(HwResource::dma_coherence);
+    stated.next() == Some(DmaCoherence::Snooped) && stated.all(|c| c == DmaCoherence::Snooped)
 }
 
 /// Every register window a unit's node names: what no process may map,
@@ -166,6 +236,110 @@ pub fn register_windows(node: &HwNode) -> impl Iterator<Item = Range<u64>> + '_ 
 ///
 /// The [`Refusal`] saying why the unit stays untranslated.
 pub fn take_over(node: &HwNode, env: &UnitEnv<'_>) -> Result<Unit, Refusal> {
+    let family = family_of(node)?;
+    if !snoops(node) {
+        return Err(Refusal::Unsnooped);
+    }
+    let mut reserved = Vec::new();
+    reserved
+        .try_reserve(node.resources().len())
+        .map_err(|_| Refusal::Unit(IommuError::Exhausted))?;
+    reserved.extend(
+        node.resources()
+            .iter()
+            .filter_map(|r| r.iommu_reserved().ok()),
+    );
+    let faults = WiredFaults::of(node);
+    // Serving faults routes them to the wired line the node names, or else
+    // as a message; a family that must know is told as the unit is taken
+    // over, the one time it may be.
+    let signalling = if faults.is_some() {
+        Signalling::Wired
+    } else {
+        Signalling::Message
+    };
+    let unit = match family {
+        DmaUnitFamily::Unmatched => return Err(Refusal::Unmatched),
+        DmaUnitFamily::Vtd => tairix_kernel_iommu_vtd::VtdUnit::new(
+            first_window(node, env)?,
+            env.frames,
+            env.coherence,
+            env.clock,
+        )
+        .and_then(kept),
+        DmaUnitFamily::AmdVi => {
+            let function = env.function.map(|function| (function, node.address()));
+            tairix_kernel_iommu_amdvi::AmdViUnit::new(
+                first_window(node, env)?,
+                env.frames,
+                env.clock,
+                function,
+            )
+            .and_then(kept)
+        }
+        DmaUnitFamily::Smmuv3 => tairix_kernel_iommu_smmuv3::Smmuv3Unit::new(
+            first_window(node, env)?,
+            env.frames,
+            env.clock,
+        )
+        .and_then(kept),
+        DmaUnitFamily::Riscv => tairix_kernel_iommu_riscv::RiscvUnit::new(
+            first_window(node, env)?,
+            env.frames,
+            env.coherence,
+            env.clock,
+            signalling,
+        )
+        .and_then(kept),
+        DmaUnitFamily::VirtioPci => return virtio_function(node, env, reserved, faults),
+        DmaUnitFamily::VirtioMmio => {
+            let window = first_window(node, env)?;
+            let transport = tairix_virtio::MmioTransport::new(window)
+                .ok()
+                .filter(|transport| {
+                    transport
+                        .window()
+                        .read_u32(tairix_virtio::transport_mmio::regs::DEVICE_ID)
+                        == Ok(tairix_kernel_iommu_virtio::DEVICE_ID)
+                })
+                .ok_or(Refusal::Unit(IommuError::Hardware))?;
+            // A slot raises its interrupt on its line alone.
+            tairix_kernel_iommu_virtio::VirtioIommuUnit::new(
+                transport,
+                env.frames,
+                env.clock,
+                None,
+                Signalling::Wired,
+            )
+            .and_then(kept)
+        }
+    };
+    Ok(Unit {
+        node: node.id(),
+        unit: unit.map_err(Refusal::Unit)?,
+        reserved,
+        faults: fault_signal(family, faults, || Ok(0)).map_err(Refusal::Unit)?,
+        family,
+        counts: FaultCounts::default(),
+    })
+}
+
+/// The families a unit is matched to, and the name each is matched as.
+const FAMILIES: [(DmaUnitFamily, &str); 6] = [
+    (DmaUnitFamily::Vtd, "vtd"),
+    (DmaUnitFamily::AmdVi, "amdvi"),
+    (DmaUnitFamily::Smmuv3, "smmuv3"),
+    (DmaUnitFamily::Riscv, "riscv"),
+    (DmaUnitFamily::VirtioPci, "virtio-pci"),
+    (DmaUnitFamily::VirtioMmio, "virtio-mmio"),
+];
+
+/// The family `node` is matched to.
+///
+/// # Errors
+///
+/// [`Refusal::Unmatched`] where none is.
+fn family_of(node: &HwNode) -> Result<DmaUnitFamily, Refusal> {
     let key = |compatible| HwMatchKey::compatible(compatible).map_err(|_| Refusal::Unmatched);
     let bind = |key| {
         [DriverBindKey {
@@ -179,103 +353,134 @@ pub fn take_over(node: &HwNode, env: &UnitEnv<'_>) -> Result<Unit, Refusal> {
         bind(key(tairix_kernel_iommu_amdvi::COMPATIBLE)?),
         bind(key(tairix_kernel_iommu_smmuv3::COMPATIBLE)?),
         bind(key(tairix_kernel_iommu_riscv::COMPATIBLE)?),
+        bind(key(tairix_kernel_iommu_virtio::COMPATIBLE)?),
+        bind(key(tairix_virtio::transport_mmio::COMPATIBLE.as_bytes())?),
     ];
-    let families = [Family::Vtd, Family::AmdVi, Family::Smmuv3, Family::Riscv];
-    let candidates = [
-        DriverCandidate {
-            path: "vtd",
-            bind_keys: &keys[0],
-        },
-        DriverCandidate {
-            path: "amdvi",
-            bind_keys: &keys[1],
-        },
-        DriverCandidate {
-            path: "smmuv3",
-            bind_keys: &keys[2],
-        },
-        DriverCandidate {
-            path: "riscv",
-            bind_keys: &keys[3],
-        },
-    ];
-    let MatchResolution::Winner { candidate, .. } =
-        tairix_devmatch::resolve(node.match_keys(), &candidates)
-    else {
-        return Err(Refusal::Unmatched);
-    };
+    let candidates: [DriverCandidate<'_>; FAMILIES.len()] =
+        core::array::from_fn(|at| DriverCandidate {
+            path: FAMILIES[at].1,
+            bind_keys: &keys[at],
+        });
+    match tairix_devmatch::resolve(node.match_keys(), &candidates) {
+        MatchResolution::Winner { candidate, .. } => Ok(FAMILIES[candidate].0),
+        _ => Err(Refusal::Unmatched),
+    }
+}
+
+/// The first register window `node` names, mapped for the kernel.
+fn first_window(node: &HwNode, env: &UnitEnv<'_>) -> Result<RegisterWindow, Refusal> {
     let window = node
         .resources()
         .iter()
         .find(|r| r.kind() == Some(HwResourceKind::Mmio))
         .ok_or(Refusal::NoRegisters)?;
-    let base = window.base();
-    let len = usize::try_from(window.length()).map_err(|_| Refusal::NoRegisters)?;
-    base.checked_add(window.length())
-        .ok_or(Refusal::NoRegisters)?;
-    let mut reserved = Vec::new();
-    reserved
-        .try_reserve(node.resources().len())
-        .map_err(|_| Refusal::Unit(IommuError::Exhausted))?;
-    reserved.extend(
-        node.resources()
-            .iter()
-            .filter_map(|r| r.iommu_reserved().ok()),
-    );
+    map_registers(env, window.base(), window.length())
+}
+
+/// The unit's registers at `[base, base + length)`, mapped uncached for the
+/// kernel alone.
+fn map_registers(env: &UnitEnv<'_>, base: u64, length: u64) -> Result<RegisterWindow, Refusal> {
+    let len = usize::try_from(length).map_err(|_| Refusal::NoRegisters)?;
+    base.checked_add(length).ok_or(Refusal::NoRegisters)?;
     let registers = (env.mmio)(base, len).ok_or(Refusal::NoRegisters)?;
     // SAFETY: the port mapped exactly `len` bytes of the unit's register set
     // uncached for the kernel's life, and the kernel maps a unit's registers
     // nowhere else (no process may map them), so this window is their only
     // owner.
-    let regs = unsafe { RegisterWindow::from_mapping(base, registers, len) };
-    let faults = WiredFaults::of(node);
-    let unit = match families[candidate] {
-        Family::Vtd => {
-            tairix_kernel_iommu_vtd::VtdUnit::new(regs, env.frames, env.coherence, env.clock)
-                .and_then(kept)
-        }
-        Family::AmdVi => {
-            let function = env.function.map(|function| (function, node.address()));
-            tairix_kernel_iommu_amdvi::AmdViUnit::new(regs, env.frames, env.clock, function)
-                .and_then(kept)
-        }
-        Family::Smmuv3 => {
-            tairix_kernel_iommu_smmuv3::Smmuv3Unit::new(regs, env.frames, env.clock).and_then(kept)
-        }
-        Family::Riscv => {
-            // Serving faults routes them to the wired line the node names,
-            // or else as a message; the unit is told which as it is taken
-            // over, the one time it may be.
-            let signalling = if faults.is_some() {
-                tairix_kernel_iommu_riscv::Signalling::Wired
-            } else {
-                tairix_kernel_iommu_riscv::Signalling::Message
-            };
-            tairix_kernel_iommu_riscv::RiscvUnit::new(
-                regs,
-                env.frames,
-                env.coherence,
-                env.clock,
-                signalling,
-            )
-            .and_then(kept)
-        }
+    Ok(unsafe { RegisterWindow::from_mapping(base, registers, len) })
+}
+
+/// Take over the virtio-iommu that is the PCI function `node` names: its
+/// four configuration windows, which discovery placed on the node and so
+/// guards from every process, mapped for the kernel; its own bus mastering
+/// on, its queues being its DMA; and its interrupt raised on the line
+/// `faults` names, else through its MSI-X entry where it has one, else on its
+/// pin, which nothing hears.
+fn virtio_function(
+    node: &HwNode,
+    env: &UnitEnv<'_>,
+    reserved: Vec<IommuReservedWindow>,
+    faults: Option<WiredFaults>,
+) -> Result<Unit, Refusal> {
+    let function = env.function.ok_or(Refusal::NoRegisters)?;
+    let address = node.address();
+    let faults = fault_signal(DmaUnitFamily::VirtioPci, faults, || {
+        function.msix_entries(address)
+    })
+    .map_err(Refusal::Unit)?;
+    let signalling = if faults == FaultSignal::Message {
+        Signalling::Message
+    } else {
+        Signalling::Wired
     };
+    let regions = function.virtio_windows(address).map_err(Refusal::Unit)?;
+    let guarded = |(base, len): (u64, usize)| {
+        let end = base.saturating_add(len as u64);
+        register_windows(node).any(|window| window.start <= base && end <= window.end)
+    };
+    let all = [regions.common, regions.notify, regions.isr, regions.device];
+    if !all.into_iter().all(guarded) {
+        return Err(Refusal::NoRegisters);
+    }
+    let map = |(base, len): (u64, usize)| map_registers(env, base, len as u64);
+    let windows = tairix_virtio::PciTransportWindows {
+        common: map(regions.common)?,
+        notify: map(regions.notify)?,
+        isr: map(regions.isr)?,
+        device: map(regions.device)?,
+        notify_off_multiplier: regions.notify_off_multiplier,
+    };
+    let entry =
+        (signalling == Signalling::Message).then_some(tairix_kernel_iommu_virtio::MSIX_ENTRY);
+    let mut transport = tairix_virtio::PciTransport::new(windows, entry)
+        .map_err(|_| Refusal::Unit(IommuError::Hardware))?;
+    // Whatever firmware left its queues pointing at is forgotten before the
+    // function may master anything.
+    tairix_virtio::transport::Transport::reset(&mut transport)
+        .map_err(|_| Refusal::Unit(IommuError::Hardware))?;
+    function.set_master(address, true).map_err(Refusal::Unit)?;
+    let unit = tairix_kernel_iommu_virtio::VirtioIommuUnit::new(
+        transport,
+        env.frames,
+        env.clock,
+        Some((function, address)),
+        signalling,
+    )
+    .and_then(kept)
+    .map_err(|err| {
+        // The device was given up on: nothing of the kernel's is its to reach.
+        let _ = function.set_master(address, false);
+        Refusal::Unit(err)
+    })?;
     Ok(Unit {
         node: node.id(),
-        unit: unit.map_err(Refusal::Unit)?,
+        unit,
         reserved,
         faults,
+        family: DmaUnitFamily::VirtioPci,
+        counts: FaultCounts::default(),
     })
 }
 
-/// The families a unit is matched to.
-#[derive(Copy, Clone)]
-enum Family {
-    Vtd,
-    AmdVi,
-    Smmuv3,
-    Riscv,
+/// How a unit of `family` raises its faults: on the line its node names,
+/// else as a message — a virtio-iommu function only through the MSI-X entry
+/// `msix_entries` says it has, a virtio-mmio slot never, its one line being
+/// all it has — else on a line nothing hears.
+fn fault_signal(
+    family: DmaUnitFamily,
+    wired: Option<WiredFaults>,
+    msix_entries: impl FnOnce() -> Result<u16, IommuError>,
+) -> Result<FaultSignal, IommuError> {
+    Ok(match (wired, family) {
+        (Some(wired), _) => FaultSignal::Wired(wired),
+        (None, DmaUnitFamily::VirtioPci)
+            if msix_entries()? > tairix_kernel_iommu_virtio::MSIX_ENTRY =>
+        {
+            FaultSignal::Message
+        }
+        (None, DmaUnitFamily::VirtioPci | DmaUnitFamily::VirtioMmio) => FaultSignal::Unheard,
+        (None, _) => FaultSignal::Message,
+    })
 }
 
 /// `unit`, kept for the kernel's life: a unit's tables are never freed, so
@@ -294,20 +499,53 @@ fn kept<U: IommuUnit + 'static>(unit: U) -> Result<&'static dyn IommuUnit, Iommu
 /// What became of a discovered unit.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UnitOutcome {
-    /// It translates, at the stage named; what telling the functions behind
-    /// it found mastering DMA as it took over, though firmware keeps no window
-    /// for them, to stop came to.
-    Translating(Quiesced, tairix_kernel_iommu_api::Stage),
+    /// It translates, keeping its domains' translations where named; what
+    /// telling the functions behind it found mastering DMA as it took over,
+    /// though firmware keeps no window for them, to stop came to.
+    Translating(Quiesced, Tables),
     /// It translates nothing, for the refusal named, so every function
     /// behind it was told to stop, firmware's windows kept for none.
     Stranded(Refusal, Quiesced),
 }
 
+/// A discovered unit that translates nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Stranded {
+    /// Its node.
+    pub node: u32,
+    /// The family its node matched, [`DmaUnitFamily::Unmatched`] for none.
+    pub family: DmaUnitFamily,
+    /// Why it translates nothing.
+    pub refusal: Refusal,
+}
+
+impl Stranded {
+    /// The unit at `node`, which translates nothing for `refusal`: a unit no
+    /// family drives names none.
+    #[must_use]
+    pub fn of(node: &HwNode, refusal: Refusal) -> Self {
+        let family = match refusal {
+            Refusal::Unmatched => Err(refusal),
+            Refusal::NoRegisters | Refusal::Unsnooped | Refusal::Unit(_) => family_of(node),
+        };
+        Self {
+            node: node.id(),
+            family: family.unwrap_or(DmaUnitFamily::Unmatched),
+            refusal,
+        }
+    }
+}
+
 /// How a node's DMA reaches memory.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DmaPath {
-    /// Through units translating here: its carves map into its domain.
-    Translated,
+    /// Through units translating here: its carves map into its domain, from
+    /// frames wholly below `output_limit`.
+    Translated {
+        /// The exclusive physical address every unit it crosses can name up
+        /// to.
+        output_limit: u64,
+    },
     /// Around every unit: its carves take physical addresses and the
     /// quarantine.
     Untranslated,
@@ -322,6 +560,9 @@ pub enum DmaPath {
 /// Stream ranges one node names: its resources bound how many.
 type Streams = ArrayVec<IommuStreams, HW_NODE_MAX_RESOURCES>;
 
+/// The doorbells one node's interrupt messages are written to.
+type Doorbells = ArrayVec<Range<u64>, HW_NODE_MAX_RESOURCES>;
+
 /// A unit, by its index in the facility, and a group on it.
 type GroupKey = (usize, u32);
 
@@ -333,6 +574,9 @@ struct Identity {
     requester: Streams,
     /// The further streams the fabric delivers its DMA as.
     aliases: Streams,
+    /// Where its interrupt messages are written, which its domain maps so
+    /// they arrive.
+    doorbells: Doorbells,
 }
 
 impl Identity {
@@ -368,8 +612,13 @@ pub struct Translation {
     /// Units discovered, whether or not they translate: one that does not
     /// strands its devices, which master no DMA.
     discovered: usize,
+    /// The discovered units that translate nothing, and why.
+    stranded: Vec<Stranded>,
     /// Every discovered unit's register window, whatever became of the unit.
     guarded: Vec<Range<u64>>,
+    /// What the platform's PCI segments decode, in whole pages, ascending and
+    /// apart: no domain hands out an IOVA there.
+    peers: Vec<Range<u64>>,
     tree: &'static dyn HwTreeSource,
     audit: &'static (dyn Sink + Sync),
     mastering: Option<Mastering>,
@@ -378,6 +627,9 @@ pub struct Translation {
     firmware: SpinLock<HashMap<(usize, u32), Domain<'static>, BuildFastHash>>,
     /// Every unit's remapping table is built.
     remap_prepared: AtomicBool,
+    /// Carves freed while their owners live, awaiting the invalidation that
+    /// confirms them gone.
+    batch: SpinLock<deferred::Batch>,
 }
 
 struct Owners {
@@ -506,7 +758,13 @@ struct Owner {
     /// Whether a carve of this owner was audited as unconfirmed: once per
     /// owner, so a driver retrying it cannot flood the log.
     unconfirmed: AtomicBool,
+    /// The last admission refused its group, audited once each for the same
+    /// reason.
+    refused: AtomicU64,
 }
+
+/// No admission's generation: they count up from the kernel's.
+const NONE_REFUSED: u64 = u64::MAX;
 
 impl Owner {
     fn master(&self) -> MasterOwner {
@@ -545,7 +803,7 @@ impl Translation {
     #[must_use]
     pub fn start(
         units: Vec<Unit>,
-        refused: &[(u32, Refusal)],
+        mut refused: Vec<Stranded>,
         guarded: Vec<Range<u64>>,
         tree: &'static dyn HwTreeSource,
         audit: &'static (dyn Sink + Sync),
@@ -554,13 +812,18 @@ impl Translation {
     ) -> Self {
         let strand =
             |node| mastering.map_or_else(Quiesced::default, |m| m.quiesce(node, &|_| false));
-        for &(node, refusal) in refused {
+        for &Stranded { node, refusal, .. } in &refused {
             report(node, UnitOutcome::Stranded(refusal, strand(node)));
         }
+        // Room for every unit that may not enable, so each is listed; one the
+        // heap could not make room for is still reported.
+        let _ = refused.try_reserve(units.len());
         let mut translation = Self {
             discovered: refused.len() + units.len(),
+            stranded: refused,
             units,
             guarded,
+            peers: Vec::new(),
             tree,
             audit,
             mastering,
@@ -572,12 +835,13 @@ impl Translation {
             }),
             firmware: SpinLock::new(HashMap::with_hasher(BuildFastHash::new())),
             remap_prepared: AtomicBool::new(false),
+            batch: SpinLock::new(deferred::Batch::new()),
         };
         // A unit that does not enable leaves the list in place, so the units
         // after it, whose firmware domains are not yet made, keep their index.
         let mut index = 0;
         while let Some(unit) = translation.units.get(index) {
-            let (node, enable) = (unit.node, unit.unit);
+            let (node, enable, family) = (unit.node, unit.unit, unit.family);
             for window in 0..unit.reserved.len() {
                 let stream = translation.units[index].reserved[window].stream();
                 translation.restore_firmware(index, stream);
@@ -590,7 +854,7 @@ impl Translation {
             let outcome = match enable.enable() {
                 Ok(()) => {
                     index += 1;
-                    UnitOutcome::Translating(quiesced, enable.profile().stage)
+                    UnitOutcome::Translating(quiesced, enable.profile().tables)
                 }
                 Err(err) => {
                     translation
@@ -598,6 +862,13 @@ impl Translation {
                         .lock()
                         .retain(|&(unit, _), _| unit != index);
                     translation.units.remove(index);
+                    if translation.stranded.try_reserve(1).is_ok() {
+                        translation.stranded.push(Stranded {
+                            node,
+                            family,
+                            refusal: Refusal::Unit(err),
+                        });
+                    }
                     // What firmware's windows kept mastering stops too: no
                     // unit keeps them.
                     let rest = strand(node);
@@ -615,6 +886,32 @@ impl Translation {
         translation
     }
 
+    /// The translation, handing no domain an IOVA in `windows`: what the
+    /// platform's PCI segments decode, where a device's DMA may reach a peer
+    /// before its unit sees it. Each is widened to whole pages.
+    #[must_use]
+    pub fn avoiding(mut self, mut windows: Vec<Range<u64>>) -> Self {
+        let last_page = !(IO_PAGE_SIZE - 1);
+        for window in &mut windows {
+            window.start &= last_page;
+            window.end = window
+                .end
+                .checked_next_multiple_of(IO_PAGE_SIZE)
+                .unwrap_or(last_page);
+        }
+        windows.retain(|window| window.start < window.end);
+        windows.sort_unstable_by_key(|window| window.start);
+        windows.dedup_by(|later, kept| {
+            let joins = later.start <= kept.end;
+            if joins {
+                kept.end = kept.end.max(later.end);
+            }
+            joins
+        });
+        self.peers = windows;
+        self
+    }
+
     /// [`Self::start`] over `units` with none refused, the outcomes kept.
     #[cfg(test)]
     pub(crate) fn started(
@@ -627,7 +924,7 @@ impl Translation {
         let mut outcomes = Vec::new();
         let translation = Self::start(
             units,
-            &[],
+            Vec::new(),
             guarded,
             tree,
             audit,
@@ -653,12 +950,20 @@ impl Translation {
             .iter()
             .filter_map(|r| r.iommu_streams().ok())
         {
-            if self.unit_index(streams.unit()).is_none() {
+            let Some(unit) = self.unit_index(streams.unit()) else {
                 return DmaPath::Stranded {
                     unit: Some(streams.unit()),
                 };
-            }
-            path = DmaPath::Translated;
+            };
+            let reach = self.units[unit].unit.profile().reach.output_limit();
+            path = match path {
+                DmaPath::Translated { output_limit } => DmaPath::Translated {
+                    output_limit: output_limit.min(reach),
+                },
+                _ => DmaPath::Translated {
+                    output_limit: reach,
+                },
+            };
         }
         path
     }
@@ -803,8 +1108,19 @@ impl Translation {
             group: group.id(),
             requester: ArrayVec::new(),
             aliases: ArrayVec::new(),
+            doorbells: ArrayVec::new(),
         };
         for resource in entry.resources() {
+            if resource.kind() == Some(HwResourceKind::MsiDoorbell) {
+                let window = resource
+                    .doorbell_window()
+                    .map_err(|_| DmaError::Translation)?;
+                identity
+                    .doorbells
+                    .try_push(window)
+                    .map_err(|_| DmaError::Translation)?;
+                continue;
+            }
             let (streams, into) = match resource.kind() {
                 Some(HwResourceKind::IommuStream) => {
                     (resource.iommu_streams(), &mut identity.requester)
@@ -849,6 +1165,26 @@ impl Translation {
         Ok(windows)
     }
 
+    /// What unit `unit` claims for any of `streams`: IOVAs a domain
+    /// translating them hands out none of.
+    fn claimed(&self, unit: usize, streams: &[u32]) -> Result<Vec<Range<u64>>, IommuError> {
+        let mut claimed = Vec::new();
+        let mut room = true;
+        for &stream in streams {
+            self.units[unit].unit.reserved_iova(stream, &mut |range| {
+                room &= claimed.try_reserve(1).is_ok();
+                if room {
+                    claimed.push(range);
+                }
+            })?;
+        }
+        if room {
+            Ok(claimed)
+        } else {
+            Err(IommuError::Exhausted)
+        }
+    }
+
     /// Give `stream` a firmware domain again if firmware keeps a window for
     /// it and it has none. A stream that cannot have one stays blocked. The
     /// unit's waits run outside the firmware lock; a stream two restorers
@@ -863,7 +1199,10 @@ impl Translation {
         if windows.is_empty() {
             return;
         }
-        let Ok(mut domain) = Domain::new(self.units[unit].unit, &windows) else {
+        let Ok(claimed) = self.claimed(unit, &[stream]) else {
+            return;
+        };
+        let Ok(mut domain) = Domain::new(self.units[unit].unit, &windows, &claimed) else {
             return;
         };
         if domain.attach(stream).is_ok() {
@@ -888,7 +1227,9 @@ impl Translation {
         }
         // Written once the holder's lock is let go, so a refusal never holds
         // up the live owner's maps and unmaps.
-        audit_group_refused(self.audit, node, generation, holder);
+        if holder.refused.swap(generation, Ordering::Relaxed) != generation {
+            audit_group_refused(self.audit, node, generation, holder);
+        }
         Err(DmaError::GroupBusy)
     }
 
@@ -935,6 +1276,7 @@ impl Translation {
                 epoch: self.mastering.map_or(0, |mastering| mastering.begin()),
                 state: SpinLock::new(OwnerState::Adopting),
                 unconfirmed: AtomicBool::new(false),
+                refused: AtomicU64::new(NONE_REFUSED),
             });
             let mut state = owner.state.lock();
             let published = {
@@ -951,7 +1293,11 @@ impl Translation {
             if !published {
                 continue;
             }
-            match self.adopt(owner.identity.unit, &owner.streams) {
+            match self.adopt(
+                owner.identity.unit,
+                &owner.streams,
+                owner.identity.doorbells.as_slice(),
+            ) {
                 Ok(domain) => {
                     self.owners.lock().attached(&owner);
                     *state = OwnerState::Live(domain);
@@ -978,22 +1324,68 @@ impl Translation {
     }
 
     /// A domain translating `streams` and holding the firmware windows they
-    /// keep, their firmware domains given up for it. Nothing of the carve that
-    /// asked is mapped yet, so a failure leaves no memory unconfirmed, and
-    /// every stream it leaves blocked gets its firmware domain back.
-    fn adopt(&self, unit: usize, streams: &[u32]) -> Result<Domain<'static>, DmaError> {
-        let adopted = self.windows(unit, streams).and_then(|windows| {
+    /// keep and `doorbells`, their firmware domains given up for it. Nothing
+    /// of the carve that asked is mapped yet, so a failure leaves no memory
+    /// unconfirmed, and every stream it leaves blocked gets its firmware
+    /// domain back.
+    fn adopt(
+        &self,
+        unit: usize,
+        streams: &[u32],
+        doorbells: &[Range<u64>],
+    ) -> Result<Domain<'static>, DmaError> {
+        let adopted = self.windows(unit, streams).and_then(|mut windows| {
+            let mut claimed = self.claimed(unit, streams)?;
+            claimed
+                .try_reserve(self.peers.len())
+                .map_err(|_| IommuError::Exhausted)?;
+            claimed.extend_from_slice(&self.peers);
+            let intercepted = self.units[unit].unit.message_files().is_some();
+            if intercepted {
+                // The unit takes a write to the doorbell as a message, so the
+                // domain only keeps the page clear of carves.
+                claimed
+                    .try_reserve(doorbells.len())
+                    .map_err(|_| IommuError::Exhausted)?;
+                claimed.extend_from_slice(doorbells);
+            } else {
+                // A doorbell takes writes alone, read access coming with it
+                // only where the unit's tables cannot leave it out.
+                let access = if self.units[unit].unit.profile().write_only {
+                    Access::WRITE
+                } else {
+                    Access::READ_WRITE
+                };
+                windows
+                    .try_reserve(doorbells.len())
+                    .map_err(|_| IommuError::Exhausted)?;
+                windows.extend(doorbells.iter().map(|range| IdentityWindow {
+                    range: range.clone(),
+                    access,
+                }));
+            }
             for &stream in streams {
                 let firmware = self.firmware.lock().remove(&(unit, stream));
                 if let Some(domain) = firmware {
                     domain.destroy()?;
                 }
             }
-            let mut domain = Domain::new(self.units[unit].unit, &windows)?;
+            let mut domain = Domain::new(self.units[unit].unit, &windows, &claimed)?;
+            let mut attached = false;
             for &stream in streams {
-                domain.attach(stream)?;
+                match domain.attach(stream) {
+                    Ok(()) => attached = true,
+                    Err(IommuError::NoEndpoint) => {}
+                    Err(err) => return Err(err),
+                }
             }
-            Ok(domain)
+            // A node none of whose streams the unit has is not behind it, and
+            // its carves' addresses would be taken as physical.
+            if attached {
+                Ok(domain)
+            } else {
+                Err(IommuError::NoEndpoint)
+            }
         });
         adopted.map_err(|err| {
             for &stream in streams {
@@ -1025,6 +1417,65 @@ pub(crate) fn audit_unconfirmed(audit: &(dyn Sink + Sync), node: u32, generation
             },
         ],
     );
+}
+
+/// The DMA translation units a malformed firmware table described: the
+/// family it describes, and whether the PCI functions it would have described
+/// were withheld or, by the administrator's choice, published untranslated.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MalformedUnits {
+    /// The family the table describes units of.
+    pub family: DmaUnitFamily,
+    /// The functions were published untranslated, their DMA unconfined.
+    pub unconfined: bool,
+}
+
+impl MalformedUnits {
+    /// The units' one listing: under the tree's root, which is all a
+    /// malformed table leaves to name them by.
+    #[must_use]
+    pub const fn record(self) -> DmaUnitRecord {
+        DmaUnitRecord {
+            node: tairix_abi::hwtree::HW_NODE_ROOT_ID,
+            family: self.family,
+            state: if self.unconfined {
+                DmaUnitState::Unconfined
+            } else {
+                DmaUnitState::Withheld
+            },
+            faults: DmaFaultSignal::None,
+            tables: DmaTables::None,
+            owners: 0,
+            firmware_streams: 0,
+            faults_recorded: 0,
+            faults_dropped: 0,
+            streams_silenced: 0,
+        }
+    }
+
+    /// Record what the table came to on `audit`.
+    pub fn audit(self, audit: &(dyn Sink + Sync)) {
+        let record = self.record();
+        emit(
+            audit,
+            if self.unconfined {
+                Level::Error
+            } else {
+                Level::Warn
+            },
+            AuditEvent::DmaUnitsMalformed,
+            &[
+                Field {
+                    key: "family",
+                    value: FieldValue::Str(record.family.name()),
+                },
+                Field {
+                    key: "outcome",
+                    value: FieldValue::Str(record.state.name()),
+                },
+            ],
+        );
+    }
 }
 
 /// Record that `node`'s owner admitted as `generation` was refused its first
@@ -1087,20 +1538,244 @@ fn dma_error(err: IommuError) -> DmaError {
     }
 }
 
+impl Translation {
+    /// Up to `max` packed [`DmaUnitRecord`]s from the `first`th: the units
+    /// translating, in discovery order, then those stranded.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the page cannot be built.
+    pub fn unit_records(&self, first: u64, max: usize) -> Result<Vec<u8>, Errno> {
+        let per_unit = || {
+            let mut counts = Vec::new();
+            counts
+                .try_reserve_exact(self.units.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            counts.resize(self.units.len(), 0_usize);
+            Ok::<_, Errno>(counts)
+        };
+        let mut live = per_unit()?;
+        let mut kept = per_unit()?;
+        // Each owner's state is read with no other lock held, as an adoption
+        // takes the firmware domains under it.
+        for owner in self.owner_snapshot()? {
+            if matches!(*owner.state.lock(), OwnerState::Live(_)) {
+                if let Some(count) = live.get_mut(owner.identity.unit) {
+                    *count += 1;
+                }
+            }
+        }
+        for &(unit, _) in self.firmware.lock().keys() {
+            if let Some(count) = kept.get_mut(unit) {
+                *count += 1;
+            }
+        }
+        let translating =
+            self.units
+                .iter()
+                .zip(live.iter().zip(&kept))
+                .map(|(unit, (&owners, &firmware))| Listed::Translating {
+                    unit,
+                    owners,
+                    firmware,
+                });
+        let listed = translating.chain(self.stranded.iter().map(Listed::Stranded));
+        pack(listed, first, max, |entry| {
+            match entry {
+                Listed::Translating {
+                    unit,
+                    owners,
+                    firmware,
+                } => DmaUnitRecord {
+                    node: unit.node,
+                    family: unit.family,
+                    state: DmaUnitState::Translating,
+                    faults: match unit.faults {
+                        _ if !unit.counts.heard() => DmaFaultSignal::Unheard,
+                        FaultSignal::Wired(_) => DmaFaultSignal::Wired,
+                        FaultSignal::Message => DmaFaultSignal::Message,
+                        FaultSignal::Unheard => DmaFaultSignal::Unheard,
+                    },
+                    tables: match unit.unit.profile().tables {
+                        Tables::Walked(Stage::First) => DmaTables::FirstStage,
+                        Tables::Walked(Stage::Second) => DmaTables::SecondStage,
+                        Tables::Kept => DmaTables::Kept,
+                    },
+                    owners: u32::try_from(owners).unwrap_or(u32::MAX),
+                    firmware_streams: u32::try_from(firmware).unwrap_or(u32::MAX),
+                    faults_recorded: unit.counts.recorded.load(Ordering::Relaxed),
+                    faults_dropped: unit.counts.dropped.load(Ordering::Relaxed),
+                    streams_silenced: unit.counts.silenced.load(Ordering::Relaxed),
+                },
+                Listed::Stranded(stranded) => DmaUnitRecord {
+                    node: stranded.node,
+                    family: stranded.family,
+                    state: match stranded.refusal {
+                        Refusal::Unmatched => DmaUnitState::Unmatched,
+                        Refusal::NoRegisters => DmaUnitState::NoRegisters,
+                        Refusal::Unsnooped => DmaUnitState::Unsnooped,
+                        Refusal::Unit(_) => DmaUnitState::Failed,
+                    },
+                    faults: DmaFaultSignal::None,
+                    tables: DmaTables::None,
+                    owners: 0,
+                    firmware_streams: 0,
+                    faults_recorded: 0,
+                    faults_dropped: 0,
+                    streams_silenced: 0,
+                },
+            }
+            .to_le_bytes()
+        })
+    }
+
+    /// Up to `max` packed [`DmaGroupRecord`]s from the `first`th, ascending
+    /// by unit node and group: each group an owner has taken, and its holder.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the page cannot be built.
+    pub fn group_records(&self, first: u64, max: usize) -> Result<Vec<u8>, Errno> {
+        let mut groups = Vec::new();
+        {
+            let owners = self.owners.lock();
+            groups
+                .try_reserve_exact(owners.groups.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            groups.extend(owners.groups.iter().filter_map(|(&(unit, group), owner)| {
+                Some((self.units.get(unit)?.node, group, Arc::clone(owner)))
+            }));
+        }
+        groups.sort_unstable_by_key(|&(unit, group, _)| (unit, group));
+        pack(groups.iter(), first, max, |(unit, group, owner)| {
+            DmaGroupRecord {
+                unit: *unit,
+                group: *group,
+                holder: owner.node,
+                state: owner.state.lock().standing(),
+                generation: owner.generation,
+            }
+            .to_le_bytes()
+        })
+    }
+
+    /// Up to `max` packed [`DmaNodeRecord`]s from the `first`th, ascending
+    /// by node: each node a unit translates for an owner.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the page cannot be built.
+    pub fn node_records(&self, first: u64, max: usize) -> Result<Vec<u8>, Errno> {
+        let mut owners = self.owner_snapshot()?;
+        owners.sort_unstable_by_key(|owner| owner.node);
+        let translated = owners
+            .iter()
+            .filter_map(|owner| Some((owner, self.units.get(owner.identity.unit)?.node)));
+        pack(translated, first, max, |(owner, unit)| {
+            let state = owner.state.lock();
+            let (mappings, mapped_bytes) = match &*state {
+                OwnerState::Live(domain) => (
+                    u32::try_from(domain.mapped()).unwrap_or(u32::MAX),
+                    domain.mapped_bytes(),
+                ),
+                _ => (0, 0),
+            };
+            DmaNodeRecord {
+                node: owner.node,
+                unit,
+                group: owner.identity.group,
+                state: state.standing(),
+                streams: u16::try_from(owner.streams.len()).unwrap_or(u16::MAX),
+                generation: owner.generation,
+                mappings,
+                mapped_bytes,
+            }
+            .to_le_bytes()
+        })
+    }
+
+    /// Every node's latest owner, taken out from under the owners' lock so
+    /// each owner's own state is read without it.
+    fn owner_snapshot(&self) -> Result<Vec<Arc<Owner>>, Errno> {
+        let owners = self.owners.lock();
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(owners.nodes.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        snapshot.extend(owners.nodes.values().cloned());
+        Ok(snapshot)
+    }
+}
+
+impl OwnerState {
+    /// Where the owner stands, as an administrator reads it.
+    const fn standing(&self) -> DmaOwnerState {
+        match self {
+            Self::Adopting => DmaOwnerState::Adopting,
+            Self::Live(_) => DmaOwnerState::Live,
+            Self::Unadopted(_) => DmaOwnerState::Unadopted,
+            Self::Revoked { confirmed: true } => DmaOwnerState::Ended,
+            Self::Revoked { confirmed: false } => DmaOwnerState::Unconfirmed,
+        }
+    }
+}
+
+/// A unit as the administrator's listing reads it.
+enum Listed<'t> {
+    /// Translating, with how many live owners and firmware streams it has.
+    Translating {
+        unit: &'t Unit,
+        owners: usize,
+        firmware: usize,
+    },
+    Stranded(&'t Stranded),
+}
+
+/// Up to `max` of `items` from the `first`th, packed end to end, each
+/// encoded only once it is in the page.
+fn pack<T, const N: usize>(
+    items: impl Iterator<Item = T>,
+    first: u64,
+    max: usize,
+    mut encode: impl FnMut(T) -> [u8; N],
+) -> Result<Vec<u8>, Errno> {
+    let skip = usize::try_from(first).unwrap_or(usize::MAX);
+    let page = items.skip(skip).take(max);
+    let mut out = Vec::new();
+    let held = page.size_hint().1.unwrap_or(max);
+    out.try_reserve_exact(held.saturating_mul(N))
+        .map_err(|_| Errno::OutOfMemory)?;
+    for item in page {
+        out.try_reserve(N).map_err(|_| Errno::OutOfMemory)?;
+        out.extend_from_slice(&encode(item));
+    }
+    Ok(out)
+}
+
+// A frame block's order is the order of the I/O pages it maps as.
+const _: () = assert!(tairix_kernel_mem::PAGE_SIZE as u64 == tairix_kernel_iommu_api::IO_PAGE_SIZE);
+
 impl DeviceTranslation for Translation {
     fn map(
         &self,
         node: u32,
         generation: u64,
-        block: DmaBlock,
+        blocks: &[FrameBlock],
         limit: u64,
     ) -> Result<u64, DmaError> {
+        let mut runs = SmallVec::<FrameRun, 1>::try_with_capacity(blocks.len())
+            .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))?;
+        for block in blocks {
+            // Room for every block was had above.
+            let _ = runs.try_push(FrameRun {
+                phys: block.frame.start().as_u64(),
+                order: block.order,
+            });
+        }
         let owner = self.owner(node, generation)?;
         let mut state = owner.state.lock();
         let result = match &mut *state {
-            OwnerState::Live(domain) => domain
-                .map(block.frame.start().as_u64(), block.order, limit)
-                .map_err(dma_error),
+            OwnerState::Live(domain) => domain.map(&runs, limit).map_err(dma_error),
             OwnerState::Unadopted(err) => Err(*err),
             OwnerState::Adopting | OwnerState::Revoked { .. } => Err(DmaError::DeviceGone),
         };
@@ -1108,13 +1783,7 @@ impl DeviceTranslation for Translation {
         self.note(node, &owner, result)
     }
 
-    fn unmap(
-        &self,
-        node: u32,
-        generation: u64,
-        iova: u64,
-        _block: DmaBlock,
-    ) -> Result<(), DmaError> {
+    fn unmap(&self, node: u32, generation: u64, iova: u64) -> Result<(), DmaError> {
         let owner = self.owners.lock().nodes.get(&node).cloned();
         // Any other generation was retired and confirmed: one that was not
         // would still be the node's owner.
@@ -1137,6 +1806,21 @@ impl DeviceTranslation for Translation {
         self.note(node, &owner, result)
     }
 
+    fn defer_free(
+        &self,
+        node: u32,
+        generation: u64,
+        iova: u64,
+        blocks: &mut Chunks,
+    ) -> Result<bool, DmaError> {
+        let owner = self.owners.lock().nodes.get(&node).cloned();
+        // Another generation's carves were confirmed gone with its end.
+        match owner.filter(|owner| owner.generation == generation) {
+            Some(owner) => self.defer(node, &owner, iova, blocks),
+            None => Ok(false),
+        }
+    }
+
     fn end(&self, node: u32, generation: u64) {
         self.revoke(node, generation);
     }
@@ -1155,7 +1839,7 @@ impl DmaCustody for Translation {
 
     /// Keeps the frames for good: nothing after an unconfirmed end can prove
     /// the device lost them.
-    fn hold(&self, _node: u32, _generation: u64, _block: DmaBlock) {}
+    fn hold(&self, _node: u32, _generation: u64, _block: FrameBlock) {}
 }
 
 #[cfg(test)]

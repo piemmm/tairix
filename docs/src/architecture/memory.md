@@ -55,7 +55,7 @@ malformed boot maps.
 **A carve for a device that reaches only part of RAM searches below its
 ceiling.** The lists are LIFO and address-blind, so their front block says
 nothing about where a free block below a device's addressing limit is —
-seeded in ascending order, it is the *top* of RAM. `alloc_order_under` walks
+seeded in ascending order, it is the *top* of RAM. `alloc_order_under_user` walks
 the bitmap's maximal free runs downward from the ceiling a word at a time and
 takes the highest aligned block below it, so a device reaching less keeps the
 memory beneath, and the carve fails only when no such block is free
@@ -626,15 +626,16 @@ task's capability set. The capability gate is the companion module
 before dispatching to the pool, and emit
 [`AuditEvent::DmaAllocated`] / [`AuditEvent::DmaAllocDenied`] records on
 every decision (IDs 1030 / 1031, see [Security audit catalogue](./security.md)).
-A future syscall wrapper maps gate failures to `Errno` via
-`DmaGateError::as_errno`:
+An in-kernel driver host reports a refusal to its driver through
+`DmaGateError::as_driver_error`:
 
-| Gate error | `Errno` |
+| Gate error | `DriverError` |
 | --- | --- |
 | `CapabilityMissing` | `PermissionDenied` |
-| `Pool(ZeroSize)` | `BufferTooSmall` |
-| `Pool(Alloc)` / `Pool(SizeUnsupported)` | `LengthOutOfRange` |
-| Other internal pool failures | `OutOfRange` |
+| `Pool(Alloc(OutOfMemory))` | `OutOfMemory` |
+| `Pool(ZeroSize)` / `Pool(Alloc(ZeroSize))` | `BufferTooSmall` |
+| `Pool(SizeUnsupported)` / `Pool(Alloc(SizeUnsupported))` | `LengthOutOfRange` |
+| Any other pool failure | `OutOfRange` |
 
 [`AuditEvent::DmaAllocated`]: ../../tairix_kernel_sec/enum.AuditEvent.html#variant.DmaAllocated
 [`AuditEvent::DmaAllocDenied`]: ../../tairix_kernel_sec/enum.AuditEvent.html#variant.DmaAllocDenied
@@ -650,17 +651,32 @@ over a space it owns outright, exactly as `MmioMap` wraps `MmioWindowMap`
 per-task live address space (`LiveSpace`, §7e, the `dma_alloc` syscall
 path) drives the *same* `DmaWindowMap` against the
 space it owns and lends, adding an `addr_limit` bound (the granted device
-DMA constraint, §18.3): the block is carved below it
-(`FrameAllocator::alloc_order_under`, §1), and a limit no free block
-satisfies refuses the carve with the allocator's own error.
+DMA constraint, §18.3, narrowed to the reach the driver states for its
+device): the block is carved below it
+(`FrameAllocator::alloc_order_under_user`, §1), and a limit no free block
+satisfies refuses the carve with the allocator's own error. A device a
+translation unit confines is handed its pages instead, wherever frames are
+free: `FrameAllocator::alloc_chunks_user` draws them as the largest free
+blocks first, no block larger than the one before, and the unit maps them end
+to end below the limit in the device's domain
+([DMA translation](../security/iommu.md)), so a translated carve is bounded
+by RAM and the window rather than by `MAX_ORDER`. Both draws are a process's,
+so neither may take the kernel reserve or a committed page's frame: the
+contiguous one is refused under the allocator's lock, and the chunked one is
+admitted as a commitment that each block then draws down as it is taken, so
+a concurrent commit counts the request once.
 
 **A region several processes map can be DMA memory too.** `shm_create_dma`
 carves one contiguous, power-of-two block below a `Dma` grant's limit through
-the same `alloc_order_under`, zeroes it and cleans it to memory, and records
+the same `alloc_order_under_user` — or, translated, the region's pages through
+the same `alloc_chunks_user`, mapped end to end — once the creator's window is
+seen to have room for it, zeroes it and cleans it to memory, and records
 it in the shared-region registry (`kernel/core::sharedreg`) like any other
 region — except that every mapping of it, the creator's and each grantee's,
-is `DMA_COHERENT` (`SharedMemory::DmaCoherent`), so no mapping can hold a
-line the device never sees. The region reserves room in the creator's node
+is as its device snoops (`SharedMemory::dma`): ordinary memory for one that
+does (`SharedMemory::DmaSnooped`), `DMA_COHERENT` (`SharedMemory::DmaCoherent`)
+for one that does not, so no mapping can hold a line the device never sees,
+and either way marked `MapFlags::DMA`. The region reserves room in the creator's node
 quarantine at creation, and returns it when freed. The creator's own unmap is its word
 that its device is done with the region, exactly as `dma_free` is for a
 carve, so a driver keeps its mapping while its device may master the
@@ -1900,8 +1916,10 @@ nor metadata format with it.
   interrupt stacks, page tables, DMA buffers, device memory, driver
   rings, crypto-key storage, credential metadata, sensitive or
   latency-critical pages, and pages of *unknown* role are refused with
-  a typed reason. A mapping-flag defence (`NO_CACHE`/`DMA_COHERENT`)
-  backs the classifier in depth.
+  a typed reason. A mapping-flag defence (`NO_CACHE`, `DMA_COHERENT`, and
+  the `DMA` mark every DMA buffer's mapping carries in a page-table bit the
+  port leaves to software) backs the classifier in depth for device memory
+  and every DMA buffer, a snooping device's ordinary cacheable one included.
 - **Process pinning is the "pinned" attribute's source**
   (`mem_pin`/`mem_unpin`, `plans/STRESSTEST.md` ST2). A process holding
   `CAP_MEM_PIN` may mark its entire anonymous memory — current and

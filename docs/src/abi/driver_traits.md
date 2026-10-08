@@ -53,7 +53,6 @@ driver's `register` entry point.
 |-------------------------------------|---------------------------------------|
 | `has_capability(cap)`               | None (pure query of load-time grant). |
 | `kind()`                            | None.                                 |
-| `virtio_host()`                     | None (host enforces `CAP_MEM_DMA` per alloc). |
 | `mmio_mapper()`                     | None (mapper enforces `CAP_MMIO_MAP` per map). |
 | `dma_host()`                        | None (host enforces `CAP_MEM_DMA` per alloc). |
 | `mailbox()`                         | None (host enforces the doorbell/buffer gate). |
@@ -88,9 +87,9 @@ device type that owns DMA memory, when it is dropped — whatever path drops
 it, a serve loop's early return included — either stops or resets its device,
 or, where nothing short of a reset could prove the memory released (an EMMC2
 controller that never confirmed its line reset, a firmware mailbox still owed
-a reply), withholds it: `DmaSlab::withhold` makes the slab's drop free
-nothing, so the region stays mapped until the driver exits and the kernel
-quarantines it. A request a device leaves unanswered is failed
+a reply), withholds it: `DmaSlab::withhold` makes the slab's drop tell its
+pool `SlabEnd::Withheld`, and the pool frees nothing, so the region stays
+mapped until the driver exits and the kernel quarantines it. A request a device leaves unanswered is failed
 to its caller, but the buffers it named stay the device's until the device
 hands them back; a request queue carrying one request at a time
 (`tairix_virtio::RequestQueue`) publishes nothing over them until then.
@@ -129,10 +128,15 @@ with a node id, and an id names one device for the whole boot (`AGENTS.md` §4
 publish surfaces as `DriverError::PermissionDenied`; the in-kernel floor host
 still attaches the node to the boot tree directly.
 
-These four facility accessors are `abi-v1` *internal* additions: like
-`virtio_host()` before them, each carries a default body so every
-existing host impl stays source-compatible, and the public `register`
-entry point is unchanged. They are the host surface the **autoloaded
+Discovery alone may state that the kernel drives a device itself
+(`HwProperty::KernelDriven`): a generic ECAM PCI host, whose functions'
+configuration space the kernel owns, or an interrupt controller or interrupt
+translation service, whose registers route any device's interrupts anywhere.
+Such a node, like a translation unit, is never a load target, its resources
+are never a grant, and a published node stating it is refused.
+
+These four facility accessors each carry a default body reporting the
+facility absent, and the public `register` entry point is unchanged. They are the host surface the **autoloaded
 user-space bus-driver chain** consumes (see below).
 
 #### The recursive user-space bus-driver chain
@@ -187,7 +191,7 @@ The board-neutral USB half is the landed
 `tairix_drv_bus_usb::wiring::bring_up_boot_input`: it maps the controller
 BAR (`mmio_mapper()`), carves the device-shared DMA region (`dma_host()`
 — a USB host controller is not virtio, so it uses the bus-neutral DMA
-seam, not `virtio_host()`), brings the controller up, enumerates the boot
+seam, not a `VirtioHost`), brings the controller up, enumerates the boot
 device, augments the enumerated HID `HwNode` with its xHCI-BAR
 (`HwResource::mmio`) and DMA (`HwResource::dma`) grant *requests* — exactly
 what the matched user-space host-controller driver receives, no more
@@ -196,20 +200,9 @@ controller, so its host tests prove the composition and its fail-closed
 paths up to the controller hand-off; the live enumerate→emit path is the
 on-metal acceptance item.
 
-`virtio_host(&self) -> Option<&dyn VirtioHost>` is an `abi-v1`
-*internal* extension added at Stage 4.D Item 0-tail. A virtio-class
-driver consults it from inside `register()` to obtain the
-per-driver host minted by `HostConfig::virtio_host_factory` (see
-[Userland driver host](../drivers/host.md#virtio-host-factory)); the
-default impl returns `None`, which keeps every existing
-non-virtio host source-compatible. The public `register(host:
-&dyn DriverHost) -> Result<DriverHandle, DriverError>` entry point
-per `AGENTS.md` §8 is unchanged: the accessor takes `&self` to
-compose with the immutable driver-host loan, and `VirtioHost`'s
-own methods use interior mutability for state. The owned
-`DmaSlab`, `PoolId`, and `SlabFreeFn` types backing the trait now
-live in `tairix_abi::driver::dma`; `drivers/bus/virtio`
-re-exports them so existing import sites remain unchanged.
+The owned `DmaSlab`, `PoolId`, `SlabEnd`, and `SlabFreeFn` types backing the DMA
+seams live in `tairix_abi::driver::dma`; `drivers/bus/virtio` re-exports
+them.
 
 ### DriverHandle
 
@@ -236,7 +229,11 @@ infer which one was meant from the call site it came through. On the
 filesystem surface that means a taken name is `AlreadyExists`, a populated
 directory is `DirectoryNotEmpty`, and a move that would make a directory its
 own descendant is `DirectoryCycle`; `Busy` is reserved for the retryable
-transient it documents. The generated C view names every value
+transient it documents. Memory the host or the driver cannot have is
+`OutOfMemory`, never `LengthOutOfRange` or `DeviceFault`, so a machine short
+of memory never reads as a broken device: every host's DMA allocation
+returns it on exhaustion, and `tairix_virtio` maps a host's refusal through
+`VirtioError::host_refused`. The generated C view names every value
 (`TAIRIX_DRIVER_ERROR_*`), and a table test pins the numbering dense so a new
 variant cannot be dropped from it.
 
@@ -610,8 +607,9 @@ Unlike the PCI transport's four capability-selected windows, the MMIO
 transport consumes exactly one window over the register block at the
 slot's `BusDevice::address`. The kernel's `provision_virtio_mmio` walk
 (see [Bus drivers](../drivers/bus.md#ring-0-virtio-mmio-walk))
-enumerates through the `Bus` supertrait, picks the slot whose
-`DeviceID` matches, maps its window through the `CAP_MMIO_MAP`-gated
+enumerates through the `Bus` supertrait, takes the slot at the position it
+is given, which must hold the `DeviceID` asked for (the bound node's own,
+`hwdiscovery::virtio_mmio_block_slot`), maps its window through the `CAP_MMIO_MAP`-gated
 `MmioMapper`, and hands the window to a caller-supplied builder — so it
 names neither the concrete `Mmio` type nor the `MmioTransport` it
 produces.

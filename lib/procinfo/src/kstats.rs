@@ -28,15 +28,14 @@
 
 use tairix_abi::net_ipc::{NetBondMemberRecord, NetInterfaceFactsRecord, NetStackDefenceCounters};
 use tairix_abi::sysinfo::{
-    CacheLedgerListRequest, CacheLedgerRecord, CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord,
-    DesktopFrameStatsRequest, IrqListRequest, IrqRecord, MemoryPressureBand, MemoryPressureStats,
-    MemoryTotal, NetInterfaceListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
-    SysinfoQueryId, RECLAIM_CLASS_COUNT,
+    CacheLedgerRecord, CpuLoadRecord, DesktopFrameRecord, IrqRecord, MemoryPressureBand,
+    MemoryPressureStats, MemoryTotal, RamzipStats, ReclaimClassRecord, SysinfoQueryId,
+    RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::Errno;
 use tairix_sysconfig::SystemConfig;
 
-use crate::list::{walk_pages, ListError, WalkStep};
+use crate::list::{walk_records, ListError, WalkStep};
 use crate::request::{call, CallError};
 use crate::transport::Transport;
 
@@ -223,27 +222,15 @@ pub fn net_stack_defence(transport: &dyn Transport) -> Result<NetStackDefenceCou
 ///   walk stops at that record.
 pub fn for_each_reclaim_class(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&ReclaimClassRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&ReclaimClassRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::RECLAIM_STATS,
         ReclaimClassRecord::WIRE_LEN,
         RECLAIM_PAGE,
-        |offset, limit| {
-            ReclaimListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = ReclaimClassRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        ReclaimClassRecord::from_bytes,
+        sink,
     )
 }
 
@@ -262,27 +249,15 @@ pub fn for_each_reclaim_class(
 /// As [`for_each_reclaim_class`].
 pub fn for_each_cache_ledger(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&CacheLedgerRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&CacheLedgerRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::CACHE_LEDGERS,
         CacheLedgerRecord::WIRE_LEN,
         CACHE_LEDGER_PAGE,
-        |offset, limit| {
-            CacheLedgerListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = CacheLedgerRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        CacheLedgerRecord::from_bytes,
+        sink,
     )
 }
 
@@ -300,27 +275,15 @@ pub fn for_each_cache_ledger(
 /// As [`for_each_reclaim_class`].
 pub fn for_each_cpu_load(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&CpuLoadRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&CpuLoadRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::CPU_LOAD,
         CpuLoadRecord::WIRE_LEN,
         CPU_LOAD_PAGE,
-        |offset, limit| {
-            CpuLoadRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = CpuLoadRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        CpuLoadRecord::from_bytes,
+        sink,
     )
 }
 
@@ -359,27 +322,15 @@ pub const NET_INTERFACE_PAGE: u16 = 16;
 /// As [`for_each_cpu_load`].
 pub fn for_each_irq(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&IrqRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&IrqRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::IRQ_LIST,
         IrqRecord::WIRE_LEN,
         IRQ_PAGE,
-        |offset, limit| {
-            IrqListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = IrqRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        IrqRecord::from_bytes,
+        sink,
     )
 }
 
@@ -412,27 +363,15 @@ pub const DESKTOP_FRAME_PAGE: u16 = 16;
 /// As [`for_each_cpu_load`].
 pub fn for_each_desktop_frame_report(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&DesktopFrameRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&DesktopFrameRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::DESKTOP_FRAME_STATS,
         DesktopFrameRecord::WIRE_LEN,
         DESKTOP_FRAME_PAGE,
-        |offset, limit| {
-            DesktopFrameStatsRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = DesktopFrameRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        DesktopFrameRecord::from_bytes,
+        sink,
     )
 }
 
@@ -464,19 +403,15 @@ pub fn for_each_desktop_frame_report(
 /// * [`ListError::Sink`] — `sink` returned an error; the walk stops there.
 pub fn for_each_net_interface(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&NetInterfaceFactsRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&NetInterfaceFactsRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::NET_INTERFACE_FACTS,
         NetInterfaceFactsRecord::WIRE_LEN,
         NET_INTERFACE_PAGE,
-        net_list_request,
-        |chunk| {
-            let record = NetInterfaceFactsRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        NetInterfaceFactsRecord::from_bytes,
+        sink,
     )
 }
 
@@ -499,32 +434,16 @@ pub fn for_each_net_interface(
 /// As [`for_each_net_interface`].
 pub fn for_each_net_bond_member(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&NetBondMemberRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&NetBondMemberRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::NET_BOND_MEMBERS,
         NetBondMemberRecord::WIRE_LEN,
         NET_INTERFACE_PAGE,
-        net_list_request,
-        |chunk| {
-            let record = NetBondMemberRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        NetBondMemberRecord::from_bytes,
+        sink,
     )
-}
-
-/// Encode one page request of the interface-table query family, whose
-/// `offset`/`limit` envelope is shared by every `NET_*` list query.
-fn net_list_request(offset: u32, limit: u16) -> alloc::vec::Vec<u8> {
-    NetInterfaceListRequest {
-        offset,
-        limit,
-        flags: 0,
-    }
-    .to_le_bytes()
-    .to_vec()
 }
 
 #[cfg(test)]
@@ -540,11 +459,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
-        CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord, DesktopFrameStatsRequest,
-        DesktopFrameTotals, IrqListRequest, IrqRecord, MemoryPressureStats, MemoryTotal,
-        RamzipStats, ReclaimClassRecord, ReclaimListRequest, SysinfoQueryId, SysinfoRequestHeader,
-        RECLAIM_CLASS_COUNT,
+        CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind, CpuLoadRecord, DesktopFrameRecord,
+        DesktopFrameTotals, IrqRecord, MemoryPressureStats, MemoryTotal, PageRequest, RamzipStats,
+        ReclaimClassRecord, SysinfoQueryId, SysinfoRequestHeader, RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::Errno;
 
@@ -688,31 +605,31 @@ mod tests {
                 SysinfoQueryId::RAMZIP_STATS => Ok(self.ramzip.to_le_bytes().to_vec()),
                 SysinfoQueryId::SYSTEM_CONFIG => Ok(self.system_config.clone()),
                 SysinfoQueryId::RECLAIM_STATS => {
-                    let req = ReclaimListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     page(&self.reclaim, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     })
                 }
                 SysinfoQueryId::CPU_LOAD => {
-                    let req = CpuLoadRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     page(&self.loads, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     })
                 }
                 SysinfoQueryId::IRQ_LIST => {
-                    let req = IrqListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     page(&self.irqs, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     })
                 }
                 SysinfoQueryId::CACHE_LEDGERS => {
-                    let req = CacheLedgerListRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     page(&self.caches, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     })
                 }
                 SysinfoQueryId::DESKTOP_FRAME_STATS => {
-                    let req = DesktopFrameStatsRequest::from_bytes(payload)?;
+                    let req = PageRequest::from_bytes(payload)?;
                     page(&self.frames, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
                     })

@@ -39,7 +39,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define TAIRIX_SYSINFO_QUERY_NAME_MAX 20u
 #define TAIRIX_SYSINFO_QUERY_RECORD_LEN 26u
-#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1144u
+#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1222u
 #define TAIRIX_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -87,6 +87,9 @@
 #define TAIRIX_SYSINFO_QUERY_SYSTEM_CONFIG ((uint16_t)41u)
 #define TAIRIX_SYSINFO_QUERY_GROUP_DIRECTORY ((uint16_t)42u)
 #define TAIRIX_SYSINFO_QUERY_SELF_ACCOUNT ((uint16_t)43u)
+#define TAIRIX_SYSINFO_QUERY_DMA_UNITS ((uint16_t)44u)
+#define TAIRIX_SYSINFO_QUERY_DMA_GROUPS ((uint16_t)45u)
+#define TAIRIX_SYSINFO_QUERY_DMA_NODES ((uint16_t)46u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define TAIRIX_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -131,23 +134,54 @@
 #define TAIRIX_MAX_PATH_LEN 128u
 #define TAIRIX_MAX_SUPPLEMENTARY_GIDS 16u
 #define TAIRIX_MAX_PASSWORD_LEN 256u
+/* What a DMA translation record says of a unit and its owners (uint8_t). */
+#define TAIRIX_DMA_UNIT_FAMILY_UNMATCHED ((uint8_t)0u)
+#define TAIRIX_DMA_UNIT_FAMILY_VTD ((uint8_t)1u)
+#define TAIRIX_DMA_UNIT_FAMILY_AMDVI ((uint8_t)2u)
+#define TAIRIX_DMA_UNIT_FAMILY_SMMUV3 ((uint8_t)3u)
+#define TAIRIX_DMA_UNIT_FAMILY_RISCV ((uint8_t)4u)
+#define TAIRIX_DMA_UNIT_FAMILY_VIRTIO_PCI ((uint8_t)5u)
+#define TAIRIX_DMA_UNIT_FAMILY_VIRTIO_MMIO ((uint8_t)6u)
+#define TAIRIX_DMA_UNIT_STATE_TRANSLATING ((uint8_t)1u)
+#define TAIRIX_DMA_UNIT_STATE_UNMATCHED ((uint8_t)2u)
+#define TAIRIX_DMA_UNIT_STATE_NO_REGISTERS ((uint8_t)3u)
+#define TAIRIX_DMA_UNIT_STATE_FAILED ((uint8_t)4u)
+#define TAIRIX_DMA_UNIT_STATE_WITHHELD ((uint8_t)5u)
+#define TAIRIX_DMA_UNIT_STATE_UNCONFINED ((uint8_t)6u)
+#define TAIRIX_DMA_UNIT_STATE_UNSNOOPED ((uint8_t)7u)
+#define TAIRIX_DMA_FAULT_SIGNAL_NONE ((uint8_t)0u)
+#define TAIRIX_DMA_FAULT_SIGNAL_WIRED ((uint8_t)1u)
+#define TAIRIX_DMA_FAULT_SIGNAL_MESSAGE ((uint8_t)2u)
+#define TAIRIX_DMA_FAULT_SIGNAL_UNHEARD ((uint8_t)3u)
+#define TAIRIX_DMA_TABLES_NONE ((uint8_t)0u)
+#define TAIRIX_DMA_TABLES_FIRST_STAGE ((uint8_t)1u)
+#define TAIRIX_DMA_TABLES_SECOND_STAGE ((uint8_t)2u)
+#define TAIRIX_DMA_TABLES_KEPT ((uint8_t)3u)
+#define TAIRIX_DMA_OWNER_STATE_ADOPTING ((uint8_t)1u)
+#define TAIRIX_DMA_OWNER_STATE_LIVE ((uint8_t)2u)
+#define TAIRIX_DMA_OWNER_STATE_UNADOPTED ((uint8_t)3u)
+#define TAIRIX_DMA_OWNER_STATE_ENDED ((uint8_t)4u)
+#define TAIRIX_DMA_OWNER_STATE_UNCONFIRMED ((uint8_t)5u)
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
-#define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
-#define TAIRIX_PROCESS_LIST_REQUEST_WIRE_LEN 8u
+#define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 16u
+#define TAIRIX_PAGE_REQUEST_WIRE_LEN 12u
 #define TAIRIX_PROCESS_RECORD_WIRE_LEN 125u
 #define TAIRIX_KERNEL_MEMORY_STATS_WIRE_LEN 88u
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
-#define TAIRIX_MOUNT_LIST_REQUEST_WIRE_LEN 8u
 #define TAIRIX_MOUNT_RECORD_WIRE_LEN 224u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
-#define TAIRIX_USER_DIRECTORY_REQUEST_WIRE_LEN 8u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 40u
-#define TAIRIX_GROUP_DIRECTORY_REQUEST_WIRE_LEN 8u
 #define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
 #define TAIRIX_SELF_ACCOUNT_RECORD_WIRE_LEN 432u
+#define TAIRIX_DMA_UNIT_RECORD_WIRE_LEN 40u
+#define TAIRIX_DMA_GROUP_RECORD_WIRE_LEN 24u
+#define TAIRIX_DMA_NODE_RECORD_WIRE_LEN 40u
+
+/* The `walk` of a page part of no walk. */
+#define TAIRIX_PAGE_REQUEST_FRESH 0u
 
 /* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */
 #define TAIRIX_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 256u
@@ -160,15 +194,20 @@ typedef struct tairix_sysinfo_request_header {
     uint16_t query;
     uint16_t reserved;
     uint32_t payload_len;
-    uint64_t request_id;
 } tairix_sysinfo_request_header_t;
 
-/* Process-list request payload (offset/limit paging). */
-typedef struct tairix_process_list_request {
+/* What every paged list query's payload begins with: skip `offset` records
+* and answer at most `limit` whole ones, `limit` non-zero. `flags` is
+* reserved zero. Every page of one walk names the same `walk`, distinct
+* among the caller's own, and is answered from the list as the walk's
+* first page read it; TAIRIX_PAGE_REQUEST_FRESH reads afresh per page.
+* A walk the service let go is answered TAIRIX_E_INTERRUPTED. */
+typedef struct tairix_page_request {
     uint32_t offset;
     uint16_t limit;
     uint16_t flags;
-} tairix_process_list_request_t;
+    uint32_t walk;
+} tairix_page_request_t;
 
 /* One process entry. The numeric pid/parent_pid are reused across process
 * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused
@@ -240,13 +279,6 @@ typedef struct tairix_system_identity {
     uint8_t hostname[TAIRIX_HOSTNAME_MAX];
 } tairix_system_identity_t;
 
-/* Mount-list request payload (offset/limit paging). */
-typedef struct tairix_mount_list_request {
-    uint32_t offset;
-    uint16_t limit;
-    uint16_t flags;
-} tairix_mount_list_request_t;
-
 /* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);
 * its flag bits are defined by the filesystem driver ABI. `availability` is
 * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).
@@ -283,13 +315,6 @@ typedef struct tairix_resource_limit_record {
     uint64_t usage;
 } tairix_resource_limit_record_t;
 
-/* User-directory request payload (offset/limit paging). */
-typedef struct tairix_user_directory_request {
-    uint32_t offset;
-    uint16_t limit;
-    uint16_t flags;
-} tairix_user_directory_request_t;
-
 /* One account entry: the uid + username pairing, and nothing else (no
 * credential material). The inline name is valid for name_len bytes. */
 typedef struct tairix_user_directory_record {
@@ -297,13 +322,6 @@ typedef struct tairix_user_directory_record {
     uint8_t name_len;
     uint8_t name[TAIRIX_MAX_USERNAME_LEN];
 } tairix_user_directory_record_t;
-
-/* Group-directory request payload (offset/limit paging). */
-typedef struct tairix_group_directory_request {
-    uint32_t offset;
-    uint16_t limit;
-    uint16_t flags;
-} tairix_group_directory_request_t;
 
 /* One group entry: the gid + group-name pairing, and nothing else (no
 * membership list, ACL, or grant). Valid for name_len bytes. */
@@ -330,5 +348,50 @@ typedef struct tairix_self_account_record {
     uint8_t home[TAIRIX_MAX_PATH_LEN];
     uint8_t shell[TAIRIX_MAX_PATH_LEN];
 } tairix_self_account_record_t;
+
+/* One DMA translation unit: its hardware-tree node, its TAIRIX_DMA_UNIT_FAMILY_*,
+* TAIRIX_DMA_UNIT_STATE_*, TAIRIX_DMA_FAULT_SIGNAL_* and TAIRIX_DMA_TABLES_*,
+* the owners and firmware streams it holds, and its fault counters since
+* boot. */
+typedef struct tairix_dma_unit_record {
+    uint32_t node;
+    uint8_t family;
+    uint8_t state;
+    uint8_t faults;
+    uint8_t tables;
+    uint32_t owners;
+    uint32_t firmware_streams;
+    uint64_t faults_recorded;
+    uint64_t faults_dropped;
+    uint64_t streams_silenced;
+} tairix_dma_unit_record_t;
+
+/* One isolation group an owner holds: its unit, group and holding node, and
+* the owner's TAIRIX_DMA_OWNER_STATE_* and generation. reserved0 is zero. */
+typedef struct tairix_dma_group_record {
+    uint32_t unit;
+    uint32_t group;
+    uint32_t holder;
+    uint8_t state;
+    uint8_t reserved0[3];
+    uint64_t generation;
+} tairix_dma_group_record_t;
+
+/* One node a unit translates for an owner: its unit and group, the owner's
+* TAIRIX_DMA_OWNER_STATE_* and generation, the streams it masters through,
+* and its domain's mappings and the bytes they map. The reserved fields are
+* zero. */
+typedef struct tairix_dma_node_record {
+    uint32_t node;
+    uint32_t unit;
+    uint32_t group;
+    uint8_t state;
+    uint8_t reserved0;
+    uint16_t streams;
+    uint64_t generation;
+    uint32_t mappings;
+    uint32_t reserved1;
+    uint64_t mapped_bytes;
+} tairix_dma_node_record_t;
 
 #endif /* TAIRIX_SYSINFO_H */

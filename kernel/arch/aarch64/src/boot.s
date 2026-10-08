@@ -241,6 +241,20 @@ _el2_establish_and_drop:
     // MDCR_EL2 = el2::MDCR_EL2_HANDOFF: no debug/PMU traps to EL2.
     msr     mdcr_el2, xzr
 
+    // A core with the GICv3 system-register interface (ID_AA64PFR0_EL1.GIC,
+    // el2::ID_AA64PFR0_GIC_SHIFT) must let EL1 use it, or EL1's first ICC_*
+    // access traps into vector-less EL2: ICC_SRE_EL2 =
+    // el2::ICC_SRE_EL2_HANDOFF, ICH_HCR_EL2 = 0. On a core without it the
+    // registers are undefined, so they are left untouched.
+    mrs     x0, id_aa64pfr0_el1
+    ubfx    x0, x0, #24, #4
+    cbz     x0, 1f
+    mov     x0, #0xf
+    msr     S3_4_C12_C9_5, x0       // ICC_SRE_EL2
+    isb
+    msr     S3_4_C12_C11_0, xzr     // ICH_HCR_EL2
+1:
+
     // EL1 reads of MIDR_EL1/MPIDR_EL1 return VPIDR_EL2/VMPIDR_EL2:
     // mirror the silicon's own identity registers so EL1 never sees an
     // UNKNOWN core id.

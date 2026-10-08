@@ -5,8 +5,8 @@
 //! specification, AMD rev. 3.08 §2.2–§2.5.
 
 use tairix_kernel_iommu_api::{
-    Access, Command, Fault, FaultReason, InterruptTarget, Pte, PteFormat, IO_PAGE_SIZE,
-    MESSAGE_WINDOW,
+    Access, Command, Fault, FaultReason, InterruptTarget, PageSpan, Pte, PteFormat, IO_PAGE_SHIFT,
+    IO_PAGE_SIZE, MESSAGE_WINDOW,
 };
 
 /// Address bits 51:12 of a table entry.
@@ -165,22 +165,28 @@ pub(crate) fn invalidate_domain(domain: u16) -> Command {
     invalidate_pages(domain, EVERY_PAGE)
 }
 
-/// Drop what the unit caches for `[iova, iova + len)` of `domain`, the
-/// directories above it included: the smallest naturally aligned span
-/// holding it, which the span encoding names by the address bits below its
-/// size set.
-pub(crate) fn invalidate_range(domain: u16, iova: u64, len: u64) -> Command {
-    let last = iova.saturating_add(len.max(1) - 1);
-    let differ = (iova ^ last) & !(IO_PAGE_SIZE - 1);
-    if differ == 0 {
-        return invalidate_pages(domain, (iova & ADDRESS) | PAGES_DIRECTORIES);
+/// Drop what the unit caches for `pages` of `domain`, the directories above
+/// them included: the smallest naturally aligned span holding them, which
+/// the span encoding names by the address bits below its size set; [`None`]
+/// for one wider than the encoding names, which only the domain covers.
+pub(crate) fn invalidate_range(domain: u16, pages: PageSpan) -> Option<Command> {
+    let (base, order) = pages.covering_block();
+    if order == 0 {
+        return Some(invalidate_pages(
+            domain,
+            (base & ADDRESS) | PAGES_DIRECTORIES,
+        ));
     }
-    let top = differ.ilog2();
+    // The bits below the span's top bit are set, naming its size.
+    let top = order + IO_PAGE_SHIFT - 1;
     if top > SPAN_TOP_BIT {
-        return invalidate_domain(domain);
+        return None;
     }
-    let span = (iova | ((1 << top) - 1)) & ADDRESS;
-    invalidate_pages(domain, span | PAGES_SPAN | PAGES_DIRECTORIES)
+    let span = (base | ((1 << top) - 1)) & ADDRESS;
+    Some(invalidate_pages(
+        domain,
+        span | PAGES_SPAN | PAGES_DIRECTORIES,
+    ))
 }
 
 /// Drop the unit's copies of `device`'s remapping entries.
@@ -372,7 +378,7 @@ mod tests {
             (0x7FFF_F000, 0x2000),
             (0x1234_5000, 0x10_0000),
         ] {
-            let [low, address] = invalidate_range(9, iova, len);
+            let [low, address] = range(iova, len).unwrap();
             assert_eq!(low, (9 << 32) | (3 << 60));
             assert_eq!(address & PAGES_DIRECTORIES, PAGES_DIRECTORIES);
             let (base, size) = span_of(address);
@@ -385,14 +391,14 @@ mod tests {
                 "{iova:#x}+{len:#x} fits a half of {base:#x}+{size:#x}"
             );
         }
-        assert_eq!(invalidate_range(9, 0x4000_0000, 0x1000)[1] & PAGES_SPAN, 0);
-        let [_, everything] = invalidate_range(9, 0, 1 << 52);
+        assert_eq!(range(0x4000_0000, 0x1000).unwrap()[1] & PAGES_SPAN, 0);
+        let [_, everything] = range(0, 1 << 52).unwrap();
         assert_eq!(span_of(everything), (0, 1 << 52));
-        assert_eq!(
-            invalidate_range(9, 0, 1 << 53),
-            invalidate_domain(9),
-            "past bit 51 the whole domain"
-        );
+        assert_eq!(range(0, 1 << 53), None, "past bit 51 only the whole domain");
+    }
+
+    fn range(iova: u64, len: u64) -> Option<Command> {
+        invalidate_range(9, PageSpan::of(iova, len).unwrap())
     }
 
     /// An event record as the unit writes it.

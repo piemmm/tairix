@@ -920,9 +920,9 @@ made the old surface unable to show a live clock. The record is 88 bytes per
 core, so a 128-core machine costs ~11 KB per sample — well inside the
 transport, and the price of a live reading. The immutable part (model, class,
 feature bits, reference clock) is re-read with it because the query is not
-field-selective; if that ever matters, the fix is a request flag asking for
-the live fields only, and `CpuInfoListRequest::flags` is already reserved for
-one. It is not added before there is a measurement saying it is needed.
+field-selective; if that ever matters, the fix is a `CPU_INFO` request that
+asks for the live fields only. It is not added before there is a measurement
+saying it is needed.
 
 Per-task CPU history for the Activity sparkline is the service's own: a
 bounded per-task ring of the CPU permille it already measures, keyed by the
@@ -1070,8 +1070,8 @@ internal, not the utilisation split every user may see. Per volume:
 - `budget_depth`, `budget_deadline_ns` — the `BlkDeviceClass` budget in force,
   so a depth is read against the ceiling that applies to that medium.
 
-Q1 and Q2 are **landed**, over `IntrospectDomain::{VolumeIoStats, VolumeIoQueue}`
-and one shared `VolumeIoRequest` all three per-volume reads page by. Their
+Q1 and Q2 are **landed**, over `IntrospectDomain::{VolumeIoStats, VolumeIoQueue}`,
+paged by the one `PageRequest` every list takes. Their
 counters are folded in the kernel `BlkClient` beside the health tallies
 (`plans/FIX-IO.md` IO5) as `BlkIoCounters` / `BlkQueueCounters` — shared
 `lib/abi` value types with a lock-free atomic mirror, so the fold and the
@@ -1091,8 +1091,7 @@ is state no counter carries. The row reads `N.NN mean`.
 
 **`GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`. Landed.** Gated with
 `HARDWARE_TREE`, whose device inventory it details, and audited with it. One
-record per graphics device a display service drives, paged by a
-`DeviceStatsRequest`:
+record per graphics device a display service drives:
 
 - `busy_ns`, `idle_ns` — the same busy/idle vocabulary as the CPU, so
   utilisation derives the same way and no new averaging convention appears.

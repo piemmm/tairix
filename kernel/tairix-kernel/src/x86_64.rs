@@ -16,11 +16,14 @@ pub mod dispatch;
 pub mod ioapic_controller;
 pub mod msi;
 pub mod remapping;
+pub mod vectors;
 
 #[cfg(freestanding)]
 pub mod boot;
 #[cfg(freestanding)]
 pub mod com1_rx;
+#[cfg(freestanding)]
+pub mod floor;
 #[cfg(freestanding)]
 pub mod init_spawn;
 #[cfg(freestanding)]

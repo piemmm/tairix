@@ -256,6 +256,7 @@ pub struct Controller<E: DmaEngine, H: ControllerHost> {
     engine: E,
     host: H,
     endpoint: u64,
+    owned: u64,
     usable: u64,
     peripheral_window: Option<HwResource>,
     slots: [Option<Slot>; CHANNEL_SLOTS],
@@ -294,6 +295,7 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
             engine,
             host,
             endpoint,
+            owned,
             usable: usable & owned,
             peripheral_window,
             slots: [const { None }; CHANNEL_SLOTS],
@@ -345,6 +347,13 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
 
     /// Service the channels in `fired` whose interrupt line was raised.
     pub fn interrupt(&mut self, fired: u64) {
+        // A channel taken out of service is only quietened: its latched flags
+        // would hold a shared line up for good.
+        for channel in channels(fired & self.owned & !self.usable) {
+            if let Some(engine_channel) = self.engine.channel(channel) {
+                let _ = engine_channel.take_event();
+            }
+        }
         for channel in channels(fired & self.usable) {
             let index = usize::from(channel);
             let running = self.slots[index].as_ref().is_some_and(|slot| slot.running);
@@ -407,7 +416,11 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
             }
             DmaEngineRequest::Stop { channel } => {
                 self.owned(caller, channel)?;
-                self.halt(channel, WaitEnd::Stopped);
+                // A channel that would not stop may still write its buffer,
+                // which its client must then never reuse.
+                if !self.halt(channel, WaitEnd::Stopped) {
+                    return Err(Errno::DeviceFault);
+                }
                 Ok(Answer::Done(DmaEngineOp::Stop))
             }
             DmaEngineRequest::Position { channel } => {
@@ -633,7 +646,8 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
     fn advance(&mut self, channel: u8) {
         let Some(Ok(offset)) = self.engine.channel(channel).map(|engine| engine.position()) else {
             self.host.record(Record::Lost { channel });
-            return self.halt(channel, WaitEnd::Stopped);
+            self.halt(channel, WaitEnd::Stopped);
+            return;
         };
         let serviced = self.host.now();
         let Some(slot) = self.slot_mut(channel) else {
@@ -668,18 +682,20 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
         }
     }
 
-    /// Stop `channel` if it runs, and answer its posted wait with `end`.
-    fn halt(&mut self, channel: u8, end: WaitEnd) {
+    /// Stop `channel` if it runs, and answer its posted wait with `end`,
+    /// answering whether what the channel reached may be freed.
+    fn halt(&mut self, channel: u8, end: WaitEnd) -> bool {
         let serviced = self.host.now();
         let Some(slot) = self.slot_mut(channel) else {
-            return;
+            return true;
         };
         let was_running = core::mem::replace(&mut slot.running, false);
         let posted = slot.wait.take();
         let position = slot.position();
+        let mut settled = true;
         if was_running {
             if let Some(outcome) = self.engine.channel(channel).map(DmaChannel::stop) {
-                self.settle(channel, outcome);
+                settled = self.settle(channel, outcome);
             }
         }
         if let Some(posted) = posted {
@@ -690,15 +706,18 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
             };
             let _ = self.send_report(posted.ticket, &report);
         }
+        settled
     }
 
     /// Stop `channel`, free its chain and its buffer, and forget its owner.
     fn retire(&mut self, channel: u8) {
-        self.halt(channel, WaitEnd::Stopped);
-        let freed = match self.engine.channel(channel).map(DmaChannel::release) {
-            Some(outcome) => self.settle(channel, outcome),
-            None => true,
-        };
+        // A channel that would not stop is not reset again, and keeps all it
+        // reached.
+        let freed = self.halt(channel, WaitEnd::Stopped)
+            && match self.engine.channel(channel).map(DmaChannel::release) {
+                Some(outcome) => self.settle(channel, outcome),
+                None => true,
+            };
         let Some(slot) = self
             .slots
             .get_mut(usize::from(channel))
@@ -757,4 +776,27 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
             let _ = self.host.reply(ticket, &out[..len]);
         }
     }
+}
+
+/// The node's translated `windows` as the engines use them: the one covering
+/// the controller's own registers at `[base, base + len)`, through which they
+/// reach peripherals, and the first other, through which they reach memory.
+#[must_use]
+pub fn split_windows<'r>(
+    windows: impl IntoIterator<Item = &'r HwResource>,
+    base: u64,
+    len: u64,
+) -> (Option<HwResource>, Option<HwResource>) {
+    let (mut peripheral, mut memory) = (None, None);
+    for window in windows {
+        let slot = if window.dma_bus_address(base, len).is_some() {
+            &mut peripheral
+        } else {
+            &mut memory
+        };
+        if slot.is_none() {
+            *slot = Some(*window);
+        }
+    }
+    (peripheral, memory)
 }

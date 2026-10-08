@@ -33,25 +33,9 @@ const TEST_SEED: [u8; 32] = [
 const SYS_HASH: [u8; 32] = [0x22; 32];
 
 fn main() {
-    tairix_itest_harness::emit_target_cfg();
-    println!("cargo:rerun-if-changed=build.rs");
+    tairix_itest_harness::aarch64_virt_guest_build(1);
 
     let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR set by cargo");
-
-    let target = std::env::var("TARGET").unwrap_or_default();
-    let dtb_bytes = if target == "aarch64-unknown-none" {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let linker_script = format!(
-            "{}/../../../kernel/arch/aarch64/link/aarch64-virt.ld",
-            manifest_dir.trim_end_matches('/')
-        );
-        println!("cargo:rerun-if-changed={linker_script}");
-        println!("cargo:rustc-link-arg=-T{linker_script}");
-        tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir, 1)
-    } else {
-        // Host builds compile the bin to a no-op `main`; no DTB needed.
-        Vec::new()
-    };
 
     let signing_key = Ed25519SecretKey::from_seed(&TEST_SEED);
     let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
@@ -114,17 +98,6 @@ fn main() {
     out.push_str("pub const SYSCALL_TABLE_HASH: [u8; 32] = [");
     for (i, b) in SYS_HASH.iter().enumerate() {
         if i % 8 == 0 {
-            out.push_str("\n    ");
-        }
-        write!(out, "0x{b:02x}, ").expect("write to String never fails");
-    }
-    out.push_str("\n];\n");
-
-    out.push_str("\n/// Canonical QEMU `virt` flattened device tree, dumped at build\n");
-    out.push_str("/// time for the aarch64-none target (empty on host builds).\n");
-    out.push_str("pub const DTB_BLOB: &[u8] = &[");
-    for (i, b) in dtb_bytes.iter().enumerate() {
-        if i % 16 == 0 {
             out.push_str("\n    ");
         }
         write!(out, "0x{b:02x}, ").expect("write to String never fails");

@@ -45,7 +45,7 @@ use tairix_sync::SpinLock;
 use crate::anon::{map_anonymous, page_at, unmap_anonymous, AnonError};
 use crate::anon_window::AnonWindowMap;
 use crate::coldscan::{ColdPageScanner, ColdScanError};
-use crate::dma::{DmaCustodian, DmaError, DmaWindowMap};
+use crate::dma::{CarveDevice, DmaCustodian, DmaError, DmaWindowMap};
 use crate::filemap::{map_file_page, unmap_file_region};
 use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap, SharedMemory};
@@ -115,8 +115,8 @@ impl From<DmaError> for LiveSpaceError {
 /// `cpu_va` is the base **user virtual address** the driver's CPU accesses
 /// go through; `device_addr` is where the device reaches the buffer: an IOVA
 /// in its node's domain when a translation unit stands between them, else the
-/// physically-contiguous base of the backing frames, which the `kernel/core`
-/// producer may still rebase through an inbound viewport.
+/// physical base of its one backing block, which the `kernel/core` producer
+/// may still rebase through an inbound viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaMapping {
     /// Base user virtual address of the mapped, guard-bracketed buffer.
@@ -124,7 +124,7 @@ pub struct DmaMapping {
     /// Where the device reaches the buffer's first byte.
     pub device_addr: u64,
     /// Backing length in bytes: the request rounded up to a power-of-two
-    /// page count.
+    /// page count, or for a translated device to whole pages.
     pub len: usize,
 }
 
@@ -390,14 +390,17 @@ pub trait LiveUserSpace: Send {
         unmapped: &mut dyn FnMut(u64, u64),
     ) -> Result<(), LiveSpaceError>;
 
-    /// Carve a physically-contiguous, zeroed, coherent DMA buffer of `len`
-    /// bytes into this space, returning its CPU virtual base and its
-    /// physically-contiguous base ([`DmaMapping`]).
+    /// Carve a zeroed, coherent DMA buffer of `len` bytes into this space,
+    /// returning its CPU virtual base and the base its device reaches it at
+    /// ([`DmaMapping`]): one physically contiguous block for an untranslated
+    /// device, its pages wherever frames are free for one a translation unit
+    /// confines.
     ///
-    /// The block is mapped `RW|USER`, never executable, guard-bracketed, and
+    /// The buffer is mapped `RW|USER`, never executable, guard-bracketed, and
     /// zeroed before it is user-visible. When `addr_limit` is non-zero the
-    /// contiguous block is carved wholly below it (the granted device
-    /// addressing constraint), or the request is refused; `addr_limit == 0`
+    /// device reaches it wholly below it (the granted device addressing
+    /// constraint) — its frames for an untranslated device, its IOVA for a
+    /// translated one — or the request is refused; `addr_limit == 0`
     /// declares no constraint.
     ///
     /// The producer has already resolved and validated the grant the buffer
@@ -414,9 +417,12 @@ pub trait LiveUserSpace: Send {
     /// # Errors
     ///
     /// [`LiveSpaceError::Dma`] carrying the precise [`DmaError`]: zero
-    /// length, past the max buddy order, no block below the limit
-    /// ([`AllocError::OutOfRange`](crate::AllocError::OutOfRange) when no RAM
-    /// lies below it), no virtual slot, a page-table or direct-map failure, a
+    /// length, an untranslated carve past the max buddy order, no block below
+    /// the limit ([`AllocError::OutOfRange`](crate::AllocError::OutOfRange)
+    /// when no RAM lies below it), frames the machine cannot spare past the
+    /// kernel reserve ([`DmaError::Alloc`]), no virtual slot, a page-table or
+    /// direct-map failure, the translation's refusal to map the carve
+    /// ([`DeviceTranslation::map`](crate::dma::DeviceTranslation::map)), a
     /// custody that refused the reservation ([`DmaError::DeviceGone`],
     /// [`DmaError::NoCustody`], [`DmaError::Alloc`]), or a custodian other
     /// than the space's own ([`DmaError::CustodianMismatch`]).
@@ -446,7 +452,9 @@ pub trait LiveUserSpace: Send {
     /// # Errors
     ///
     /// [`LiveSpaceError::Dma`] — [`DmaError::UnknownBuffer`] when `cpu_va` is
-    /// not the base of a live DMA carve of this space, or the direct-map,
+    /// not the base of a live DMA carve of this space,
+    /// [`DmaError::Unconfirmed`] when the unit could not confirm a translated
+    /// carve unmapped (its blocks are then never reused), or the direct-map,
     /// page-table, or allocator refusal that stopped the release part-way; a
     /// block that is not returned to the allocator stays allocated.
     fn free_dma(&mut self, cpu_va: u64, retire: &mut dyn Retire) -> Result<usize, LiveSpaceError>;
@@ -476,6 +484,11 @@ pub trait LiveUserSpace: Send {
         chunks: &[(u64, u64)],
         memory: SharedMemory,
     ) -> Result<u64, LiveSpaceError>;
+
+    /// Whether the shared window has a free run for a region of `pages`
+    /// now, so a caller can refuse before drawing frames
+    /// [`Self::map_shared_chunks`] would have nowhere to map.
+    fn shared_room(&self, pages: u64) -> bool;
 
     /// Release the shared-region mapping based at `base_va` from this space,
     /// tearing down only its page-table entries (the registry owns the
@@ -628,7 +641,7 @@ pub trait LiveUserSpace: Send {
 /// * `anon` — the per-task placement allocator that chooses the base for a
 ///   non-`FIXED` anonymous mapping out of this task's heap window;
 /// * `dma` — the per-task guarded DMA-buffer allocator that carves a
-///   physically-contiguous coherent buffer out of this task's DMA window,
+///   coherent buffer out of this task's DMA window,
 ///   and `dma_custodian`, the custody its buffers are surrendered to at
 ///   teardown (the first carve's, which every later carve must name);
 /// * `shared` — the per-task guarded allocator that maps a kernel-owned
@@ -1136,7 +1149,7 @@ where
         {
             return Err(DmaError::CustodianMismatch.into());
         }
-        custodian.custody.reserve(custodian.node)?;
+        custodian.custody().reserve(custodian.node)?;
         self.dma_custodian = Some(custodian);
         let buf = self
             .dma
@@ -1145,10 +1158,13 @@ where
                 self.frames,
                 &self.physmap,
                 len,
-                addr_limit,
-                custodian.translator(),
+                CarveDevice {
+                    addr_limit,
+                    translator: custodian.translator(),
+                    coherence: custodian.coherence(),
+                },
             )
-            .inspect_err(|_| custodian.custody.unreserve(custodian.node))?;
+            .inspect_err(|_| custodian.custody().unreserve(custodian.node))?;
         Ok(DmaMapping {
             cpu_va: buf.virt().as_u64(),
             device_addr: buf.device_addr(),
@@ -1166,7 +1182,7 @@ where
         // failed release kept is surrendered at teardown, which spends it then.
         if was_live && !self.dma.holds(virt) {
             if let Some(custodian) = self.dma_custodian {
-                custodian.custody.unreserve(custodian.node);
+                custodian.custody().unreserve(custodian.node);
             }
         }
         Ok(released?)
@@ -1181,6 +1197,10 @@ where
             .shared
             .map_chunks_into(&mut self.space, chunks, memory)?;
         Ok(region.virt().as_u64())
+    }
+
+    fn shared_room(&self, pages: u64) -> bool {
+        usize::try_from(pages).is_ok_and(|pages| self.shared.has_room(pages))
     }
 
     fn unmap_shared(&mut self, base_va: u64, _len: usize) -> Result<(), LiveSpaceError> {
@@ -1521,12 +1541,12 @@ mod tests {
     const TEST_GENERATION: u64 = 3;
 
     fn custodian(custody: &'static crate::test_fixture::RecordingCustody) -> DmaCustodian {
-        DmaCustodian {
-            node: TEST_NODE,
-            generation: TEST_GENERATION,
+        DmaCustodian::untranslated(
+            TEST_NODE,
+            TEST_GENERATION,
             custody,
-            translation: None,
-        }
+            tairix_abi::DmaCoherence::Snooped,
+        )
     }
 
     use crate::phys::PhysMap;
@@ -2119,7 +2139,7 @@ mod tests {
     }
 
     /// Whether every byte of `block` reads zero through `simmap`.
-    fn block_is_zero(simmap: &SimPhysMap, block: crate::dma::DmaBlock) -> bool {
+    fn block_is_zero(simmap: &SimPhysMap, block: crate::frame::FrameBlock) -> bool {
         phys_is_zero(simmap, block.frame.start(), block.len())
     }
 
@@ -2222,36 +2242,34 @@ mod tests {
     }
 
     fn translated_custodian(
-        custody: &'static crate::test_fixture::RecordingCustody,
         domains: &'static crate::test_fixture::RecordingTranslation,
     ) -> DmaCustodian {
-        DmaCustodian {
-            translation: Some(domains),
-            ..custodian(custody)
-        }
+        DmaCustodian::translated(
+            TEST_NODE,
+            TEST_GENERATION,
+            domains,
+            u64::MAX,
+            tairix_abi::DmaCoherence::Snooped,
+        )
     }
 
     #[test]
     fn teardown_ends_a_translated_owner_once_then_frees_every_carve() {
         let (frames, simmap) = backing!();
-        let held = custody!();
         let domains = crate::test_fixture::translation!();
         let before = frames.free_frames();
         {
             let mut live = shared_live_space!(frames, simmap);
             let carve = live
-                .alloc_dma(2 * PAGE_SIZE, 0, translated_custodian(held, domains))
+                .alloc_dma(2 * PAGE_SIZE, 0, translated_custodian(domains))
                 .expect("carve");
             assert_eq!(carve.device_addr, crate::test_fixture::IOVA_BASE);
-            live.alloc_dma(PAGE_SIZE, 0, translated_custodian(held, domains))
+            live.alloc_dma(PAGE_SIZE, 0, translated_custodian(domains))
                 .expect("a second carve");
         }
         assert_eq!(frames.free_frames(), before, "both blocks went back");
-        held.with(|record| {
-            assert!(record.held.is_empty(), "nothing needed custody");
-            assert_eq!(record.reserved, 0, "each reservation was returned");
-        });
         domains.with(|record| {
+            assert!(record.held.is_empty(), "nothing needed custody");
             assert_eq!(record.ended, [(TEST_NODE, TEST_GENERATION)]);
             assert!(
                 record.unmapped.is_empty(),
@@ -2263,17 +2281,16 @@ mod tests {
     #[test]
     fn teardown_holds_a_translated_carve_its_unit_could_not_confirm() {
         let (frames, simmap) = backing!();
-        let held = custody!();
         let domains = crate::test_fixture::translation!(unconfirmed);
         let before = frames.free_frames();
         {
             let mut live = shared_live_space!(frames, simmap);
-            live.alloc_dma(PAGE_SIZE, 0, translated_custodian(held, domains))
+            live.alloc_dma(PAGE_SIZE, 0, translated_custodian(domains))
                 .expect("carve");
         }
         assert_eq!(frames.free_frames(), before - 1);
-        domains.with(|record| assert_eq!(record.ended, [(TEST_NODE, TEST_GENERATION)]));
-        held.with(|record| {
+        domains.with(|record| {
+            assert_eq!(record.ended, [(TEST_NODE, TEST_GENERATION)]);
             assert_eq!(record.held.len(), 1, "the device may still reach it");
             let (_, _, block) = record.held[0];
             frames
@@ -2293,7 +2310,7 @@ mod tests {
             live.alloc_dma(
                 PAGE_SIZE,
                 0,
-                translated_custodian(held, crate::test_fixture::translation!())
+                translated_custodian(crate::test_fixture::translation!())
             ),
             Err(LiveSpaceError::Dma(DmaError::CustodianMismatch))
         );

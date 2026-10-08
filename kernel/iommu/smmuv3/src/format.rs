@@ -199,7 +199,14 @@ const CMD_CFGI_STE: u64 = 0x03;
 const CMD_CFGI_STE_RANGE: u64 = 0x04;
 const CMD_CFGI_CD_ALL: u64 = 0x06;
 const CMD_TLBI_NH_ASID: u64 = 0x11;
+const CMD_TLBI_NH_VA: u64 = 0x12;
 const CMD_TLBI_S12_VMALL: u64 = 0x28;
+const CMD_TLBI_S2_IPA: u64 = 0x2A;
+/// A VA TLBI's address, bits 63:12, and an IPA TLBI's, bits 51:12; the
+/// `Leaf` bit below them left clear, so the walk caches for the address go
+/// too.
+const TLBI_VA: u64 = !0xFFF;
+const TLBI_IPA: u64 = 0x000F_FFFF_FFFF_F000;
 const CMD_TLBI_NSNH_ALL: u64 = 0x30;
 const CMD_SYNC: u64 = 0x46;
 
@@ -226,6 +233,20 @@ pub const fn cfgi_cd_all(stream: u32) -> Command {
 #[must_use]
 pub const fn tlbi_asid(asid: u16) -> Command {
     [CMD_TLBI_NH_ASID | (asid as u64) << 48, 0]
+}
+
+/// Forget the stage 1 translation of the page at `iova` cached under `asid`,
+/// and every walk cache entry leading to it.
+#[must_use]
+pub const fn tlbi_va(asid: u16, iova: u64) -> Command {
+    [CMD_TLBI_NH_VA | (asid as u64) << 48, iova & TLBI_VA]
+}
+
+/// Forget the stage 2 translation of the page at `ipa` cached under `vmid`,
+/// and every walk cache entry leading to it.
+#[must_use]
+pub const fn tlbi_ipa(vmid: u16, ipa: u64) -> Command {
+    [CMD_TLBI_S2_IPA | (vmid as u64) << 32, ipa & TLBI_IPA]
 }
 
 /// Forget every stage 1 and stage 2 translation cached under `vmid`.

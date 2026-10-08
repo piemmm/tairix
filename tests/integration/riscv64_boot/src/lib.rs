@@ -22,15 +22,9 @@
 //! | `publish` | Set-once firmware-map / DTB observers for the device verticals (freestanding). |
 //! | `boot`    | Thin wrapper: publish, then delegate to `tairix_kernel::riscv64::boot` (freestanding). |
 //!
-//! The `kernel/irq` `IrqController` bridge over the arch port's PLIC register
-//! driver (`PlicIrqController`) is the production
-//! `tairix_kernel::riscv64_plic_irq` definition, re-exported here for the
-//! freestanding `virt`-board verticals (one definition, no duplication); its
-//! mask-before-wake / re-arm regression test lives with it and runs under
-//! `cargo test` on the CI host. `boot` / `publish` are gated to the
-//! freestanding `virt`-board target because they drive the arch port's
-//! freestanding-only `halt_current_hart` / SBI console and are exercised by
-//! the QEMU boot vertical.
+//! `boot` / `publish` are gated to the freestanding `virt`-board target
+//! because they drive the arch port's freestanding-only `halt_current_hart` /
+//! SBI console and are exercised by the QEMU boot vertical.
 
 #![cfg_attr(freestanding, no_std)]
 #![deny(missing_docs)]
@@ -50,18 +44,8 @@ pub use boot::{boot, try_boot, BootError, RiscvBinArch};
 #[cfg(freestanding)]
 pub use publish::{published_dtb, published_memory_map};
 
-// The single `PlicIrqController` definition lives in the production kernel
-// (`tairix_kernel::riscv64_plic_irq`); re-export it so the `virt`-board
-// virtio-MMIO verticals name it under the same path they always have. Only
-// the freestanding target links the kernel, so the re-export is gated to it.
+// A vertical that runs the full boot before its scenario binds its device's
+// line on the table and controller that boot published: the trap dispatch is
+// set once per boot.
 #[cfg(freestanding)]
-pub use tairix_kernel::riscv64_plic_irq::PlicIrqController;
-
-// The production boot pipeline installs the S-mode PLIC dispatch and
-// publishes the kernel IRQ table + controller in its `Irq` phase. A
-// `virt`-board vertical that runs the full boot before its scenario reuses
-// that one IRQ path (the charter forbids building a second, and the arch
-// `set_trap_dispatch` is set-once per boot), so re-export the accessors it
-// binds its device source through.
-#[cfg(freestanding)]
-pub use tairix_kernel::riscv64::irq::{plic_controller, published_irq_table};
+pub use tairix_kernel::riscv64::irq::{controller, published_irq_table};

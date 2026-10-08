@@ -96,8 +96,10 @@ for filesystems, the feature section below.
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |
 | DMA-engine drivers (cyclic channels, `dmaengine-v1`) | — | ◐ bcm2835 | — | — |
-| Kernel-owned PCI host (enumeration, resources, interrupts) | ✓ MCFG, MSI-X | ✓ generic ECAM, INTx | ✓ generic ECAM, INTx | — |
-| DMA translation units (IOMMU) | ◐ VT-d, AMD-Vi | ◐ SMMUv3 | ◐ RISC-V IOMMU | — |
+| Interrupt controllers, chosen by discovery | ✓ IO-APIC, xAPIC, x2APIC | ✓ GICv2, GICv3 + ITS | ✓ PLIC, APLIC + IMSIC | — |
+| Kernel-owned PCI host (enumeration, resources, interrupts) | ✓ MCFG, MSI-X | ✓ generic ECAM, INTx, MSI-X as ITS LPIs | ✓ generic ECAM, INTx, MSI-X into interrupt files | — |
+| DMA translation units (IOMMU) | ◐ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
+| Scatter-gather DMA carves on translated devices (no 32 MiB bound) | ✓ | ✓ | ✓ | — |
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
@@ -182,10 +184,11 @@ no ambient root, signed code) are designed in from the kernel up.
 | Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA carves and MMIO grants (§4, §18.1) | A driver reaching device registers or memory it was not granted | ✓ | ✓ | ✓ | — |
-| DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d, AMD-Vi | ◐ SMMUv3 | ◐ RISC-V IOMMU | — |
-| Isolation groups: one owner at a time for devices the fabric cannot keep apart — requester-id aliases, ACS (`plans/IOMMU.md` IOM8) | Two drivers whose devices share a bridge's alias or reach each other peer-to-peer below the unit, each reaching the other's memory or device | ◐ VT-d, AMD-Vi | ◐ SMMUv3 | ◐ RISC-V IOMMU | — |
-| Address translation services refused: ATS, PRI and PASID off at the device and translated requests refused at the unit; untrusted external-facing ports (`plans/IOMMU.md` IOM10) | A device presenting a pre-translated address past the unit; a hot-plugged device passing as another or reaching firmware's windows | ◐ VT-d, AMD-Vi | ◐ SMMUv3 | ◐ RISC-V IOMMU | — |
-| Interrupt remapping, whole-machine or none, x2APIC under extended mode (`plans/IOMMU.md` IOM11, IOM12) | A device forging an MSI — any vector, any CPU, as any requester | ◐ VT-d, AMD-Vi | ▢ | ▢ | — |
+| DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
+| A malformed description of the DMA translation units fails closed: nothing it would have described masters DMA; on x86_64 `iommu.malformed=unconfined` publishes it untranslated instead, audited and listed by `sysinfo dma` (`plans/IOMMU.md` IOM1, IOM14) | A firmware table bug leaving every device's DMA unconfined on a machine that has a unit | ✓ DMAR, IVRS, VIOT | ✓ device tree | ✓ device tree | — |
+| Isolation groups: one owner at a time for devices the fabric cannot keep apart — requester-id aliases, ACS (`plans/IOMMU.md` IOM8) | Two drivers whose devices share a bridge's alias or reach each other peer-to-peer below the unit, each reaching the other's memory or device | ✓ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
+| Address translation services refused: ATS, PRI and PASID off at the device and translated requests refused at the unit; untrusted external-facing ports (`plans/IOMMU.md` IOM10) | A device presenting a pre-translated address past the unit; a hot-plugged device passing as another or reaching firmware's windows | ✓ VT-d, AMD-Vi | ✓ SMMUv3 | ✓ RISC-V IOMMU | — |
+| Interrupt remapping, whole-machine or none, x2APIC under extended mode; MSI translation through a GICv3 ITS or into a RISC-V IOMMU's per-device interrupt files (`plans/IOMMU.md` IOM11, IOM12, IOM18) | A device forging an MSI — any vector, any CPU, as any requester | ◐ VT-d, AMD-Vi | ✓ GICv3 ITS | ✓ RISC-V IOMMU | — |
 | A removed device's authority revoked at removal (§4, §18.4) | A vanished device's driver, or anything it delegated to, reaching its successor's registers, interrupts, endpoints or buffers | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |
 | Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ✓ boot seed | ◐ unkeyed |

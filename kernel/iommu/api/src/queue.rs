@@ -1,7 +1,16 @@
 //! The command queue the queued families drive: two-word commands in a ring
 //! the unit consumes from a head it advances to the tail software writes,
-//! each batch confirmed by a completion command — one the unit stores a token
+//! each batch closed by a completion command — one the unit stores a token
 //! for, or one it consumes only once every command before it is done.
+//!
+//! A batch is handed over under the ring's own lock and waited on holding
+//! none, each on its own completion, so batches for different domains overlap
+//! their waits. A command the unit rejects is charged to the batch holding it.
+
+use alloc::vec::Vec;
+use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+
+use tairix_sync::SpinLock;
 
 use crate::memory::{Table, TableMemory};
 use crate::{Clock, IommuError};
@@ -33,14 +42,27 @@ pub trait QueueRegisters {
     /// The unit's refusal.
     fn set_tail(&self, tail: usize) -> Result<(), IommuError>;
 
-    /// Whether the unit stopped on a command it rejected; where it did, put
-    /// the queue back to running past it — through `queue`'s
-    /// [`CommandQueue::replace`] — and answer `true`.
+    /// The slot the unit stopped at, where it stopped on a command it
+    /// rejected; it stays stopped until [`Self::resume`].
+    ///
+    /// # Errors
+    ///
+    /// The unit's refusal, or [`IommuError::Hardware`] for a unit that can run
+    /// no further command.
+    fn stopped_at(&self) -> Result<Option<usize>, IommuError>;
+
+    /// Put the unit, stopped at `slot`, back to running past it — through
+    /// `queue`'s [`CommandQueue::replace`].
     ///
     /// # Errors
     ///
     /// The unit's refusal.
-    fn stopped(&self, queue: &CommandQueue, memory: &TableMemory<'_>) -> Result<bool, IommuError>;
+    fn resume(
+        &self,
+        queue: &CommandQueue,
+        memory: &TableMemory<'_>,
+        slot: usize,
+    ) -> Result<(), IommuError>;
 
     /// How the unit confirms a batch.
     fn completion(&self) -> Completion {
@@ -63,15 +85,74 @@ pub enum Completion {
 pub struct CommandQueue {
     ring: Table,
     status: Table,
+    state: SpinLock<Ring>,
+    /// Rejections charged so far, so a waiter looks for its own only when one
+    /// was.
+    rejections: AtomicU32,
+    /// The position the unit's head was last seen at.
+    consumed: AtomicU64,
+}
+
+struct Ring {
     tail: usize,
     /// The head as last read: the unit only advances it, so this never
     /// overstates the room left.
     head: usize,
+    /// Commands queued so far: the position the next one takes.
+    queued: u64,
     sequence: u32,
+    /// The token of the batch each slot's command belongs to.
+    owners: [u32; SLOTS],
+    /// Tokens of batches a rejected command was charged to, until their
+    /// waiters answer.
+    rejected: Vec<u32>,
+    /// A rejection could not be recorded, so no batch can be vouched for.
+    poisoned: bool,
+}
+
+impl Ring {
+    /// Take `head`, read from the unit, as its head, answering its position.
+    fn observe(&mut self, head: usize) -> u64 {
+        let behind = (self.tail + SLOTS - head) % SLOTS;
+        self.head = head;
+        self.queued - behind as u64
+    }
+}
+
+/// A batch handed to its unit, to be waited on.
+#[must_use]
+#[derive(Debug)]
+pub struct Ticket {
+    token: u32,
+    /// The position of its completion.
+    completion: u64,
+    confirm: Completion,
+    /// [`CommandQueue::rejections`] as it was when the batch was handed over.
+    rejections: u32,
 }
 
 /// Commands one table frame holds.
 const SLOTS: usize = crate::TABLE_BYTES / core::mem::size_of::<Command>();
+
+/// Polls of its completion a waiter makes between looks at the unit itself,
+/// so many waiters do not each read its registers on every one.
+const LOOK_EVERY: u32 = 16;
+
+/// Looks a waiter tries the ring for before it takes it outright, so a busy
+/// ring cannot keep it from ever looking.
+const PATIENCE: u32 = 64;
+
+/// Pages a family invalidates one command apiece before one domain-wide
+/// command is the cheaper confirmation: half a ring, so a range's sync never
+/// waits on the unit to make room.
+pub const PAGE_INVALIDATIONS: u64 = (SLOTS / 2) as u64;
+
+/// Whether the unit's stored `status` covers the batch of `token`: tokens
+/// rise, the unit completes batches in order, and so many batches are never
+/// outstanding at once that the comparison wraps.
+const fn stored_covers(status: u32, token: u32) -> bool {
+    status.wrapping_sub(token) < 1 << 31
+}
 
 impl CommandQueue {
     /// Commands the ring holds.
@@ -81,8 +162,13 @@ impl CommandQueue {
     ///
     /// # Errors
     ///
-    /// [`IommuError::Exhausted`] when either cannot be had.
+    /// [`IommuError::Exhausted`] when either, or room to charge every slot's
+    /// batch a rejection, cannot be had.
     pub fn new(memory: &TableMemory<'_>) -> Result<Self, IommuError> {
+        let mut rejected = Vec::new();
+        rejected
+            .try_reserve_exact(SLOTS)
+            .map_err(|_| IommuError::Exhausted)?;
         let ring = memory.alloc()?;
         let status = match memory.alloc() {
             Ok(status) => status,
@@ -94,9 +180,17 @@ impl CommandQueue {
         Ok(Self {
             ring,
             status,
-            tail: 0,
-            head: 0,
-            sequence: 0,
+            state: SpinLock::new(Ring {
+                tail: 0,
+                head: 0,
+                queued: 0,
+                sequence: 0,
+                owners: [0; SLOTS],
+                rejected,
+                poisoned: false,
+            }),
+            rejections: AtomicU32::new(0),
+            consumed: AtomicU64::new(0),
         })
     }
 
@@ -111,6 +205,12 @@ impl CommandQueue {
     #[must_use]
     pub const fn ring(&self) -> u64 {
         self.ring.phys()
+    }
+
+    /// The physical address of the word a completion stores its token to.
+    #[must_use]
+    pub const fn status_word(&self) -> u64 {
+        self.status.phys()
     }
 
     /// Write `command` over slot `slot` where the unit will read it: how a
@@ -133,74 +233,234 @@ impl CommandQueue {
     }
 
     /// Queue `commands`, then the completion `completion` makes of a fresh
-    /// token and the status word's address, and return once the unit has
-    /// stored the token: every command before it is done. A stream longer
-    /// than the ring is handed over as room frees.
+    /// token and the status word's address, and hand the unit the batch. A
+    /// stream longer than the ring is handed over as room frees.
     ///
     /// # Errors
     ///
-    /// [`IommuError::Hardware`] when the unit rejected a command,
-    /// [`IommuError::Unconfirmed`] past [`COMMAND_BUDGET_NS`], or the
-    /// registers' refusal.
+    /// [`IommuError::Hardware`] when the unit cannot run on past a command
+    /// it rejected, [`IommuError::Unconfirmed`] when no room frees within
+    /// [`COMMAND_BUDGET_NS`], or the registers' refusal.
+    pub fn submit(
+        &self,
+        memory: &TableMemory<'_>,
+        clock: &dyn Clock,
+        regs: &dyn QueueRegisters,
+        commands: impl IntoIterator<Item = Command>,
+        completion: impl Fn(u32, u64) -> Command,
+    ) -> Result<Ticket, IommuError> {
+        let mut ring = self.state.lock();
+        ring.sequence = ring.sequence.wrapping_add(1).max(1);
+        let token = ring.sequence;
+        let rejections = self.rejections.load(Ordering::Acquire);
+        let wait = completion(token, self.status.phys());
+        for command in commands.into_iter().chain(core::iter::once(wait)) {
+            let next = (ring.tail + 1) % SLOTS;
+            // The ring is full while the tail would catch the head: the unit
+            // is handed what is queued so it can make room.
+            if next == ring.head {
+                let mut head = regs.head()? % SLOTS;
+                if next == head {
+                    tairix_dma_barrier::dma_wmb();
+                    regs.set_tail(ring.tail)?;
+                    wait_for(clock, || {
+                        self.recover(&mut ring, memory, regs)?;
+                        head = regs.head()? % SLOTS;
+                        Ok(next != head)
+                    })?;
+                }
+                let at = ring.observe(head);
+                self.consumed.fetch_max(at, Ordering::AcqRel);
+            }
+            let slot = ring.tail;
+            self.replace(memory, slot, command)?;
+            ring.owners[slot] = token;
+            ring.tail = next;
+            ring.queued += 1;
+        }
+        tairix_dma_barrier::dma_wmb();
+        regs.set_tail(ring.tail)?;
+        Ok(Ticket {
+            token,
+            completion: ring.queued - 1,
+            confirm: regs.completion(),
+            rejections,
+        })
+    }
+
+    /// Return once the unit has done every command of `ticket`'s batch,
+    /// holding no lock while it waits.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] when the unit rejected a command of the
+    /// batch, or can run no further command; [`IommuError::Unconfirmed`] past
+    /// [`COMMAND_BUDGET_NS`]; or the registers' refusal.
+    // Taken by value so a batch's answer, its charge included, is collected
+    // once.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn wait(
+        &self,
+        memory: &TableMemory<'_>,
+        clock: &dyn Clock,
+        regs: &dyn QueueRegisters,
+        ticket: Ticket,
+    ) -> Result<(), IommuError> {
+        let mut polls: u32 = 0;
+        let waited = wait_for(clock, || {
+            if self.done(memory, &ticket)? {
+                return Ok(true);
+            }
+            polls = polls.wrapping_add(1);
+            if !polls.is_multiple_of(LOOK_EVERY) {
+                return Ok(false);
+            }
+            // A unit that stopped never reaches the completion, and one that
+            // confirms by consumption says how far it got only through its
+            // head: a waiter looks now and then, where it finds the ring free,
+            // and takes it once it has missed it long enough.
+            let ring = if polls.is_multiple_of(LOOK_EVERY * PATIENCE) {
+                Some(self.state.lock())
+            } else {
+                self.state.try_lock()
+            };
+            if let Some(mut ring) = ring {
+                self.recover(&mut ring, memory, regs)?;
+                if ticket.confirm == Completion::Consumed {
+                    let at = ring.observe(regs.head()? % SLOTS);
+                    self.consumed.fetch_max(at, Ordering::AcqRel);
+                }
+            }
+            self.done(memory, &ticket)
+        });
+        // The completion was read before any charge to its batch can be: a
+        // charge lands before the unit runs on to complete the batch.
+        fence(Ordering::Acquire);
+        let charged = self.rejections.load(Ordering::Acquire) != ticket.rejections;
+        if !charged && waited.is_ok() {
+            return Ok(());
+        }
+        let mut ring = self.state.lock();
+        let rejected = ring
+            .rejected
+            .iter()
+            .position(|&token| token == ticket.token);
+        if let Some(at) = rejected {
+            ring.rejected.swap_remove(at);
+        }
+        if rejected.is_some() || ring.poisoned {
+            return Err(IommuError::Hardware);
+        }
+        waited
+    }
+
+    /// Hand the unit `commands` and return once it has done them all: a
+    /// [`Self::submit`] waited on at once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::submit`] and [`Self::wait`].
     pub fn run(
-        &mut self,
+        &self,
         memory: &TableMemory<'_>,
         clock: &dyn Clock,
         regs: &dyn QueueRegisters,
         commands: impl IntoIterator<Item = Command>,
         completion: impl Fn(u32, u64) -> Command,
     ) -> Result<(), IommuError> {
-        self.sequence = self.sequence.wrapping_add(1).max(1);
-        let token = self.sequence;
-        let wait = completion(token, self.status.phys());
-        for command in commands.into_iter().chain(core::iter::once(wait)) {
-            let next = (self.tail + 1) % SLOTS;
-            // The ring is full while the tail would catch the head: the unit
-            // is handed what is queued so it can make room.
-            if next == self.head {
-                let mut head = regs.head()? % SLOTS;
-                if next == head {
-                    tairix_dma_barrier::dma_wmb();
-                    regs.set_tail(self.tail)?;
-                    let queue = &*self;
-                    wait_for(clock, || {
-                        head = regs.head()? % SLOTS;
-                        if next != head {
-                            return Ok(true);
-                        }
-                        if regs.stopped(queue, memory)? {
-                            return Err(IommuError::Hardware);
-                        }
-                        Ok(false)
-                    })?;
-                }
-                self.head = head;
+        let ticket = self.submit(memory, clock, regs, commands, completion)?;
+        self.wait(memory, clock, regs, ticket)
+    }
+
+    fn done(&self, memory: &TableMemory<'_>, ticket: &Ticket) -> Result<bool, IommuError> {
+        Ok(match ticket.confirm {
+            Completion::Stored => {
+                let status = memory.read(&self.status, 0)?.to_le_bytes();
+                let status = u32::from_le_bytes([status[0], status[1], status[2], status[3]]);
+                stored_covers(status, ticket.token)
             }
-            self.replace(memory, self.tail, command)?;
-            self.tail = next;
+            Completion::Consumed => self.consumed.load(Ordering::Acquire) > ticket.completion,
+        })
+    }
+
+    /// Where the unit stopped on a command it rejected, charge the batch
+    /// holding it, then put the unit back to running: charged first, so the
+    /// batch's waiter cannot see it complete uncharged.
+    fn recover(
+        &self,
+        ring: &mut Ring,
+        memory: &TableMemory<'_>,
+        regs: &dyn QueueRegisters,
+    ) -> Result<(), IommuError> {
+        let Some(slot) = regs.stopped_at()? else {
+            return Ok(());
+        };
+        let token = ring.owners[slot % SLOTS];
+        if ring.rejected.try_reserve(1).is_ok() {
+            ring.rejected.push(token);
+        } else {
+            ring.poisoned = true;
         }
+        self.rejections.fetch_add(1, Ordering::AcqRel);
         tairix_dma_barrier::dma_wmb();
-        regs.set_tail(self.tail)?;
-        let completion = regs.completion();
-        wait_for(clock, || {
-            let done = match completion {
-                Completion::Stored => {
-                    memory.read(&self.status, 0)?.to_le_bytes()[..4] == token.to_le_bytes()
-                }
-                Completion::Consumed => regs.head()? % SLOTS == self.tail,
-            };
-            if done {
-                return Ok(true);
-            }
-            if regs.stopped(self, memory)? {
-                return Err(IommuError::Hardware);
-            }
-            Ok(false)
-        })?;
-        if completion == Completion::Consumed {
-            self.head = self.tail;
-        }
-        Ok(())
+        regs.resume(self, memory, slot)
+    }
+}
+
+/// A unit's command queue as its family drives it: the ring, the memory it
+/// lives in, the clock its waits are bounded by, its registers, and the
+/// completion command its batches close with.
+#[derive(Clone, Copy)]
+pub struct Invalidator<'a> {
+    /// The ring.
+    pub queue: &'a CommandQueue,
+    /// The memory the ring and its status word live in.
+    pub memory: TableMemory<'a>,
+    /// What every wait is bounded on.
+    pub clock: &'a dyn Clock,
+    /// The unit's queue registers.
+    pub regs: &'a dyn QueueRegisters,
+    /// The completion command closing a batch, from its token and the status
+    /// word's address.
+    pub completion: fn(u32, u64) -> Command,
+}
+
+impl Invalidator<'_> {
+    /// [`CommandQueue::submit`] `commands`.
+    ///
+    /// # Errors
+    ///
+    /// As [`CommandQueue::submit`].
+    pub fn submit(
+        &self,
+        commands: impl IntoIterator<Item = Command>,
+    ) -> Result<Ticket, IommuError> {
+        self.queue.submit(
+            &self.memory,
+            self.clock,
+            self.regs,
+            commands,
+            self.completion,
+        )
+    }
+
+    /// [`CommandQueue::wait`] on `ticket`.
+    ///
+    /// # Errors
+    ///
+    /// As [`CommandQueue::wait`].
+    pub fn wait(&self, ticket: Ticket) -> Result<(), IommuError> {
+        self.queue.wait(&self.memory, self.clock, self.regs, ticket)
+    }
+
+    /// [`CommandQueue::run`] `commands`.
+    ///
+    /// # Errors
+    ///
+    /// As [`CommandQueue::run`].
+    pub fn run(&self, commands: impl IntoIterator<Item = Command>) -> Result<(), IommuError> {
+        let ticket = self.submit(commands)?;
+        self.wait(ticket)
     }
 }
 
@@ -231,10 +491,13 @@ pub fn wait_within(
 ) -> Result<(), IommuError> {
     let deadline = clock.now_ns().saturating_add(budget_ns);
     loop {
+        // Read before polling, so only a poll begun past the deadline can
+        // fail the wait, however long the CPU was taken away between them.
+        let expired = clock.now_ns() > deadline;
         if done()? {
             return Ok(());
         }
-        if clock.now_ns() > deadline {
+        if expired {
             return Err(IommuError::Unconfirmed);
         }
         core::hint::spin_loop();
@@ -242,233 +505,5 @@ pub fn wait_within(
 }
 
 #[cfg(test)]
-mod tests {
-    use core::cell::Cell;
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    use super::*;
-    use crate::hostmem::HostFrames;
-
-    /// A unit that consumes the ring up to the tail the moment it is set and
-    /// stores each completion's token, or stops on a command naming `reject`.
-    struct Unit<'m> {
-        frames: &'m HostFrames,
-        ring: u64,
-        status: u64,
-        head: Cell<usize>,
-        head_reads: Cell<usize>,
-        reject: u64,
-        stopped: Cell<bool>,
-    }
-
-    impl QueueRegisters for Unit<'_> {
-        fn head(&self) -> Result<usize, IommuError> {
-            self.head_reads.set(self.head_reads.get() + 1);
-            Ok(self.head.get())
-        }
-
-        fn set_tail(&self, tail: usize) -> Result<(), IommuError> {
-            while self.head.get() != tail {
-                let slot = self.head.get();
-                let word = self
-                    .frames
-                    .word(self.ring + 16 * slot as u64)
-                    .ok_or(IommuError::Hardware)?;
-                if word == self.reject {
-                    self.stopped.set(true);
-                    return Ok(());
-                }
-                if word >> 60 == 0xC {
-                    self.frames.store_word(self.status, word & 0xFFFF_FFFF);
-                }
-                self.head.set((slot + 1) % SLOTS);
-            }
-            Ok(())
-        }
-
-        fn stopped(
-            &self,
-            queue: &CommandQueue,
-            memory: &TableMemory<'_>,
-        ) -> Result<bool, IommuError> {
-            if !self.stopped.replace(false) {
-                return Ok(false);
-            }
-            queue.replace(memory, self.head.get(), [0, 0])?;
-            Ok(true)
-        }
-    }
-
-    /// A completion as the test unit reads it: its token in the low word.
-    fn completion(token: u32, _status: u64) -> Command {
-        [0xC << 60 | u64::from(token), 0]
-    }
-
-    struct Clock0(AtomicU64);
-
-    impl Clock for Clock0 {
-        fn now_ns(&self) -> u64 {
-            self.0.fetch_add(1_000, Ordering::Relaxed)
-        }
-    }
-
-    fn rig<'m>(frames: &'m HostFrames, queue: &CommandQueue, reject: u64) -> Unit<'m> {
-        Unit {
-            frames,
-            ring: queue.ring(),
-            status: queue.status.phys(),
-            head: Cell::new(0),
-            head_reads: Cell::new(0),
-            reject,
-            stopped: Cell::new(false),
-        }
-    }
-
-    #[test]
-    fn a_batch_returns_once_its_completion_is_stored_and_wraps_the_ring() {
-        let frames = HostFrames::new(0x1_0000_0000);
-        let memory = TableMemory::new(&frames, None);
-        let mut queue = CommandQueue::new(&memory).unwrap();
-        let unit = rig(&frames, &queue, u64::MAX);
-        let clock = Clock0(AtomicU64::new(0));
-        for round in 0..(2 * SLOTS) {
-            queue
-                .run(&memory, &clock, &unit, [[round as u64, 0]], completion)
-                .unwrap();
-        }
-        assert_eq!(unit.head.get(), queue.tail, "the unit consumed every slot");
-    }
-
-    /// A stream longer than the ring is handed over as the unit makes room,
-    /// with the head register read only when the ring looks full.
-    #[test]
-    fn a_stream_longer_than_the_ring_is_handed_over_as_room_frees() {
-        let frames = HostFrames::new(0x1_0000_0000);
-        let memory = TableMemory::new(&frames, None);
-        let mut queue = CommandQueue::new(&memory).unwrap();
-        let unit = rig(&frames, &queue, u64::MAX);
-        let clock = Clock0(AtomicU64::new(0));
-        let stream = (0..3 * SLOTS as u64).map(|command| [command, 0]);
-        queue
-            .run(&memory, &clock, &unit, stream, completion)
-            .unwrap();
-        assert_eq!(
-            unit.head.get(),
-            queue.tail,
-            "the unit consumed every command"
-        );
-        assert!(
-            unit.head_reads.get() < SLOTS,
-            "the head was read {} times for {} commands",
-            unit.head_reads.get(),
-            3 * SLOTS
-        );
-    }
-
-    #[test]
-    fn a_rejected_command_is_reported_and_the_queue_runs_on() {
-        let frames = HostFrames::new(0x1_0000_0000);
-        let memory = TableMemory::new(&frames, None);
-        let mut queue = CommandQueue::new(&memory).unwrap();
-        let unit = rig(&frames, &queue, 0xBAD);
-        let clock = Clock0(AtomicU64::new(0));
-        assert_eq!(
-            queue.run(&memory, &clock, &unit, [[0xBAD, 0]], completion),
-            Err(IommuError::Hardware)
-        );
-        unit.set_tail(queue.tail).unwrap();
-        queue
-            .run(&memory, &clock, &unit, [[1, 0]], completion)
-            .unwrap();
-    }
-
-    /// A unit confirming by consumption, which stores nothing; it stops
-    /// consuming before slot `stall` where one is given.
-    struct Consuming {
-        head: Cell<usize>,
-        stall: Option<usize>,
-    }
-
-    impl QueueRegisters for Consuming {
-        fn head(&self) -> Result<usize, IommuError> {
-            Ok(self.head.get())
-        }
-
-        fn set_tail(&self, tail: usize) -> Result<(), IommuError> {
-            while self.head.get() != tail && Some(self.head.get()) != self.stall {
-                self.head.set((self.head.get() + 1) % SLOTS);
-            }
-            Ok(())
-        }
-
-        fn stopped(
-            &self,
-            _queue: &CommandQueue,
-            _memory: &TableMemory<'_>,
-        ) -> Result<bool, IommuError> {
-            Ok(false)
-        }
-
-        fn completion(&self) -> Completion {
-            Completion::Consumed
-        }
-    }
-
-    /// A batch a consuming unit has moved its head past is done; one it stops
-    /// short of, with the completion still ahead of its head, is not.
-    #[test]
-    fn a_unit_confirming_by_consumption_is_done_once_its_head_passes_the_batch() {
-        let frames = HostFrames::new(0x1_0000_0000);
-        let memory = TableMemory::new(&frames, None);
-        let mut queue = CommandQueue::new(&memory).unwrap();
-        let clock = Clock0(AtomicU64::new(0));
-        let unit = Consuming {
-            head: Cell::new(0),
-            stall: None,
-        };
-        for round in 0..(2 * SLOTS) {
-            queue
-                .run(&memory, &clock, &unit, [[round as u64, 0]], completion)
-                .unwrap();
-        }
-        assert_eq!(unit.head.get(), queue.tail);
-        let stuck = Consuming {
-            head: Cell::new(queue.tail),
-            stall: Some((queue.tail + 1) % SLOTS),
-        };
-        assert_eq!(
-            queue.run(&memory, &clock, &stuck, [[1, 0]], completion),
-            Err(IommuError::Unconfirmed),
-            "the completion is never consumed"
-        );
-    }
-
-    /// A unit that never stores its completion is not waited on forever.
-    #[test]
-    fn a_unit_that_never_completes_is_unconfirmed() {
-        struct Silent;
-        impl QueueRegisters for Silent {
-            fn head(&self) -> Result<usize, IommuError> {
-                Ok(0)
-            }
-            fn set_tail(&self, _tail: usize) -> Result<(), IommuError> {
-                Ok(())
-            }
-            fn stopped(
-                &self,
-                _queue: &CommandQueue,
-                _memory: &TableMemory<'_>,
-            ) -> Result<bool, IommuError> {
-                Ok(false)
-            }
-        }
-        let frames = HostFrames::new(0x1_0000_0000);
-        let memory = TableMemory::new(&frames, None);
-        let mut queue = CommandQueue::new(&memory).unwrap();
-        let clock = Clock0(AtomicU64::new(0));
-        assert_eq!(
-            queue.run(&memory, &clock, &Silent, [[1, 0]], completion),
-            Err(IommuError::Unconfirmed)
-        );
-    }
-}
+#[path = "queue_tests.rs"]
+mod tests;

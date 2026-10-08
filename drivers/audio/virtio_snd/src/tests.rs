@@ -92,13 +92,14 @@ struct DeviceLog {
 
 /// Build a mock transport whose control queue answers as `spec` describes and
 /// whose transfer queues complete every posted buffer.
-fn mock_device(spec: &DeviceSpec, log: &Rc<RefCell<DeviceLog>>) -> MockTransport {
+fn mock_device(spec: &DeviceSpec, log: &Rc<RefCell<DeviceLog>>, host: &MockHost) -> MockTransport {
     let mut transport = MockTransport::new(
         wire::QUEUE_COUNT,
         64,
         tairix_virtio::TRANSPORT_FEATURES,
         wire::config::LEN,
     );
+    transport.reach(host);
     transport.set_synchronous_notify(true);
     transport.set_config(wire::config::JACKS, &spec.jacks.to_le_bytes());
     let streams = u32::try_from(spec.streams.len()).expect("small");
@@ -284,7 +285,7 @@ fn bring_up_reads_what_the_device_says_rather_than_assuming_it() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock)
+    let device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
         .expect("the device comes up");
 
     let facts = device.device_facts().expect("facts");
@@ -324,7 +325,7 @@ fn published_jacks_and_channel_maps_are_used_where_the_device_offers_them() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let device = VirtioSnd::open(mock_device(&spec, &log), &host, &clock).expect("comes up");
+    let device = VirtioSnd::open(mock_device(&spec, &log, &host), &host, &clock).expect("comes up");
 
     let sink = device.endpoint_facts(0).expect("sink facts");
     assert_eq!(sink.jack, JackState::Present);
@@ -342,7 +343,7 @@ fn a_device_that_advertises_jacks_and_maps_but_answers_neither_still_comes_up() 
     let clock = StepClock::new();
     let spec = DeviceSpec::qemu();
     assert!(spec.jacks > 0 && spec.chmaps > 0, "the queries are issued");
-    let device = VirtioSnd::open(mock_device(&spec, &log), &host, &clock).expect("comes up");
+    let device = VirtioSnd::open(mock_device(&spec, &log, &host), &host, &clock).expect("comes up");
 
     // Undescribed, never invented: the conventional layout is what the
     // facts fall back to, and the jack is honestly unknown.
@@ -363,7 +364,7 @@ fn a_device_that_will_not_describe_its_streams_is_still_refused() {
     let mut spec = DeviceSpec::qemu();
     spec.not_supported.push(wire::request::PCM_INFO);
     assert_eq!(
-        VirtioSnd::open(mock_device(&spec, &log), &host, &clock)
+        VirtioSnd::open(mock_device(&spec, &log, &host), &host, &clock)
             .err()
             .expect("refused"),
         DriverError::NotImplemented
@@ -375,17 +376,17 @@ fn bring_up_declares_the_device_quiesced_once_its_reset_confirms() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let _device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let _device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     assert_eq!(host.quiesced_calls(), 1);
 }
 
 #[test]
 fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
-    let mut transport = mock_device(&DeviceSpec::qemu(), &log);
-    transport.refuse_resets_after(0);
     let host = MockHost::new();
+    let mut transport = mock_device(&DeviceSpec::qemu(), &log, &host);
+    transport.refuse_resets_after(0);
     let clock = StepClock::new();
     assert_eq!(
         VirtioSnd::open(transport, &host, &clock).err(),
@@ -396,10 +397,13 @@ fn a_device_whose_reset_never_confirms_is_refused_before_it_is_given_memory() {
 }
 
 /// A device that goes live and then describes itself unusably.
-fn a_live_device_that_fails_enumeration(log: &Rc<RefCell<DeviceLog>>) -> MockTransport {
+fn a_live_device_that_fails_enumeration(
+    log: &Rc<RefCell<DeviceLog>>,
+    host: &MockHost,
+) -> MockTransport {
     let mut spec = DeviceSpec::qemu();
     spec.not_supported.push(wire::request::PCM_INFO);
-    mock_device(&spec, log)
+    mock_device(&spec, log, host)
 }
 
 #[test]
@@ -407,16 +411,21 @@ fn a_failure_once_the_device_is_live_resets_it_before_releasing_its_memory() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    assert!(VirtioSnd::open(a_live_device_that_fails_enumeration(&log), &host, &clock).is_err());
+    assert!(VirtioSnd::open(
+        a_live_device_that_fails_enumeration(&log, &host),
+        &host,
+        &clock
+    )
+    .is_err());
     assert_eq!(host.slabs_outstanding(), 0);
 }
 
 #[test]
 fn a_live_failure_on_a_device_that_then_wedges_releases_nothing() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
-    let mut transport = a_live_device_that_fails_enumeration(&log);
-    transport.refuse_resets_after(1);
     let host = MockHost::new();
+    let mut transport = a_live_device_that_fails_enumeration(&log, &host);
+    transport.refuse_resets_after(1);
     let clock = StepClock::new();
     assert!(VirtioSnd::open(transport, &host, &clock).is_err());
     assert!(
@@ -437,7 +446,7 @@ fn a_device_describing_no_streams_or_too_many_is_refused() {
         let host = MockHost::new();
         let clock = StepClock::new();
         assert_eq!(
-            VirtioSnd::open(mock_device(&spec, &log), &host, &clock)
+            VirtioSnd::open(mock_device(&spec, &log, &host), &host, &clock)
                 .err()
                 .expect("refused"),
             DriverError::DeviceFault,
@@ -456,7 +465,7 @@ fn a_stream_offering_no_encoding_this_stack_speaks_is_a_device_fault() {
     let host = MockHost::new();
     let clock = StepClock::new();
     assert_eq!(
-        VirtioSnd::open(mock_device(&spec, &log), &host, &clock)
+        VirtioSnd::open(mock_device(&spec, &log, &host), &host, &clock)
             .err()
             .expect("refused"),
         DriverError::DeviceFault
@@ -468,8 +477,8 @@ fn configure_programs_the_device_and_answers_what_it_will_run_at() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
 
     let grant = device.configure(0, &params()).expect("configured");
     assert_eq!(grant.rate, Rate::HZ_48000);
@@ -494,8 +503,8 @@ fn a_request_the_device_cannot_meet_is_substituted_rather_than_refused() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
 
     let asked = ConfigureParams {
         // A rate the device does not clock at, and an encoding it does not
@@ -516,8 +525,8 @@ fn a_period_is_rounded_up_to_a_power_of_two_inside_the_drivers_own_bound() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
 
     let grant = device
         .configure(
@@ -552,8 +561,8 @@ fn a_configure_on_a_running_stream_is_refused_rather_than_reprogramming_it() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
     device.start(0, Frames::ZERO).expect("started");
     assert_eq!(
@@ -567,8 +576,8 @@ fn playback_moves_the_rings_frames_and_the_position_follows_them() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
     device.start(0, Frames::ZERO).expect("started");
 
@@ -613,8 +622,8 @@ fn a_short_ring_is_padded_with_silence_and_the_loss_is_counted_exactly() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
     device.start(0, Frames::ZERO).expect("started");
 
@@ -651,8 +660,8 @@ fn a_stopped_stream_is_never_fed_silence_to_keep_it_busy() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
 
     let mut ring = Ring::new();
@@ -671,8 +680,8 @@ fn a_ring_that_is_not_the_configured_shape_is_refused() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
 
     let geometry = PcmGeometry::new(RING_FRAMES, SampleFormat::S32, 2).expect("valid");
@@ -691,8 +700,8 @@ fn capture_posts_buffers_and_carries_what_the_device_wrote_into_the_ring() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device
         .configure(
             1,
@@ -743,8 +752,8 @@ fn capture_the_mixer_did_not_drain_is_counted_as_lost_rather_than_dropped_silent
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device
         .configure(
             1,
@@ -789,7 +798,7 @@ fn a_control_refusal_reaches_the_caller_as_the_typed_error_the_device_named() {
         let host = MockHost::new();
         let clock = StepClock::new();
         assert_eq!(
-            VirtioSnd::open(mock_device(&spec, &log), &host, &clock)
+            VirtioSnd::open(mock_device(&spec, &log, &host), &host, &clock)
                 .err()
                 .expect("refused"),
             expected,
@@ -803,8 +812,8 @@ fn release_stops_and_releases_the_device_and_a_second_release_is_harmless() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
     device.start(0, Frames::ZERO).expect("started");
     device.release(0).expect("released");
@@ -825,8 +834,8 @@ fn gain_is_refused_because_the_endpoint_honestly_reports_none() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     assert_eq!(
         device.set_gain(0, -600, false).unwrap_err(),
         DriverError::NotImplemented
@@ -842,8 +851,8 @@ fn a_posted_transfer_is_reported_as_a_period_boundary_even_with_no_device_event(
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     // Nothing is posted yet, so there is nothing to report.
     assert!(device.take_interrupt().expect("read").is_empty());
 
@@ -874,8 +883,8 @@ fn masking_the_event_sources_is_the_used_ring_suppression_the_bus_offers() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     assert!(!device.events_armed());
     device.set_event_interrupts(true).expect("armed");
     assert!(device.events_armed());
@@ -930,8 +939,8 @@ fn playing_device<'h>(
     host: &'h MockHost,
     clock: &'h StepClock,
 ) -> VirtioSnd<'h, MockTransport> {
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), log), host, clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), log, host), host, clock)
+        .expect("comes up");
     device.configure(0, &params()).expect("configured");
     device.start(0, Frames::ZERO).expect("started");
     let mut ring = Ring::new();
@@ -1005,7 +1014,7 @@ fn device_holding_transfers<'h>(
     host: &'h MockHost,
     clock: &'h StepClock,
 ) -> (VirtioSnd<'h, Device>, Device) {
-    let mut transport = mock_device(spec, log);
+    let mut transport = mock_device(spec, log, host);
     transport.set_synchronous_notify(false);
     let transport = transport.into_shared();
     host.attach(&transport);
@@ -1099,7 +1108,7 @@ fn a_device_with_a_shallow_event_queue_still_comes_up() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+    let mut transport = mock_device(&DeviceSpec::qemu(), &log, &host);
     transport.set_queue_max(wire::EVENT_QUEUE, 8);
     let device = VirtioSnd::open(transport, &host, &clock).expect("comes up");
     assert_eq!(device.eventq.size(), 8);
@@ -1115,10 +1124,10 @@ fn a_queue_too_shallow_for_what_it_carries_is_refused_before_it_is_programmed() 
         (wire::RX_QUEUE, 16),
     ] {
         let log = Rc::new(RefCell::new(DeviceLog::default()));
-        let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+        let host = MockHost::new();
+        let mut transport = mock_device(&DeviceSpec::qemu(), &log, &host);
         transport.set_queue_max(queue, max);
         let transport = transport.into_shared();
-        let host = MockHost::new();
         let clock = StepClock::new();
         assert_eq!(
             VirtioSnd::open(Rc::clone(&transport), &host, &clock).err(),
@@ -1171,8 +1180,8 @@ fn one_drain_takes_no_more_than_a_ring_of_event_completions() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     let ring = device.eventq.size();
     // Head 0 is reposted under head 0 each time it comes back.
     for _ in 0..2 * ring {
@@ -1193,8 +1202,8 @@ fn an_event_slot_completed_without_a_write_is_not_read_as_its_last_event() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     let slot = device.event_slots[0].expect("head 0 is posted");
     let at = usize::from(slot) * wire::event::LEN;
     let len = u32::try_from(wire::event::LEN).expect("small");
@@ -1224,7 +1233,7 @@ fn a_transfer_the_device_completed_without_a_status_is_refused() {
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut transport = mock_device(&DeviceSpec::qemu(), &log);
+    let mut transport = mock_device(&DeviceSpec::qemu(), &log, &host);
     let answered = Rc::new(core::cell::Cell::new(0usize));
     let counter = Rc::clone(&answered);
     transport.install_shim(
@@ -1298,8 +1307,8 @@ fn a_control_request_left_unanswered_holds_back_the_next_until_it_is_answered() 
     let log = Rc::new(RefCell::new(DeviceLog::default()));
     let host = MockHost::new();
     let clock = StepClock::new();
-    let mut device =
-        VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log), &host, &clock).expect("comes up");
+    let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
+        .expect("comes up");
     // The device stops answering: every wait wakes with nothing in the ring.
     device.transport.set_synchronous_notify(false);
     assert_eq!(

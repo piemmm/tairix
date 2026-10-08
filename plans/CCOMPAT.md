@@ -1,5 +1,14 @@
 # CCOMPAT.md — A C-callable `abi-v1`: full `lib/abi` header surface, syscall stubs, and crt0
 
+| ID | Item | Status |
+|---|---|---|
+| CC1 | The full `lib/abi` C header surface, generated into `include/tairix/` | in progress |
+| CC1.1 | C mirrors for the remaining System Information records, and a completeness test that derives its list | planned |
+| CC2 | `lib/abi-sys`: the C-callable syscall stub runtime | done |
+| CC3 | crt0: C program startup and teardown | done |
+| CC4 | Loader and bundle integration for native programs | done |
+| CC5 | An end-to-end C program, fuzzing, and the audited C toolchain wrapper | done |
+
 This is a staged build plan for making the whole TAIRiX user/kernel ABI
 (`abi-v1`) callable from programs **not written in Rust** (C first, then any
 language with a C FFI). It is **binding under `AGENTS.md`**; read `AGENTS.md`
@@ -104,7 +113,7 @@ not start a stage before its predecessor is green on the whole-project gate
 
 ### Stage CC1 — Full `lib/abi` C header surface
 
-**Status: done.** The generator has been grown from a single
+The generator has been grown from a single
 `tairix_abi.h` into a per-module header set under `include/tairix/`: the
 umbrella `tairix_abi.h` now only carries `TAIRIX_ABI_VERSION` and `#include`s
 the module headers `tairix_error.h`, `tairix_capability.h`, `tairix_time.h`,
@@ -161,11 +170,11 @@ discriminants — a `Segment` record is hand-serialised, so the header exports
 its wire size and `TAIRIX_SEG_FLAG_*` field codes rather than a C struct mirror —
 every value read from `lib/abi` and pinned by an in-module test. The `sysinfo`
 module has now landed too: `tairix_sysinfo.h` declares C struct mirrors of the
-eight `#[repr(C)]` System Information wire types (`SysinfoRequestHeader`,
-`ProcessListRequest`, `ProcessRecord`, `KernelMemoryStats`, `Uptime`,
-`SystemIdentity`, `MountListRequest`, `MountRecord`) — `tairix_uptime_t`'s members
-are the `tairix_duration64_t` / `tairix_time64_t` types from `tairix_time.h`, which it
-`#include`s — plus the `TAIRIX_SYSINFO_VERSION_*` / `TAIRIX_SYSINFO_REQUEST_MAGIC` /
+`SysinfoRequestHeader`, the `PageRequest` every list query takes, and the
+process, kernel-memory, uptime, load-average, identity, mount, resource-limit,
+account and DMA-translation records, with the DMA records' discriminants —
+`tairix_uptime_t`'s members are the `tairix_duration64_t` / `tairix_time64_t`
+types from `tairix_time.h`, which it `#include`s — plus the `TAIRIX_SYSINFO_VERSION_*` / `TAIRIX_SYSINFO_REQUEST_MAGIC` /
 `TAIRIX_SYSINFO_MAX_PAYLOAD_LEN` / `TAIRIX_SYSINFO_QUERY_ID_MAX` framing, the
 `TAIRIX_SYSINFO_QUERY_*` well-known ids, the `TAIRIX_SYSINFO_QUERY_NAME_MAX` /
 `_RECORD_LEN` / `_ENCODED_QUERY_TABLE_LEN` registry constants, the
@@ -208,9 +217,15 @@ and the runtime objects (`RegisterWindow`, `DmaSlab`, `PoolId`) carry no
 `#[repr(C)]`/explicit-primitive layout and never cross the C boundary, so —
 like the driver-host traits — they are deliberately omitted (§2.3). The CC1
 **completeness test** (`every_repr_c_abi_type_is_represented_in_the_header_set`)
-now pins every `lib/abi` `#[repr(C)]` type's size/align and asserts it has a C
-`typedef`, the type-surface analogue of `errno_table_matches_the_frozen_enum`.
-CC1 is complete and green on the whole-project gate.
+pins each type it lists — its size/align, and that it has a C `typedef`.
+
+**CC1.1.** The other System Information records have no C mirror
+yet: IRQ, seat, CPU time, load and info, crash, reclaim class, cache ledger,
+memory pressure, volume I/O, desktop frame, network interface and socket, and
+RAID. And the completeness test pins a hand-written list, so a new
+`#[repr(C)]` type escapes the C surface until someone lists it: it is to find
+every such type in `lib/abi` itself and fail on one without a `typedef`, as
+`errno_table_matches_the_frozen_enum` does for the error table.
 
 **Deliverables**
 - Grow the `tools/xtask` generator (`commands/c_header.rs`) from the current
@@ -244,9 +259,8 @@ header list, endianness, the "not frozen yet" note); rustdoc on the generator.
 
 ### Stage CC2 — `lib/abi-sys`: the C-callable syscall stub runtime
 
-**Status: DONE — runtime + host tests + the QEMU round-trip on all three
-native targets (x86_64, riscv64, aarch64).**
-The per-architecture trap layer exists on all three native targets
+The runtime, its host tests and the QEMU round-trip cover all three native
+targets (x86_64, riscv64, aarch64). The per-architecture trap layer exists on all three native targets
 (`kernel/arch/{x86_64,aarch64,riscv64}/src/syscall_entry.rs`).
 The crate `lib/abi-sys` (`tairix-abi-sys`) has landed: it exports the eleven
 `extern "C"`, export-name-pinned `tairix_sys_<name>` functions matching the CC1
@@ -353,8 +367,8 @@ tier; `AGENTS.md` §3 + `PLAN.md` registration (§6).
 
 ### Stage CC3 — crt0: C program startup/teardown
 
-**Status: DONE. The end-to-end spawn round-trip has landed and is QEMU-proven
-on all three native targets: on riscv64, aarch64, and x86_64 a separately-linked
+**The end-to-end spawn round-trip is QEMU-proven on all three native
+targets: on riscv64, aarch64, and x86_64 a separately-linked
 crt0+abi-sys program is built into a user (U-mode / EL0 / ring-3) address space
 by the production capability-checked, audited spawn caller
 (`tairix_kernel_core::spawn_and_enter`) and entered (`sret` / EL0 `eret` /
@@ -605,7 +619,7 @@ crt0 crate `README.md`.
 
 ### Stage CC4 — Loader / bundle integration for native programs
 
-**Status: DONE.** A C-compiled `.app` bundle now loads through the
+A C-compiled `.app` bundle loads through the
 language-agnostic application-bundle loader (`userland/system/appmgr`), which
 validates its `Run` `rxe` image and resolves the `tairix_sys_*` runtime **only**
 from the curated `/System/Libraries/` class or the app's own bundle
@@ -667,9 +681,9 @@ manifest/syscall-hash mismatch.
 
 ### Stage CC5 — End-to-end C program + fuzzing
 
-**Status: DONE — fuzz/regression, the audited C toolchain wrapper, the in-tree
-C program, and the QEMU round-trips on **all three native Tier-1 targets**
-(riscv64, aarch64, x86_64) have all landed. The aarch64 (EL0) and x86_64
+Fuzz/regression, the audited C toolchain wrapper, the in-tree C program, and
+the QEMU round-trips on **all three native Tier-1 targets** (riscv64, aarch64,
+x86_64) are in place. The aarch64 (EL0) and x86_64
 (ring-3) C-program round-trips followed the same shape as CC3, reusing
 `cc5_program` + `tairix-cc` + `elf_to_rxe`; each is QEMU-proven PASS plus a
 deliberately-wrong-expectation FAIL.** **Depended on** CC1–CC4 (all done).

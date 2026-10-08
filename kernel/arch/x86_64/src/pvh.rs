@@ -58,13 +58,26 @@ pub enum ParseError {
     EmptyMemoryMap,
 }
 
+/// The most bytes a command line is read for, its NUL included: one page.
+pub const COMMAND_LINE_MAX: usize = 4096;
+
+/// The command line `bytes` begins with: its text before the first NUL, where
+/// there is one and the text is UTF-8.
+#[must_use]
+pub fn command_line(bytes: &[u8]) -> Option<&str> {
+    let len = bytes.iter().position(|&byte| byte == 0)?;
+    core::str::from_utf8(bytes.get(..len)?).ok()
+}
+
 /// Decoded, validated version-1 `hvm_start_info` fields the kernel
-/// consumes. Module list and command line are intentionally not
-/// surfaced: no consumer exists today.
+/// consumes. The module list is not surfaced: no consumer exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartInfo {
     /// Record version (≥ 1 by construction).
     pub version: u32,
+    /// Physical address of the NUL-terminated kernel command line, or 0
+    /// when the loader passed none.
+    pub cmdline_paddr: u64,
     /// Physical address of the ACPI RSDP, or 0 when the loader did not
     /// provide one.
     pub rsdp_paddr: u64,
@@ -103,6 +116,7 @@ impl StartInfo {
         }
         Ok(Self {
             version,
+            cmdline_paddr: read_u64(bytes, 24),
             rsdp_paddr,
             memmap_paddr,
             memmap_entries,
@@ -200,6 +214,33 @@ impl<'a> MemoryMap<'a> {
             remaining: self.entries,
         }
     }
+
+    /// Where the RAM holding `addr` ends: the furthest end of the RAM entries
+    /// containing it, cut where any other entry begins, or `None` where no
+    /// RAM entry holds it or another entry does too. An overlap is a firmware
+    /// defect, and the region that is not RAM wins it.
+    #[must_use]
+    pub fn ram_end(&self, addr: u64) -> Option<u64> {
+        let mut ram_end: Option<u64> = None;
+        let mut other_start = u64::MAX;
+        for entry in self.entries() {
+            if entry.kind == PvhMemoryKind::Ram {
+                let Some(end) = entry.addr.checked_add(entry.size) else {
+                    continue;
+                };
+                if entry.addr <= addr && addr < end {
+                    ram_end = ram_end.max(Some(end));
+                }
+            } else if entry.addr <= addr {
+                if addr < entry.addr.saturating_add(entry.size) {
+                    return None;
+                }
+            } else {
+                other_start = other_start.min(entry.addr);
+            }
+        }
+        ram_end.map(|end| end.min(other_start))
+    }
 }
 
 /// Iterator over [`PvhMemoryEntry`]s; see [`MemoryMap::entries`].
@@ -250,8 +291,11 @@ mod tests {
 
     #[test]
     fn parse_accepts_v1_record() {
-        let si = StartInfo::parse(&v1_record()).expect("v1 record must parse");
+        let mut record = v1_record();
+        put_u64(&mut record, 24, 0x0009_F000);
+        let si = StartInfo::parse(&record).expect("v1 record must parse");
         assert_eq!(si.version, 1);
+        assert_eq!(si.cmdline_paddr, 0x0009_F000);
         assert_eq!(si.rsdp_paddr, 0x000E_0000);
         assert_eq!(si.memmap_paddr, 0x0009_E000);
         assert_eq!(si.memmap_entries, 2);
@@ -352,6 +396,55 @@ mod tests {
         put_u32(&mut b, 16 + 2 * MEMMAP_ENTRY_LEN, 1);
         let map = MemoryMap::parse(&b, 1).expect("table must parse");
         assert_eq!(map.entries().count(), 1);
+    }
+
+    /// A command line is its text before the first NUL, and is refused where
+    /// it has no NUL or is not UTF-8.
+    #[test]
+    fn a_pvh_command_line_is_read_up_to_its_nul_and_no_further() {
+        assert_eq!(
+            command_line(b"console=ttyS0 iommu.malformed=unconfined\0junk"),
+            Some("console=ttyS0 iommu.malformed=unconfined")
+        );
+        assert_eq!(command_line(b"\0"), Some(""));
+        assert_eq!(command_line(&[b'a'; COMMAND_LINE_MAX]), None, "no NUL");
+        assert_eq!(command_line(&[0xFF, 0xFE, 0]), None, "not UTF-8");
+        assert_eq!(command_line(&[]), None);
+    }
+
+    /// Only RAM the map reports bounds a read: the furthest end of the RAM
+    /// entries holding the address, cut where another entry begins, nothing
+    /// where another entry holds it too, and nothing for a RAM entry whose
+    /// end overflows.
+    #[test]
+    fn a_read_stays_in_the_ram_the_map_reports() {
+        let mut b = [0u8; 4 * MEMMAP_ENTRY_LEN];
+        let entries = [
+            (0, 0x9_F000, 1),
+            (0x8_0000, 0x4_0000, 1),
+            (0xA_0000, 0x6_0000, 2),
+            (u64::MAX - 0x10, 0x20, 1),
+        ];
+        for (at, (addr, size, kind)) in entries.into_iter().enumerate() {
+            let off = at * MEMMAP_ENTRY_LEN;
+            put_u64(&mut b, off, addr);
+            put_u64(&mut b, off + 8, size);
+            put_u32(&mut b, off + 16, kind);
+        }
+        let map = MemoryMap::parse(&b, 4).expect("table must parse");
+        assert_eq!(map.ram_end(0x2_0000), Some(0x9_F000));
+        assert_eq!(
+            map.ram_end(0x9_F800),
+            Some(0xA_0000),
+            "the further RAM entry, cut where the reserved one begins"
+        );
+        assert_eq!(map.ram_end(0xB_0000), None, "reserved wins an overlap");
+        assert_eq!(map.ram_end(0x10_0000), None, "an end is exclusive");
+        assert_eq!(
+            map.ram_end(u64::MAX - 1),
+            None,
+            "an entry ending past the address space"
+        );
     }
 
     #[test]

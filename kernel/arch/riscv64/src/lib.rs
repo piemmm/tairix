@@ -118,6 +118,7 @@ core::arch::global_asm!(include_str!("smp.s"));
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 core::arch::global_asm!(include_str!("takeover.s"));
 
+pub mod aplic;
 pub mod backtrace;
 pub mod context;
 /// riscv64 implementation of the Arch HAL context-switch surface
@@ -147,6 +148,7 @@ pub mod entropy;
 pub mod fault;
 pub mod fdt;
 pub mod fpstate;
+pub mod imsic;
 pub mod irqmask;
 pub mod kernel_arch;
 /// riscv64 implementation of the Arch HAL memory-tagging surface

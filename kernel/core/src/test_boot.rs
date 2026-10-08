@@ -65,6 +65,8 @@ std::thread_local! {
     static PEERS: Cell<u32> = const { Cell::new(0) };
     /// Every task the calling test's wakes unparked, in order.
     static UNPARKED: RefCell<std::vec::Vec<TaskId>> = const { RefCell::new(std::vec::Vec::new()) };
+    /// Every CPU [`claim_cpu`] handed the calling test, in order.
+    static CLAIMED_CPUS: RefCell<std::vec::Vec<CpuId>> = const { RefCell::new(std::vec::Vec::new()) };
 }
 
 /// Serial number of the next claim, which both its CPU and its task id are
@@ -193,7 +195,13 @@ pub(crate) fn claim_cpu() -> CpuId {
         usize::try_from(cpu).is_ok_and(|cpu| cpu < crate::cpu_state::TEST_CPUS),
         "the suite claimed more CPUs than the test state table holds"
     );
+    CLAIMED_CPUS.with(|claimed| claimed.borrow_mut().push(cpu));
     cpu
+}
+
+/// Every CPU [`claim_cpu`] handed the calling test, in order.
+pub(crate) fn claimed_cpus() -> std::vec::Vec<CpuId> {
+    CLAIMED_CPUS.with(|claimed| claimed.borrow().clone())
 }
 
 /// Whether [`claim_cpu`] has handed `cpu` out.

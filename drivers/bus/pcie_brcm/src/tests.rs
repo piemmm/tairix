@@ -35,6 +35,7 @@ const PI_WINDOWS: PcieWindows = PcieWindows {
     inbound_pcie_base: 0,
     inbound_size: APERTURE_TOP,
     inbound_cpu_top: APERTURE_TOP,
+    inbound_coherence: DmaCoherence::Unsnooped,
     outbound_cpu_base: OUTBOUND_CPU,
     outbound_pcie_base: OUTBOUND_PCIE,
     outbound_size: OUTBOUND_SIZE,
@@ -746,6 +747,7 @@ fn bridge_node(windows: &PcieWindows) -> HwNode {
         windows.inbound_cpu_top,
         windows.inbound_size,
         windows.inbound_pcie_base,
+        windows.inbound_coherence,
     ))
     .unwrap();
     node.push_resource(HwResource::bus_window(
@@ -771,6 +773,18 @@ fn bringup_inputs_are_assembled_from_the_node() {
 }
 
 #[test]
+fn the_inbound_coherence_is_the_grant_s() {
+    for coherence in [DmaCoherence::Snooped, DmaCoherence::Unsnooped] {
+        let windows = PcieWindows {
+            inbound_coherence: coherence,
+            ..PI_WINDOWS
+        };
+        let bringup = wiring::pcie_bringup_from_node(&bridge_node(&windows)).expect("resources");
+        assert_eq!(bringup.windows.inbound_coherence, coherence);
+    }
+}
+
+#[test]
 fn bringup_carries_a_nonzero_inbound_pcie_base() {
     // A viewport not anchored at PCIe address 0: the translation rides
     // the DMA resource's far-side base, distinct from the CPU top.
@@ -781,6 +795,7 @@ fn bringup_carries_a_nonzero_inbound_pcie_base() {
         APERTURE_TOP,
         APERTURE_TOP,
         0x4000_0000,
+        DmaCoherence::Unsnooped,
     ))
     .unwrap();
     node.push_resource(HwResource::bus_window(
@@ -799,8 +814,13 @@ fn bringup_carries_a_nonzero_inbound_pcie_base() {
 fn bringup_fails_closed_on_each_missing_resource() {
     // No controller register window.
     let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
-    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
-        .unwrap();
+    node.push_resource(HwResource::dma_translated(
+        APERTURE_TOP,
+        APERTURE_TOP,
+        0,
+        DmaCoherence::Unsnooped,
+    ))
+    .unwrap();
     node.push_resource(HwResource::bus_window(
         OUTBOUND_CPU,
         OUTBOUND_SIZE,
@@ -831,8 +851,13 @@ fn bringup_fails_closed_on_each_missing_resource() {
     let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
     node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
         .unwrap();
-    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
-        .unwrap();
+    node.push_resource(HwResource::dma_translated(
+        APERTURE_TOP,
+        APERTURE_TOP,
+        0,
+        DmaCoherence::Unsnooped,
+    ))
+    .unwrap();
     assert_eq!(
         wiring::pcie_bringup_from_node(&node),
         Err(wiring::BringupError::NoOutboundWindow)
@@ -873,8 +898,13 @@ fn bring_up_from_node_fails_closed_on_an_incomplete_node() {
         mapper: Some(MockMapper { grant: true }),
     };
     let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
-    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
-        .unwrap();
+    node.push_resource(HwResource::dma_translated(
+        APERTURE_TOP,
+        APERTURE_TOP,
+        0,
+        DmaCoherence::Unsnooped,
+    ))
+    .unwrap();
     node.push_resource(HwResource::bus_window(
         OUTBOUND_CPU,
         OUTBOUND_SIZE,
@@ -1015,6 +1045,10 @@ impl PciBus for StubPciBus {
         Ok(0)
     }
 
+    fn capability_header(&self, _bdf: u64, _id: u8) -> Result<u32, DriverError> {
+        Err(DriverError::NotFound)
+    }
+
     fn route_msi(&self, _bdf: u64, _message: tairix_abi::MsiMessage) -> Result<(), DriverError> {
         self.calls.borrow_mut().push("route_msi");
         if self.route_msi_ok {
@@ -1143,6 +1177,27 @@ fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
     assert_eq!(*emitted, node);
 }
 
+/// The function's DMA grant meets the CPU's caches as the bridge's own does,
+/// whichever way that is.
+#[test]
+fn a_published_function_s_dma_grant_carries_the_bridge_s_coherence() {
+    for coherence in [DmaCoherence::Snooped, DmaCoherence::Unsnooped] {
+        let windows = PcieWindows {
+            inbound_coherence: coherence,
+            ..PI_WINDOWS
+        };
+        let bus = StubPciBus::new(windows.outbound_pcie_base);
+        let host = RecordingHost::new(true, &windows);
+        let node = wiring::publish_usb_function(&host, &bus, &windows).expect("publishes");
+        let dma = node
+            .resources()
+            .iter()
+            .find(|r| r.kind() == Some(HwResourceKind::Dma))
+            .expect("a Dma constraint grant");
+        assert_eq!(dma.dma_coherence(), Some(coherence));
+    }
+}
+
 #[test]
 fn publish_usb_function_without_a_usb_function_fails_closed_not_found() {
     let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
@@ -1250,6 +1305,7 @@ fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
         inbound_pcie_base: 0x4_0000_0000,
         inbound_size: 0x2_0000_0000,
         inbound_cpu_top: 0x2_0000_0000,
+        inbound_coherence: DmaCoherence::Unsnooped,
         outbound_cpu_base: 0x6_0000_0000,
         outbound_pcie_base: 0xc000_0000,
         outbound_size: 0x4000_0000,
@@ -1271,6 +1327,7 @@ fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
             windows.inbound_cpu_top,
             windows.inbound_size,
             windows.inbound_pcie_base,
+            DmaCoherence::Unsnooped,
         )
     );
 }

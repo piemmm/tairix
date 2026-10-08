@@ -138,8 +138,6 @@ impl<'s> KernelDriverLoader<'s> {
             source: &source,
             spawner: &spawner,
             sink: self.sink,
-            virtio_host_factory: None,
-            mmio_mapper: None,
         });
         host.load(path, caller_caps)
     }

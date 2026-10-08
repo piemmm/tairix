@@ -338,39 +338,32 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
     ///   advertises no data queue, rejects the negotiated features, or a
     ///   queue or staging allocation fails.
     pub fn open(mut transport: T, host: &'h dyn VirtioHost) -> Result<Self, DriverError> {
-        transport.reset().map_err(VirtioError::as_driver_error)?;
-        host.device_quiesced();
-        let mut status = Status::default().with(Status::ACKNOWLEDGE);
-        transport.set_status(status);
-        status = status.with(Status::DRIVER);
-        transport.set_status(status);
         // No device-specific feature is negotiated: the stateless-mode bits
         // change the request shape, and this driver implements the session
         // shape, so accepting one would promise behaviour it does not honour.
-        let driver_features = transport.device_features() & TRANSPORT_FEATURES;
-        transport.set_driver_features(driver_features);
-        status = status.with(Status::FEATURES_OK);
-        transport.set_status(status);
-        if !transport.status().contains(Status::FEATURES_OK) {
-            return Err(VirtioError::FeaturesRejected.as_driver_error());
-        }
+        let negotiated = tairix_virtio::negotiate::<_, DriverError>(
+            &mut transport,
+            || host.device_quiesced(),
+            |offered| Ok(offered & TRANSPORT_FEATURES),
+        )?;
+        let mut status = negotiated.status;
 
         // Every figure below is the device's, so it is validated before it
         // sizes anything or decides anything.
-        if read_config_u32(&transport, wire::config::STATUS) & wire::S_HW_READY == 0 {
+        if transport.read_config_u32(wire::config::STATUS) & wire::S_HW_READY == 0 {
             return Err(DriverError::Unsupported);
         }
-        if read_config_u32(&transport, wire::config::CRYPTO_SERVICES) & wire::SERVICE_CIPHER == 0 {
+        if transport.read_config_u32(wire::config::CRYPTO_SERVICES) & wire::SERVICE_CIPHER == 0 {
             return Err(DriverError::Unsupported);
         }
-        let ciphers = offered_ciphers(read_config_u32(&transport, wire::config::CIPHER_ALGO_L));
+        let ciphers = offered_ciphers(transport.read_config_u32(wire::config::CIPHER_ALGO_L));
         if ciphers.is_empty() {
             return Err(DriverError::Unsupported);
         }
         // The control queue sits immediately after the data queues, so its
         // index is the device's own `max_dataqueues`. A device offering none
         // has nowhere to submit a job.
-        let data_queues = read_config_u32(&transport, wire::config::MAX_DATAQUEUES);
+        let data_queues = transport.read_config_u32(wire::config::MAX_DATAQUEUES);
         if data_queues == 0 {
             return Err(DriverError::DeviceFault);
         }
@@ -387,7 +380,7 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         // The staged ceiling is the smaller of what the device will carry and
         // what this driver will allocate for it; a device declaring no
         // ceiling of its own gets the driver's.
-        let advertised = read_config_u64(&transport, wire::config::MAX_SIZE);
+        let advertised = transport.read_config_u64(wire::config::MAX_SIZE);
         let ceiling = if advertised == 0 {
             MAX_STAGED_JOB_BYTES
         } else {
@@ -869,20 +862,6 @@ const fn data_opcode(direction: CipherDirection) -> u32 {
         CipherDirection::Encrypt => wire::CIPHER_ENCRYPT,
         CipherDirection::Decrypt => wire::CIPHER_DECRYPT,
     }
-}
-
-/// Read one little-endian `u32` from the device-configuration window.
-fn read_config_u32<T: Transport>(transport: &T, offset: usize) -> u32 {
-    let mut buf = [0u8; 4];
-    transport.read_config(offset, &mut buf);
-    u32::from_le_bytes(buf)
-}
-
-/// Read one little-endian `u64` from the device-configuration window.
-fn read_config_u64<T: Transport>(transport: &T, offset: usize) -> u64 {
-    let mut buf = [0u8; 8];
-    transport.read_config(offset, &mut buf);
-    u64::from_le_bytes(buf)
 }
 
 /// Write `value` little-endian at `offset`. The frames are fixed-size arrays

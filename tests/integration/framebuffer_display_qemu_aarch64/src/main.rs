@@ -29,6 +29,7 @@ mod fixture {
     //! Build-time generated signed `.rxe` fixture, trust anchor, and the
     //! embedded `virt` device tree.
     include!(concat!(env!("OUT_DIR"), "/fb_fixture.rs"));
+    include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 }
 
 #[cfg(itest_aarch64)]

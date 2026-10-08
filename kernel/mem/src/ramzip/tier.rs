@@ -78,9 +78,10 @@ const WARM_RADIUS: u64 = 64;
 /// Recent demand faults remembered as warm-up locality hints.
 const RECENT_FAULTS: usize = 8;
 
-/// The mapping-flag bits that must not appear on a compressible page:
-/// device (uncached) and DMA-coherent mappings are hardware-visible.
-const FORBIDDEN_FLAG_BITS: u8 = MapFlags::NO_CACHE.bits() | MapFlags::DMA_COHERENT.bits();
+/// The mapping-flag bits that must not appear on a compressible page: device
+/// and DMA mappings are hardware-visible, whatever their memory type.
+const FORBIDDEN_FLAG_BITS: u8 =
+    MapFlags::NO_CACHE.bits() | MapFlags::DMA_COHERENT.bits() | MapFlags::DMA.bits();
 
 /// The VM objects one tier operation works against: the owning address
 /// space, the kernel direct map, the physical frame allocator, and the

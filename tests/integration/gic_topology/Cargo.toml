@@ -1,0 +1,23 @@
+[package]
+name = "tairix-itest-gic"
+description = "The GIC topology an aarch64 test kernel hands gic::init: its CPUs' slots, and a GICv3's redistributor regions read from the board's tree into storage that lives as long as the kernel. Test scaffolding: nothing in TAIRiX itself links it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

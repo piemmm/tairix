@@ -1,25 +1,14 @@
 //! Owned DMA region ABI types (`abi-v1`).
 //!
-//! These types are the host↔driver ABI seam for DMA-able memory.
-//! They live in `lib/abi` (rather than in `drivers/bus/virtio`)
-//! because every driver-class trait that a host implements — and the
-//! [`DriverHost::virtio_host`] accessor on the host trait itself —
-//! has to be able to name them without pulling in `drivers/bus/*`.
-//! That would invert the dependency direction and violate.
+//! The host↔driver seam for DMA-able memory. These types live in `lib/abi`
+//! because every driver-class trait a host implements names them, and a host
+//! depending on a driver crate would invert the dependency direction.
+//! `lib/virtio` re-exports them beside its virtio-specific `BounceBuffer`, and
+//! its tests (`lib/virtio/src/dma.rs`, which may allocate) exercise them
+//! through that re-export.
 //!
-//! The [`PoolId`], [`SlabFreeFn`], and [`DmaSlab`] surface is
-//! identical to the surface previously exposed from
-//! `drivers/bus/virtio::dma`; that crate now re-exports these
-//! definitions for source compatibility. The `BounceBuffer` wrapper
-//! is virtio-specific and stays in the virtio crate.
-//!
-//! No allocation: the crate-wide `no_std` and no-allocation
-//! invariants documented in `lib/abi`'s crate-root rustdoc are
-//! preserved. The unit tests for these types live in
-//! `drivers/bus/virtio/src/dma.rs` (which is permitted to depend on
-//! `alloc`) and exercise the surface through the re-export.
-//!
-//! [`DriverHost::virtio_host`]: super::DriverHost::virtio_host
+//! No allocation: the crate-wide `no_std` and no-allocation invariants
+//! documented in `lib/abi`'s crate-root rustdoc are preserved.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -53,7 +42,10 @@ pub trait DmaHost {
     /// # Errors
     ///
     /// * [`DriverError::BufferTooSmall`] if `size == 0`.
-    /// * [`DriverError::LengthOutOfRange`] if the host exhausts its DMA pool.
+    /// * [`DriverError::OutOfMemory`] if the memory cannot be had: the host's
+    ///   frames or the driver's DMA budget are exhausted.
+    /// * [`DriverError::LengthOutOfRange`] if `size` is more than the host can
+    ///   carve as one region.
     /// * [`DriverError::PermissionDenied`] if the calling task is missing the
     ///   capability the host enforces at allocation time (the kernel host
     ///   gates on [`CapabilityId::MEM_DMA`](crate::CapabilityId::MEM_DMA)).
@@ -75,6 +67,67 @@ pub trait DmaHost {
     /// decision. A host whose DMA memory cannot outlive the process using it
     /// — an in-kernel host, a test mock — has nothing to release.
     fn device_quiesced(&self);
+
+    /// Hold every later region to what a device driving `reach` reaches,
+    /// never wider than the host's own bound: a driver states it once its
+    /// bring-up has read the device's address width, and the narrowest
+    /// statement stands.
+    ///
+    /// The default honours only the full reach, for a host that cannot place
+    /// a region below a bound, so a driver whose device reaches less fails
+    /// rather than hand it memory past its reach.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Unsupported`] where the host cannot honour the bound.
+    fn narrow_dma_reach(&self, reach: DmaReach) -> Result<(), DriverError> {
+        if reach == DmaReach::FULL {
+            Ok(())
+        } else {
+            Err(DriverError::Unsupported)
+        }
+    }
+}
+
+/// The address bits a DMA master drives, from one to 64.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct DmaReach(u32);
+
+impl DmaReach {
+    /// A master that drives every address bit.
+    pub const FULL: Self = Self(u64::BITS);
+
+    /// A master driving `N` address bits, the bound checked as the program is
+    /// built.
+    #[must_use]
+    pub const fn of<const N: u32>() -> Self {
+        const { assert!(N != 0 && N <= u64::BITS, "a DMA reach is one to 64 bits") };
+        Self(N)
+    }
+
+    /// A master driving `bits` address bits, or `None` for no bits or more
+    /// than 64.
+    #[must_use]
+    pub const fn new(bits: u32) -> Option<Self> {
+        if bits == 0 || bits > u64::BITS {
+            None
+        } else {
+            Some(Self(bits))
+        }
+    }
+
+    /// The address bits.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// The first address past the reach, or `None` for a master that drives
+    /// every address bit.
+    #[must_use]
+    pub const fn end(self) -> Option<u64> {
+        1u64.checked_shl(self.0)
+    }
 }
 
 /// Stable identifier of a DMA pool.
@@ -132,6 +185,16 @@ impl PoolId {
 /// in-process mock host) skips maintenance entirely.
 pub type SlabCoherencyFn = fn(base: *const u8, len: usize);
 
+/// How a [`DmaSlab`] from a pool ended, which its [`SlabFreeFn`] is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlabEnd {
+    /// The pool takes the region back.
+    Released,
+    /// The region was [withheld](DmaSlab::withhold): the pool frees none of
+    /// it.
+    Withheld,
+}
+
 /// Type-erased free shim called from [`DmaSlab::drop`].
 ///
 /// * `pool` is the opaque pointer the slab was built with;
@@ -139,14 +202,16 @@ pub type SlabCoherencyFn = fn(base: *const u8, len: usize);
 ///   allocator returned) — the key a syscall-backed pool (the user-space
 ///   `RtDriverHost`) frees the buffer by;
 /// * `slot` and `len` are the slab's bookkeeping (a slot-bitmap pool such as
-///   the in-kernel host frees by `slot`, ignoring `cpu`).
+///   the in-kernel host frees by `slot`, ignoring `cpu`);
+/// * `end` is whether the pool may take the region back.
 ///
 /// # Safety
 ///
 /// The shim is `unsafe` because [`DmaSlab::drop`] (the only caller)
 /// must guarantee `pool` still points at the originating pool, which
 /// the pool enforces by outliving every slab it minted.
-pub type SlabFreeFn = unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, len: usize);
+pub type SlabFreeFn =
+    unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, len: usize, end: SlabEnd);
 
 /// Owned, device-visible DMA region.
 ///
@@ -160,10 +225,10 @@ pub type SlabFreeFn = unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, 
 ///   `len` bytes. Disjointness with every other live slab from the
 ///   same pool is witnessed by the pool's slot bitmap (one slot ↔
 ///   one slab).
-/// * If `free_fn` is `Some`, dropping the slab calls
-///   `free_fn(pool_ptr, slot, len)` exactly once; the pool reclaims
-///   the slot. If `free_fn` is `None` (a leaked or [withheld] slab), drop
-///   is a no-op and the bytes leak (the leak contract).
+/// * If `free_fn` is `Some`, dropping the slab calls it exactly once, and
+///   the pool reclaims the slot unless the slab was [withheld]. If
+///   `free_fn` is `None` (a leaked slab), drop is a no-op and the bytes
+///   leak (the leak contract).
 ///
 /// [withheld]: Self::withhold
 #[derive(Debug)]
@@ -175,6 +240,7 @@ pub struct DmaSlab {
     slot: usize,
     pool_ptr: *const (),
     free_fn: Option<SlabFreeFn>,
+    withheld: bool,
     coherency: Option<SlabCoherencyFn>,
 }
 
@@ -185,8 +251,8 @@ pub struct DmaSlab {
 // bitmap guarantees only this slab observes its byte range; (ii) the
 // pool implementations in `tairix-kernel-mem` are themselves `Send`
 // (their internal storage is behind a per-process address space);
-// and (iii) the in-process mock-host mint uses `Box::leak`, which
-// yields `'static` storage safe to send between test threads.
+// and (iii) the in-process mock host's slab holds a count of its own
+// thread-safe storage, so whichever thread drops it last frees it.
 // No `Sync`: the inner bytes are mutably aliased through
 // `as_bytes_mut` and concurrent access through two threads would
 // race.
@@ -220,6 +286,7 @@ impl DmaSlab {
             slot,
             pool_ptr: core::ptr::null(),
             free_fn: None,
+            withheld: false,
             coherency: None,
         }
     }
@@ -255,6 +322,7 @@ impl DmaSlab {
             slot,
             pool_ptr,
             free_fn: Some(free_fn),
+            withheld: false,
             coherency: None,
         }
     }
@@ -349,11 +417,13 @@ impl DmaSlab {
     /// Never return this region to its pool: the device it was handed to may
     /// still master it, and nothing has proven otherwise.
     ///
-    /// Dropping the slab afterwards frees nothing. In a user-space driver the
-    /// region stays mapped until the process ends, when the kernel takes it
-    /// into the DMA quarantine that frees it once the device is proven quiet.
+    /// Dropping the slab afterwards tells its pool the region ended
+    /// [withheld](SlabEnd::Withheld), and the pool frees none of it. In a
+    /// user-space driver the region stays mapped until the process ends, when
+    /// the kernel takes it into the DMA quarantine that frees it once the
+    /// device is proven quiet.
     pub fn withhold(&mut self) {
-        self.free_fn = None;
+        self.withheld = true;
     }
 
     /// Slot index within the originating pool.
@@ -389,13 +459,18 @@ impl DmaSlab {
 impl Drop for DmaSlab {
     fn drop(&mut self) {
         if let Some(f) = self.free_fn {
+            let end = if self.withheld {
+                SlabEnd::Withheld
+            } else {
+                SlabEnd::Released
+            };
             // SAFETY: at construction the caller of `from_pool`
             // proved that `pool_ptr` outlives this slab and that
             // `(slot, len)` is the slab's exclusive slot in the
             // pool's bitmap. `self.ptr` is this slab's CPU base, the
             // key a syscall-backed pool frees by. `Drop::drop` runs
             // exactly once.
-            unsafe { f(self.pool_ptr, self.ptr, self.slot, self.len) }
+            unsafe { f(self.pool_ptr, self.ptr, self.slot, self.len, end) }
         }
     }
 }

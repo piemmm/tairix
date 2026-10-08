@@ -86,6 +86,9 @@ pub mod attrs {
     /// Software-defined leaf bit distinguishing write-combining Normal-NC
     /// framebuffer mappings from bidirectional coherent-DMA mappings.
     pub const SW_WRITE_COMBINE: u64 = 1 << 55;
+    /// Software-defined leaf bit marking a DMA buffer, whatever its memory
+    /// type ([`PageFlags::DMA`](tairix_arch_api::mmu::PageFlags::DMA)).
+    pub const SW_DMA: u64 = 1 << 56;
 
     /// `MAIR_EL1` attribute index for Normal write-back memory (index 0).
     pub const ATTR_IDX_NORMAL: u64 = 0 << 2;
@@ -358,9 +361,15 @@ pub const fn el0_device_leaf_attrs() -> u64 {
         | attrs::UXN
 }
 
-/// Number of `u64` words in a gigapage mask covering all
-/// [`ENTRIES_PER_TABLE`] L1 slots (one bit per 1 GiB identity gigapage).
-pub const GIGAPAGE_MASK_WORDS: usize = ENTRIES_PER_TABLE / 64;
+use tairix_arch_api::gigapages::{covers, word_holds};
+pub use tairix_arch_api::gigapages::{
+    from_extents as gigapage_mask_from_extents, MASK_WORDS as GIGAPAGE_MASK_WORDS,
+};
+
+const _: () = assert!(
+    tairix_arch_api::gigapages::MASK_WORDS * 64 == ENTRIES_PER_TABLE,
+    "one gigapage bit per L1 slot"
+);
 
 /// Gigapage mask in effect before any board discovery runs: bit 0 only —
 /// the QEMU `virt` board keeps its UART, GIC, and the rest of its device
@@ -415,17 +424,10 @@ pub fn device_gigapages() -> [u64; GIGAPAGE_MASK_WORDS] {
     mask
 }
 
-/// `true` if gigapage `index`'s bit is set in `word` (the mask word
-/// covering it) — the one bit test [`gigapage_is_device`] and the
-/// constructor's per-word configured-mask read share.
-const fn mask_word_bit(word: u64, index: usize) -> bool {
-    word & (1 << (index % 64)) != 0
-}
-
 /// `true` if identity gigapage `index` is mapped Device under `mask`.
 #[must_use]
 pub const fn gigapage_is_device(mask: &[u64; GIGAPAGE_MASK_WORDS], index: usize) -> bool {
-    index < ENTRIES_PER_TABLE && mask_word_bit(mask[index / 64], index)
+    tairix_arch_api::gigapages::holds(mask, index)
 }
 
 /// `true` if identity gigapage `index` is mapped Device under the
@@ -440,24 +442,17 @@ pub const fn gigapage_is_device(mask: &[u64; GIGAPAGE_MASK_WORDS], index: usize)
 /// path integer-only.
 fn configured_gigapage_is_device(index: usize) -> bool {
     index < ENTRIES_PER_TABLE
-        && mask_word_bit(DEVICE_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
+        && word_holds(DEVICE_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
 }
 
 /// Gigapages of device registers only the kernel reaches — a PCI host's
 /// configuration region — which [`install_boot_physmap`] maps
 /// Device-nGnRnE in the kernel regime at their direct-map address
-/// ([`physmap_virt`]). No process root carries them, so they need not lie
-/// below the user region the identity window shares its root with.
-static KERNEL_DEVICE_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] =
-    [const { AtomicU64::new(0) }; GIGAPAGE_MASK_WORDS];
-
-/// Install the kernel-regime Device gigapage mask. Called once on a board's
-/// boot path, before [`install_boot_physmap`].
-pub fn configure_kernel_device_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
-    for (slot, word) in KERNEL_DEVICE_GIGAPAGES.iter().zip(mask) {
-        slot.store(word, Ordering::Release);
-    }
-}
+/// ([`physmap_virt`]), named on a board's boot path before it runs. No
+/// process root carries them, so they need not lie below the user region
+/// the identity window shares its root with.
+pub static KERNEL_DEVICES: tairix_arch_api::gigapages::KernelDevices =
+    tairix_arch_api::gigapages::KernelDevices::new(MAX_PHYSMAP_GIB);
 
 /// Kernel-extent gigapage mask in effect before any board discovery runs:
 /// **all** slots, so a build that configures nothing (a host test, a QEMU
@@ -504,34 +499,7 @@ pub fn configure_kernel_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
 /// reason as [`configured_gigapage_is_device`].
 fn configured_gigapage_is_kernel(index: usize) -> bool {
     index < ENTRIES_PER_TABLE
-        && mask_word_bit(KERNEL_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
-}
-
-/// Derive a gigapage mask from physical extents: each `(base, len)` pair
-/// marks every gigapage it overlaps. A zero-length extent contributes
-/// nothing; an extent reaching past the 512 GiB an L1 table spans is
-/// clamped (no representable slot beyond it).
-///
-/// Both gigapage-granular facts the port derives come through here — the
-/// identity window's kernel extents ([`configure_kernel_gigapages`]) and
-/// the direct map's covered RAM ([`install_boot_physmap`]) — so the two
-/// cannot disagree about which gigapage an extent touches.
-#[must_use]
-pub fn gigapage_mask_from_extents(extents: &[(u64, u64)]) -> [u64; GIGAPAGE_MASK_WORDS] {
-    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
-    for &(base, len) in extents {
-        if len == 0 {
-            continue;
-        }
-        let first = (base >> 30) as usize;
-        let last = ((base.saturating_add(len - 1)) >> 30) as usize;
-        let mut index = first;
-        while index <= last && index < ENTRIES_PER_TABLE {
-            mask[index / 64] |= 1 << (index % 64);
-            index += 1;
-        }
-    }
-    mask
+        && word_holds(KERNEL_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
 }
 
 /// Fold one combined (Device | kernel-extent) mask word into a running
@@ -750,8 +718,8 @@ pub fn physmap_gigapages() -> usize {
 ///
 /// `const`, so a fixed address names its direct-map spelling without a
 /// run-time load. It resolves only for a `phys` the map covers;
-/// [`physmap_covers`] (RAM) or [`kernel_device_covers`] (registers) is the
-/// check a caller with a discovered address makes first.
+/// [`physmap_covers`] (RAM) or [`KERNEL_DEVICES`]' `covers` (registers) is
+/// the check a caller with a discovered address makes first.
 #[must_use]
 pub const fn physmap_virt(phys: u64) -> u64 {
     PHYSMAP_VMA_BASE.wrapping_add(phys)
@@ -761,25 +729,8 @@ pub const fn physmap_virt(phys: u64) -> u64 {
 /// len)`. Fails closed on a wrapping or over-wide range.
 #[must_use]
 pub fn physmap_covers(phys: u64, len: u64) -> bool {
-    mask_covers(&PHYSMAP_COVERED, MAX_PHYSMAP_GIB, phys, len)
+    covers(&PHYSMAP_COVERED, MAX_PHYSMAP_GIB, phys, len)
 }
-
-/// The kernel-regime Device gigapages the live direct map carries, or
-/// all-zero before [`install_boot_physmap`] runs.
-static KERNEL_DEVICE_MAPPED: [AtomicU64; GIGAPAGE_MASK_WORDS] =
-    [const { AtomicU64::new(0) }; GIGAPAGE_MASK_WORDS];
-
-/// `true` when the live direct map carries every byte of `[phys, phys +
-/// len)` as kernel-regime Device memory, reached at [`physmap_virt`]. Fails
-/// closed on a wrapping or over-wide range.
-#[must_use]
-pub fn kernel_device_covers(phys: u64, len: u64) -> bool {
-    mask_covers(&KERNEL_DEVICE_MAPPED, MAX_PHYSMAP_GIB, phys, len)
-}
-
-/// One past the highest physical address the kernel regime can map device
-/// registers at.
-pub const KERNEL_DEVICE_REACH: u64 = (MAX_PHYSMAP_GIB as u64) << 30;
 
 /// `true` when every byte of `[phys, phys + len)` lies in an identity
 /// gigapage mapped Device ([`configure_device_gigapages`]): the only part of
@@ -787,40 +738,13 @@ pub const KERNEL_DEVICE_REACH: u64 = (MAX_PHYSMAP_GIB as u64) << 30;
 /// on a wrapping or empty range.
 #[must_use]
 pub fn identity_device_covers(phys: u64, len: u64) -> bool {
-    mask_covers(&DEVICE_GIGAPAGES, ENTRIES_PER_TABLE, phys, len)
-}
-
-/// `true` when every gigapage `[phys, phys + len)` touches has its bit set in
-/// `mask`, all of them below `gigapages`.
-fn mask_covers(
-    mask: &[AtomicU64; GIGAPAGE_MASK_WORDS],
-    gigapages: usize,
-    phys: u64,
-    len: u64,
-) -> bool {
-    let Some(last) = len.checked_sub(1).and_then(|off| phys.checked_add(off)) else {
-        // A zero-length range covers nothing to check, but a caller asking
-        // for it has no bytes to reach either.
-        return false;
-    };
-    let mut gigapage = (phys >> 30) as usize;
-    let last_gigapage = (last >> 30) as usize;
-    if last_gigapage >= gigapages {
-        return false;
-    }
-    while gigapage <= last_gigapage {
-        if !mask_word_bit(mask[gigapage / 64].load(Ordering::Acquire), gigapage) {
-            return false;
-        }
-        gigapage += 1;
-    }
-    true
+    covers(&DEVICE_GIGAPAGES, ENTRIES_PER_TABLE, phys, len)
 }
 
 /// Size the direct physical map from `covered` — the gigapage mask of the
 /// RAM the allocator may hand out — and install its leaves into the kernel
-/// root, set-once, with the configured kernel-regime Device gigapages
-/// ([`configure_kernel_device_gigapages`]) beside them.
+/// root, set-once, with the kernel-regime Device gigapages
+/// [`KERNEL_DEVICES`] names beside them.
 ///
 /// Called once from the boot path, before anything reaches a frame by
 /// pointer. It needs no frame source and draws no table: each covered
@@ -840,14 +764,11 @@ pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
     for gigapage in 0..MAX_PHYSMAP_GIB {
         let bit = 1 << (gigapage % 64);
         // Device wins a gigapage both name, as in the identity window.
-        if mask_word_bit(
-            KERNEL_DEVICE_GIGAPAGES[gigapage / 64].load(Ordering::Acquire),
-            gigapage,
-        ) {
+        if KERNEL_DEVICES.named(gigapage) {
             devices[gigapage / 64] |= bit;
             continue;
         }
-        let asked = mask_word_bit(covered[gigapage / 64], gigapage);
+        let asked = word_holds(covered[gigapage / 64], gigapage);
         if !asked || configured_gigapage_is_device(gigapage) {
             continue;
         }
@@ -869,9 +790,9 @@ pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
     for gigapage in 0..MAX_PHYSMAP_GIB {
         // Never executable: the kernel fetches from its identity window, so
         // nothing is ever fetched through the map.
-        let leaf = if mask_word_bit(leaves[gigapage / 64], gigapage) {
+        let leaf = if word_holds(leaves[gigapage / 64], gigapage) {
             normal_leaf_attrs(true) | attrs::PXN
-        } else if mask_word_bit(devices[gigapage / 64], gigapage) {
+        } else if word_holds(devices[gigapage / 64], gigapage) {
             config_leaf_attrs(true)
         } else {
             continue;
@@ -886,9 +807,7 @@ pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
     for (word, published) in PHYSMAP_COVERED.iter().zip(leaves) {
         word.store(published, Ordering::Release);
     }
-    for (word, published) in KERNEL_DEVICE_MAPPED.iter().zip(devices) {
-        word.store(published, Ordering::Release);
-    }
+    KERNEL_DEVICES.publish(devices);
     true
 }
 
@@ -1080,6 +999,38 @@ pub(crate) fn translation_enabled() -> bool {
 /// cannot show it).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
+    sweep_to_poc(base, len, |addr| {
+        // SAFETY: `dc civac` performs cache maintenance only — it never
+        // changes memory contents — so it is sound for any address; the
+        // caller names a range it owns.
+        unsafe {
+            core::arch::asm!("dc civac, {addr}", addr = in(reg) addr,
+                options(nostack, preserves_flags));
+        }
+    });
+}
+
+/// Clean every data-cache line of `[base, base + len)` to the point of
+/// coherency (`dc cvac`), then `dsb sy`: what a non-snooping reader of bytes
+/// the CPU goes on caching needs — a DMA scan-out, an interrupt
+/// translation service's tables.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn clean_range_to_poc(base: u64, len: u64) {
+    sweep_to_poc(base, len, |addr| {
+        // SAFETY: `dc cvac` writes a line back and changes no memory
+        // contents, so it is sound for any address; the caller names a
+        // range it owns.
+        unsafe {
+            core::arch::asm!("dc cvac, {addr}", addr = in(reg) addr,
+                options(nostack, preserves_flags));
+        }
+    });
+}
+
+/// Run `maintain` on every data-cache line of `[base, base + len)`, line
+/// size decoded from the live `CTR_EL0`, then complete it with `dsb sy`.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn sweep_to_poc(base: u64, len: u64, maintain: impl Fn(u64)) {
     if len == 0 {
         return;
     }
@@ -1091,18 +1042,11 @@ pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
             options(nomem, nostack, preserves_flags));
     }
     let line = dcache_line_bytes(ctr) as u64;
-    // Sweep from the line-aligned base so the first partial line is
-    // covered too.
+    // From the line-aligned base, so the first partial line is covered too.
     let mut addr = base & !(line - 1);
     let end = base.saturating_add(len);
     while addr < end {
-        // SAFETY: `dc civac` performs cache maintenance only — it never
-        // changes memory contents — so it is sound for any address; the
-        // caller names a range it owns.
-        unsafe {
-            core::arch::asm!("dc civac, {addr}", addr = in(reg) addr,
-                options(nostack, preserves_flags));
-        }
+        maintain(addr);
         addr += line;
     }
     // SAFETY: barrier-only instruction — completes the maintenance in
@@ -1120,6 +1064,16 @@ pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
 /// contend).
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn clean_invalidate_range_to_poc(base: u64, len: u64) {
+    #[cfg(test)]
+    record_poc_sweep(base, len);
+    #[cfg(not(test))]
+    let _ = (base, len);
+}
+
+/// Host stand-in for [`clean_range_to_poc`], recording as
+/// [`clean_invalidate_range_to_poc`]'s does.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn clean_range_to_poc(base: u64, len: u64) {
     #[cfg(test)]
     record_poc_sweep(base, len);
     #[cfg(not(test))]
@@ -1171,9 +1125,11 @@ pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
 }
 
 /// Derive the identity-map Device gigapage mask from the board's
-/// discovered MMIO extents and the kernel image's own extent.
+/// discovered MMIO extents, the gigapages `windows` already names, and the
+/// kernel image's own extent.
 ///
-/// Each gigapage one of `device_extents` overlaps is mapped Device so
+/// Each gigapage one of `device_extents` overlaps, or `windows` holds, is
+/// mapped Device so
 /// MMIO reads/writes are not cached, reordered, or speculated
 /// (Device-nGnRE is the only correct attribute for a
 /// register block). The gigapages overlapping `[kernel_start,
@@ -1188,14 +1144,15 @@ pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
 #[must_use]
 pub fn identity_device_mask(
     device_extents: &[(u64, u64)],
+    windows: [u64; GIGAPAGE_MASK_WORDS],
     kernel_start: u64,
     kernel_end: u64,
 ) -> [u64; GIGAPAGE_MASK_WORDS] {
-    without_kernel(
-        gigapage_mask_from_extents(device_extents),
-        kernel_start,
-        kernel_end,
-    )
+    let mut mask = gigapage_mask_from_extents(device_extents);
+    for (word, window) in mask.iter_mut().zip(windows) {
+        *word |= window;
+    }
+    without_kernel(mask, kernel_start, kernel_end)
 }
 
 /// `mask` less the gigapages `[kernel_start, kernel_end)` lies in, which
@@ -1625,6 +1582,16 @@ impl AddressSpace {
     /// permission fault reading its own mapped register (`plans/PI.md` P10
     /// chunk 5d-0).
     fn leaf_attrs_for(flags: PageFlags) -> u64 {
+        let mark = if flags.contains(PageFlags::DMA) {
+            attrs::SW_DMA
+        } else {
+            0
+        };
+        Self::memory_attrs_for(flags) | mark
+    }
+
+    /// [`Self::leaf_attrs_for`]'s attributes but for the software DMA mark.
+    fn memory_attrs_for(flags: PageFlags) -> u64 {
         if flags.contains(PageFlags::DEVICE) {
             if flags.contains(PageFlags::USER) {
                 el0_device_leaf_attrs()
@@ -2713,6 +2680,9 @@ fn page_flags_from_leaf(desc: u64) -> PageFlags {
         } else {
             out = out | PageFlags::DMA_COHERENT;
         }
+    }
+    if desc & attrs::SW_DMA != 0 {
+        out = out | PageFlags::DMA;
     }
     out
 }

@@ -76,6 +76,7 @@ fn pool_over<'a>(
         capacity_pages,
         frames,
         phys,
+        tairix_abi::DmaCoherence::Snooped,
     )
     .expect("pool constructs")
 }
@@ -143,6 +144,7 @@ fn new_rejects_zero_capacity() {
         0,
         &frames,
         &sim,
+        tairix_abi::DmaCoherence::Snooped,
     );
     assert_eq!(err.err(), Some(DmaError::InvalidPoolConfig));
 }
@@ -157,6 +159,7 @@ fn new_rejects_misaligned_base() {
         4,
         &frames,
         &sim,
+        tairix_abi::DmaCoherence::Snooped,
     );
     assert_eq!(err.err(), Some(DmaError::InvalidPoolConfig));
 }
@@ -367,6 +370,7 @@ fn a_carve_is_scrubbed_before_any_page_of_it_is_mapped() {
         8,
         &frames,
         &sim,
+        tairix_abi::DmaCoherence::Snooped,
     )
     .expect("pool constructs");
     pool.alloc(4 * PAGE_SIZE, 0).expect("alloc");
@@ -466,6 +470,7 @@ fn alloc_cleans_direct_map_alias_after_zeroing() {
         8,
         &frames,
         &rec,
+        tairix_abi::DmaCoherence::Snooped,
     )
     .expect("pool constructs");
     let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
@@ -485,6 +490,7 @@ fn free_cleans_direct_map_alias_after_zeroing() {
         8,
         &frames,
         &rec,
+        tairix_abi::DmaCoherence::Snooped,
     )
     .expect("pool constructs");
     let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
@@ -792,7 +798,7 @@ fn the_window_contains_exactly_its_own_span() {
 
 #[test]
 fn a_block_spans_its_order_in_pages() {
-    let block = DmaBlock {
+    let block = FrameBlock {
         frame: crate::frame::Frame(16),
         order: 3,
     };
@@ -927,8 +933,15 @@ fn a_release_that_cannot_clear_a_page_retires_only_what_it_cleared() {
         table: HostPageTable::new(),
         refused: &refused,
     });
-    let mut pool = DmaPool::new(space, VirtAddr::new(0x1000_0000), 16, &frames, &sim)
-        .expect("pool constructs");
+    let mut pool = DmaPool::new(
+        space,
+        VirtAddr::new(0x1000_0000),
+        16,
+        &frames,
+        &sim,
+        tairix_abi::DmaCoherence::Snooped,
+    )
+    .expect("pool constructs");
     let buf = pool.alloc(3 * PAGE_SIZE, 0).expect("alloc 3 pages");
     let base = buf.virt().as_u64();
     refused.set(Some(base + PAGE_SIZE as u64));
@@ -994,11 +1007,71 @@ fn a_block_that_cannot_be_scrubbed_stays_live_for_teardown() {
 }
 
 fn translator(domains: &'static crate::test_fixture::RecordingTranslation) -> DmaTranslator {
+    translator_below(domains, u64::MAX)
+}
+
+fn translator_below(
+    domains: &'static crate::test_fixture::RecordingTranslation,
+    output_limit: u64,
+) -> DmaTranslator {
     DmaTranslator {
         node: 5,
         generation: 2,
         domains,
+        output_limit,
     }
+}
+
+/// A translated carve's frames lie below what its unit can name, contiguous
+/// or scattered, though frames above are free; one whose unit names no frame
+/// of RAM is refused.
+#[test]
+fn a_translated_carve_lies_wholly_below_its_unit_s_reach() {
+    let frames = fresh_frames(64);
+    let sim = fresh_sim(64);
+    let domains = crate::test_fixture::translation!();
+    let limit = RAM_BASE + (16 * PAGE_SIZE) as u64;
+    let mut free = pool_with_capacity(&frames, &sim, 32).translated(translator(domains));
+    let anywhere = free.alloc(PAGE_SIZE, 0).expect("an unbounded carve");
+    assert!(
+        anywhere.phys().as_u64() >= limit,
+        "an unbounded carve lands above the reach, so the bound is what moves it"
+    );
+    let mut bounded =
+        pool_with_capacity(&frames, &sim, 32).translated(translator_below(domains, limit));
+    for _ in 0..3 {
+        let under = bounded.alloc(PAGE_SIZE, 0).expect("a carve within reach");
+        let end = under.phys().as_u64() + under.len() as u64;
+        assert!(end <= limit, "carve ends at {end:#x}, past {limit:#x}");
+    }
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &sim,
+            5 * PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator_below(domains, limit)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("scattered blocks within reach");
+    domains.with(|record| {
+        let (_, ref blocks, _) = record.mapped[record.mapped.len() - 1];
+        for block in blocks {
+            let end = block.frame.start().as_u64() + block.len() as u64;
+            assert!(end <= limit, "block ends at {end:#x}, past {limit:#x}");
+        }
+    });
+    let mut unreachable =
+        pool_with_capacity(&frames, &sim, 32).translated(translator_below(domains, RAM_BASE));
+    assert_eq!(
+        unreachable.alloc(PAGE_SIZE, 0).err(),
+        Some(DmaError::Alloc(AllocError::OutOfRange))
+    );
 }
 
 #[test]
@@ -1017,10 +1090,11 @@ fn a_translated_carve_hands_out_its_iova_and_takes_no_frame_ceiling() {
     assert_eq!(buf.device_addr(), crate::test_fixture::IOVA_BASE);
     domains.with(|record| {
         assert_eq!(record.mapped.len(), 1);
-        let (iova, block, limit) = record.mapped[0];
+        let (iova, ref blocks, limit) = record.mapped[0];
         assert_eq!(iova, buf.device_addr());
-        assert_eq!(block.frame.start(), buf.phys());
-        assert_eq!(block.len(), 2 * PAGE_SIZE);
+        assert_eq!(blocks.len(), 1, "a pool's carve is one block");
+        assert_eq!(blocks[0].frame.start(), buf.phys());
+        assert_eq!(blocks[0].len(), 2 * PAGE_SIZE);
         assert_eq!(limit, reach, "the reach binds the IOVA");
     });
 
@@ -1039,12 +1113,34 @@ fn freeing_a_translated_carve_unmaps_it_before_its_frames_return() {
     let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     pool.free(buf).expect("free");
     domains.with(|record| {
-        assert_eq!(record.unmapped.len(), 1);
-        assert_eq!(record.unmapped[0].0, buf.device_addr());
-        assert_eq!(record.unmapped[0].1.frame.start(), buf.phys());
+        assert_eq!(record.unmapped, [buf.device_addr()]);
     });
     assert_eq!(frames.free_frames(), before);
     assert_eq!(pool.live(), 0);
+}
+
+/// A free the translation defers leaves the pool at once with its blocks
+/// taken: they are the translation's to free once its unit confirms them
+/// gone, so none reaches the allocator here.
+#[test]
+fn a_deferred_free_hands_the_carves_blocks_over_unfreed() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let domains = crate::test_fixture::translation!(deferring);
+    let mut pool = pool_with_capacity(&frames, &sim, 16).translated(translator(domains));
+    let buf = pool.alloc(2 * PAGE_SIZE, 0).expect("alloc");
+    let held = frames.free_frames();
+    pool.free(buf).expect("free");
+    assert_eq!(pool.live(), 0, "the pool forgets it at once");
+    assert_eq!(frames.free_frames(), held, "its frames wait for the unit");
+    domains.with(|record| {
+        assert!(record.unmapped.is_empty(), "nothing confirmed here");
+        assert_eq!(record.deferred.len(), 1);
+        let (iova, ref blocks) = record.deferred[0];
+        assert_eq!(iova, buf.device_addr());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].frame.start(), buf.phys());
+    });
 }
 
 #[test]
@@ -1088,4 +1184,490 @@ fn a_map_the_unit_could_not_confirm_gone_never_frees_its_frames() {
         before - 1,
         "no device may reach it again"
     );
+}
+
+/// Hold every other two-page block of `frames`, so no free block spans more
+/// than two pages; the held blocks are returned.
+fn fragment(frames: &FrameAllocator) -> Vec<Frame> {
+    let pairs: Vec<Frame> =
+        core::iter::from_fn(|| frames.alloc_order(MemoryClass::Dma, 1).ok()).collect();
+    let mut held = Vec::new();
+    for (at, frame) in pairs.into_iter().enumerate() {
+        if at % 2 == 0 {
+            held.push(frame);
+        } else {
+            frames.free_order(frame, 1).expect("free");
+        }
+    }
+    held
+}
+
+/// A translated device reaches scattered frames, so a live space's carve is
+/// served from whatever blocks a fragmented allocator gives, largest first,
+/// no larger than its pages and mapped at one IOVA; an untranslated device's
+/// carve, one contiguous block, cannot be.
+#[test]
+fn a_translated_carve_is_served_from_scattered_blocks() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let held = fragment(&frames);
+    let domains = crate::test_fixture::translation!();
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    let before = frames.free_frames();
+    let buf = window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &sim,
+            5 * PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator(domains)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("scattered blocks serve it");
+    assert_eq!(buf.len(), 5 * PAGE_SIZE, "no larger than its pages");
+    assert_eq!(frames.free_frames(), before - 5);
+    assert_eq!(space.mapped_pages(), 5, "one flat window over the blocks");
+    domains.with(|record| {
+        let (iova, ref blocks, _) = record.mapped[0];
+        assert_eq!(iova, buf.device_addr());
+        let orders: Vec<u32> = blocks.iter().map(|block| block.order).collect();
+        assert_eq!(orders, [1, 1, 0], "largest first");
+    });
+    assert_eq!(
+        window
+            .alloc_into(
+                &mut space,
+                &frames,
+                &sim,
+                5 * PAGE_SIZE,
+                CarveDevice {
+                    addr_limit: 0,
+                    translator: None,
+                    coherence: tairix_abi::DmaCoherence::Snooped
+                }
+            )
+            .err(),
+        Some(DmaError::Alloc(AllocError::OutOfMemory)),
+        "no block of eight pages is free"
+    );
+    window
+        .free_from(&mut space, &frames, &sim, buf)
+        .expect("free");
+    assert_eq!(frames.free_frames(), before, "every block went back");
+    domains.with(|record| assert_eq!(record.unmapped, [buf.device_addr()]));
+    for frame in held {
+        frames.free_order(frame, 1).expect("free");
+    }
+}
+
+/// A carve is ordinary RAM for a device that snoops the caches and mapped
+/// coherent for one that does not.
+#[test]
+fn a_carve_is_mapped_as_its_device_snoops() {
+    for (coherence, uncached) in [
+        (tairix_abi::DmaCoherence::Snooped, false),
+        (tairix_abi::DmaCoherence::Unsnooped, true),
+    ] {
+        let frames = fresh_frames(16);
+        let sim = fresh_sim(16);
+        let mut space = AddressSpace::new(HostPageTable::new());
+        let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+        let buf = window
+            .alloc_into(
+                &mut space,
+                &frames,
+                &sim,
+                PAGE_SIZE,
+                CarveDevice {
+                    addr_limit: 0,
+                    translator: None,
+                    coherence,
+                },
+            )
+            .expect("carves");
+        let page = Page::from_addr(buf.virt()).expect("aligned");
+        let (_, flags) = space.translate(page).expect("mapped");
+        assert!(flags.contains(MapFlags::READ | MapFlags::WRITE | MapFlags::USER | MapFlags::DMA));
+        assert_eq!(
+            flags.contains(MapFlags::DMA_COHERENT),
+            uncached,
+            "{coherence:?}"
+        );
+        window
+            .free_from(&mut space, &frames, &sim, buf)
+            .expect("free");
+    }
+}
+
+/// A process's carve, translated or not, never draws the frames the kernel
+/// keeps in reserve.
+#[test]
+fn a_window_carve_never_draws_the_kernel_reserve() {
+    let usable = 4 * tairix_reclaim::RESERVE_DIVISOR;
+    let frames = fresh_frames(usable);
+    let sim = fresh_sim(usable);
+    let headroom = usable - frames.reserve_frames();
+    let domains = crate::test_fixture::translation!();
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window =
+        DmaWindowMap::new(VirtAddr::new(0x1_0000_0000), usable + GUARD_SLOTS).expect("window");
+    let past_reserve = |window: &mut DmaWindowMap, space: &mut _, pages, translator| {
+        window
+            .alloc_into(
+                space,
+                &frames,
+                &sim,
+                pages * PAGE_SIZE,
+                CarveDevice {
+                    addr_limit: 0,
+                    translator,
+                    coherence: tairix_abi::DmaCoherence::Snooped,
+                },
+            )
+            .err()
+    };
+    let refused = Some(DmaError::Alloc(AllocError::OutOfMemory));
+    assert_eq!(
+        past_reserve(
+            &mut window,
+            &mut space,
+            headroom + 1,
+            Some(translator(domains))
+        ),
+        refused
+    );
+    assert_eq!(past_reserve(&mut window, &mut space, usable, None), refused);
+    assert_eq!(frames.free_frames(), usable);
+}
+
+/// A translated carve is bounded by RAM and its window, not by the largest
+/// buddy block: one past `MAX_ORDER` is two blocks mapped end to end.
+#[test]
+fn a_translated_carve_may_exceed_the_largest_block() {
+    let pages = (1 << MAX_ORDER) + 1;
+    // Room for the kernel reserve, which a user's carve may not draw.
+    let usable = pages + pages / 32;
+    let frames = fresh_frames(usable);
+    let sim = fresh_sim(usable);
+    let domains = crate::test_fixture::translation!();
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window =
+        DmaWindowMap::new(VirtAddr::new(0x1_0000_0000), pages + GUARD_SLOTS).expect("window");
+    let buf = window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &sim,
+            pages * PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator(domains)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("past one block");
+    assert_eq!(buf.len(), pages * PAGE_SIZE);
+    domains.with(|record| {
+        let orders: Vec<u32> = record.mapped[0].1.iter().map(|block| block.order).collect();
+        assert!(
+            orders.windows(2).all(|pair| pair[0] >= pair[1]),
+            "largest first: {orders:?}"
+        );
+        assert!(orders.iter().all(|&order| order <= MAX_ORDER));
+        assert_eq!(
+            orders.iter().map(|&order| 1usize << order).sum::<usize>(),
+            pages
+        );
+    });
+    assert_eq!(
+        window
+            .alloc_into(
+                &mut space,
+                &frames,
+                &sim,
+                PAGE_SIZE << (MAX_ORDER + 1),
+                CarveDevice {
+                    addr_limit: 0,
+                    translator: None,
+                    coherence: tairix_abi::DmaCoherence::Snooped,
+                },
+            )
+            .err(),
+        Some(DmaError::SizeUnsupported),
+        "an untranslated carve is still one block"
+    );
+    window
+        .free_from(&mut space, &frames, &sim, buf)
+        .expect("free");
+}
+
+/// A refused translation takes every block of a scattered carve back.
+#[test]
+fn a_refused_scattered_carve_returns_every_block() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let held = fragment(&frames);
+    let domains = crate::test_fixture::translation!(refusing DmaError::Translation);
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    let before = frames.free_frames();
+    assert_eq!(
+        window
+            .alloc_into(
+                &mut space,
+                &frames,
+                &sim,
+                5 * PAGE_SIZE,
+                CarveDevice {
+                    addr_limit: 0,
+                    translator: Some(translator(domains)),
+                    coherence: tairix_abi::DmaCoherence::Snooped
+                }
+            )
+            .err(),
+        Some(DmaError::Translation)
+    );
+    assert_eq!(frames.free_frames(), before);
+    assert_eq!(space.mapped_pages(), 0);
+    assert_eq!(window.live(), 0);
+    for frame in held {
+        frames.free_order(frame, 1).expect("free");
+    }
+}
+
+/// A scattered carve whose map the unit could not confirm gone keeps every
+/// block out of reuse, not only the first.
+#[test]
+fn a_scattered_map_the_unit_could_not_confirm_gone_keeps_every_block() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let held = fragment(&frames);
+    let domains = crate::test_fixture::translation!(refusing DmaError::Unconfirmed);
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    let before = frames.free_frames();
+    assert_eq!(
+        window
+            .alloc_into(
+                &mut space,
+                &frames,
+                &sim,
+                5 * PAGE_SIZE,
+                CarveDevice {
+                    addr_limit: 0,
+                    translator: Some(translator(domains)),
+                    coherence: tairix_abi::DmaCoherence::Snooped
+                }
+            )
+            .err(),
+        Some(DmaError::Unconfirmed)
+    );
+    assert_eq!(space.mapped_pages(), 0, "no CPU reaches it");
+    assert_eq!(window.live(), 0);
+    assert_eq!(
+        frames.free_frames(),
+        before - 5,
+        "no device may reach any of its blocks again"
+    );
+    for frame in held {
+        frames.free_order(frame, 1).expect("free");
+    }
+}
+
+/// Simulated RAM whose direct map misses one block.
+struct MissingBlock<'a> {
+    inner: &'a SimPhysMap,
+    at: PhysAddr,
+}
+
+impl PhysMap for MissingBlock<'_> {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        (phys != self.at)
+            .then(|| self.inner.translate(phys, len))
+            .flatten()
+    }
+
+    fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+        self.inner.clean_invalidate(phys, len);
+    }
+
+    fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+        self.inner.sync_instruction_cache(phys, len);
+    }
+}
+
+/// Teardown returns each block of a scattered carve it could scrub and keeps
+/// the one it could not, in its translation's custody.
+#[test]
+fn surrender_holds_only_the_block_it_could_not_scrub() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let held = fragment(&frames);
+    let domains = crate::test_fixture::translation!();
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    let before = frames.free_frames();
+    window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &sim,
+            5 * PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator(domains)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("carve");
+    let blocks = domains.with(|record| record.mapped[0].1.clone());
+    assert_eq!(blocks.len(), 3, "the carve spans several blocks");
+    let stuck = blocks[1];
+    let phys = MissingBlock {
+        inner: &sim,
+        at: stuck.frame.start(),
+    };
+    let custodian =
+        DmaCustodian::translated(5, 2, domains, u64::MAX, tairix_abi::DmaCoherence::Snooped);
+
+    window.surrender_into(&mut space, &frames, &phys, &custodian);
+
+    assert_eq!(window.live(), 0);
+    assert_eq!(space.mapped_pages(), 0);
+    assert_eq!(
+        frames.free_frames(),
+        before - stuck.len() / PAGE_SIZE,
+        "every other block went back"
+    );
+    domains.with(|record| assert_eq!(record.held, [(5, 2, stuck)]));
+    frames
+        .free_order(stuck.frame, stuck.order)
+        .expect("hygiene: the test releases what custody held");
+    for frame in held {
+        frames.free_order(frame, 1).expect("free");
+    }
+}
+
+/// A carve whose unmap was confirmed before its scrub failed is surrendered
+/// without a second unmap, and goes back to the allocator once it scrubs.
+#[test]
+fn a_surrender_after_a_confirmed_unmap_never_unmaps_again() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let phys = RecordingPhysMap::new(&sim);
+    let domains = crate::test_fixture::translation!();
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    let before = frames.free_frames();
+    let buf = window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &phys,
+            PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator(domains)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("carve");
+    phys.refusing.set(true);
+    assert_eq!(
+        window.free_from(&mut space, &frames, &phys, buf),
+        Err(DmaError::DirectMap)
+    );
+    phys.refusing.set(false);
+    window.surrender_into(
+        &mut space,
+        &frames,
+        &phys,
+        &DmaCustodian::translated(5, 2, domains, u64::MAX, tairix_abi::DmaCoherence::Snooped),
+    );
+    domains.with(|record| {
+        assert_eq!(record.unmapped, [buf.device_addr()], "unmapped once");
+        assert!(record.held.is_empty(), "nothing it could free was held");
+    });
+    assert_eq!(window.live(), 0);
+    assert_eq!(frames.free_frames(), before);
+}
+
+/// Only a carve of one block names one physical span; a scattered one has
+/// none to hand out.
+#[test]
+fn a_scattered_carve_names_no_single_physical_span() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let held = fragment(&frames);
+    let domains = crate::test_fixture::translation!();
+    let mut space = AddressSpace::new(HostPageTable::new());
+    let mut window = DmaWindowMap::new(VirtAddr::new(0x1000_0000), 16).expect("window");
+    let one = window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &sim,
+            PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator(domains)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("one block");
+    let scattered = window
+        .alloc_into(
+            &mut space,
+            &frames,
+            &sim,
+            5 * PAGE_SIZE,
+            CarveDevice {
+                addr_limit: 0,
+                translator: Some(translator(domains)),
+                coherence: tairix_abi::DmaCoherence::Snooped,
+            },
+        )
+        .expect("several blocks");
+    assert_eq!(window.live_frames(&one), Ok((one.phys(), PAGE_SIZE)));
+    assert_eq!(window.live_frames(&scattered), Err(DmaError::Discontiguous));
+    window
+        .free_from(&mut space, &frames, &sim, one)
+        .expect("free");
+    window
+        .free_from(&mut space, &frames, &sim, scattered)
+        .expect("free");
+    for frame in held {
+        frames.free_order(frame, 1).expect("free");
+    }
+}
+
+/// A free whose unmap was confirmed but whose scrub failed never unmaps the
+/// carve's address again: another carve may hold it by then.
+#[test]
+fn a_confirmed_unmap_is_never_repeated() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let phys = RecordingPhysMap::new(&sim);
+    let domains = crate::test_fixture::translation!();
+    let mut pool = pool_over(AddressSpace::new(HostPageTable::new()), &frames, &phys, 16)
+        .translated(translator(domains));
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
+    let held = frames.free_frames();
+    phys.refusing.set(true);
+    assert_eq!(pool.free(buf), Err(DmaError::DirectMap));
+    assert_eq!(
+        pool.free(buf),
+        Err(DmaError::DirectMap),
+        "still unreachable"
+    );
+    domains.with(|record| assert_eq!(record.unmapped, [buf.device_addr()], "unmapped once"));
+    assert_eq!(frames.free_frames(), held);
+    phys.refusing.set(false);
+    pool.free(buf).expect("scrubbed at last");
+    domains.with(|record| assert_eq!(record.unmapped.len(), 1));
+    assert_eq!(frames.free_frames(), held + 1);
 }

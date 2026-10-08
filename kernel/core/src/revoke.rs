@@ -510,7 +510,7 @@ mod tests {
             HwResource::mmio(0xFE00_0000, 0x1000),
             HwResource::irq(40, 1),
             HwResource::port(0x70, 2),
-            HwResource::dma(0x3FFF_FFFF, 0x1000),
+            HwResource::dma(0x3FFF_FFFF, 0x1000, tairix_abi::DmaCoherence::Snooped),
             HwResource::endpoint(0xCA11_0007),
             HwResource::shared(0x77),
         ];

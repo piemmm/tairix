@@ -11,6 +11,10 @@ publish.workspace = true
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
 
 [lints]
 workspace = true

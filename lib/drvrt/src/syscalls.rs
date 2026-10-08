@@ -8,6 +8,8 @@
 //! [`RtGrantSyscalls`], the zero-sized forwarder to `tairix_rt`, so the one
 //! syscall trap is not duplicated.
 
+use tairix_abi::driver::DmaReach;
+
 /// The `mmio_map` / `dma_alloc` syscalls the user-space driver host issues.
 ///
 /// Both methods return the kernel's raw signed `abi-v1` result register: a
@@ -46,13 +48,13 @@ pub unsafe trait GrantSyscalls {
     fn boot_facts(&self) -> Option<tairix_abi::BootFacts>;
 
     /// Carve a coherent DMA buffer of `len` bytes bounded by the constraint
-    /// named by the kernel-issued grant `handle`, write the buffer's
-    /// device-visible base to `device_out`, and return its base user virtual
-    /// address (or `-errno`; `device_out` is left untouched on a negative
-    /// result).
+    /// named by the kernel-issued grant `handle` and the `reach` address bits
+    /// the device drives, write the buffer's device-visible base to
+    /// `device_out`, and return its base user virtual address (or `-errno`;
+    /// `device_out` is left untouched on a negative result).
     ///
     /// Mirrors [`tairix_rt::dma_alloc`].
-    fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64;
+    fn dma_alloc(&self, handle: u64, len: usize, reach: DmaReach, device_out: &mut u64) -> i64;
 
     /// Release the coherent DMA buffer based at `cpu_va` (the user virtual
     /// base a prior [`Self::dma_alloc`] returned) bounded by the constraint
@@ -184,8 +186,8 @@ unsafe impl GrantSyscalls for RtGrantSyscalls {
     }
 
     #[inline]
-    fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64 {
-        tairix_rt::dma_alloc(handle, len, device_out)
+    fn dma_alloc(&self, handle: u64, len: usize, reach: DmaReach, device_out: &mut u64) -> i64 {
+        tairix_rt::dma_alloc(handle, len, reach, device_out)
     }
 
     #[inline]

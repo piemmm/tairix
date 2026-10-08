@@ -133,7 +133,7 @@ pub(crate) fn bind(process: ProcessId, limits: CpuFreqLimits, now_ns: u64) -> Re
     //
     // Clearing fabricates no utilisation. It says the governor does not know
     // yet, and a governor that does not know must not slow the machine down.
-    for state in cpu_state::states() {
+    for state in cpu_state::governed() {
         state.cpu_active_since.store(0, Ordering::Relaxed);
         state.gov_util.store(0, Ordering::Relaxed);
         state.gov_folded_ns.store(now_ns, Ordering::Relaxed);
@@ -283,7 +283,7 @@ fn survey(now_ns: u64) -> Survey {
         peak_util: 0,
         any_active: false,
     };
-    for state in cpu_state::states() {
+    for state in cpu_state::governed() {
         if state.cpu_active_since.load(Ordering::Relaxed) != 0 {
             found.any_active = true;
         }

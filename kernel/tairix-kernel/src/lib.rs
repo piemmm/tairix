@@ -201,6 +201,20 @@ pub mod pci_fdt;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod iommu_fdt;
 
+// How a device the kernel drives itself masters memory: through the kernel's
+// own domain behind a unit, physical otherwise.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod floor_dma;
+
+// How a device the kernel drives itself takes its interrupt. Host-tested.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod floor_irq;
+
+// The virtio-MMIO block slot the device-tree ports' floor disk is brought up
+// from, with each port supplying only what its silicon decides.
+#[cfg(all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "riscv64")))]
+pub mod floor_mmio;
+
 // What a kernel PCI probe makes of one segment: each function's DMA identity
 // behind a unit, the functions it stops mastering, and the PCI host's record
 // (`plans/IOMMU.md` IOM7, IOM8). Host-tested.
@@ -487,6 +501,22 @@ pub mod riscv64;
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_plic_irq;
 
+// The riscv64 AIA `IrqController` bridge, at the crate root for the same
+// reason: generic over the APLIC and IMSIC seams, so its tests run on the host.
+#[cfg(any(kernel_isa = "riscv64", test))]
+pub mod riscv64_aia_irq;
+
+// The riscv64 message routes a RISC-V IOMMU confines to interrupt files, at the
+// crate root for the same reason: its planning carries host tests.
+#[cfg(any(kernel_isa = "riscv64", test))]
+pub mod riscv64_messages;
+
+// The aarch64 message-signalled line space and the LPI routes a GICv3 ITS
+// raises, at the crate root for the same reason: its route planning carries
+// host tests.
+#[cfg(any(kernel_isa = "aarch64", test))]
+pub mod aarch64_messages;
+
 // The callback pointers every port's wiring installs, defined once so no two
 // ports can drift and so each port's test compares against the coercion the
 // install actually stored.
@@ -630,8 +660,8 @@ pub use x86_64::arch_wrapper::BinArch;
 pub use x86_64::dispatch::{production_dispatch, DISPATCH_SLOT};
 // The boot paths and the QEMU verticals provision devices through these.
 pub use tairix_kernel_virtio::{
-    provision_virtio_mmio, provision_virtio_pci, KernelVirtioFactory, KernelVirtioFactoryConfig,
-    VirtioMmioProvision, VirtioMmioWalkError, VirtioPciWalkError, VirtioProvision, MAX_SLOTS,
+    provision_virtio_mmio, provision_virtio_pci, VirtioMmioProvision, VirtioMmioWalkError,
+    VirtioPciWalkError, VirtioProvision, MAX_SLOTS,
 };
 
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]

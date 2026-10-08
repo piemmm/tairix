@@ -3,11 +3,16 @@
 //! A buddy allocator over naturally aligned power-of-two blocks of pages:
 //! a buddy carve's frames are aligned to their own size, so an IOVA aligned
 //! the same way lets the unit map the carve with the largest leaves it has.
-//! Blocks are handed out top-down below the device's reach, and every
-//! operation costs `O(orders × log blocks)` — nothing scans.
+//! Blocks are handed out top-down below the device's reach. Each order's free
+//! blocks are a [`RadixTree`] keyed by block index, so a search or an update
+//! costs the tree's height and nothing scans or shifts. Each order's highest
+//! free block is kept beside its tree, since an allocation wants the highest
+//! block, so one reaching the whole aperture walks no tree to choose it.
 
 use alloc::vec::Vec;
 use core::ops::Range;
+
+use tairix_collections::RadixTree;
 
 use crate::{IO_PAGE_SHIFT, IO_PAGE_SIZE};
 
@@ -22,24 +27,108 @@ pub enum IovaError {
     BadAperture,
     /// A reserved range is not page-aligned or is empty.
     BadReservation,
-    /// The block handed back is misaligned for its order, past the orders a
-    /// space holds, or already free.
-    NotAllocated,
     /// No memory to record a free block.
     Exhausted,
+}
+
+/// A block an [`IovaSpace`] handed out. Only [`IovaSpace::alloc`] makes one
+/// and [`IovaSpace::free`] consumes it, so a block goes back once, whole, at
+/// the order it was handed out at:
+///
+/// ```compile_fail,E0382
+/// # use tairix_kernel_iommu_api::IovaSpace;
+/// let mut space = IovaSpace::new(0x1000..0x10_0000, &[]).unwrap();
+/// let block = space.alloc(0, 0).unwrap();
+/// space.free(block).unwrap();
+/// space.free(block).unwrap();
+/// ```
+#[must_use = "a block dropped instead of freed stays out of its space"]
+#[derive(Debug, Eq, PartialEq)]
+pub struct IovaBlock {
+    base: u64,
+    order: usize,
+}
+
+impl IovaBlock {
+    /// Its first IOVA, aligned to its size.
+    #[must_use]
+    pub const fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// Its size in bytes: `IO_PAGE_SIZE << order`.
+    #[must_use]
+    pub const fn bytes(&self) -> u64 {
+        block_bytes(self.order)
+    }
 }
 
 /// One domain's IOVA space.
 pub struct IovaSpace {
     aperture: Range<u64>,
-    /// `free[o]` holds the base of every free block of `IO_PAGE_SIZE << o`
-    /// bytes, ascending. Room for a change is reserved before the space
-    /// changes, so running out of memory leaves it as it was.
-    free: Vec<Vec<u64>>,
+    /// `orders[o]` holds the free blocks of `IO_PAGE_SIZE << o` bytes.
+    orders: Vec<Order>,
+}
+
+/// One order's free blocks, each by its index: its base over its size.
+#[derive(Default)]
+struct Order {
+    /// The nodes a change needs are reserved before the space changes, so
+    /// running out of memory leaves it as it was.
+    blocks: RadixTree<()>,
+    /// The greatest index in `blocks`.
+    highest: Option<u64>,
+}
+
+impl Order {
+    /// The greatest index at or below `at`.
+    fn at_or_below(&self, at: u64) -> Option<u64> {
+        match self.highest? {
+            highest if highest <= at => Some(highest),
+            _ => self.blocks.prev(at).map(|(index, ())| index),
+        }
+    }
+
+    fn holds(&self, index: u64) -> bool {
+        self.highest.is_some_and(|highest| index <= highest) && self.blocks.contains_key(index)
+    }
+
+    fn insert(&mut self, index: u64) -> Result<(), IovaError> {
+        self.blocks
+            .try_insert(index, ())
+            .map_err(|_| IovaError::Exhausted)?;
+        self.highest = self.highest.max(Some(index));
+        Ok(())
+    }
+
+    /// Record `index` into room [`RadixTree::try_reserve_key`] made for it,
+    /// which no exhaustion can take away.
+    fn record(&mut self, index: u64) {
+        let _reserved = self.insert(index);
+    }
+
+    fn remove(&mut self, index: u64) {
+        if self.blocks.remove(index).is_some() && self.highest == Some(index) {
+            self.highest = index
+                .checked_sub(1)
+                .and_then(|below| self.blocks.prev(below))
+                .map(|(next, ())| next);
+        }
+    }
 }
 
 const fn block_bytes(order: usize) -> u64 {
     IO_PAGE_SIZE << order
+}
+
+/// The index of the block of `order` holding `at`.
+const fn index(order: usize, at: u64) -> u64 {
+    at >> (IO_PAGE_SHIFT as usize + order)
+}
+
+/// The block of `order` that is the buddy of the one holding `at`.
+const fn buddy(order: usize, at: u64) -> u64 {
+    (at & !(block_bytes(order) - 1)) ^ block_bytes(order)
 }
 
 impl IovaSpace {
@@ -74,13 +163,14 @@ impl IovaSpace {
             .map_err(|_| IovaError::Exhausted)?;
         holes.extend_from_slice(reserved);
         holes.sort_unstable_by_key(|r| r.start);
-        let mut free = Vec::new();
-        free.try_reserve_exact(ORDERS)
+        let mut orders = Vec::new();
+        orders
+            .try_reserve_exact(ORDERS)
             .map_err(|_| IovaError::Exhausted)?;
-        free.resize_with(ORDERS, Vec::new);
+        orders.resize_with(ORDERS, Order::default);
         let mut space = Self {
             aperture: aperture.clone(),
-            free,
+            orders,
         };
         let mut cursor = aperture.start;
         for hole in holes {
@@ -110,9 +200,8 @@ impl IovaSpace {
     /// the split cannot be recorded.
     ///
     /// Highest-first keeps device addresses clear of the low MMIO windows
-    /// where a switch could route them peer-to-peer; among equally high
-    /// slots the smallest free block is split.
-    pub fn alloc(&mut self, order: u32, limit: u64) -> Option<u64> {
+    /// where a switch could route them peer-to-peer.
+    pub fn alloc(&mut self, order: u32, limit: u64) -> Option<IovaBlock> {
         let want = usize::try_from(order).ok().filter(|&o| o < ORDERS)?;
         let size = block_bytes(want);
         let limit = if limit == 0 {
@@ -121,115 +210,78 @@ impl IovaSpace {
             limit.min(self.aperture.end)
         };
         let highest_base = limit.checked_sub(size)?;
-        let mut best: Option<(u64, usize, usize)> = None;
+        // Free blocks are disjoint, so the highest one based low enough holds
+        // the highest slot. The highest base an order offers falls as the
+        // order grows, so once it is below the best found no larger order can
+        // beat it.
+        let mut best: Option<(usize, u64)> = None;
         for o in want..ORDERS {
-            // Blocks of one order are disjoint, so the highest base that
-            // fits also holds that order's highest fitting slot.
-            let blocks = &self.free[o];
-            let Some(index) = blocks
-                .partition_point(|&b| b <= highest_base)
-                .checked_sub(1)
-            else {
-                continue;
-            };
-            let block = blocks[index];
-            let target = ((block + block_bytes(o)).min(limit) - size) & !(size - 1);
-            if best.is_none_or(|(highest, _, _)| target > highest) {
-                best = Some((target, o, index));
+            let ceiling = highest_base & !(block_bytes(o) - 1);
+            if best.is_some_and(|(_, block)| block >= ceiling) {
+                break;
+            }
+            if let Some(at) = self.orders[o].at_or_below(index(o, ceiling)) {
+                let block = at << (IO_PAGE_SHIFT as usize + o);
+                if best.is_none_or(|(_, highest)| block > highest) {
+                    best = Some((o, block));
+                }
             }
         }
-        let (target, found_order, index) = best?;
-        // Each order below the one split takes exactly one buddy.
-        for o in want..found_order {
-            self.free[o].try_reserve(1).ok()?;
+        let (found, block) = best?;
+        let target = ((block + block_bytes(found)).min(limit) - size) & !(size - 1);
+        // Each order below the one split keeps the buddy of the half holding
+        // the target, made room for before anything changes.
+        for o in want..found {
+            self.orders[o]
+                .blocks
+                .try_reserve_key(index(o, buddy(o, target)))
+                .ok()?;
         }
-        let mut base = self.free[found_order].remove(index);
-        for o in (want..found_order).rev() {
-            let upper = base + block_bytes(o);
-            if target >= upper {
-                self.insert(o, base);
-                base = upper;
-            } else {
-                self.insert(o, upper);
-            }
+        self.orders[found].remove(index(found, block));
+        for o in want..found {
+            self.orders[o].record(index(o, buddy(o, target)));
         }
-        Some(base)
+        Some(IovaBlock {
+            base: target,
+            order: want,
+        })
     }
 
-    /// Take back the block of order `order` at `base`, merging it with every
+    /// Take back `block`, which this space handed out, merging it with every
     /// free buddy.
     ///
     /// # Errors
     ///
-    /// [`IovaError::NotAllocated`] for a base misaligned for its order, an
-    /// order past the space's, or a block any part of which is already free,
-    /// and [`IovaError::Exhausted`] with no memory to record the merged
-    /// block: the block then stays out of the space.
-    pub fn free(&mut self, base: u64, order: u32) -> Result<(), IovaError> {
-        let order = usize::try_from(order)
-            .ok()
-            .filter(|&o| o < ORDERS)
-            .ok_or(IovaError::NotAllocated)?;
-        let end = base.checked_add(block_bytes(order));
-        let inside = base >= self.aperture.start && end.is_some_and(|end| end <= self.aperture.end);
-        if !base.is_multiple_of(block_bytes(order)) || !inside || self.overlaps_free(base, order) {
-            return Err(IovaError::NotAllocated);
-        }
-        let (mut merged, mut top) = (base, order);
-        while top + 1 < ORDERS && self.position(top, merged ^ block_bytes(top)).is_ok() {
-            merged = merged.min(merged ^ block_bytes(top));
+    /// [`IovaError::Exhausted`] with no memory to record the merged block:
+    /// the block then stays out of the space.
+    // Taken by value so a block goes back once.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn free(&mut self, block: IovaBlock) -> Result<(), IovaError> {
+        let IovaBlock { base, order } = block;
+        let mut top = order;
+        while top + 1 < ORDERS && self.orders[top].holds(index(top, buddy(top, base))) {
             top += 1;
         }
-        self.free[top]
-            .try_reserve(1)
+        let merged = index(top, base);
+        self.orders[top]
+            .blocks
+            .try_reserve_key(merged)
             .map_err(|_| IovaError::Exhausted)?;
-        let mut base = base;
         for o in order..top {
-            let buddy = base ^ block_bytes(o);
-            if let Ok(index) = self.position(o, buddy) {
-                self.free[o].remove(index);
-            }
-            base = base.min(buddy);
+            self.orders[o].remove(index(o, buddy(o, base)));
         }
-        self.insert(top, base);
+        self.orders[top].record(merged);
         Ok(())
     }
 
     /// Free bytes in the space.
     #[must_use]
     pub fn free_bytes(&self) -> u64 {
-        self.free
+        self.orders
             .iter()
             .enumerate()
-            .map(|(order, blocks)| block_bytes(order).saturating_mul(blocks.len() as u64))
+            .map(|(o, order)| block_bytes(o).saturating_mul(order.blocks.len() as u64))
             .fold(0, u64::saturating_add)
-    }
-
-    /// Where `base` is, or would go, among the free blocks of `order`.
-    fn position(&self, order: usize, base: u64) -> Result<usize, usize> {
-        self.free[order].binary_search(&base)
-    }
-
-    /// Record the free block of `order` at `base`, into room reserved for it.
-    fn insert(&mut self, order: usize, base: u64) {
-        if let Err(index) = self.position(order, base) {
-            self.free[order].insert(index, base);
-        }
-    }
-
-    /// Whether any byte of the aligned block at `base` is free: a free block
-    /// of its order or above containing it, or a smaller one inside it.
-    fn overlaps_free(&self, base: u64, order: usize) -> bool {
-        let end = base + block_bytes(order);
-        let contained =
-            (order..ORDERS).any(|o| self.position(o, base & !(block_bytes(o) - 1)).is_ok());
-        contained
-            || (0..order).any(|o| {
-                let blocks = &self.free[o];
-                blocks
-                    .get(blocks.partition_point(|&b| b < base))
-                    .is_some_and(|&b| b < end)
-            })
     }
 
     /// Release `[start, end)` as the largest aligned blocks it holds.
@@ -240,10 +292,7 @@ impl IovaSpace {
             let fit = usize::try_from((end - start).ilog2().saturating_sub(IO_PAGE_SHIFT))
                 .unwrap_or(ORDERS - 1);
             let order = align.min(fit).min(ORDERS - 1);
-            self.free[order]
-                .try_reserve(1)
-                .map_err(|_| IovaError::Exhausted)?;
-            self.insert(order, start);
+            self.orders[order].insert(index(order, start))?;
             start += block_bytes(order);
         }
         Ok(())

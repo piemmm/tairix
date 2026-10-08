@@ -2661,6 +2661,33 @@ fn a_driver_reported_structural_refusal_keeps_its_own_class() {
     assert_eq!(VfsError::DirectoryCycle.to_errno(), Errno::OutOfRange);
 }
 
+/// A full volume and exhausted memory reach the caller as themselves, never
+/// as the I/O error a faulted device is: a full disk used to read as `EIO`.
+#[test]
+fn a_full_volume_and_exhausted_memory_are_reported_as_themselves() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    for (refusal, reported, errno) in [
+        (DriverError::NoSpace, VfsError::NoSpace, Errno::NoSpace),
+        (
+            DriverError::OutOfMemory,
+            VfsError::OutOfMemory,
+            Errno::OutOfMemory,
+        ),
+    ] {
+        let mut fs = RefusingFs { refusal };
+        for outcome in [
+            vfs.create_via(&admin, &p("/x"), &mut fs),
+            vfs.mkdir_via(&admin, &p("/x"), &mut fs),
+            vfs.symlink_via(&admin, &p("/x"), &mut fs, "/target"),
+        ] {
+            assert_eq!(outcome, Err(reported));
+        }
+        assert_eq!(reported.to_errno(), errno);
+    }
+}
+
 /// A genuinely transient driver refusal keeps meaning "retry": it is not
 /// read as any of the structural conflicts that used to share its value.
 #[test]

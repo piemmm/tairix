@@ -38,7 +38,7 @@
 compile_error!(
     "tairix-test-file-map-qemu-riscv64: the `test-hooks` Cargo feature is a \
      debug-only test affordance and must not be enabled in release builds. \
-     See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
+     See AGENTS.md §2.1 (no hacks) and §5.4.5 (fail closed)."
 );
 
 #[cfg(all(itest_riscv64, feature = "test-hooks"))]

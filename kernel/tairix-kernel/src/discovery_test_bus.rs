@@ -36,7 +36,7 @@ impl FakeBus {
                 class: 2,
                 reserved0: 0,
                 // A distinct, plausible per-slot base; unused by the
-                // block gate (the probed child carries only its bind key).
+                // block gate, whose probed child records the slot's place.
                 address: 0x0A00_0000 + (i as u64) * 0x200,
             })
             .collect();

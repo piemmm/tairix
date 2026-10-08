@@ -61,6 +61,16 @@ Yr ymholiadau:
   iddi (cysylltnod ar gyfer ymgeisydd heb gysylltiad), ei slot, ei rôl
   (candidate/held/in-sync/resyncing/faulted), ei maint, a'r cenhedliad
   metadata y mae'n ei gario (angen `CAP_SYSINFO_HW`).
+- `dma`, `iommu` — yr unedau cyfieithu DMA: un rhes fesul uned — ei nod yn y
+  goeden caledwedd, ei theulu, a yw'n cyfieithu neu pam lai, sut mae'n codi
+  ei namau, ble mae ei chyfieithiadau'n byw, y perchnogion a ffrydiau'r
+  cadarnwedd y mae'n eu dal, a'i namau a gofnodwyd ac a ollyngwyd, a'r
+  ffrydiau a dawelwyd gan storm, ers cychwyn — wedyn un rhes fesul grŵp
+  ynysu y mae perchennog yn ei ddal — ei uned, nod a chenhedlaeth y deiliad
+  a sefyllfa'r perchennog hwnnw — wedyn un rhes fesul nod y mae uned yn ei
+  gyfieithu ar ran perchennog — ei uned a'i grŵp, cenhedlaeth a chyflwr ei
+  berchennog, ei ffrydiau, a mapiadau ei barth a'r beitiau y maent yn eu
+  mapio (angen `CAP_SYSINFO_HW`).
 - `show <resource-ref>` — darllen un cyfeiriad adnodd
   `info:`/`state:`/`stats:` ac argraffu ei werth. Mae'r gofodau enwau hynny
   yn gweini gwerthoedd teipiedig drwy'r API hwn, byth ffrydiau beit: ni all

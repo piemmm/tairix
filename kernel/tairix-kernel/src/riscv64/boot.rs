@@ -221,6 +221,10 @@ impl KernelArch for RiscvBinArch {
         crate::pci_host::unit_function()
     }
 
+    fn pci_windows(&self, sink: &mut dyn FnMut(core::ops::Range<u64>)) {
+        crate::pci_host::decoded_windows(sink);
+    }
+
     fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
         device_registers(base, len)
     }
@@ -354,17 +358,9 @@ impl KernelArch for RiscvBinArch {
     }
 
     fn irq_routing(&self) -> IrqRouting {
-        // Size the core `IrqTable` to the discovered PLIC source ceiling and
-        // hand it the shared PLIC controller (`Phase::Irq`), so a device
-        // source — the root-unlock virtio-blk completion line, an autoloaded
-        // driver's line — can be bound. Without this override the core falls
-        // back to the unsupported routing (`max_line = 0`) and every device
-        // `bind` fails closed as out-of-range, wedging every interrupt-driven
-        // bring-up. A board with no PLIC (or a host build) returns the
-        // unsupported routing and interrupt-driven bring-up fails closed.
         #[cfg(all(freestanding, kernel_isa = "riscv64"))]
         {
-            crate::riscv64::irq::plic_routing()
+            crate::riscv64::irq::routing()
         }
         #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
         {
@@ -372,7 +368,10 @@ impl KernelArch for RiscvBinArch {
         }
     }
 
-    fn install_irq_dispatch(&self, table: &'static tairix_kernel_irq::IrqTable) {
+    fn install_irq_dispatch(
+        &self,
+        table: &'static tairix_kernel_irq::IrqTable,
+    ) -> Result<(), &'static str> {
         // Set up tickless supervisor-timer preemption now that the
         // scheduler is up (P-1b, `plans/PI.md` D2b-2b-A): register the
         // per-hart preempt storage, install the U-mode-preemption
@@ -385,22 +384,30 @@ impl KernelArch for RiscvBinArch {
         // `sstatus.SIE == 0`, so a tick is *taken* only while a U-mode task
         // runs (the privilege rule U < S).
         arm_preemption(self.arch.timebase_hz());
-        // Wire the S-mode external-interrupt (PLIC) dispatch on top: publish
-        // this table, build + publish the PLIC controller from the base +
-        // source count discovered from the firmware tree at boot
-        // (`seed_hardware_tree` → `irq::record_plic`), install the
-        // claim → `IrqTable::fire` → complete dispatcher, and enable
-        // `sie.SEIE` so the interrupt-driven bootstrap-floor bring-up (the
-        // root-unlock virtio-blk completion line, an autoloaded driver's
-        // device line) can be taken. Additive: every source stays masked at
-        // the controller until a driver arms its own line, and `sstatus.SIE`
-        // is toggled by the dispatch loop, so this changes no behaviour until
-        // the first line is armed. A board with no PLIC leaves the dispatch
-        // unwired and interrupt-driven bring-up fails closed.
+        // Every source stays masked until a driver arms its own line.
         #[cfg(all(freestanding, kernel_isa = "riscv64"))]
         crate::riscv64::irq::install_dispatch(table);
         #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
         let _ = table;
+        Ok(())
+    }
+
+    fn route_interrupts(
+        &self,
+        remapper: Option<&'static tairix_kernel_core::iommu::Translation>,
+        _cpus: u32,
+        frames: &'static tairix_kernel_mem::FrameAllocator,
+        log: &dyn Sink,
+    ) -> tairix_kernel_core::iommu::InterruptRouting {
+        #[cfg(all(freestanding, kernel_isa = "riscv64"))]
+        {
+            crate::riscv64_messages::route(remapper, frames, log)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
+        {
+            let _ = (remapper, frames, log);
+            tairix_kernel_core::iommu::InterruptRouting::Native
+        }
     }
 
     fn machine_takeover(
@@ -859,7 +866,17 @@ fn enable_boot_mmu() -> bool {
 /// installs: a board whose image ends above it could never have a process
 /// root activated under it, so the boot says so rather than faulting on the
 /// first switch into user mode.
-fn install_direct_physical_map(map: &BootMemoryMap) -> Result<(), BootError> {
+fn install_direct_physical_map(map: &BootMemoryMap, fdt: &Fdt<'_>) -> Result<(), BootError> {
+    // What the kernel drives from a syscall must be mapped in every root, so
+    // the map carries its registers before any root is built from it.
+    let mut registers = [0; tairix_arch_api::gigapages::MASK_WORDS];
+    tairix_arch_riscv64::fdt::kernel_register_windows(fdt, &mut |base, len| {
+        let window = tairix_arch_api::gigapages::from_extents(&[(base, len)]);
+        for (word, held) in registers.iter_mut().zip(window) {
+            *word |= held;
+        }
+    });
+    paging::KERNEL_DEVICES.name(registers);
     let gib = crate::mem_map::direct_map_gib(map, 0, paging::MAX_PHYSMAP_GIB);
     if !paging::install_boot_physmap(&BOOT_PAGE_TABLES, gib) {
         return Err(BootError::DirectMapInstall);
@@ -899,7 +916,11 @@ pub fn enable_paging_and_direct_map(dtb: u64) -> Result<(), BootError> {
     if !enable_boot_mmu() {
         return Err(BootError::MmuEnableFailed);
     }
-    install_direct_physical_map(&build_boot_memory_map(dtb)?)
+    let map = build_boot_memory_map(dtb)?;
+    // SAFETY: `dtb` is the firmware tree the memory map was just read from,
+    // identity-mapped and immutable for the kernel's life.
+    let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.map_err(|_| BootError::Fdt)?;
+    install_direct_physical_map(&map, &fdt)
 }
 
 /// Boot the kernel on the boot hart and forward to
@@ -1175,7 +1196,7 @@ pub fn try_boot(
 
     // 2a. Install the direct physical map over the discovered RAM, before
     //     anything reaches a *frame* by pointer.
-    install_direct_physical_map(&memory_map)?;
+    install_direct_physical_map(&memory_map, &fdt)?;
     // Sv39 root leaves are always gigapages, so the map never costs tables.
     crate::mem_map::log_direct_map(log_sink, paging::physmap_gigapages(), true);
 
@@ -1307,10 +1328,8 @@ pub fn try_boot(
 ///    ([`tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb`]) and reads each
 ///    slot's `DeviceID` through the frozen bus seam, emitting the probed
 ///    Block / Input / Network child nodes (`crate::hwdiscovery`) into the
-///    same sink. The interrupt-driven input/network nodes carry their
-///    discovered PLIC line, resolved by the arch port's
-///    [`tairix_arch_riscv64::fdt::plic_device_source`] — a discovered value,
-///    never a board constant.
+///    same sink. The interrupt-driven input/network nodes carry the line
+///    their slot's `interrupts` names on the tree's controller.
 ///
 /// The probe is safe here: [`boot`] enabled the Sv39 identity MMU before
 /// `try_boot`, so the `virt`-board virtio-MMIO aperture the device tree
@@ -1342,18 +1361,19 @@ fn seed_hardware_tree(
     // consumes the `fdt` reader, so the virtio-MMIO probe below can reborrow
     // the same firmware bytes the bus builder needs.
     let total = fdt.total_size();
-    // Record the PLIC register base + `riscv,ndev` source count for the
-    // external-interrupt dispatch install (`irq::install_dispatch`, run later
-    // in the kernel-core `Irq` phase, which has no device tree). Read before
-    // the discovery walk consumes the `fdt` reader; a board with no PLIC
-    // leaves both `None`, so nothing is recorded and the dispatch install
-    // wires no external IRQ (interrupt-driven bring-up then fails closed).
-    if let (Some(base), Some(ndev)) = (
-        tairix_arch_riscv64::fdt::plic_base(&fdt),
-        tairix_arch_riscv64::fdt::plic_ndev(&fdt),
+    let hart = u64::from(tairix_arch_riscv64::smp::current_hartid());
+    // The walk decodes specifiers for the APLIC wherever one delivers by MSI,
+    // so an AIA whose hart file cannot be found leaves no controller rather
+    // than a PLIC the tree's devices do not name.
+    let controller = match (
+        tairix_arch_riscv64::fdt::supervisor_aplic(&fdt),
+        tairix_arch_riscv64::fdt::supervisor_aia(&fdt, hart),
     ) {
-        crate::riscv64::irq::record_plic(base, ndev);
-    }
+        (Some(_), aia) => aia.map(Ok),
+        (None, _) => tairix_arch_riscv64::fdt::plic_window(&fdt)
+            .zip(tairix_arch_riscv64::fdt::plic_ndev(&fdt))
+            .map(Err),
+    };
     let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     // A discovery error leaves the sink empty; seed whatever was collected.
     let _ = tairix_arch_riscv64::platform::FdtDiscovery::new(fdt).discover(&mut sink);
@@ -1367,96 +1387,133 @@ fn seed_hardware_tree(
     // identity-mapped Device memory the probe alone reads (side-effect-free
     // `DeviceID` registers, MMU on — `boot` enabled it before `try_boot`).
     let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb as *const u8, total) };
-    if let Ok(bus) = unsafe { tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) } {
-        // Resolve each virtio slot's PLIC source from the firmware tree
-        // (`plic_device_source` reads the node's single `interrupts` cell —
-        // a discovered value, never a board constant) so an emitted
-        // input/network node carries the interrupt line its interrupt-driven
-        // user-space driver parks on. The first `fdt` was consumed by the
-        // discovery walk above, so re-parse the validated blob per slot;
-        // there are only a handful of virtio slots, so the re-read is
-        // negligible boot cost.
-        //
-        // SAFETY: as above — `dtb` addresses the identity-mapped, immutable
-        // firmware blob and the MMU is on.
-        let slot_irq = |slot_base: u64| -> Option<u32> {
-            let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }.ok()?;
-            tairix_arch_riscv64::fdt::plic_device_source(&fdt, slot_base)
+    // SAFETY: as above — the aperture is identity-mapped Device memory the
+    // probe alone reads.
+    let probe = unsafe { tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb(dtb_bytes) };
+    if let (Ok(bus), Ok(slots)) = (probe, Fdt::new(dtb_bytes)) {
+        // Read before the probes add nodes of their own.
+        let dma = crate::iommu_fdt::SlotDma::read(
+            &slots,
+            sink.nodes(),
+            <tairix_arch_riscv64::platform::Riscv64Fdt as FdtPlatform>::DEFAULT_DMA_COHERENCE,
+        );
+        // A slot whose line cannot be resolved is left undiscovered.
+        let platform =
+            <tairix_arch_riscv64::platform::Riscv64Fdt as FdtPlatform>::from_tree(&slots);
+        let slot_irq = |slot_base: u64| {
+            let slot = crate::hwdiscovery::virtio_mmio_slot(&slots, slot_base)?;
+            platform.node_line(&slot).map(|line| line.line)
         };
-        // Each probe reads `bus` sequentially, so the immutable borrows do
-        // not overlap. An enumeration error leaves the affected nodes
-        // undiscovered rather than aborting the boot (fail closed).
-        let _ = crate::hwdiscovery::observe_virtio_mmio_block_devices(&bus, &mut sink);
+        // An enumeration error leaves the affected nodes undiscovered rather
+        // than aborting the boot.
+        let _ = crate::hwdiscovery::observe_virtio_mmio_block_devices(&bus, &dma, &mut sink);
         let _ = crate::hwdiscovery::observe_virtio_mmio_input_devices(
-            &bus, &slot_irq, &mut sink, log_sink,
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
         let _ = crate::hwdiscovery::observe_virtio_mmio_network_devices(
-            &bus, &slot_irq, &mut sink, log_sink,
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
-
-        // A sound card is discovered by the same walk as a NIC — one slot's
-        // register window, its coherent DMA constraint and its decoded
-        // interrupt line — so the autoloaded user-space driver can park on
-        // the device's own period interrupt.
         let _ = crate::hwdiscovery::observe_virtio_mmio_audio_devices(
-            &bus, &slot_irq, &mut sink, log_sink,
+            &bus, &slot_irq, &dma, &mut sink, log_sink,
         );
     }
 
-    // Every generic ECAM host the tree describes becomes the kernel's own.
+    // Every generic ECAM host the tree describes becomes the kernel's own,
+    // each function behind a unit confining messages given a file of its own.
+    let mut files = 0;
     if let Ok(fdt) = Fdt::new(dtb_bytes) {
-        let port = PciPort {
-            plic: <tairix_arch_riscv64::platform::Riscv64Fdt as FdtPlatform>::from_tree(&fdt),
-        };
-        crate::pci_fdt::seed(&fdt, &port, &mut sink, log_sink);
+        let intx =
+            IntxOnTree(<tairix_arch_riscv64::platform::Riscv64Fdt as FdtPlatform>::from_tree(&fdt));
+        match controller {
+            Some(Ok(aia)) => {
+                let mut planner = crate::riscv64_messages::discover(&fdt, &aia, sink.nodes());
+                crate::pci_fdt::seed(&fdt, &PciPort, &intx, &mut planner, &mut sink, log_sink);
+                let nodes = planner.into_nodes();
+                files = u32::try_from(nodes.len()).unwrap_or(0);
+                crate::riscv64_messages::publish(nodes);
+            }
+            _ => crate::pci_fdt::seed(
+                &fdt,
+                &PciPort,
+                &intx,
+                &mut crate::pci_fdt::NoMessages,
+                &mut sink,
+                log_sink,
+            ),
+        }
+    }
+    match controller {
+        Some(Ok(aia)) => {
+            crate::riscv64::irq::record(crate::riscv64::irq::Discovered::Aia { aia, files });
+        }
+        Some(Err(((base, len), sources))) => {
+            crate::riscv64::irq::record(crate::riscv64::irq::Discovered::Plic {
+                base,
+                len,
+                sources,
+            });
+        }
+        None => {}
     }
     sink.into_vec()
 }
 
 /// One past the highest physical address the identity window every root the
-/// kernel runs under maps: a register the kernel drives from a syscall must
-/// lie below it, not merely below the boot root's wider identity map.
-fn register_reach() -> u64 {
+/// kernel runs under maps, not merely the boot root's wider identity map.
+fn identity_reach() -> u64 {
     (crate::riscv64::spawn_producer::identity_gigapages() as u64) << 30
 }
 
-/// A kernel mapping of the device registers at `[base, base + len)`: the
-/// identity map's, whose memory type the platform's attributes decide. A
-/// window reaching past [`register_reach`] fails closed.
+/// A mapping of the device registers at `[base, base + len)` that every root
+/// carries: the identity window's below [`identity_reach`], else the direct
+/// map's where the boot named them a window the kernel drives
+/// (`tairix_arch_riscv64::fdt::kernel_register_windows`). The platform's
+/// attributes decide their memory type either way; any other window fails
+/// closed.
 pub(crate) fn device_registers(base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
-    let end = base.checked_add(u64::try_from(len).ok()?)?;
-    if len == 0 || end > register_reach() {
+    let len = u64::try_from(len).ok()?;
+    let end = base.checked_add(len)?;
+    let virt = if len != 0 && end <= identity_reach() {
+        base
+    } else if paging::KERNEL_DEVICES.covers(base, len) {
+        paging::physmap_virt(base)
+    } else {
         return None;
-    }
+    };
     core::ptr::NonNull::new(core::ptr::with_exposed_provenance_mut(
-        usize::try_from(base).ok()?,
+        usize::try_from(virt).ok()?,
     ))
 }
 
 /// How a generic ECAM host reaches this port: its configuration region
-/// through the identity map, its INTx on the PLIC, decoded as the platform
-/// walk decodes every other device's.
-struct PciPort {
-    plic: tairix_arch_riscv64::platform::Riscv64Fdt,
+/// through [`device_registers`], its INTx on the tree's controller, decoded as
+/// the platform walk decodes every other device's.
+struct PciPort;
+
+/// A function's INTx on the tree's interrupt controller, decoded as the
+/// platform walk decodes every other device's.
+struct IntxOnTree(tairix_arch_riscv64::platform::Riscv64Fdt);
+
+impl crate::pci_fdt::IntxLines for IntxOnTree {
+    fn line(&self, spec: &tairix_fdt::pci::InterruptSpec) -> Option<u32> {
+        if self.0.root_interrupt_controller() != Some(spec.parent) {
+            return None;
+        }
+        self.0.line(spec.cells()).map(|line| line.line)
+    }
 }
 
 impl crate::pci_fdt::FdtPort for PciPort {
+    fn dma_convention(&self) -> tairix_abi::DmaCoherence {
+        <tairix_arch_riscv64::platform::Riscv64Fdt as tairix_arch_api::fdtwalk::FdtPlatform>::DEFAULT_DMA_COHERENCE
+    }
+
     fn registers(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
         device_registers(base, len)
     }
 
     fn reach(&self) -> u64 {
-        register_reach()
-    }
-
-    fn interrupt(&self, _fdt: &Fdt<'_>, spec: &tairix_fdt::pci::InterruptSpec) -> Option<u32> {
-        if self.plic.root_interrupt_controller() != Some(spec.parent) {
-            return None;
-        }
-        match spec.cells() {
-            &[source] => self.plic.line_of(source),
-            _ => None,
-        }
+        paging::KERNEL_DEVICES.reach()
     }
 }
 

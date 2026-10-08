@@ -421,6 +421,21 @@ fn map_page_translates_neutral_flags_and_walks() {
     assert_ne!(leaf & flags::WRITE, 0);
     assert_eq!(leaf & flags::EXEC, 0);
     assert_eq!(leaf & flags::USER, 0);
+    assert_eq!(leaf & flags::SW_DMA, 0);
+}
+
+/// A DMA buffer's mark rides a bit the walk leaves to software and decodes
+/// back.
+#[test]
+fn the_dma_mark_round_trips_through_a_leaf() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 1).expect("root");
+    let vaddr = (100u64 << 30) | (7u64 << 21) | (9u64 << 12);
+    let marked = PageFlags::READ | PageFlags::WRITE | PageFlags::DMA;
+    mmu::AddressSpace::map_page(&mut space, vaddr, 0x8200_0000, marked).expect("maps");
+    let (_, flags) = mmu::AddressSpace::translate(&space, vaddr).expect("mapped");
+    assert!(flags.contains(marked));
 }
 
 /// A parent PTE whose PPN the frame source never handed out is what a
@@ -723,6 +738,25 @@ fn kernel_slots_are_everything_from_the_map_upward() {
     assert!(is_kernel_slot(ENTRIES_PER_TABLE - 1));
 }
 
+/// Sv39 states no memory type, so memory a master that does not snoop would
+/// share cannot be kept from the caches: the map is refused.
+#[test]
+fn memory_for_a_master_that_does_not_snoop_is_refused() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let (va, pa) = (100u64 << 30, 0x8123_4000);
+    let shared = PageFlags::READ | PageFlags::WRITE | PageFlags::USER;
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut space, va, pa, shared | PageFlags::DMA_COHERENT),
+        Err(MapError::Unsupported)
+    );
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut space, va, pa, shared),
+        Ok(())
+    );
+}
+
 /// A user leaf in a kernel root slot would hand U-mode the direct physical
 /// map or the shared remap window. Both entry points refuse it whatever the
 /// caller computed, and the HAL names the cause rather than reporting
@@ -782,11 +816,28 @@ fn every_root_installs_the_published_direct_map() {
     use tairix_arch_api::mmu;
     static POOL: PageTablePool = PageTablePool::new();
     const GIB: usize = 5;
+    // A configuration region in RAM's first gigapage, and a 2 GiB register
+    // window at 16 GiB, past both RAM and the 4 GiB identity window.
+    let window = (16u64 << 30, 2u64 << 30);
+    KERNEL_DEVICES.name(tairix_arch_api::gigapages::from_extents(&[
+        (0x3000_0000, 0x1000_0000),
+        window,
+    ]));
 
     assert!(publish_physmap(GIB), "the first publication");
     assert_eq!(physmap_gigapages(), GIB);
-    assert_eq!(physmap_bytes(), (GIB as u64) << 30);
+    assert_eq!(physmap_bytes(), (GIB as u64) << 30, "RAM alone sizes it");
     assert!(!publish_physmap(GIB), "the map is installed once per boot");
+    assert!(KERNEL_DEVICES.covers(window.0, window.1));
+    assert!(KERNEL_DEVICES.covers(0x3000_0000, 0x1000));
+    assert!(
+        !KERNEL_DEVICES.covers(window.0, window.1 + 1),
+        "past the window"
+    );
+    assert!(
+        !KERNEL_DEVICES.covers(4 << 30, 0x1000),
+        "RAM is not a register"
+    );
 
     let probe = 0x1_2345_6000u64;
     for space in [
@@ -813,6 +864,19 @@ fn every_root_installs_the_published_direct_map() {
     assert!(
         mmu::AddressSpace::translate(&space, physmap_virt(physmap_bytes())).is_none(),
         "the map stops at its published extent"
+    );
+    // A register window past it is carried in every root, never executable
+    // or user-accessible either.
+    let register = window.0 + 0x1234_5000;
+    let leaf = leaf_pte(&POOL, &space, physmap_virt(register)).expect("a register leaf");
+    assert_eq!(
+        mmu::AddressSpace::translate(&space, physmap_virt(register)).map(|(phys, _)| phys),
+        Some(register)
+    );
+    assert_eq!(leaf.0 & (flags::EXEC | flags::USER), 0);
+    assert!(
+        mmu::AddressSpace::translate(&space, physmap_virt(window.0 + window.1)).is_none(),
+        "nothing past the window"
     );
     // The host has no live root, so the boot install finds none to patch
     // and refuses rather than publishing a map nothing carries.

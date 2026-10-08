@@ -60,6 +60,12 @@ pub struct UnitNodes {
     pub untrusted: usize,
 }
 
+/// The DMA a translation unit's node states: its tables, queues and records,
+/// placed with no regard to its bus.
+pub(crate) fn unit_dma() -> tairix_abi::HwResource {
+    tairix_abi::HwResource::dma(0, 0, crate::DMA_COHERENCE)
+}
+
 /// The hardware-tree id of the unit at `index` among a table's units, ids
 /// numbered from `first_id`.
 pub(crate) fn unit_node_id(first_id: u32, index: usize) -> Option<u32> {
@@ -329,6 +335,48 @@ impl<'a> Madt<'a> {
     #[must_use]
     pub fn entries(&self) -> MadtIter<'a> {
         MadtIter { rest: self.entries }
+    }
+
+    /// Whether some Local APIC entry names an enabled processor: then a
+    /// Local x2APIC entry repeats one only with an id xAPIC cannot hold.
+    #[must_use]
+    pub fn lists_xapic_processors(&self) -> bool {
+        self.entries().any(|entry| {
+            matches!(entry, MadtEntry::LocalApic { .. }) && processor_id(&entry, false).is_some()
+        })
+    }
+
+    /// The APIC id of each enabled processor the table names, once each, in
+    /// table order.
+    pub fn processors(&self) -> impl Iterator<Item = u32> + 'a {
+        let xapic_listed = self.lists_xapic_processors();
+        self.entries()
+            .filter_map(move |entry| processor_id(&entry, xapic_listed))
+    }
+}
+
+/// Bit 0 of a Local APIC or Local x2APIC entry's flags: Processor Enabled.
+const PROCESSOR_ENABLED: u32 = 1 << 0;
+
+/// The APIC id of the processor `entry` names, where it names one to bring
+/// up: firmware lists one whose id fits xAPIC in a Local APIC entry, and may
+/// repeat it as a Local x2APIC one, which then names it only with an id xAPIC
+/// cannot hold where `xapic_listed` says Local APIC entries name processors
+/// at all (ACPI 6.5 §5.2.12.12). Each entry type's all-ones id is a
+/// placeholder for none.
+#[must_use]
+pub fn processor_id(entry: &MadtEntry, xapic_listed: bool) -> Option<u32> {
+    match *entry {
+        MadtEntry::LocalApic { apic_id, flags, .. } => {
+            (flags & PROCESSOR_ENABLED != 0 && apic_id != u8::MAX).then_some(u32::from(apic_id))
+        }
+        MadtEntry::LocalX2Apic {
+            x2apic_id, flags, ..
+        } => (flags & PROCESSOR_ENABLED != 0
+            && x2apic_id != u32::MAX
+            && !(xapic_listed && x2apic_id < u32::from(u8::MAX)))
+        .then_some(x2apic_id),
+        _ => None,
     }
 }
 
@@ -695,6 +743,23 @@ pub unsafe fn locate_ivrs(rsdp: &Rsdp) -> Option<&'static [u8]> {
     unsafe { locate_sdt(rsdp, crate::ivrs::IVRS_SIGNATURE) }
 }
 
+/// Locate the VIOT (the virtio-iommu topology) by walking the firmware
+/// (X|R)SDT pointed at by `rsdp`; the caller hands the bytes to
+/// [`crate::viot::Viot::parse`].
+///
+/// # Safety
+///
+/// Identical to [`locate_madt`].
+///
+/// Returns `None` on a platform with no virtio-iommu.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_viot(rsdp: &Rsdp) -> Option<&'static [u8]> {
+    // SAFETY: forwarded — caller's contract pins the tables into the
+    // identity-mapped window.
+    unsafe { locate_sdt(rsdp, crate::viot::VIOT_SIGNATURE) }
+}
+
 /// Walk the firmware (X|R)SDT pointed at by `rsdp` for the first table
 /// whose signature is `signature`, returning its bytes.
 ///
@@ -1055,6 +1120,58 @@ pub(crate) mod tests {
             decode_entry(9, &entry[..12]),
             MadtEntry::Other(9),
             "a short entry"
+        );
+    }
+
+    fn local_apic(apic_id: u8, flags: u32) -> Vec<u8> {
+        let mut entry = vec![0u8, 8, 0, apic_id];
+        entry.extend_from_slice(&flags.to_le_bytes());
+        entry
+    }
+
+    fn local_x2apic(x2apic_id: u32, flags: u32) -> Vec<u8> {
+        let mut entry = vec![9u8, 16, 0, 0];
+        entry.extend_from_slice(&x2apic_id.to_le_bytes());
+        entry.extend_from_slice(&flags.to_le_bytes());
+        entry.extend_from_slice(&0u32.to_le_bytes());
+        entry
+    }
+
+    fn processors_of(entries: &[Vec<u8>]) -> Vec<u32> {
+        let bytes = build_madt(0xFEE0_0000, 0, &entries.concat());
+        Madt::parse(&bytes)
+            .expect("a valid MADT")
+            .processors()
+            .collect()
+    }
+
+    /// Every enabled processor is named once by its APIC id in table order:
+    /// an x2APIC entry repeating one an xAPIC entry names is not a second
+    /// processor, one past xAPIC's eight bits is, and a disabled entry or an
+    /// all-ones placeholder is none.
+    #[test]
+    fn every_enabled_processor_is_named_once() {
+        assert_eq!(
+            processors_of(&[
+                local_apic(0, 1),
+                local_apic(1, 0),
+                local_apic(0xFF, 1),
+                local_x2apic(0, 1),
+                local_x2apic(0x100, 1),
+                local_x2apic(0x1_0000, 0),
+                local_x2apic(u32::MAX, 1),
+            ]),
+            [0, 0x100]
+        );
+    }
+
+    /// With no xAPIC entry naming a processor, firmware may name every one
+    /// in x2APIC entries, small ids included.
+    #[test]
+    fn x2apic_entries_alone_name_every_processor() {
+        assert_eq!(
+            processors_of(&[local_x2apic(3, 1), local_x2apic(0x200, 1)]),
+            [3, 0x200]
         );
     }
 

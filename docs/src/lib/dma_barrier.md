@@ -3,10 +3,11 @@
 DMA memory-ordering barriers for user-space drivers.
 
 A user-space driver shares a block of memory with a device that is a separate
-bus master (an xHCI controller, a virtio device). On a platform whose device
-DMA is **not** I/O-coherent — the Raspberry Pi 4's PCIe root complex is the
-standing example — that block is mapped Normal **Non-Cacheable**
-(`PageFlags::DMA_COHERENT`, see [the aarch64 port](../platform/aarch64.md)).
+bus master (an xHCI controller, a virtio device). For a device that does not
+snoop the CPU's caches — what its `Dma` grant says, as the functions behind
+the Raspberry Pi 4's PCIe root complex do — that block is mapped Normal
+**Non-Cacheable** (`PageFlags::DMA_COHERENT`, see
+[the aarch64 port](../platform/aarch64.md)).
 Non-cacheable removes the *cache*-coherency problem, but it does **not** order
 the CPU's accesses with respect to the device. Two hazards follow, and this
 crate supplies the one barrier each needs:

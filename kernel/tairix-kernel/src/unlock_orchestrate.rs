@@ -31,6 +31,7 @@ use tairix_abi::blkio::kernel_block_device;
 use tairix_abi::driver::block::Block;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::{VolumeKey, ARXFS};
+use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, SleepLock,
     YieldHandle,
@@ -40,11 +41,13 @@ use tairix_kernel_sec::identity::UserId;
 use tairix_log::{Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 use tairix_reclaim::MemoryPressure;
+use tairix_virtio::{Transport, VirtioHost};
 
 use tairix_kernel_core::fs::blkmeter::MeteredBlock;
 
 use crate::block_cache::BlockCache;
-use crate::driver_catalog::KERNEL_DRIVER_SIGNER_PUBKEY;
+use crate::driver_catalog::{KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
+use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{
     unlock_root_disk_interactively, with_system_volume, AdminInstall, UnlockInstall, UnlockOutcome,
@@ -56,7 +59,7 @@ use crate::system_mount::{
 };
 use crate::transform_cache::TransformClusterCache;
 use crate::unlock_service::{
-    autoload_caps, note, store_endpoint_binder_caps, KthreadConsoleRead, UNLOCK_TASK,
+    autoload_caps, loader_caps, note, store_endpoint_binder_caps, KthreadConsoleRead, UNLOCK_TASK,
     USERS_DB_INSTALLED_MESSAGE,
 };
 
@@ -240,6 +243,30 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             self.watches,
         )
     }
+}
+
+/// Admit the floor virtio-blk driver at the signed load gate, open the whole
+/// disk over `transport` and `host`, and run [`finish_unlock`] over it: the
+/// tail every port's virtio bring-up ends in.
+///
+/// On success this never returns.
+///
+/// # Errors
+///
+/// The step that failed.
+pub fn finish_virtio_unlock<T: Transport + 'static>(
+    transport: T,
+    host: &'static dyn VirtioHost,
+    coop: &CooperativeYield<'_>,
+    env: UnlockEnv,
+    console: &'static dyn UnlockConsole,
+) -> Result<Infallible, &'static str> {
+    let loader = KernelDriverLoader::new(env.audit).ok_or("root-unlock: driver trust anchor")?;
+    loader
+        .admit(VIRTIO_BLK_PATH, &loader_caps())
+        .map_err(|_| "root-unlock: virtio-blk refused at the signed load gate")?;
+    let blk = VirtioBlk::open(transport, host).map_err(|_| "root-unlock: virtio-blk open")?;
+    finish_unlock(blk, coop, env, console)
 }
 
 /// The shared two-task tail both floor block bring-ups feed, turning the one

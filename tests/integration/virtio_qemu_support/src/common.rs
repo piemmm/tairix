@@ -40,7 +40,7 @@ use tairix_drvhost::{
 };
 use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use tairix_kernel_mem::{PhysAddr, PAGE_SIZE};
-use tairix_virtio::{Transport, VirtioHost, VirtioHostFactory};
+use tairix_virtio::{Transport, VirtioHost};
 use tairix_virtio_input::VirtioInput;
 
 /// Upper bound of the boot identity map both arches build
@@ -115,9 +115,8 @@ pub struct ScenarioConfig<'a> {
 }
 
 /// Build the driver host over the signed `.rxe` and exercise the full
-/// `load → snapshot → reload → unload` cycle against `factory`, running
-/// `body` (the device round-trip) *after* the reload and *before* the
-/// unload. Every transition that misbehaves flips QEMU failure with a
+/// `load → snapshot → reload → unload` cycle, running `body` (the device
+/// round-trip) *after* the reload and *before* the unload. Every transition that misbehaves flips QEMU failure with a
 /// breadcrumb (no weakened tests). Never returns.
 ///
 /// `body` is the per-device tail — typically [`virtio_blk_round_trip`]
@@ -128,7 +127,6 @@ pub struct ScenarioConfig<'a> {
 pub fn drive_driver_lifecycle<Tr, F>(
     env: &dyn QemuEnv,
     cfg: &ScenarioConfig<'_>,
-    factory: &dyn VirtioHostFactory,
     transport: Tr,
     vhost: &dyn VirtioHost,
     body: F,
@@ -153,8 +151,6 @@ where
         source: &source,
         spawner: cfg.spawner,
         sink: env.audit_sink(),
-        virtio_host_factory: Some(factory),
-        mmio_mapper: None,
     });
     let Ok(first) = host.load(DRIVER_PATH, &load_caps) else {
         env.fail("signed .rxe load");
@@ -282,14 +278,12 @@ pub unsafe fn dtb_total_size(ptr: u64) -> usize {
 /// Logical sector size.
 const SECTOR_LEN: usize = 512;
 
-/// `true` if `sector` matches the pattern the host harness planted at
-/// LBA 0 (`byte[i] == i mod 256`). Kept in sync with the `plant_raw_disk`
-/// call in `tools/xtask/src/commands/qemu_tests.rs`.
+/// `true` if `sector` is the one the runner planted at LBA 0.
 fn sector0_matches(sector: &[u8; SECTOR_LEN]) -> bool {
     sector
         .iter()
         .enumerate()
-        .all(|(i, b)| *b == u8::try_from(i & 0xFF).unwrap_or(0))
+        .all(|(i, b)| *b == tairix_itest_witness::sector0_byte(i))
 }
 
 /// Fill `sector` with the pattern the test writes to LBA 1

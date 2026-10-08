@@ -24,6 +24,9 @@
 //!   each as an identity and the set canonicalising by absorbing everything it
 //!   touches. What every hand-rolled `base -> length` reservation table and
 //!   its own overlap arithmetic was standing in for.
+//! * [`RadixTree`] — a sparse `u64`-keyed index whose every operation costs
+//!   its height, with predecessor and successor search and tagged walks. What
+//!   a sorted vector updated by shifting was standing in for.
 //! * [`SmallVec`] — inline while it is small, spilling to the heap beyond
 //!   that, for the paths that carry a handful of elements and pay an
 //!   allocation for it.
@@ -68,6 +71,7 @@ pub mod bytequeue;
 pub mod group;
 pub mod lru;
 pub mod map;
+pub mod radix;
 pub mod range;
 pub mod rangeset;
 mod raw;
@@ -77,6 +81,7 @@ pub mod smallvec;
 pub use bytequeue::{ByteQueue, QueueError};
 pub use lru::LruMap;
 pub use map::HashMap;
+pub use radix::RadixTree;
 pub use range::{RangeError, RangeKey, RangeMap};
 pub use rangeset::RangeSet;
 pub use set::HashSet;

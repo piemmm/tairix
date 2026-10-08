@@ -107,7 +107,6 @@ static int check_sysinfo_header(void) {
     request.query = TAIRIX_SYSINFO_QUERY_UPTIME;
     request.reserved = 0u;
     request.payload_len = 0u;
-    request.request_id = 1u;
 
     if (request.magic != 0x31495953u) { /* "SYI1" little-endian */
         return 0;

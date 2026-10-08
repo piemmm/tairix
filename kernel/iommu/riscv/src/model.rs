@@ -54,8 +54,8 @@ pub(crate) struct Features {
     pub second_stage: bool,
     /// Which of the stage's three modes it walks.
     pub modes: [bool; 3],
-    /// 64-byte extended contexts.
-    pub extended: bool,
+    /// How far it translates messages.
+    pub msi: Msi,
     /// Which directory depths `ddtp` takes, one to three levels.
     pub depths: [bool; 3],
     /// How it raises interrupts.
@@ -64,6 +64,17 @@ pub(crate) struct Features {
     pub physical_bits: u32,
     /// Performance counters.
     pub hpm: bool,
+}
+
+/// How far the modelled unit translates devices' messages.
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub(crate) enum Msi {
+    /// Not at all: base-format contexts.
+    None,
+    /// Through MSI page tables of flat entries alone: extended contexts.
+    Flat,
+    /// Through entries naming memory-resident interrupt files too.
+    Files,
 }
 
 /// How the modelled unit raises interrupts.
@@ -92,7 +103,8 @@ impl Features {
             Interrupts::Both => 0b10,
         };
         0x10 | modes
-            | u64::from(self.extended) << 22
+            | u64::from(self.msi != Msi::None) << 22
+            | u64::from(self.msi == Msi::Files) << 23
             | interrupts << 28
             | u64::from(self.hpm) << 30
             | u64::from(self.physical_bits) << 32
@@ -221,18 +233,18 @@ impl<'f> Model<'f> {
     }
 
     /// Leave cached what a firmware's translation would have: a valid
-    /// context for `device`, and a translation tagged `tag` at each stage.
+    /// context for `device`, and a translation tagged `tag` at the stage the
+    /// unit implements.
     pub(crate) fn firmware_cached(&self, device: u32, tag: u32) {
         let mut state = self.state.lock();
         let mut context = [0; CONTEXT_WORDS];
         context[0] = 1;
         context[1] = 8 << 60 | u64::from(tag) << 44;
         state.contexts.insert(device, context);
-        for stage in [false, true] {
-            state.tlb.insert(((stage, tag), 0), (0, true, true));
-        }
+        let second = self.features.second_stage;
+        state.tlb.insert(((second, tag), 0), (0, true, true));
         state.stale_contexts = true;
-        state.stale_stages = [true; 2];
+        state.stale_stages[usize::from(second)] = true;
     }
 
     /// Whether a directory was made live while firmware's cached contexts or
@@ -264,6 +276,15 @@ impl<'f> Model<'f> {
 
     pub(crate) fn interrupt_pending(&self) -> bool {
         self.state.lock().ipsr & regs::IPSR_FIP != 0
+    }
+
+    /// Whether the TLB holds the translation of the page at `iova` under
+    /// `id` at the second stage or the first.
+    pub(crate) fn caches(&self, second_stage: bool, id: u32, iova: u64) -> bool {
+        self.state
+            .lock()
+            .tlb
+            .contains_key(&((second_stage, id), iova & !0xFFF))
     }
 
     pub(crate) fn processed(&self, opcode: u8) -> usize {
@@ -359,6 +380,12 @@ impl<'f> Model<'f> {
                 return;
             }
             match (opcode, function) {
+                // Unsupported, a stage the unit lacks halts the queue as an
+                // illegal command does.
+                (op::IOTINVAL, 0 | 1) if (function == 1) != self.features.second_stage => {
+                    state.cqcsr |= regs::CQCSR_CMD_ILL;
+                    return;
+                }
                 (op::IOTINVAL, 0 | 1) => {
                     let second_stage = function == 1;
                     let (named, id) = if second_stage {
@@ -366,11 +393,18 @@ impl<'f> Model<'f> {
                     } else {
                         (low & (1 << 32) != 0, ((low >> 12) & 0xF_FFFF) as u32)
                     };
-                    state.tlb.retain(|&((stage, tag), _), _| {
-                        stage != second_stage || (named && tag != id)
-                    });
-                    if !named {
-                        state.stale_stages[usize::from(second_stage)] = false;
+                    if low & (1 << 10) != 0 {
+                        let page = (high >> 10) << 12;
+                        state.tlb.retain(|&((stage, tag), at), _| {
+                            stage != second_stage || (named && tag != id) || at != page
+                        });
+                    } else {
+                        state.tlb.retain(|&((stage, tag), _), _| {
+                            stage != second_stage || (named && tag != id)
+                        });
+                        if !named {
+                            state.stale_stages[usize::from(second_stage)] = false;
+                        }
                     }
                 }
                 (op::IOFENCE, 0)
@@ -416,8 +450,9 @@ impl<'f> Model<'f> {
         if let Some(context) = state.contexts.get(&device) {
             return Ok(*context);
         }
-        let leaf_bits = if self.features.extended { 6 } else { 7 };
-        let words: usize = if self.features.extended { 8 } else { 4 };
+        let extended = self.features.msi != Msi::None;
+        let leaf_bits = if extended { 6 } else { 7 };
+        let words: usize = if extended { 8 } else { 4 };
         let levels = match state.ddtp & regs::DDTP_MODE {
             2 => 1,
             3 => 2,
@@ -696,6 +731,52 @@ impl Registers for &Model<'_> {
 
     fn window_len(&self) -> usize {
         regs::WINDOW
+    }
+}
+
+impl Model<'_> {
+    /// A message `stream` writes to `address` with identity `data`: where its
+    /// context confines it into a file, the file's pending bit is set — with
+    /// a read and a write, as a unit without atomic files does — and the
+    /// notice the unit then sends is answered, [`None`] where the file has
+    /// the identity disabled. `Err` for a write that is no confined message.
+    pub(crate) fn message(
+        &self,
+        stream: u32,
+        address: u64,
+        data: u32,
+    ) -> Result<Option<(u64, u32)>, ()> {
+        let context = {
+            let mut state = self.state.lock();
+            self.context(&mut state, stream).map_err(|_| ())?
+        };
+        let (msiptp, pattern) = (context[4], context[6]);
+        let valid = context[0] & 1 != 0;
+        if !valid
+            || msiptp >> 60 != 1
+            || address & (PAGE - 1) != 0
+            || address >> 12 != pattern
+            || data > 2047
+        {
+            return Err(());
+        }
+        let table = (msiptp & ((1 << 44) - 1)) << 12;
+        let (entry, notice) = (
+            self.frames.word(table).ok_or(())?,
+            self.frames.word(table + 8).ok_or(())?,
+        );
+        if entry & 1 == 0 || (entry >> 1) & 0b11 != 1 {
+            return Err(());
+        }
+        let pending = (((entry >> 7) & ((1 << 47) - 1)) << 9) + u64::from(data / 64) * 16;
+        let bit = 1 << (data % 64);
+        let was = self.frames.word(pending).ok_or(())?;
+        self.frames.store_word(pending, was | bit);
+        let enabled = self.frames.word(pending + 8).ok_or(())? & bit != 0;
+        let identity =
+            u32::try_from((notice & 0x3FF) | ((notice >> 60) & 1) << 10).map_err(|_| ())?;
+        let page = ((notice >> 10) & ((1 << 44) - 1)) << 12;
+        Ok(enabled.then_some((page, identity)))
     }
 }
 

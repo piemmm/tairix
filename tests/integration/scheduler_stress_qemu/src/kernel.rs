@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use tairix_arch_api::SecondaryBringup;
-use tairix_arch_x86_64::acpi::{self, MadtEntry};
+use tairix_arch_x86_64::acpi;
 use tairix_arch_x86_64::apic::{Lapic, LocalApic};
 use tairix_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
 use tairix_arch_x86_64::bootinfo::BootData;
@@ -195,8 +195,8 @@ fn min_preemptions(cpu_count: u32) -> u64 {
 ///    **not** drive `step` — the cooperative step loops do dispatch).
 ///
 /// We deliberately do **not** propagate `on_timer_tick`'s `Result`:
-/// the dispatcher only invokes us with a `CpuId` produced by the
-/// `LAPIC_TO_CPU_ID` table that the BSP/APs populated themselves, so
+/// the dispatcher only invokes us with a `CpuId` the arch handle's reverse
+/// map gave for the interrupted CPU's LAPIC id, so
 /// `Err(NoSuchCpu)` would be a kernel bug, not a recoverable
 /// condition. We let the scheduler-side metric (`preemption_count`)
 /// be the regression catcher: a CPU whose ID was misregistered would
@@ -285,7 +285,7 @@ static ALLOCATOR: BumpAllocator = BumpAllocator {
 // --- SchedulerArch impl -------------------------------------------
 
 /// Architecture implementation for the QEMU kernel. `current_cpu`
-/// reads the LAPIC ID register directly; `send_ipi` is a no-op-with-
+/// maps the LAPIC ID register back to its dense id; `send_ipi` is a no-op-with-
 /// counter because Stage 3a (b) does not arm preemption (cores are in
 /// a tight `step()` loop and observe spawned tasks on their next
 /// iteration; the host-side test on `TestArch` exhibits the same
@@ -294,7 +294,7 @@ struct SmpArch;
 
 impl SchedulerArch for SmpArch {
     fn current_cpu(&self) -> u32 {
-        tairix_arch_x86_64::apic::local_apic_id()
+        preempt::cpu_id_for_lapic(tairix_arch_x86_64::apic::local_apic_id())
     }
     fn ticks_now(&self) -> u64 {
         // RDTSC has been available since the Pentium and is universally
@@ -390,7 +390,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // Software-enable the BSP's LAPIC so we can drive IPIs.
     let mut lapic = Lapic::new(LocalApic);
     lapic.software_enable(0xFF);
-    let bsp_id = u8::try_from(lapic.id()).expect("the boot CPU has an xAPIC id");
+    let bsp_id = lapic.id();
     let _ = writeln!(com1, "[scheduler_stress_qemu] BSP LAPIC id = {bsp_id}");
 
     // Calibrate the LAPIC timer against the PIT *once*, on the BSP. APs
@@ -423,7 +423,6 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     );
     BSP_CALIBRATION_PACKED.store(pack_calibration(calibration), Ordering::Release);
     QUANTUM_TSC.store(calibration.quantum_tsc(), Ordering::Release);
-    preempt::set_cpu_id_for_lapic(u32::from(bsp_id), 0);
 
     // Discover APs.
     let Some(ap_ids) = discover_aps(boot_info, bsp_id, &mut com1) else {
@@ -465,23 +464,15 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // CPU's timer is armed.
     preempt::set_timer_callback(scheduler_tick);
 
-    // Register every AP's LAPIC ID -> dense CpuId mapping *before*
-    // we bring them up so the first tick that fires on a given AP
-    // (typically right after `sti`) finds the mapping populated.
-    for i in 0..ap_ids.count {
-        let cpu_id = (i + 1) as u32;
-        preempt::set_cpu_id_for_lapic(u32::from(ap_ids.ids[i]), cpu_id);
-    }
-
     // Build the bring-up handle from the discovered LAPIC map and start
     // every AP through the Arch HAL `SecondaryBringup` trait. The
     // INIT-SIPI-SIPI orchestration now lives in `tairix_arch_x86_64::smp`
     // (`plans/WIRING.md` Stage W14); this vertical exercises it
     // end-to-end on ≥ 4 real (emulated) cores.
     let mut cpu_to_lapic: [Option<u32>; MAX_CPUS] = [None; MAX_CPUS];
-    cpu_to_lapic[0] = Some(u32::from(bsp_id));
+    cpu_to_lapic[0] = Some(bsp_id);
     for i in 0..ap_ids.count {
-        cpu_to_lapic[i + 1] = Some(u32::from(ap_ids.ids[i]));
+        cpu_to_lapic[i + 1] = Some(ap_ids.ids[i]);
     }
     // The bring-up handle borrows its per-CPU bookkeeping from a
     // caller-sized `&'static` backing (sized to this
@@ -489,7 +480,9 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // crate). `kernel_main` runs once, so a function-local `static` is
     // sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<MAX_CPUS> = X86_64ArchStorage::new();
-    let bringup = match X86_64Arch::new(&ARCH_STORAGE, 0, u32::from(bsp_id), &cpu_to_lapic) {
+    // Built before any AP starts, so the first tick that fires on one finds
+    // it mapped back from its LAPIC id.
+    let bringup = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
         Ok(handle) => handle,
         Err(e) => {
             let _ = writeln!(
@@ -584,9 +577,9 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
                 // Each CPU's execution counter is incremented by the
                 // *executing* CPU, not the home CPU — that's what proves
                 // multi-core dispatch happened.
-                let me = tairix_arch_x86_64::apic::local_apic_id() as usize;
-                if me < MAX_CPUS {
-                    PER_CPU_EXEC[me].fetch_add(1, Ordering::Relaxed);
+                let me = preempt::cpu_id_for_lapic(tairix_arch_x86_64::apic::local_apic_id());
+                if let Some(count) = usize::try_from(me).ok().and_then(|me| PER_CPU_EXEC.get(me)) {
+                    count.fetch_add(1, Ordering::Relaxed);
                 }
                 EXECUTIONS.fetch_add(1, Ordering::Relaxed);
                 TaskAction::Exit
@@ -815,11 +808,11 @@ fn run_step_loop(cpu_id: u32, sched: &Scheduler<SmpArch>) {
 // --- MADT discovery -----------------------------------------------
 
 struct ApList {
-    ids: [u8; smp::AP_TRAMPOLINE_LEN], // overprovisioned upper bound
+    ids: [u32; smp::AP_TRAMPOLINE_LEN], // overprovisioned upper bound
     count: usize,
 }
 
-fn discover_aps(boot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> Option<ApList> {
+fn discover_aps(boot_info: u64, bsp_id: u32, com1: &mut serial::Serial) -> Option<ApList> {
     // SAFETY: `boot_info` is the verbatim pointer from `boot.s`
     // SAFETY-INVARIANT 7. The blob and every table it points at sit in
     // the identity-mapped 0..4 GiB window, the documented contract of
@@ -846,20 +839,13 @@ fn discover_aps(boot_info: u64, bsp_id: u8, com1: &mut serial::Serial) -> Option
         ids: [0; smp::AP_TRAMPOLINE_LEN],
         count: 0,
     };
-    for entry in madt.entries() {
-        if let MadtEntry::LocalApic { apic_id, flags, .. } = entry {
-            // ACPI 6.5 Table 5.40: bit 0 = "Processor Enabled".
-            if flags & 1 == 0 {
-                continue;
-            }
-            if apic_id == bsp_id {
-                continue;
-            }
-            if list.count < list.ids.len() {
-                list.ids[list.count] = apic_id;
-                list.count += 1;
-            }
-        }
+    for id in madt
+        .processors()
+        .filter(|&id| id != bsp_id)
+        .take(list.ids.len())
+    {
+        list.ids[list.count] = id;
+        list.count += 1;
     }
     Some(list)
 }

@@ -1,9 +1,9 @@
-//! What the freestanding QEMU integration kernels' PASS witnesses read off an
-//! audit record.
+//! What the freestanding QEMU integration kernels' PASS witnesses read: an
+//! audit record, and the fixtures the runner plants for them.
 //!
 //! A guest kernel's sink compiles only for its bare-metal target, where no
 //! host test reaches it, so a reading every vertical shares lives here and is
-//! proven once.
+//! proven once, as does a fixture the runner writes and a guest checks.
 //!
 //! Test scaffolding: nothing in TAIRiX itself links it.
 
@@ -21,6 +21,22 @@ pub fn field<'e>(event: &'e Event<'_>, key: &str) -> Option<&'e FieldValue<'e>> 
         .iter()
         .find(|field| field.key == key)
         .map(|field| &field.value)
+}
+
+/// The unsigned integer `event` carries under `key`: the first such field
+/// holding one, or `None`.
+#[must_use]
+pub fn field_u64(event: &Event<'_>, key: &str) -> Option<u64> {
+    event.fields.iter().find_map(|field| match field.value {
+        FieldValue::UnsignedInt(value) if field.key == key => Some(value),
+        _ => None,
+    })
+}
+
+/// Byte `i` of the sector the runner plants at the start of a scratch disk.
+#[must_use]
+pub const fn sector0_byte(i: usize) -> u8 {
+    i.to_le_bytes()[0]
 }
 
 /// The text `event` carries under `key`: the first such field holding a
@@ -51,7 +67,7 @@ mod tests {
 
     use std::format;
 
-    use super::{field, field_str, names_bundle};
+    use super::{field, field_str, field_u64, names_bundle, sector0_byte};
     use tairix_abi::{SYSTEM_APPLICATION_STORE, SYSTEM_SERVICE_STORE};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
 
@@ -101,6 +117,40 @@ mod tests {
         };
         assert_eq!(field_str(&event, "kind"), Some("touch"));
         assert_eq!(field_str(&event, "bundle"), None);
+    }
+
+    #[test]
+    fn a_field_reads_as_the_first_unsigned_integer_under_its_key() {
+        let fields = [
+            Field {
+                key: "iova",
+                value: FieldValue::Str("high"),
+            },
+            Field {
+                key: "iova",
+                value: FieldValue::UnsignedInt(0x1000),
+            },
+            Field {
+                key: "iova",
+                value: FieldValue::UnsignedInt(0x2000),
+            },
+        ];
+        let event = Event {
+            level: Level::Info,
+            id: EventId(1),
+            message: "",
+            fields: &fields,
+        };
+        assert_eq!(field_u64(&event, "iova"), Some(0x1000));
+        assert_eq!(field_u64(&event, "stream"), None);
+    }
+
+    #[test]
+    fn the_planted_sector_counts_each_byte_s_offset_modulo_256() {
+        assert_eq!(sector0_byte(0), 0);
+        assert_eq!(sector0_byte(255), 255);
+        assert_eq!(sector0_byte(256), 0);
+        assert_eq!(sector0_byte(511), 255);
     }
 
     #[test]

@@ -11,15 +11,12 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
-    fold_cache_ledgers, spec_for, CacheLedgerListRequest, CacheLedgerRecord, CacheReportRequest,
-    CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
-    CpuTimeRecord, CrashRecord, CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest,
-    DesktopFrameTotals, DeviceStatsRequest, GroupDirectoryRecord, GroupDirectoryRequest,
-    HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest, MountRecord,
-    NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord,
-    RaidListRequest, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, UserDirectoryRequest,
-    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord,
+    fold_cache_ledgers, spec_for, CacheLedgerRecord, CacheReportRequest, CpuInfoRecord,
+    CpuLoadRecord, CpuTimeRecord, CrashRecord, DesktopFrameRecord, DesktopFrameTotals,
+    DmaGroupRecord, DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, MountRecord,
+    NetInterfaceRatesRequest, PageRequest, ProcessRecord, ReclaimClassRecord, ResourceLimitRecord,
+    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, VolumeIoHealthRecord,
+    VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -27,6 +24,7 @@ use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use crate::events;
 use crate::reporters::SelfReports;
 use crate::source::{Caller, ProcessScope, SysinfoSource};
+use crate::walks::{WalkKey, Walked, Walks};
 
 /// Serve one System Information request.
 ///
@@ -52,7 +50,8 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 ///   records.
 /// * The scalar queries return the little-endian wire image of their
 ///   response struct.
-/// * The hardware-tree query returns the source's encoded bytes verbatim.
+/// * The hardware-tree query returns the snapshot's header, then one page of
+///   its nodes.
 /// * [`SysinfoQueryId::RECLAIM_STATS`] folds the kernel's own
 ///   [`CacheLedgerRecord`] rows with `registry`'s self-reported rows
 ///   (after dropping any reporter whose process has since exited) into the
@@ -69,16 +68,21 @@ use crate::source::{Caller, ProcessScope, SysinfoSource};
 ///   payload, or `response` cannot hold the encoded answer.
 /// * [`Errno::BadMagic`] / [`Errno::AbiVersionUnsupported`] /
 ///   [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — the header or
-///   payload failed to decode against `sysinfo-v1`.
+///   payload failed to decode against `sysinfo-v1`, or `request` runs past
+///   its declared payload.
 /// * [`Errno::PermissionDenied`] — the caller lacks the query's required
 ///   capability.
 /// * [`Errno::NotImplemented`] — the request named a reserved-but-unassigned
 ///   query identifier.
+/// * [`Errno::Interrupted`] — a later page named a walk the service no
+///   longer holds: another caller's, one never begun, or one let go to make
+///   room; the caller begins the list again.
 /// * Any error returned by the backing [`SysinfoSource`].
 pub fn serve(
     source: &dyn SysinfoSource,
     caller: &Caller,
     reports: &mut SelfReports,
+    walks: &mut Walks,
     audit: &dyn Sink,
     request: &[u8],
     response: &mut [u8],
@@ -112,15 +116,26 @@ pub fn serve(
     let payload_end = SysinfoRequestHeader::WIRE_LEN
         .checked_add(payload_len)
         .ok_or(Errno::LengthOutOfRange)?;
-    if request.len() < payload_end {
+    let framing = match request.len().cmp(&payload_end) {
+        core::cmp::Ordering::Less => Some((
+            "sysinfo request rejected: declared payload is truncated",
+            Errno::BufferTooSmall,
+        )),
+        core::cmp::Ordering::Greater => Some((
+            "sysinfo request rejected: bytes past the declared payload",
+            Errno::BadMagic,
+        )),
+        core::cmp::Ordering::Equal => None,
+    };
+    if let Some((message, errno)) = framing {
         emit(
             audit,
             Level::Warn,
             events::REQUEST_MALFORMED,
-            "sysinfo request rejected: declared payload is truncated",
+            message,
             &[query_field(spec.name)],
         );
-        return Err(Errno::BufferTooSmall);
+        return Err(errno);
     }
     let payload = &request[SysinfoRequestHeader::WIRE_LEN..payload_end];
 
@@ -153,7 +168,15 @@ pub fn serve(
         );
     }
 
-    dispatch(source, caller, reports, header.query, payload, response)
+    dispatch(
+        source,
+        caller,
+        reports,
+        walks,
+        header.query,
+        payload,
+        response,
+    )
 }
 
 /// Route a capability-cleared request to its [`SysinfoSource`] method and
@@ -162,36 +185,46 @@ fn dispatch(
     source: &dyn SysinfoSource,
     caller: &Caller,
     reports: &mut SelfReports,
+    walks: &mut Walks,
     query: SysinfoQueryId,
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
-    if query == SysinfoQueryId::SELF_PROCESS_LIST {
-        process_list(source, caller, ProcessScope::Caller, payload, response)
-    } else if query == SysinfoQueryId::GLOBAL_PROCESS_LIST {
-        process_list(source, caller, ProcessScope::Global, payload, response)
-    } else if query == SysinfoQueryId::KERNEL_MEMORY_STATS {
+    let mut page = ListPage {
+        walks,
+        caller,
+        query,
+        payload,
+        response,
+    };
+    let listed = inventory_list(source, &mut page)
+        .or_else(|| measurement_list(source, reports, &mut page))
+        .or_else(|| net_list(source, &mut page));
+    match listed {
+        Some(answer) => answer,
+        None => scalar(source, caller, reports, query, payload, page.response),
+    }
+}
+
+/// Answer a query whose reply is one record, or a report a process submits.
+fn scalar(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    reports: &mut SelfReports,
+    query: SysinfoQueryId,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    if query == SysinfoQueryId::KERNEL_MEMORY_STATS {
         write_bytes(&source.kernel_memory_stats(caller)?.to_le_bytes(), response)
-    } else if query == SysinfoQueryId::HARDWARE_TREE {
-        hardware_tree(source, caller, payload, response)
     } else if query == SysinfoQueryId::SYSTEM_IDENTITY {
         write_bytes(&source.system_identity(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::UPTIME {
         write_bytes(&source.uptime(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::LOAD_AVERAGE {
         write_bytes(&source.load_average(caller)?.to_le_bytes(), response)
-    } else if query == SysinfoQueryId::MOUNT_LIST {
-        mount_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::CPU_TIME_STATS {
-        cpu_time_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::SEAT_LIST {
-        seat_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RESOURCE_LIMITS {
         resource_limits(source, caller, response)
-    } else if query == SysinfoQueryId::USER_DIRECTORY {
-        user_directory(source, caller, payload, response)
-    } else if query == SysinfoQueryId::GROUP_DIRECTORY {
-        group_directory(source, caller, payload, response)
     } else if query == SysinfoQueryId::SELF_ACCOUNT {
         self_account(source, caller, response)
     } else if query == SysinfoQueryId::MEMORY_PRESSURE {
@@ -205,65 +238,164 @@ fn dispatch(
         write_bytes(&source.memory_total(caller)?.to_le_bytes(), response)
     } else if query == SysinfoQueryId::SYSTEM_CONFIG {
         write_bytes(&source.system_config(caller)?, response)
-    } else if query == SysinfoQueryId::RECLAIM_STATS {
-        reclaim_list(source, caller, reports, payload, response)
-    } else if query == SysinfoQueryId::CACHE_LEDGERS {
-        cache_ledgers_list(source, caller, reports, payload, response)
     } else if query == SysinfoQueryId::CACHE_REPORT {
-        cache_report(source, caller, reports, payload, response)
+        cache_report(source, caller, reports, payload)
     } else if query == SysinfoQueryId::DESKTOP_FRAME_REPORT {
         desktop_frame_report(source, caller, reports, payload)
-    } else if query == SysinfoQueryId::DESKTOP_FRAME_STATS {
-        desktop_frame_stats(source, reports, payload, response)
     } else if query == SysinfoQueryId::RAMZIP_STATS {
         write_bytes(&source.ramzip_stats(caller)?.to_le_bytes(), response)
-    } else if query == SysinfoQueryId::CPU_LOAD {
-        cpu_load_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::CPU_INFO {
-        cpu_info_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::NET_INTERFACE_FACTS {
-        net_facts_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::NET_INTERFACE_STATE {
-        net_state_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::NET_INTERFACE_COUNTERS {
-        net_counters_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::NET_INTERFACE_RATES {
-        net_rates_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::NET_STACK_DEFENCE {
         write_bytes(&source.net_stack_defence(caller)?.to_le_bytes(), response)
-    } else if query == SysinfoQueryId::NET_SOCKETS {
-        net_sockets_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::NET_BOND_MEMBERS {
-        net_bond_members_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::NET_RESOLVER_SERVERS {
-        server_addr_list(&source.net_resolver_servers(caller)?, payload, response)
-    } else if query == SysinfoQueryId::NET_TIME_SERVERS {
-        server_addr_list(&source.net_time_servers(caller)?, payload, response)
-    } else if query == SysinfoQueryId::IRQ_LIST {
-        irq_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::CRASH_RECORD {
-        crash_record_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::VOLUME_IO_HEALTH {
-        volume_io_health_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::VOLUME_IO_STATS {
-        volume_io_stats_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::VOLUME_IO_QUEUE {
-        volume_io_queue_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::RAID_ARRAYS {
-        raid_array_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::RAID_MEMBERS {
-        raid_member_list(source, caller, payload, response)
-    } else if query == SysinfoQueryId::GPU_DEVICE_STATS {
-        gpu_device_stats_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
-        // `SysinfoSource` would supply, so it is encoded here directly rather
-        // than echoed through the source seam.
+        // `SysinfoSource` would supply.
         write_bytes(&caller.origin().to_le_bytes(), response)
     } else {
         Err(Errno::NotImplemented)
     }
+}
+
+/// Answer `page` if it asks for the machine's inventory: its processes,
+/// mounts, seats, accounts, hardware, interrupts, DMA translation, crashes and
+/// arrays.
+fn inventory_list(
+    source: &dyn SysinfoSource,
+    page: &mut ListPage<'_>,
+) -> Option<Result<usize, Errno>> {
+    let caller = page.caller;
+    Some(match page.query {
+        SysinfoQueryId::SELF_PROCESS_LIST => page.of(
+            || source.process_records(caller, ProcessScope::Caller),
+            ProcessRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::GLOBAL_PROCESS_LIST => page.of(
+            || source.process_records(caller, ProcessScope::Global),
+            ProcessRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::HARDWARE_TREE => hardware_tree(source, caller, page.payload, page.response),
+        SysinfoQueryId::MOUNT_LIST => {
+            page.of(|| source.mount_records(caller), MountRecord::to_le_bytes)
+        }
+        SysinfoQueryId::SEAT_LIST => page.of(|| source.seats(caller), SeatRecord::to_le_bytes),
+        SysinfoQueryId::USER_DIRECTORY => page.of(
+            || source.user_directory(caller),
+            UserDirectoryRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::GROUP_DIRECTORY => page.of(
+            || source.group_directory(caller),
+            GroupDirectoryRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::IRQ_LIST => page.of(|| source.irqs(caller), IrqRecord::to_le_bytes),
+        SysinfoQueryId::DMA_UNITS => {
+            page.of(|| source.dma_units(caller), DmaUnitRecord::to_le_bytes)
+        }
+        SysinfoQueryId::DMA_GROUPS => {
+            page.of(|| source.dma_groups(caller), DmaGroupRecord::to_le_bytes)
+        }
+        SysinfoQueryId::DMA_NODES => {
+            page.of(|| source.dma_nodes(caller), DmaNodeRecord::to_le_bytes)
+        }
+        SysinfoQueryId::CRASH_RECORD => {
+            page.of(|| source.crashes(caller), CrashRecord::to_le_bytes)
+        }
+        SysinfoQueryId::RAID_ARRAYS => {
+            page.of(|| source.raid_arrays(caller), RaidArrayRecord::to_le_bytes)
+        }
+        SysinfoQueryId::RAID_MEMBERS => page.of(
+            || source.raid_members(caller),
+            RaidMemberRecord::to_le_bytes,
+        ),
+        _ => return None,
+    })
+}
+
+/// Answer `page` if it asks for measurements: per-CPU time, load and
+/// identity, per-volume and per-device I/O, and the memory and frame
+/// accounting.
+fn measurement_list(
+    source: &dyn SysinfoSource,
+    reports: &mut SelfReports,
+    page: &mut ListPage<'_>,
+) -> Option<Result<usize, Errno>> {
+    let caller = page.caller;
+    Some(match page.query {
+        SysinfoQueryId::CPU_TIME_STATS => {
+            page.of(|| source.cpu_times(caller), CpuTimeRecord::to_le_bytes)
+        }
+        SysinfoQueryId::CPU_LOAD => page.of(|| source.cpu_load(caller), CpuLoadRecord::to_le_bytes),
+        SysinfoQueryId::CPU_INFO => page.of(|| source.cpu_info(caller), CpuInfoRecord::to_le_bytes),
+        SysinfoQueryId::VOLUME_IO_HEALTH => page.of(
+            || source.volume_io_health(caller),
+            VolumeIoHealthRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::VOLUME_IO_STATS => page.of(
+            || source.volume_io_stats(caller),
+            VolumeIoStatsRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::VOLUME_IO_QUEUE => page.of(
+            || source.volume_io_queue(caller),
+            VolumeIoQueueRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::GPU_DEVICE_STATS => page.of(
+            || source.gpu_device_stats(caller),
+            DisplayStats::to_le_bytes,
+        ),
+        SysinfoQueryId::RECLAIM_STATS => page.of(
+            || {
+                Ok(fold_cache_ledgers(&combined_cache_rows(
+                    source, caller, reports,
+                )?))
+            },
+            ReclaimClassRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::CACHE_LEDGERS => page.of(
+            || combined_cache_rows(source, caller, reports),
+            CacheLedgerRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::DESKTOP_FRAME_STATS => page.of(
+            || live_frame_records(source, reports),
+            DesktopFrameRecord::to_le_bytes,
+        ),
+        _ => return None,
+    })
+}
+
+/// Answer `page` if it asks for the network stack's interfaces, sockets,
+/// bond members or configured servers.
+fn net_list(source: &dyn SysinfoSource, page: &mut ListPage<'_>) -> Option<Result<usize, Errno>> {
+    let caller = page.caller;
+    Some(match page.query {
+        SysinfoQueryId::NET_INTERFACE_FACTS => page.of(
+            || source.net_interface_facts(caller),
+            NetInterfaceFactsRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::NET_INTERFACE_STATE => page.of(
+            || source.net_interface_state(caller),
+            NetInterfaceStateRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::NET_INTERFACE_COUNTERS => page.of(
+            || source.net_interface_counters(caller),
+            NetInterfaceCountersRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::NET_INTERFACE_RATES => net_rates(source, page),
+        SysinfoQueryId::NET_SOCKETS => {
+            page.of(|| source.net_sockets(caller), NetSocketRecord::to_le_bytes)
+        }
+        SysinfoQueryId::NET_BOND_MEMBERS => page.of(
+            || source.net_bond_members(caller),
+            NetBondMemberRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::NET_RESOLVER_SERVERS => page.of(
+            || source.net_resolver_servers(caller),
+            NetServerAddr::to_le_bytes,
+        ),
+        SysinfoQueryId::NET_TIME_SERVERS => page.of(
+            || source.net_time_servers(caller),
+            NetServerAddr::to_le_bytes,
+        ),
+        _ => return None,
+    })
 }
 
 /// Encode the caller's per-[`LimitKind`] effective-limit + live-usage report
@@ -291,9 +423,9 @@ fn resource_limits(
     Ok(written)
 }
 
-/// Decode the [`HardwareTreeRequest`], validate the snapshot the source
-/// returned, and pack the snapshot's [`HwTreeHeader`] plus the selected
-/// window of whole [`HwNode`] records into `response`.
+/// Decode the [`PageRequest`], validate the snapshot the source returned,
+/// and pack the snapshot's [`HwTreeHeader`] plus the selected window of
+/// whole [`HwNode`] records into `response`.
 ///
 /// Every page repeats the header, so a paging client always sees the
 /// snapshot's total node count and the generation the page was served
@@ -307,215 +439,41 @@ fn hardware_tree(
     payload: &[u8],
     response: &mut [u8],
 ) -> Result<usize, Errno> {
-    let request = HardwareTreeRequest::from_bytes(payload)?;
+    let request = whole(payload, PageRequest::WIRE_LEN, PageRequest::from_bytes)?;
     let blob = source.hardware_tree(caller)?;
     let header = HwTreeHeader::from_bytes(&blob)?;
     let count = usize::try_from(header.node_count()).map_err(|_| Errno::LengthOutOfRange)?;
-    let body_len = count
-        .checked_mul(HwNode::WIRE_LEN)
-        .ok_or(Errno::LengthOutOfRange)?;
-    let body = &blob[HwTreeHeader::WIRE_LEN..];
-    if body.len() != body_len {
+    let body = blob.get(HwTreeHeader::WIRE_LEN..).ok_or(Errno::BadMagic)?;
+    let (nodes, trailing) = body.as_chunks::<{ HwNode::WIRE_LEN }>();
+    if nodes.len() != count || !trailing.is_empty() {
         return Err(Errno::BadMagic);
     }
-    if response.len() < HwTreeHeader::WIRE_LEN {
-        return Err(Errno::BufferTooSmall);
-    }
-    response[..HwTreeHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
-    let written = page_records(
-        &mut response[HwTreeHeader::WIRE_LEN..],
-        request.offset as usize,
-        request.limit as usize,
-        count,
-        HwNode::WIRE_LEN,
-        |index, slot| {
-            slot.copy_from_slice(&body[index * HwNode::WIRE_LEN..(index + 1) * HwNode::WIRE_LEN]);
-        },
-    )?;
+    let (head, rest) = response
+        .split_at_mut_checked(HwTreeHeader::WIRE_LEN)
+        .ok_or(Errno::BufferTooSmall)?;
+    let written = page(request, nodes, rest, |node| *node)?;
+    head.copy_from_slice(&header.to_le_bytes());
     Ok(HwTreeHeader::WIRE_LEN + written)
 }
 
-/// Decode the [`ProcessListRequest`], apply paging, and pack the selected
-/// [`ProcessRecord`]s into `response`.
-fn process_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    scope: ProcessScope,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = ProcessListRequest::from_bytes(payload)?;
-    let records = source.process_records(caller, scope)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        ProcessRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`MountListRequest`], apply paging, and pack the selected
-/// [`MountRecord`]s into `response`.
-fn mount_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = MountListRequest::from_bytes(payload)?;
-    let records = source.mount_records(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        MountRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceListRequest`] and page the interface-facts
-/// records into `response`.
-fn net_facts_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceListRequest::from_bytes(payload)?;
-    let records = source.net_interface_facts(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetInterfaceFactsRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceListRequest`] and page the interface-state
-/// records into `response`.
-fn net_state_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceListRequest::from_bytes(payload)?;
-    let records = source.net_interface_state(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetInterfaceStateRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceListRequest`] and page the interface-counter
-/// records into `response`.
-fn net_counters_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceListRequest::from_bytes(payload)?;
-    let records = source.net_interface_counters(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetInterfaceCountersRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceRatesRequest`] (carrying the averaging window)
-/// and page the interface-rates records into `response`.
-fn net_rates_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceRatesRequest::from_bytes(payload)?;
-    let records = source.net_interface_rates(caller, request.window)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetInterfaceRatesRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceListRequest`] and page the socket-listing
-/// records into `response`.
-fn net_sockets_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceListRequest::from_bytes(payload)?;
-    let records = source.net_sockets(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetSocketRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceListRequest`] and page the bond-member
-/// records into `response`.
-fn net_bond_members_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceListRequest::from_bytes(payload)?;
-    let records = source.net_bond_members(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetBondMemberRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`NetInterfaceListRequest`] and page a server-address set
-/// into `response`.
-///
-/// Both server sets — the recursive resolvers and the network time servers
-/// — are small and closed, so a single page always suffices, and both share
-/// this one paging codec rather than inventing a bespoke reply shape or a
-/// second copy of it.
-fn server_addr_list(
-    records: &[NetServerAddr],
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = NetInterfaceListRequest::from_bytes(payload)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        NetServerAddr::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+/// Decode the [`NetInterfaceRatesRequest`], measure the rates over its window,
+/// and page them into `page`'s reply: a walk's rates are measured once, by its
+/// first page.
+fn net_rates(source: &dyn SysinfoSource, page: &mut ListPage<'_>) -> Result<usize, Errno> {
+    let request = whole(
+        page.payload,
+        NetInterfaceRatesRequest::WIRE_LEN,
+        NetInterfaceRatesRequest::from_bytes,
+    )?;
+    let caller = page.caller;
+    walked(
+        page.walks,
+        caller,
+        page.query,
+        request.page,
+        page.response,
+        || source.net_interface_rates(caller, request.window),
+        NetInterfaceRatesRecord::to_le_bytes,
     )
 }
 
@@ -523,8 +481,9 @@ fn server_addr_list(
 /// whose process instance has since exited, and return the combined row
 /// list: kernel rows first, then `registry`'s self-reported rows.
 ///
-/// Shared by [`reclaim_list`] and [`cache_ledgers_list`] so the two query
-/// answers can never disagree about which rows exist.
+/// Both [`SysinfoQueryId::RECLAIM_STATS`] and [`SysinfoQueryId::CACHE_LEDGERS`]
+/// read these rows, so the two answers can never disagree about which rows
+/// exist.
 fn combined_cache_rows(
     source: &dyn SysinfoSource,
     caller: &Caller,
@@ -536,49 +495,21 @@ fn combined_cache_rows(
     Ok(rows)
 }
 
-/// Decode the [`ReclaimListRequest`], fold the combined kernel and
-/// self-reported cache rows into the nine per-class totals, apply paging,
-/// and pack the selected [`ReclaimClassRecord`]s into `response`.
-fn reclaim_list(
+/// The retained desktop frame records whose publishers are still alive.
+///
+/// A departed publisher's entry is dropped rather than served: each record is
+/// attributed by the *reusable* numeric pid, so serving a dead session's
+/// figures risks pinning them on whatever unrelated process the kernel has
+/// since recycled that pid to. Liveness is resolved on the read, as it is for
+/// the cache rows ([`combined_cache_rows`]), because a read is what a person
+/// asked for and is rare, while a submission is a service restating a figure
+/// on a cadence.
+fn live_frame_records(
     source: &dyn SysinfoSource,
-    caller: &Caller,
     reports: &mut SelfReports,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = ReclaimListRequest::from_bytes(payload)?;
-    let rows = combined_cache_rows(source, caller, reports)?;
-    let totals = fold_cache_ledgers(&rows);
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        totals.len(),
-        ReclaimClassRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&totals[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`CacheLedgerListRequest`], apply paging, and pack the
-/// combined kernel and self-reported [`CacheLedgerRecord`]s into
-/// `response`.
-fn cache_ledgers_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    reports: &mut SelfReports,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = CacheLedgerListRequest::from_bytes(payload)?;
-    let rows = combined_cache_rows(source, caller, reports)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        rows.len(),
-        CacheLedgerRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&rows[index].to_le_bytes()),
-    )
+) -> Result<Vec<DesktopFrameRecord>, Errno> {
+    reports.retain_live(&source.live_process_instances()?);
+    Ok(reports.frame_records())
 }
 
 /// Decode a [`CacheReportRequest`] header followed by exactly `count`
@@ -595,7 +526,6 @@ fn cache_report(
     caller: &Caller,
     reports: &mut SelfReports,
     payload: &[u8],
-    _response: &mut [u8],
 ) -> Result<usize, Errno> {
     let header = CacheReportRequest::from_bytes(payload)?;
     let count = usize::from(header.count);
@@ -638,317 +568,6 @@ fn desktop_frame_report(
     Ok(0)
 }
 
-/// Decode the [`DesktopFrameStatsRequest`], apply paging, and pack the
-/// retained [`DesktopFrameRecord`]s into `response`.
-///
-/// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed.
-///
-/// A departed publisher's entry is dropped here rather than served: each
-/// record is attributed by the *reusable* numeric pid, so serving a dead
-/// session's figures risks pinning them on whatever unrelated process the
-/// kernel has since recycled that pid to. Liveness is resolved on this path,
-/// as it is for the cache rows ([`combined_cache_rows`]), because a read is
-/// what a person asked for and is rare, while a submission is a service
-/// restating a figure on a cadence.
-fn desktop_frame_stats(
-    source: &dyn SysinfoSource,
-    reports: &mut SelfReports,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = DesktopFrameStatsRequest::from_bytes(payload)?;
-    reports.retain_live(&source.live_process_instances()?);
-    let records = reports.frame_records();
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        DesktopFrameRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`CpuLoadRequest`], apply paging, and pack the selected
-/// [`CpuLoadRecord`]s into `response`.
-fn cpu_load_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = CpuLoadRequest::from_bytes(payload)?;
-    let records = source.cpu_load(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        CpuLoadRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`CpuInfoListRequest`], apply paging, and pack the selected
-/// [`CpuInfoRecord`]s into `response`.
-fn cpu_info_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = CpuInfoListRequest::from_bytes(payload)?;
-    let records = source.cpu_info(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        CpuInfoRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`CpuTimeListRequest`], apply paging, and pack the selected
-/// [`CpuTimeRecord`]s into `response`.
-fn cpu_time_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = CpuTimeListRequest::from_bytes(payload)?;
-    let records = source.cpu_times(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        CpuTimeRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`VolumeIoRequest`], apply paging, and pack the selected
-/// [`VolumeIoHealthRecord`]s into `response`.
-fn volume_io_health_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = VolumeIoRequest::from_bytes(payload)?;
-    let records = source.volume_io_health(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        VolumeIoHealthRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`VolumeIoRequest`], apply paging, and pack the selected
-/// [`VolumeIoStatsRecord`]s into `response`.
-fn volume_io_stats_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = VolumeIoRequest::from_bytes(payload)?;
-    let records = source.volume_io_stats(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        VolumeIoStatsRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`VolumeIoRequest`], apply paging, and pack the selected
-/// [`VolumeIoQueueRecord`]s into `response`.
-fn volume_io_queue_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = VolumeIoRequest::from_bytes(payload)?;
-    let records = source.volume_io_queue(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        VolumeIoQueueRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`DeviceStatsRequest`], apply paging, and pack the selected
-/// [`DisplayStats`] records into `response`.
-fn gpu_device_stats_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = DeviceStatsRequest::from_bytes(payload)?;
-    let records = source.gpu_device_stats(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        DisplayStats::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`RaidListRequest`], apply paging, and pack the selected
-/// [`RaidArrayRecord`]s into `response`.
-fn raid_array_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = RaidListRequest::from_bytes(payload)?;
-    let records = source.raid_arrays(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        RaidArrayRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`RaidListRequest`], apply paging, and pack the selected
-/// [`RaidMemberRecord`]s into `response`.
-fn raid_member_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = RaidListRequest::from_bytes(payload)?;
-    let records = source.raid_members(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        RaidMemberRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`IrqListRequest`], apply paging, and pack the selected
-/// [`IrqRecord`]s into `response`.
-fn irq_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = IrqListRequest::from_bytes(payload)?;
-    let records = source.irqs(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        IrqRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`CrashRecordRequest`], apply paging, and pack the selected
-/// [`CrashRecord`]s into `response`.
-fn crash_record_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = CrashRecordRequest::from_bytes(payload)?;
-    let records = source.crashes(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        CrashRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`SeatListRequest`], apply paging, and pack the selected
-/// [`SeatRecord`]s into `response`.
-fn seat_list(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = SeatListRequest::from_bytes(payload)?;
-    let records = source.seats(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        SeatRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`UserDirectoryRequest`], apply paging, and pack the selected
-/// [`UserDirectoryRecord`]s into `response`.
-fn user_directory(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = UserDirectoryRequest::from_bytes(payload)?;
-    let records = source.user_directory(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        UserDirectoryRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
-/// Decode the [`GroupDirectoryRequest`], apply paging, and pack the
-/// selected [`GroupDirectoryRecord`]s into `response`.
-fn group_directory(
-    source: &dyn SysinfoSource,
-    caller: &Caller,
-    payload: &[u8],
-    response: &mut [u8],
-) -> Result<usize, Errno> {
-    let request = GroupDirectoryRequest::from_bytes(payload)?;
-    let records = source.group_directory(caller)?;
-    page_records(
-        response,
-        request.offset as usize,
-        request.limit as usize,
-        records.len(),
-        GroupDirectoryRecord::WIRE_LEN,
-        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
-    )
-}
-
 /// Answer the caller's own account record, resolved against the uid the
 /// kernel attested on this request.
 ///
@@ -966,34 +585,170 @@ fn self_account(
     write_bytes(&record.to_le_bytes(), response)
 }
 
-/// Pack a paged window of fixed-`wire_len` records into `response`.
+/// One page asked of a list: whose walks it may be part of, by whom, of which
+/// list, its payload and the reply it is answered into.
+struct ListPage<'r> {
+    walks: &'r mut Walks,
+    caller: &'r Caller,
+    query: SysinfoQueryId,
+    payload: &'r [u8],
+    response: &'r mut [u8],
+}
+
+impl ListPage<'_> {
+    /// [`paged`] over the records `read` answers, each encoded by `encode`.
+    fn of<C: AsRef<[R]>, R, const N: usize>(
+        &mut self,
+        read: impl FnOnce() -> Result<C, Errno>,
+        encode: impl Fn(&R) -> [u8; N],
+    ) -> Result<usize, Errno> {
+        paged(
+            self.walks,
+            self.caller,
+            self.query,
+            self.payload,
+            self.response,
+            read,
+            encode,
+        )
+    }
+}
+
+/// Decode the [`PageRequest`] in `payload`, then answer the page it asks for
+/// of the list `read` answers, as [`walked`].
 ///
-/// Shared by every list query so the paging arithmetic — offset bounds, the
-/// `limit` window, the buffer-capacity check, and the fail-closed
-/// `BufferTooSmall` — lives in exactly one place. `encode`
-/// writes record `index` into the supplied `wire_len`-byte slot.
-fn page_records(
+/// The request is decoded before `read` runs, so a malformed one is refused
+/// without walking anything.
+fn paged<C: AsRef<[R]>, R, const N: usize>(
+    walks: &mut Walks,
+    caller: &Caller,
+    query: SysinfoQueryId,
+    payload: &[u8],
     response: &mut [u8],
-    offset: usize,
-    limit: usize,
-    count: usize,
-    wire_len: usize,
-    mut encode: impl FnMut(usize, &mut [u8]),
+    read: impl FnOnce() -> Result<C, Errno>,
+    encode: impl Fn(&R) -> [u8; N],
 ) -> Result<usize, Errno> {
-    if offset >= count {
-        return Ok(0);
+    let request = whole(payload, PageRequest::WIRE_LEN, PageRequest::from_bytes)?;
+    walked(walks, caller, query, request, response, read, encode)
+}
+
+/// Page `request`'s window of the records `read` answers into `response`.
+///
+/// A walk's first page reads the list and `walks` holds it encoded, so every
+/// later page of the walk is answered from that one reading; the walk ends at
+/// its short page, which a list shorter than a page reaches at once, with
+/// nothing held.
+fn walked<C: AsRef<[R]>, R, const N: usize>(
+    walks: &mut Walks,
+    caller: &Caller,
+    query: SysinfoQueryId,
+    request: PageRequest,
+    response: &mut [u8],
+    read: impl FnOnce() -> Result<C, Errno>,
+    encode: impl Fn(&R) -> [u8; N],
+) -> Result<usize, Errno> {
+    if request.walk == PageRequest::FRESH {
+        return page(request, read()?.as_ref(), response, encode);
     }
-    let take = core::cmp::min(count - offset, limit);
-    let needed = take.checked_mul(wire_len).ok_or(Errno::LengthOutOfRange)?;
-    if response.len() < needed {
-        return Err(Errno::BufferTooSmall);
+    let key = WalkKey {
+        caller: caller.origin().proc_id(),
+        walk: request.walk,
+        query,
+    };
+    let served = if request.offset == 0 {
+        let list = read()?;
+        let records = list.as_ref();
+        if records.len() < usize::from(request.limit) {
+            walks.end(key);
+            return page(request, records, response, encode);
+        }
+        walks.begin(key, encoded(records, &encode));
+        match walks.list(key) {
+            Some(Walked::Held(held)) => page_bytes(request, held, N, response)?,
+            _ => page(request, records, response, &encode)?,
+        }
+    } else {
+        match walks.list(key).ok_or(Errno::Interrupted)? {
+            Walked::Held(held) => page_bytes(request, held, N, response)?,
+            Walked::Unheld => page(request, read()?.as_ref(), response, &encode)?,
+        }
+    };
+    if served < usize::from(request.limit) * N {
+        walks.end(key);
     }
-    let mut written = 0;
-    for index in offset..offset + take {
-        encode(index, &mut response[written..written + wire_len]);
-        written += wire_len;
+    Ok(served)
+}
+
+/// `records` encoded back to back, or [`None`] where they cannot be held.
+fn encoded<R, const N: usize>(records: &[R], encode: impl Fn(&R) -> [u8; N]) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(records.len().checked_mul(N)?)
+        .ok()?;
+    for record in records {
+        bytes.extend_from_slice(&encode(record));
     }
-    Ok(written)
+    Some(bytes)
+}
+
+/// [`page`] over records of `len` bytes already encoded back to back.
+fn page_bytes(
+    request: PageRequest,
+    records: &[u8],
+    len: usize,
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let start = usize::try_from(request.offset)
+        .ok()
+        .and_then(|offset| offset.checked_mul(len))
+        .map_or(records.len(), |start| start.min(records.len()));
+    let rest = &records[start..];
+    let wanted = usize::from(request.limit).saturating_mul(len);
+    let window = &rest[..wanted.min(rest.len())];
+    let out = response
+        .get_mut(..window.len())
+        .ok_or(Errno::BufferTooSmall)?;
+    out.copy_from_slice(window);
+    Ok(window.len())
+}
+
+/// Decode `payload` with `decode`, refusing bytes past the request's own
+/// `wire_len`: no client sends them, so they are corruption.
+fn whole<T>(
+    payload: &[u8],
+    wire_len: usize,
+    decode: fn(&[u8]) -> Result<T, Errno>,
+) -> Result<T, Errno> {
+    let request = decode(payload)?;
+    if payload.len() == wire_len {
+        Ok(request)
+    } else {
+        Err(Errno::BadMagic)
+    }
+}
+
+/// Pack the window of `records` that `request` selects into `response`.
+///
+/// Every list query pages through here, so the window arithmetic and the
+/// capacity check live in one place. A window starting past the end is
+/// empty; one `response` cannot hold fails closed with
+/// [`Errno::BufferTooSmall`] and writes nothing.
+fn page<R, const N: usize>(
+    request: PageRequest,
+    records: &[R],
+    response: &mut [u8],
+    encode: impl Fn(&R) -> [u8; N],
+) -> Result<usize, Errno> {
+    const { assert!(N > 0, "a record has at least one byte") };
+    let offset = usize::try_from(request.offset).unwrap_or(usize::MAX);
+    let rest = records.get(offset..).unwrap_or_default();
+    let window = rest.get(..usize::from(request.limit)).unwrap_or(rest);
+    let needed = window.len().checked_mul(N).ok_or(Errno::LengthOutOfRange)?;
+    let out = response.get_mut(..needed).ok_or(Errno::BufferTooSmall)?;
+    for (slot, record) in out.as_chunks_mut::<N>().0.iter_mut().zip(window) {
+        *slot = encode(record);
+    }
+    Ok(needed)
 }
 
 /// Copy `src` into `dst`, failing closed if `dst` is too small.
@@ -1028,7 +783,7 @@ fn query_field(name: &'static str) -> Field<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, SelfReports};
+    use super::{serve, SelfReports, Walks};
     use crate::events;
     use crate::reporters::{MIN_REPORTERS, RAM_BYTES_PER_REPORTER};
     use crate::source::{Caller, ProcessScope, SysinfoSource};
@@ -1050,24 +805,21 @@ mod tests {
         RAID_SLOT_NONE,
     };
     use tairix_abi::sysinfo::{
-        CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
-        CacheReportRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
-        CpuTimeRecord, CrashAccess, CrashFaultBucket, CrashFaultClass, CrashRecord,
-        CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals,
-        GroupDirectoryRecord, GroupDirectoryRequest, HardwareTreeRequest, IrqListRequest,
-        IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats,
-        MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState,
-        ProcessListRequest, ProcessRecord, ProcessState, RaidListRequest, RamzipStats,
-        ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
-        SelfAccountRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoQueueRecord,
-        VolumeIoRequest, VolumeIoStatsRecord, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
+        CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind, CacheReportRequest, CpuInfoRecord,
+        CpuLoadRecord, CpuTimeRecord, CrashAccess, CrashFaultBucket, CrashFaultClass, CrashRecord,
+        DesktopFrameRecord, DesktopFrameTotals, GroupDirectoryRecord, IrqRecord, KernelMemoryStats,
+        LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability,
+        MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState, RamzipStats,
+        ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SysinfoQueryId,
+        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
+        VolumeIoQueueRecord, VolumeIoStatsRecord, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
         MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN,
         SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{
-        DeviceStatsRequest, NetInterfaceListRequest, NetInterfaceRatesRequest,
+        DmaFaultSignal, DmaGroupRecord, DmaNodeRecord, DmaOwnerState, DmaTables, DmaUnitFamily,
+        DmaUnitRecord, DmaUnitState, NetInterfaceRatesRequest,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::MEMORY_CLASS_COUNT;
@@ -1301,7 +1053,10 @@ mod tests {
     /// In-memory fixture standing in for the kernel's live state.
     struct FixtureSource {
         own: [ProcessRecord; 2],
-        global: [ProcessRecord; 3],
+        /// The global process list, which a test may change between pages.
+        global: RefCell<alloc::vec::Vec<ProcessRecord>>,
+        /// How many times the process list has been read.
+        process_reads: RefCell<usize>,
         hwtree: alloc::vec::Vec<u8>,
         mounts: [MountRecord; 2],
         cache_ledgers: alloc::vec::Vec<CacheLedgerRecord>,
@@ -1316,6 +1071,9 @@ mod tests {
         /// test can assert a submission does not enumerate the machine's
         /// process table.
         live_calls: RefCell<usize>,
+        /// How many DMA-translation and server lists have been read, so a
+        /// test can assert a refused request walked none.
+        list_reads: RefCell<usize>,
     }
     impl FixtureSource {
         /// Declare which process instances `live_process_instances` should
@@ -1327,6 +1085,10 @@ mod tests {
         /// How many times the process table has been enumerated so far.
         fn live_calls(&self) -> usize {
             *self.live_calls.borrow()
+        }
+
+        fn note_list_read(&self) {
+            *self.list_reads.borrow_mut() += 1;
         }
 
         fn new() -> Self {
@@ -1354,11 +1116,12 @@ mod tests {
                     mk(10, 1000, b"shell", 4096, 512),
                     mk(11, 1000, b"editor", 8192, 1024),
                 ],
-                global: [
+                global: RefCell::new(alloc::vec![
                     mk(1, 0, b"init", u64::MAX, u64::MAX),
                     mk(10, 1000, b"shell", 4096, 512),
                     mk(11, 1000, b"editor", 8192, 1024),
-                ],
+                ]),
+                process_reads: RefCell::new(0),
                 hwtree: tree_blob(7, &tree_nodes()),
                 mounts: [
                     MountRecord::new(
@@ -1392,6 +1155,7 @@ mod tests {
                 system_config: alloc::vec::Vec::from(&b"os.loginType text\n"[..]),
                 live: RefCell::new(alloc::vec::Vec::new()),
                 live_calls: RefCell::new(0),
+                list_reads: RefCell::new(0),
             }
         }
     }
@@ -1401,9 +1165,10 @@ mod tests {
             _caller: &Caller,
             scope: ProcessScope,
         ) -> Result<alloc::vec::Vec<ProcessRecord>, Errno> {
+            *self.process_reads.borrow_mut() += 1;
             Ok(match scope {
                 ProcessScope::Caller => self.own.to_vec(),
-                ProcessScope::Global => self.global.to_vec(),
+                ProcessScope::Global => self.global.borrow().clone(),
             })
         }
         fn kernel_memory_stats(&self, _caller: &Caller) -> Result<KernelMemoryStats, Errno> {
@@ -1418,6 +1183,7 @@ mod tests {
             })
         }
         fn hardware_tree(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
+            self.note_list_read();
             Ok(self.hwtree.clone())
         }
         fn user_directory(
@@ -1580,6 +1346,7 @@ mod tests {
             _caller: &Caller,
             window: tairix_abi::time::Duration64,
         ) -> Result<alloc::vec::Vec<NetInterfaceRatesRecord>, Errno> {
+            self.note_list_read();
             Ok(alloc::vec![fixture_net_rates(window)])
         }
         fn net_stack_defence(
@@ -1601,12 +1368,14 @@ mod tests {
             &self,
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<NetServerAddr>, Errno> {
+            self.note_list_read();
             Ok(fixture_resolver_servers())
         }
         fn net_time_servers(
             &self,
             _caller: &Caller,
         ) -> Result<alloc::vec::Vec<NetServerAddr>, Errno> {
+            self.note_list_read();
             Ok(fixture_time_servers())
         }
         fn irqs(&self, _caller: &Caller) -> Result<alloc::vec::Vec<IrqRecord>, Errno> {
@@ -1624,6 +1393,33 @@ mod tests {
                     count: 200_000,
                 },
             ])
+        }
+        fn dma_units(&self, _caller: &Caller) -> Result<alloc::vec::Vec<DmaUnitRecord>, Errno> {
+            self.note_list_read();
+            Ok(alloc::vec![fixture_dma_unit(0x41), fixture_dma_unit(0x42)])
+        }
+        fn dma_groups(&self, _caller: &Caller) -> Result<alloc::vec::Vec<DmaGroupRecord>, Errno> {
+            self.note_list_read();
+            Ok(alloc::vec![DmaGroupRecord {
+                unit: 0x41,
+                group: 9,
+                holder: 0x77,
+                state: DmaOwnerState::Live,
+                generation: 5,
+            }])
+        }
+        fn dma_nodes(&self, _caller: &Caller) -> Result<alloc::vec::Vec<DmaNodeRecord>, Errno> {
+            self.note_list_read();
+            Ok(alloc::vec![DmaNodeRecord {
+                node: 0x77,
+                unit: 0x41,
+                group: 9,
+                state: DmaOwnerState::Live,
+                streams: 1,
+                generation: 5,
+                mappings: 3,
+                mapped_bytes: 3 << 12,
+            }])
         }
         fn crashes(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CrashRecord>, Errno> {
             Ok(alloc::vec![
@@ -1805,7 +1601,8 @@ mod tests {
         }
     }
 
-    fn request_bytes(query: SysinfoQueryId, payload: &[u8]) -> [u8; 64] {
+    /// A request for `query` framed exactly as a client frames one.
+    fn request_bytes(query: SysinfoQueryId, payload: &[u8]) -> alloc::vec::Vec<u8> {
         let header = SysinfoRequestHeader {
             magic: SYSINFO_REQUEST_MAGIC,
             version: SYSINFO_VERSION_CURRENT,
@@ -1813,12 +1610,10 @@ mod tests {
             query,
             reserved: 0,
             payload_len: u32::try_from(payload.len()).unwrap(),
-            request_id: 7,
         };
-        let mut buf = [0u8; 64];
-        let head = header.to_le_bytes();
-        buf[..head.len()].copy_from_slice(&head);
-        buf[head.len()..head.len() + payload.len()].copy_from_slice(payload);
+        let mut buf = alloc::vec::Vec::new();
+        buf.extend_from_slice(&header.to_le_bytes());
+        buf.extend_from_slice(payload);
         buf
     }
 
@@ -1844,28 +1639,15 @@ mod tests {
         response: &mut [u8],
     ) -> Result<usize, Errno> {
         let mut registry = SelfReports::new(1 << 30);
-        serve(source, caller, &mut registry, sink, request, response)
-    }
-
-    /// Like [`request_bytes`], but returned as an owned, exactly-sized
-    /// buffer rather than padded into a fixed 64-byte array — needed for a
-    /// [`SysinfoQueryId::CACHE_REPORT`] payload, which can carry up to
-    /// [`MAX_CACHE_REPORT_ENTRIES`] whole [`CacheLedgerRecord`]s and so can
-    /// exceed 64 bytes many times over.
-    fn request_bytes_vec(query: SysinfoQueryId, payload: &[u8]) -> alloc::vec::Vec<u8> {
-        let header = SysinfoRequestHeader {
-            magic: SYSINFO_REQUEST_MAGIC,
-            version: SYSINFO_VERSION_CURRENT,
-            flags: 0,
-            query,
-            reserved: 0,
-            payload_len: u32::try_from(payload.len()).unwrap(),
-            request_id: 7,
-        };
-        let mut buf = alloc::vec::Vec::new();
-        buf.extend_from_slice(&header.to_le_bytes());
-        buf.extend_from_slice(payload);
-        buf
+        serve(
+            source,
+            caller,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            sink,
+            request,
+            response,
+        )
     }
 
     /// A [`CacheLedgerRecord`] with `origin`/`reporter_pid` left at the
@@ -1920,10 +1702,11 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
-        let plr = ProcessListRequest {
+        let plr = PageRequest {
             offset: 0,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::SELF_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 256];
@@ -1945,10 +1728,11 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let plr = ProcessListRequest {
+        let plr = PageRequest {
             offset: 0,
             limit: 3,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -1969,10 +1753,11 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
         let sink = RecordingSink::new();
-        let plr = ProcessListRequest {
+        let plr = PageRequest {
             offset: 1,
             limit: 1,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 256];
@@ -1981,10 +1766,11 @@ mod tests {
         let rec = ProcessRecord::from_bytes(&resp[..ProcessRecord::WIRE_LEN]).unwrap();
         assert_eq!(rec.name_bytes(), b"shell");
         // Offset past the end returns an empty page.
-        let plr_end = ProcessListRequest {
+        let plr_end = PageRequest {
             offset: 99,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr_end.to_le_bytes());
         assert_eq!(
@@ -1998,7 +1784,7 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
-        let plr = ProcessListRequest::default();
+        let plr = PageRequest::default();
         let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &plr.to_le_bytes());
         let mut resp = [0u8; 256];
         assert_eq!(
@@ -2053,10 +1839,11 @@ mod tests {
         let page = |offset: u32, limit: u16| {
             request_bytes(
                 SysinfoQueryId::HARDWARE_TREE,
-                &HardwareTreeRequest {
+                &PageRequest {
                     offset,
                     limit,
                     flags: 0,
+                    walk: PageRequest::FRESH,
                 }
                 .to_le_bytes(),
             )
@@ -2118,10 +1905,11 @@ mod tests {
         loop {
             let req = request_bytes(
                 SysinfoQueryId::HARDWARE_TREE,
-                &HardwareTreeRequest {
+                &PageRequest {
                     offset: u32::try_from(walked.len()).unwrap(),
                     limit,
                     flags: 0,
+                    walk: PageRequest::FRESH,
                 }
                 .to_le_bytes(),
             );
@@ -2148,10 +1936,11 @@ mod tests {
         let granted = Caps(&[CapabilityId::SYSINFO_HW]);
         let req = request_bytes(
             SysinfoQueryId::HARDWARE_TREE,
-            &HardwareTreeRequest {
+            &PageRequest {
                 offset: 0,
                 limit: 4,
                 flags: 0,
+                walk: PageRequest::FRESH,
             }
             .to_le_bytes(),
         );
@@ -2160,6 +1949,32 @@ mod tests {
             serve_once(&source, &caller(&granted), &sink, &req, &mut resp),
             Err(Errno::BadMagic)
         );
+    }
+
+    /// A page the response cannot hold writes nothing, the snapshot header
+    /// included: a refused answer never leaves half of one behind.
+    #[test]
+    fn hardware_tree_page_that_does_not_fit_writes_nothing() {
+        let mut source = FixtureSource::new();
+        source.hwtree = tree_blob(1, &tree_nodes());
+        let sink = RecordingSink::new();
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let req = request_bytes(
+            SysinfoQueryId::HARDWARE_TREE,
+            &PageRequest {
+                offset: 0,
+                limit: 3,
+                flags: 0,
+                walk: PageRequest::FRESH,
+            }
+            .to_le_bytes(),
+        );
+        let mut resp = [0xEEu8; HwTreeHeader::WIRE_LEN + 2 * HwNode::WIRE_LEN];
+        assert_eq!(
+            serve_once(&source, &caller(&granted), &sink, &req, &mut resp),
+            Err(Errno::BufferTooSmall)
+        );
+        assert!(resp.iter().all(|&byte| byte == 0xEE), "nothing written");
     }
 
     #[test]
@@ -2246,10 +2061,11 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
-        let udr = UserDirectoryRequest {
+        let udr = PageRequest {
             offset: 0,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr.to_le_bytes());
         let mut resp = [0u8; 1024];
@@ -2263,10 +2079,11 @@ mod tests {
         assert!(sink.events.borrow().as_slice().is_empty());
 
         // Paging: a window starting past the first record returns the tail.
-        let udr_tail = UserDirectoryRequest {
+        let udr_tail = PageRequest {
             offset: 2,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_tail = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr_tail.to_le_bytes());
         let n = serve_once(&source, &caller(&caps), &sink, &req_tail, &mut resp).unwrap();
@@ -2275,10 +2092,11 @@ mod tests {
         assert_eq!(tail.name_bytes(), b"bob");
 
         // Paging past the end returns an empty page (the terminator).
-        let udr_end = UserDirectoryRequest {
+        let udr_end = PageRequest {
             offset: 9,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::USER_DIRECTORY, &udr_end.to_le_bytes());
         assert_eq!(
@@ -2293,10 +2111,11 @@ mod tests {
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
         let page = |offset: u32, limit: u16, resp: &mut [u8]| {
-            let gdr = GroupDirectoryRequest {
+            let gdr = PageRequest {
                 offset,
                 limit,
                 flags: 0,
+                walk: PageRequest::FRESH,
             };
             let req = request_bytes(SysinfoQueryId::GROUP_DIRECTORY, &gdr.to_le_bytes());
             serve_once(&source, &caller(&caps), &sink, &req, resp)
@@ -2359,10 +2178,11 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
-        let mlr = MountListRequest {
+        let mlr = PageRequest {
             offset: 0,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr.to_le_bytes());
         let mut resp = [0u8; 1024];
@@ -2382,10 +2202,11 @@ mod tests {
         assert!(sink.events.borrow().as_slice().is_empty());
 
         // Paging past the end returns an empty page.
-        let mlr_end = MountListRequest {
+        let mlr_end = PageRequest {
             offset: 9,
             limit: 4,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr_end.to_le_bytes());
         assert_eq!(
@@ -2399,10 +2220,11 @@ mod tests {
         let source = FixtureSource::new();
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
-        let ctr = CpuTimeListRequest {
+        let ctr = PageRequest {
             offset: 0,
             limit: 10,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr.to_le_bytes());
         let mut resp = [0u8; 256];
@@ -2416,10 +2238,11 @@ mod tests {
         assert!(sink.events.borrow().as_slice().is_empty());
 
         // Paging past the end returns an empty page.
-        let ctr_end = CpuTimeListRequest {
+        let ctr_end = PageRequest {
             offset: 5,
             limit: 4,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::CPU_TIME_STATS, &ctr_end.to_le_bytes());
         assert_eq!(
@@ -2583,10 +2406,11 @@ mod tests {
     fn net_bond_members_is_gated_audited_and_round_trips() {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_BOND_MEMBERS, &nlr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -2620,10 +2444,11 @@ mod tests {
     fn net_sockets_is_gated_audited_and_round_trips() {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_SOCKETS, &nlr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -2657,10 +2482,11 @@ mod tests {
     fn net_resolver_servers_is_ungated_and_round_trips() {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_RESOLVER_SERVERS, &nlr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -2688,10 +2514,11 @@ mod tests {
     fn net_time_servers_is_ungated_and_answers_its_own_set() {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_TIME_SERVERS, &nlr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -2717,9 +2544,12 @@ mod tests {
         let source = FixtureSource::new();
         let window = Duration64::from_secs(1);
         let nrr = NetInterfaceRatesRequest {
-            offset: 0,
-            limit: 8,
-            flags: 0,
+            page: PageRequest {
+                offset: 0,
+                limit: 8,
+                flags: 0,
+                walk: PageRequest::FRESH,
+            },
             window,
         };
         let req = request_bytes(SysinfoQueryId::NET_INTERFACE_RATES, &nrr.to_le_bytes());
@@ -2757,10 +2587,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_INTERFACE_COUNTERS, &nlr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -2829,10 +2660,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_INTERFACE_FACTS, &nlr.to_le_bytes());
         let mut resp = [0u8; 256];
@@ -2861,10 +2693,11 @@ mod tests {
         );
 
         // Paging past the single interface returns the empty terminator.
-        let nlr_end = NetInterfaceListRequest {
+        let nlr_end = PageRequest {
             offset: 1,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::NET_INTERFACE_FACTS, &nlr_end.to_le_bytes());
         assert_eq!(
@@ -2878,10 +2711,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let nlr = NetInterfaceListRequest {
+        let nlr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::NET_INTERFACE_STATE, &nlr.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -2917,10 +2751,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let slr = SeatListRequest {
+        let slr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::SEAT_LIST, &slr.to_le_bytes());
         let mut resp = [0u8; 256];
@@ -2952,10 +2787,11 @@ mod tests {
         );
 
         // Paging past the single seat returns the empty terminator.
-        let slr_end = SeatListRequest {
+        let slr_end = PageRequest {
             offset: 1,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::SEAT_LIST, &slr_end.to_le_bytes());
         assert_eq!(
@@ -2971,10 +2807,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = IrqListRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::IRQ_LIST, &request.to_le_bytes());
         let mut resp = [0u8; 256];
@@ -3011,16 +2848,221 @@ mod tests {
         );
 
         // Paging past the last line returns the empty terminator.
-        let end = IrqListRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::IRQ_LIST, &end.to_le_bytes());
         assert_eq!(
             serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
+    }
+
+    fn fixture_dma_unit(node: u32) -> DmaUnitRecord {
+        DmaUnitRecord {
+            node,
+            family: DmaUnitFamily::Vtd,
+            state: DmaUnitState::Translating,
+            faults: DmaFaultSignal::Message,
+            tables: DmaTables::SecondStage,
+            owners: 1,
+            firmware_streams: 0,
+            faults_recorded: 4,
+            faults_dropped: 1,
+            streams_silenced: 0,
+        }
+    }
+
+    #[test]
+    fn the_dma_translation_reads_are_gated_audited_and_paged() {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let page = |offset| {
+            PageRequest {
+                offset,
+                limit: 8,
+                flags: 0,
+                walk: PageRequest::FRESH,
+            }
+            .to_le_bytes()
+        };
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let denied = Caps(&[]);
+        let mut resp = [0u8; 256];
+        for (query, len, held) in [
+            (SysinfoQueryId::DMA_UNITS, DmaUnitRecord::WIRE_LEN, 2),
+            (SysinfoQueryId::DMA_GROUPS, DmaGroupRecord::WIRE_LEN, 1),
+            (SysinfoQueryId::DMA_NODES, DmaNodeRecord::WIRE_LEN, 1),
+        ] {
+            let req = request_bytes(query, &page(0));
+            let sink = RecordingSink::new();
+            assert_eq!(
+                serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
+                Err(Errno::PermissionDenied)
+            );
+            assert_eq!(
+                sink.events.borrow().as_slice(),
+                &[(Level::Warn, events::QUERY_DENIED)]
+            );
+            let sink = RecordingSink::new();
+            assert_eq!(
+                serve_once(&source, &caller(&granted), &sink, &req, &mut resp),
+                Ok(held * len)
+            );
+            assert_eq!(
+                sink.events.borrow().as_slice(),
+                &[(Level::Debug, events::QUERY_SERVED)]
+            );
+            let past = request_bytes(query, &page(u32::try_from(held).unwrap()));
+            assert_eq!(
+                serve_once(&source, &caller(&granted), &sink, &past, &mut resp),
+                Ok(0)
+            );
+        }
+        let req = request_bytes(SysinfoQueryId::DMA_UNITS, &page(1));
+        let sink = RecordingSink::new();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(
+            DmaUnitRecord::from_bytes(&resp[..n]),
+            Ok(fixture_dma_unit(0x42))
+        );
+    }
+
+    /// A page is the window its request names, encoded record by record, and
+    /// one the response cannot hold writes nothing.
+    #[test]
+    fn a_page_is_the_window_its_request_names() {
+        let records = [1u8, 2, 3];
+        let encode = |record: &u8| [*record, *record];
+        let at = |offset, limit| PageRequest {
+            offset,
+            limit,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        };
+        let mut out = [0u8; 8];
+        for (request, bytes) in [
+            (at(0, 2), &[1, 1, 2, 2][..]),
+            (at(1, 9), &[2, 2, 3, 3][..]),
+            (at(3, 2), &[][..]),
+            (at(u32::MAX, 2), &[][..]),
+        ] {
+            out.fill(0xEE);
+            assert_eq!(
+                super::page(request, &records, &mut out, encode),
+                Ok(bytes.len())
+            );
+            assert_eq!(&out[..bytes.len()], bytes, "{request:?}");
+        }
+        let mut short = [0xEEu8; 3];
+        assert_eq!(
+            super::page(at(0, 2), &records, &mut short, encode),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(short, [0xEE; 3], "nothing written");
+    }
+
+    /// A request carrying bytes past its own is refused as corruption, and a
+    /// short one as short, before anything is read.
+    #[test]
+    fn a_request_longer_than_its_own_is_refused() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[CapabilityId::SYSINFO_HW, CapabilityId::SYSINFO_GLOBAL]);
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; 512];
+        let page = PageRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        }
+        .to_le_bytes();
+        let rates = NetInterfaceRatesRequest {
+            page: PageRequest {
+                offset: 0,
+                limit: 8,
+                flags: 0,
+                walk: PageRequest::FRESH,
+            },
+            window: Duration64::from_secs(1),
+        }
+        .to_le_bytes();
+        let mut long_page = [0u8; PageRequest::WIRE_LEN + 1];
+        long_page[..PageRequest::WIRE_LEN].copy_from_slice(&page);
+        let mut long_rates = [0u8; NetInterfaceRatesRequest::WIRE_LEN + 1];
+        long_rates[..NetInterfaceRatesRequest::WIRE_LEN].copy_from_slice(&rates);
+        for (query, long) in [
+            (SysinfoQueryId::DMA_UNITS, &long_page[..]),
+            (SysinfoQueryId::HARDWARE_TREE, &long_page[..]),
+            (SysinfoQueryId::NET_INTERFACE_RATES, &long_rates[..]),
+        ] {
+            let req = request_bytes(query, long);
+            assert_eq!(
+                serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
+                Err(Errno::BadMagic),
+                "{query:?}"
+            );
+            let short = request_bytes(query, &long[..long.len() - 2]);
+            assert_eq!(
+                serve_once(&source, &caller(&caps), &sink, &short, &mut resp),
+                Err(Errno::BufferTooSmall),
+                "{query:?}"
+            );
+        }
+        assert_eq!(*source.list_reads.borrow(), 0);
+    }
+
+    /// A page request that does not decode is refused before the list behind
+    /// it is read, so a malformed request costs no walk.
+    #[test]
+    fn a_malformed_page_request_is_refused_before_the_list_is_read() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[CapabilityId::SYSINFO_HW]);
+        let mut resp = [0u8; 256];
+        let mut reserved = PageRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        }
+        .to_le_bytes();
+        reserved[6] = 1;
+        let empty = PageRequest {
+            offset: 0,
+            limit: 0,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        }
+        .to_le_bytes();
+        for query in [
+            SysinfoQueryId::DMA_UNITS,
+            SysinfoQueryId::DMA_GROUPS,
+            SysinfoQueryId::DMA_NODES,
+            SysinfoQueryId::NET_RESOLVER_SERVERS,
+            SysinfoQueryId::NET_TIME_SERVERS,
+        ] {
+            for (payload, refusal) in [
+                (&reserved[..], Errno::BadMagic),
+                (
+                    &reserved[..PageRequest::WIRE_LEN - 1],
+                    Errno::BufferTooSmall,
+                ),
+                (&empty[..], Errno::LengthOutOfRange),
+            ] {
+                // One sink per request: another test may have raised the
+                // filter, so each audited request may log its invocation.
+                let sink = RecordingSink::new();
+                let req = request_bytes(query, payload);
+                assert_eq!(
+                    serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
+                    Err(refusal)
+                );
+            }
+        }
+        assert_eq!(*source.list_reads.borrow(), 0);
     }
 
     #[test]
@@ -3030,10 +3072,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = VolumeIoRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::VOLUME_IO_HEALTH, &request.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -3073,10 +3116,11 @@ mod tests {
         );
 
         // Paging past the last volume returns the empty terminator.
-        let end = VolumeIoRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_HEALTH, &end.to_le_bytes());
         assert_eq!(
@@ -3092,10 +3136,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = VolumeIoRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::VOLUME_IO_STATS, &request.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -3122,10 +3167,11 @@ mod tests {
         assert!(sink.events.borrow().is_empty());
 
         // Paging past the last volume returns the empty terminator.
-        let end = VolumeIoRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_STATS, &end.to_le_bytes());
         assert_eq!(
@@ -3141,10 +3187,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = VolumeIoRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::VOLUME_IO_QUEUE, &request.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -3187,10 +3234,11 @@ mod tests {
         );
 
         // Paging past the last volume returns the empty terminator.
-        let end = VolumeIoRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_QUEUE, &end.to_le_bytes());
         assert_eq!(
@@ -3206,10 +3254,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = DeviceStatsRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::GPU_DEVICE_STATS, &request.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -3254,10 +3303,11 @@ mod tests {
         );
 
         // Paging past the last device returns the empty terminator.
-        let end = DeviceStatsRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::GPU_DEVICE_STATS, &end.to_le_bytes());
         assert_eq!(
@@ -3273,10 +3323,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = RaidListRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::RAID_ARRAYS, &request.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -3321,10 +3372,11 @@ mod tests {
         );
 
         // A window inside the list is served from its offset.
-        let middle = RaidListRequest {
+        let middle = PageRequest {
             offset: 1,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_middle = request_bytes(SysinfoQueryId::RAID_ARRAYS, &middle.to_le_bytes());
         let n = serve_once(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
@@ -3337,10 +3389,11 @@ mod tests {
         );
 
         // Paging past the last array returns the empty terminator.
-        let end = RaidListRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::RAID_ARRAYS, &end.to_le_bytes());
         assert_eq!(
@@ -3356,10 +3409,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = RaidListRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::RAID_MEMBERS, &request.to_le_bytes());
         let mut resp = [0u8; 512];
@@ -3401,10 +3455,11 @@ mod tests {
         );
 
         // A bounded window is served from its offset: the second page of one.
-        let middle = RaidListRequest {
+        let middle = PageRequest {
             offset: 1,
             limit: 1,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_middle = request_bytes(SysinfoQueryId::RAID_MEMBERS, &middle.to_le_bytes());
         let n = serve_once(&source, &caller(&granted), &sink, &req_middle, &mut resp).unwrap();
@@ -3417,10 +3472,11 @@ mod tests {
         );
 
         // Paging past the last device returns the empty terminator.
-        let end = RaidListRequest {
+        let end = PageRequest {
             offset: 3,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::RAID_MEMBERS, &end.to_le_bytes());
         assert_eq!(
@@ -3434,10 +3490,11 @@ mod tests {
         tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let sink = RecordingSink::new();
-        let request = CrashRecordRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::CRASH_RECORD, &request.to_le_bytes());
         let mut resp = [0u8; 4096];
@@ -3476,10 +3533,11 @@ mod tests {
         );
 
         // Paging past the last record returns the empty terminator.
-        let end = CrashRecordRequest {
+        let end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::CRASH_RECORD, &end.to_le_bytes());
         assert_eq!(
@@ -3607,10 +3665,11 @@ mod tests {
 
         // Denied without the gate.
         let sink = RecordingSink::new();
-        let rlr = ReclaimListRequest {
+        let rlr = PageRequest {
             offset: 0,
             limit: 16,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr.to_le_bytes());
         assert_eq!(
@@ -3630,10 +3689,11 @@ mod tests {
         }
 
         // A paged window returns whole records from the offset…
-        let rlr_page = ReclaimListRequest {
+        let rlr_page = PageRequest {
             offset: 7,
             limit: 16,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_page = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr_page.to_le_bytes());
         let n = serve_once(&source, &caller(&granted), &sink, &req_page, &mut resp).unwrap();
@@ -3642,10 +3702,11 @@ mod tests {
         assert_eq!(usize::from(record.class), 7);
 
         // …and paging past the end is the empty terminator.
-        let rlr_end = ReclaimListRequest {
+        let rlr_end = PageRequest {
             offset: 9,
             limit: 16,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr_end.to_le_bytes());
         assert_eq!(
@@ -3680,10 +3741,11 @@ mod tests {
         let mut resp = [0u8; 256];
         let granted = Caps(&[CapabilityId::SYSINFO_KERNEL]);
 
-        let clr = CpuLoadRequest {
+        let clr = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::CPU_LOAD, &clr.to_le_bytes());
 
@@ -3702,20 +3764,22 @@ mod tests {
         assert_eq!(first.switches, 42);
 
         // Offset paging serves the second CPU alone, then the terminator.
-        let clr_next = CpuLoadRequest {
+        let clr_next = PageRequest {
             offset: 1,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_next = request_bytes(SysinfoQueryId::CPU_LOAD, &clr_next.to_le_bytes());
         let n = serve_once(&source, &caller(&granted), &sink, &req_next, &mut resp).unwrap();
         assert_eq!(n, CpuLoadRecord::WIRE_LEN);
         let second = CpuLoadRecord::from_bytes(&resp[..n]).unwrap();
         assert_eq!(second.cpu, 1);
-        let clr_end = CpuLoadRequest {
+        let clr_end = PageRequest {
             offset: 2,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req_end = request_bytes(SysinfoQueryId::CPU_LOAD, &clr_end.to_le_bytes());
         assert_eq!(
@@ -3762,8 +3826,7 @@ mod tests {
             flags: 0,
             query: SysinfoQueryId::SELF_PROCESS_LIST,
             reserved: 0,
-            payload_len: u32::try_from(ProcessListRequest::WIRE_LEN).unwrap(),
-            request_id: 1,
+            payload_len: u32::try_from(PageRequest::WIRE_LEN).unwrap(),
         };
         let mut resp = [0u8; 64];
         assert_eq!(
@@ -3776,6 +3839,27 @@ mod tests {
             ),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    /// Bytes past the payload the header declares are corruption, refused
+    /// and audited before the query is served, never quietly dropped.
+    #[test]
+    fn bytes_past_the_declared_payload_are_refused() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let mut req = request_bytes(SysinfoQueryId::UPTIME, &[]);
+        req.push(0);
+        let mut resp = [0u8; 64];
+        assert_eq!(
+            serve_once(&source, &caller(&caps), &sink, &req, &mut resp),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            [(Level::Warn, events::REQUEST_MALFORMED)]
+        );
+        assert_eq!(resp, [0u8; 64], "nothing was answered");
     }
 
     #[test]
@@ -3822,22 +3906,32 @@ mod tests {
         let reporter = user_caller(&[], 0xA1, 555);
         source.set_live(alloc::vec![reporter.origin().proc_id()]);
         let payload = cache_report_payload(&[report_row("glyphs", 3, 4096)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
-        let n = serve(&source, &reporter, &mut registry, &sink, &req, &mut resp)
-            .expect("report accepted");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
+        let n = serve(
+            &source,
+            &reporter,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("report accepted");
         assert_eq!(n, 0);
 
         // The row shows up in CACHE_LEDGERS, after the kernel rows.
-        let cll = CacheLedgerListRequest {
+        let cll = PageRequest {
             offset: 0,
             limit: 32,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
         let n = serve(
             &source,
             &kernel_reader,
             &mut registry,
+            &mut Walks::new(1 << 30),
             &sink,
             &req,
             &mut resp,
@@ -3853,16 +3947,18 @@ mod tests {
         // …and its bytes are folded into class 3's `self_reported_bytes`,
         // alongside (not instead of) the kernel row's own bytes; a kernel
         // row's bytes never count towards it.
-        let rlr = ReclaimListRequest {
+        let rlr = PageRequest {
             offset: 0,
             limit: u16::try_from(RECLAIM_CLASS_COUNT).expect("the class count fits a paging limit"),
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::RECLAIM_STATS, &rlr.to_le_bytes());
         let n = serve(
             &source,
             &kernel_reader,
             &mut registry,
+            &mut Walks::new(1 << 30),
             &sink,
             &req,
             &mut resp,
@@ -3890,18 +3986,34 @@ mod tests {
         let mut preset_origin = report_row("glyphs", 0, 10);
         preset_origin.origin = CacheLedgerOrigin::Kernel;
         let payload = cache_report_payload(&[preset_origin]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::BadMagic)
         );
 
         let mut preset_pid = report_row("glyphs", 0, 10);
         preset_pid.reporter_pid = 999;
         let payload = cache_report_payload(&[preset_pid]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::BadMagic)
         );
 
@@ -3924,9 +4036,17 @@ mod tests {
         assert!(CacheLedgerRecord::from_bytes(&pretender.to_le_bytes()).is_ok());
 
         let payload = cache_report_payload(&[pretender]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::BadMagic)
         );
         assert!(registry.cache_rows().is_empty());
@@ -3942,12 +4062,30 @@ mod tests {
 
         let first =
             cache_report_payload(&[report_row("glyphs", 0, 10), report_row("artwork", 1, 20)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &first);
-        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("first report");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &first);
+        serve(
+            &source,
+            &reporter,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("first report");
 
         let second = cache_report_payload(&[report_row("cursors", 2, 5)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &second);
-        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("second report");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &second);
+        serve(
+            &source,
+            &reporter,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("second report");
 
         let rows = registry.cache_rows();
         assert_eq!(rows.len(), 1);
@@ -3963,12 +4101,30 @@ mod tests {
         let reporter = user_caller(&[], 0xD4, 9);
 
         let payload = cache_report_payload(&[report_row("glyphs", 0, 10)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
-        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("reported");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(
+            &source,
+            &reporter,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("reported");
 
         let empty = cache_report_payload(&[]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &empty);
-        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("withdrawn");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &empty);
+        serve(
+            &source,
+            &reporter,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("withdrawn");
 
         assert!(registry.cache_rows().is_empty());
     }
@@ -3980,17 +4136,27 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 4096];
         let kernel_reader = caller(&Caps(&[CapabilityId::SYSINFO_KERNEL]));
-        let cll = CacheLedgerListRequest {
+        let cll = PageRequest {
             offset: 0,
             limit: 32,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
 
         let original = user_caller(&[], 0xE5, 111);
         source.set_live(alloc::vec![original.origin().proc_id()]);
         let payload = cache_report_payload(&[report_row("glyphs", 0, 10)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
-        serve(&source, &original, &mut registry, &sink, &req, &mut resp).expect("reported");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(
+            &source,
+            &original,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("reported");
 
         // The process has exited: nobody is live any more.
         source.set_live(alloc::vec::Vec::new());
@@ -3999,6 +4165,7 @@ mod tests {
             &source,
             &kernel_reader,
             &mut registry,
+            &mut Walks::new(1 << 30),
             &sink,
             &req,
             &mut resp,
@@ -4011,15 +4178,24 @@ mod tests {
         let recycled = user_caller(&[], 0xF6, 111);
         source.set_live(alloc::vec![recycled.origin().proc_id()]);
         let payload = cache_report_payload(&[report_row("cursors", 0, 20)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
-        serve(&source, &recycled, &mut registry, &sink, &req, &mut resp)
-            .expect("recycled report admitted");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(
+            &source,
+            &recycled,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("recycled report admitted");
 
         let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
         let n = serve(
             &source,
             &kernel_reader,
             &mut registry,
+            &mut Walks::new(1 << 30),
             &sink,
             &req,
             &mut resp,
@@ -4048,18 +4224,34 @@ mod tests {
             live.push(reporter.origin().proc_id());
             source.set_live(live.clone());
             let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
-            let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp)
-                .expect("admitted within capacity");
+            let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp,
+            )
+            .expect("admitted within capacity");
         }
 
         let overflow = user_caller(&[], 200, 200);
         live.push(overflow.origin().proc_id());
         source.set_live(live);
         let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
         assert_eq!(
-            serve(&source, &overflow, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &overflow,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::NoSpace)
         );
         assert_eq!(registry.cache_rows().len(), MIN_REPORTERS);
@@ -4072,10 +4264,11 @@ mod tests {
         let mut registry = SelfReports::new(1 << 30);
         let mut resp = [0u8; 256];
 
-        let cll = CacheLedgerListRequest {
+        let cll = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
         assert_eq!(
@@ -4083,6 +4276,7 @@ mod tests {
                 &source,
                 &caller(&Caps(&[])),
                 &mut registry,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &req,
                 &mut resp
@@ -4093,12 +4287,13 @@ mod tests {
         let reporter = user_caller(&[], 0x88, 1);
         source.set_live(alloc::vec![reporter.origin().proc_id()]);
         let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
-        let report_req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let report_req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
         assert_eq!(
             serve(
                 &source,
                 &reporter,
                 &mut registry,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &report_req,
                 &mut resp
@@ -4119,12 +4314,13 @@ mod tests {
         // a row that would read as self-reported. Nothing else — not the
         // gate, not the decoder — refuses this request.
         let payload = cache_report_payload(&[report_row("glyphs", 3, 4096)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
         assert_eq!(
             serve(
                 &source,
                 &kernel_caller(),
                 &mut registry,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &req,
                 &mut resp
@@ -4142,6 +4338,7 @@ mod tests {
                 &source,
                 &kernel_caller(),
                 &mut registry,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &req,
                 &mut resp
@@ -4150,16 +4347,18 @@ mod tests {
         );
 
         // The combined view a reader gets is the kernel's own rows alone.
-        let cll = CacheLedgerListRequest {
+        let cll = PageRequest {
             offset: 0,
             limit: 32,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
         let n = serve(
             &source,
             &caller(&Caps(&[CapabilityId::SYSINFO_KERNEL])),
             &mut registry,
+            &mut Walks::new(1 << 30),
             &sink,
             &req,
             &mut resp,
@@ -4179,23 +4378,34 @@ mod tests {
         let reporter = user_caller(&[], 0x99, 2);
         source.set_live(alloc::vec![reporter.origin().proc_id()]);
         let payload = cache_report_payload(&[report_row("glyphs", 0, 1)]);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &payload);
-        serve(&source, &reporter, &mut registry, &sink, &req, &mut resp).expect("reported");
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &payload);
+        serve(
+            &source,
+            &reporter,
+            &mut registry,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("reported");
 
         let total = RECLAIM_CLASS_COUNT + 1;
         let mut seen: alloc::vec::Vec<CacheLedgerRecord> = alloc::vec::Vec::new();
         let mut offset: u32 = 0;
         loop {
-            let cll = CacheLedgerListRequest {
+            let cll = PageRequest {
                 offset,
                 limit: 3,
                 flags: 0,
+                walk: PageRequest::FRESH,
             };
             let req = request_bytes(SysinfoQueryId::CACHE_LEDGERS, &cll.to_le_bytes());
             let n = serve(
                 &source,
                 &kernel_reader,
                 &mut registry,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &req,
                 &mut resp,
@@ -4233,9 +4443,17 @@ mod tests {
             flags: 0,
             reserved: 0,
         };
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &short_header.to_le_bytes());
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &short_header.to_le_bytes());
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::BadMagic)
         );
         assert!(registry.cache_rows().is_empty());
@@ -4248,9 +4466,17 @@ mod tests {
         };
         let mut trailing = zero_header.to_le_bytes().to_vec();
         trailing.extend_from_slice(&report_row("glyphs", 0, 1).to_le_bytes());
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &trailing);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &trailing);
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::BadMagic)
         );
         assert!(registry.cache_rows().is_empty());
@@ -4261,9 +4487,17 @@ mod tests {
             flags: 0,
             reserved: 0,
         };
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &over_header.to_le_bytes());
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &over_header.to_le_bytes());
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::LengthOutOfRange)
         );
         assert!(registry.cache_rows().is_empty());
@@ -4279,9 +4513,17 @@ mod tests {
         };
         let mut req_payload = one_header.to_le_bytes().to_vec();
         req_payload.extend_from_slice(&bytes);
-        let req = request_bytes_vec(SysinfoQueryId::CACHE_REPORT, &req_payload);
+        let req = request_bytes(SysinfoQueryId::CACHE_REPORT, &req_payload);
         assert_eq!(
-            serve(&source, &reporter, &mut registry, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &reporter,
+                &mut registry,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::OutOfRange)
         );
         assert!(registry.cache_rows().is_empty());
@@ -4317,9 +4559,17 @@ mod tests {
     ) -> Result<usize, Errno> {
         let sink = RecordingSink::new();
         let mut resp = [0u8; 8];
-        let req = request_bytes_vec(SysinfoQueryId::DESKTOP_FRAME_REPORT, &totals.to_le_bytes());
+        let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_REPORT, &totals.to_le_bytes());
         source.set_live(alloc::vec![reporter.origin().proc_id()]);
-        serve(source, reporter, reports, &sink, &req, &mut resp)
+        serve(
+            source,
+            reporter,
+            reports,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
     }
 
     /// Read the published frame records back as an attested global observer.
@@ -4329,14 +4579,23 @@ mod tests {
         caller: &Caller,
     ) -> Result<alloc::vec::Vec<DesktopFrameRecord>, Errno> {
         let sink = RecordingSink::new();
-        let request = DesktopFrameStatsRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 8,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_STATS, &request.to_le_bytes());
         let mut resp = [0u8; 8 * DesktopFrameRecord::WIRE_LEN];
-        let n = serve(source, caller, reports, &sink, &req, &mut resp)?;
+        let n = serve(
+            source,
+            caller,
+            reports,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )?;
         Ok(resp[..n]
             .as_chunks::<{ DesktopFrameRecord::WIRE_LEN }>()
             .0
@@ -4407,10 +4666,11 @@ mod tests {
         let session = user_caller(&[], 0xF3, 81);
         publish_frames(&source, &mut reports, &session, frame_totals()).expect("published");
 
-        let request = DesktopFrameStatsRequest {
+        let request = PageRequest {
             offset: 0,
             limit: 4,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_STATS, &request.to_le_bytes());
         let mut resp = [0u8; 4 * DesktopFrameRecord::WIRE_LEN];
@@ -4420,7 +4680,15 @@ mod tests {
         let sink = RecordingSink::new();
         let unprivileged = user_caller(&[], 0xF4, 82);
         assert_eq!(
-            serve(&source, &unprivileged, &mut reports, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &unprivileged,
+                &mut reports,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
@@ -4430,8 +4698,16 @@ mod tests {
 
         let sink = RecordingSink::new();
         let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0xF5, 83);
-        let n = serve(&source, &observer, &mut reports, &sink, &req, &mut resp)
-            .expect("the gate holder is served");
+        let n = serve(
+            &source,
+            &observer,
+            &mut reports,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("the gate holder is served");
         assert_eq!(n, DesktopFrameRecord::WIRE_LEN);
         assert_eq!(
             sink.events.borrow().as_slice(),
@@ -4449,13 +4725,21 @@ mod tests {
         let sink = RecordingSink::new();
         let mut resp = [0u8; 8];
         let session = user_caller(&[], 0xF6, 84);
-        let req = request_bytes_vec(
+        let req = request_bytes(
             SysinfoQueryId::DESKTOP_FRAME_REPORT,
             &frame_totals().to_le_bytes(),
         );
         source.set_live(alloc::vec![session.origin().proc_id()]);
         assert_eq!(
-            serve(&source, &session, &mut reports, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &session,
+                &mut reports,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Ok(0)
         );
         assert_eq!(
@@ -4488,9 +4772,17 @@ mod tests {
         let mut resp = [0u8; 8];
         let mut trailing = frame_totals().to_le_bytes().to_vec();
         trailing.push(0);
-        let req = request_bytes_vec(SysinfoQueryId::DESKTOP_FRAME_REPORT, &trailing);
+        let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_REPORT, &trailing);
         assert_eq!(
-            serve(&source, &session, &mut reports, &sink, &req, &mut resp),
+            serve(
+                &source,
+                &session,
+                &mut reports,
+                &mut Walks::new(1 << 30),
+                &sink,
+                &req,
+                &mut resp
+            ),
             Err(Errno::BadMagic)
         );
 
@@ -4527,7 +4819,7 @@ mod tests {
         let sink = RecordingSink::new();
         let mut resp = [0u8; 8];
         source.set_live(alloc::vec![ProcId::KERNEL]);
-        let req = request_bytes_vec(
+        let req = request_bytes(
             SysinfoQueryId::DESKTOP_FRAME_REPORT,
             &frame_totals().to_le_bytes(),
         );
@@ -4536,6 +4828,7 @@ mod tests {
                 &source,
                 &kernel_caller(),
                 &mut reports,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &req,
                 &mut resp
@@ -4544,7 +4837,7 @@ mod tests {
         );
         // And withdrawing is refused for the same reason rather than
         // answering `Ok` to a principal that could never have an entry.
-        let req = request_bytes_vec(
+        let req = request_bytes(
             SysinfoQueryId::DESKTOP_FRAME_REPORT,
             &DesktopFrameTotals::ZERO.to_le_bytes(),
         );
@@ -4553,6 +4846,7 @@ mod tests {
                 &source,
                 &kernel_caller(),
                 &mut reports,
+                &mut Walks::new(1 << 30),
                 &sink,
                 &req,
                 &mut resp
@@ -4581,11 +4875,20 @@ mod tests {
         ]);
         let sink = RecordingSink::new();
         let mut resp = [0u8; 8];
-        let req = request_bytes_vec(
+        let req = request_bytes(
             SysinfoQueryId::DESKTOP_FRAME_REPORT,
             &frame_totals().to_le_bytes(),
         );
-        serve(&source, &first, &mut reports, &sink, &req, &mut resp).expect("published");
+        serve(
+            &source,
+            &first,
+            &mut reports,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("published");
 
         let observer = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0x33, 103);
         let records = read_frames(&source, &mut reports, &observer).expect("served");
@@ -4601,13 +4904,23 @@ mod tests {
         // one-record page serves the first row only.
         let sink = RecordingSink::new();
         let mut resp = [0u8; 2 * DesktopFrameRecord::WIRE_LEN];
-        let one = DesktopFrameStatsRequest {
+        let one = PageRequest {
             offset: 1,
             limit: 1,
             flags: 0,
+            walk: PageRequest::FRESH,
         };
         let req = request_bytes(SysinfoQueryId::DESKTOP_FRAME_STATS, &one.to_le_bytes());
-        let n = serve(&source, &observer, &mut reports, &sink, &req, &mut resp).expect("served");
+        let n = serve(
+            &source,
+            &observer,
+            &mut reports,
+            &mut Walks::new(1 << 30),
+            &sink,
+            &req,
+            &mut resp,
+        )
+        .expect("served");
         assert_eq!(n, DesktopFrameRecord::WIRE_LEN);
         assert_eq!(
             DesktopFrameRecord::from_bytes(&resp[..n])
@@ -4633,5 +4946,168 @@ mod tests {
         let records = read_frames(&source, &mut reports, &observer).expect("served");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].reporter_pid, 112);
+    }
+
+    /// Walk the global process list `limit` records a page as `who`'s walk
+    /// `walk`, calling `between` after each full page with its offset, and
+    /// answer every record seen.
+    fn walk_processes(
+        source: &FixtureSource,
+        who: &Caller,
+        walks: &mut Walks,
+        walk: u32,
+        limit: u16,
+        between: impl Fn(u32),
+    ) -> Result<alloc::vec::Vec<ProcessRecord>, Errno> {
+        let sink = RecordingSink::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let mut seen = alloc::vec::Vec::new();
+        let mut resp = [0u8; SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN];
+        loop {
+            let page = PageRequest {
+                offset: u32::try_from(seen.len()).unwrap(),
+                limit,
+                flags: 0,
+                walk,
+            };
+            let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &page.to_le_bytes());
+            let n = serve(source, who, &mut reports, walks, &sink, &req, &mut resp)?;
+            for chunk in resp[..n].as_chunks::<{ ProcessRecord::WIRE_LEN }>().0 {
+                seen.push(ProcessRecord::from_bytes(chunk).unwrap());
+            }
+            if n / ProcessRecord::WIRE_LEN < usize::from(limit) {
+                return Ok(seen);
+            }
+            between(page.offset);
+        }
+    }
+
+    /// A walk reads its list once however many pages it takes, where pages
+    /// read alone read it afresh each time, and it is let go at its end.
+    #[test]
+    fn a_walk_reads_its_list_once() {
+        let source = FixtureSource::new();
+        let who = caller(&Caps(&[CapabilityId::SYSINFO_GLOBAL]));
+        let mut walks = Walks::new(1 << 30);
+        let walked = walk_processes(&source, &who, &mut walks, 7, 1, |_| {}).unwrap();
+        assert_eq!(walked, *source.global.borrow());
+        assert_eq!(*source.process_reads.borrow(), 1);
+        let key = crate::walks::WalkKey {
+            caller: who.origin().proc_id(),
+            walk: 7,
+            query: SysinfoQueryId::GLOBAL_PROCESS_LIST,
+        };
+        assert!(walks.list(key).is_none(), "ended at its short page");
+        let fresh =
+            walk_processes(&source, &who, &mut walks, PageRequest::FRESH, 1, |_| {}).unwrap();
+        assert_eq!(fresh, walked);
+        assert_eq!(*source.process_reads.borrow(), 1 + 4, "a reading a page");
+    }
+
+    /// A list that changes part way through a walk changes nothing the walk
+    /// sees, where pages read afresh skip the record the change moved.
+    #[test]
+    fn a_list_changing_under_a_walk_neither_skips_nor_repeats() {
+        let source = FixtureSource::new();
+        let who = caller(&Caps(&[CapabilityId::SYSINFO_GLOBAL]));
+        let mut walks = Walks::new(1 << 30);
+        let before = source.global.borrow().clone();
+        let first_exits = |offset| {
+            if offset == 0 {
+                source.global.borrow_mut().remove(0);
+            }
+        };
+        let walked = walk_processes(&source, &who, &mut walks, 9, 1, first_exits).unwrap();
+        assert_eq!(walked, before);
+        *source.global.borrow_mut() = before.clone();
+        let fresh = walk_processes(
+            &source,
+            &who,
+            &mut walks,
+            PageRequest::FRESH,
+            1,
+            first_exits,
+        )
+        .unwrap();
+        assert_eq!(fresh, [before[0], before[2]], "read afresh, one is skipped");
+    }
+
+    /// A page of a walk the service does not hold is refused, and one caller
+    /// is never answered from what another was shown.
+    #[test]
+    fn a_page_of_a_walk_not_held_is_interrupted() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[CapabilityId::SYSINFO_GLOBAL]);
+        let first = user_caller(caps.0, 0x10, 10);
+        let other = user_caller(caps.0, 0x11, 11);
+        let mut walks = Walks::new(1 << 30);
+        let mut reports = SelfReports::new(1 << 30);
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN];
+        let mut page = |who: &Caller, offset| {
+            let page = PageRequest {
+                offset,
+                limit: 1,
+                flags: 0,
+                walk: 5,
+            };
+            let req = request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &page.to_le_bytes());
+            serve(
+                &source,
+                who,
+                &mut reports,
+                &mut walks,
+                &sink,
+                &req,
+                &mut resp,
+            )
+        };
+        assert_eq!(page(&first, 0), Ok(ProcessRecord::WIRE_LEN));
+        assert_eq!(page(&other, 1), Err(Errno::Interrupted), "another's walk");
+        assert_eq!(page(&first, 1), Ok(ProcessRecord::WIRE_LEN));
+        assert_eq!(page(&other, 2), Err(Errno::Interrupted), "never begun");
+    }
+
+    /// A walk of the interface rates measures them once, by its first page,
+    /// where pages read alone measure them for each page.
+    #[test]
+    fn a_walk_of_the_interface_rates_measures_them_once() {
+        let source = FixtureSource::new();
+        let who = caller(&Caps(&[CapabilityId::SYSINFO_GLOBAL]));
+        let mut walks = Walks::new(1 << 30);
+        let mut reports = SelfReports::new(1 << 30);
+        let sink = RecordingSink::new();
+        let mut resp = [0u8; SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN];
+        let mut pages = |walk| {
+            let mut seen = alloc::vec::Vec::new();
+            for offset in [0, 1] {
+                let rates = NetInterfaceRatesRequest {
+                    page: PageRequest {
+                        offset,
+                        limit: 1,
+                        flags: 0,
+                        walk,
+                    },
+                    window: Duration64::from_secs(1),
+                };
+                let req = request_bytes(SysinfoQueryId::NET_INTERFACE_RATES, &rates.to_le_bytes());
+                let n = serve(
+                    &source,
+                    &who,
+                    &mut reports,
+                    &mut walks,
+                    &sink,
+                    &req,
+                    &mut resp,
+                );
+                seen.push(n.unwrap());
+            }
+            seen
+        };
+        let length = NetInterfaceRatesRecord::WIRE_LEN;
+        assert_eq!(pages(9), [length, 0]);
+        assert_eq!(*source.list_reads.borrow(), 1);
+        assert_eq!(pages(PageRequest::FRESH), [length, 0]);
+        assert_eq!(*source.list_reads.borrow(), 3);
     }
 }

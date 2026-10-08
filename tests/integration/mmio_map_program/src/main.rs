@@ -220,6 +220,7 @@ mod program {
         let Ok(dma) = u64::try_from(tairix_rt::dma_alloc(
             DMA_GRANT_HANDLE,
             DMA_ALLOC_LEN,
+            tairix_abi::driver::DmaReach::FULL,
             &mut device,
         )) else {
             return FAIL_DMA_ALLOC;

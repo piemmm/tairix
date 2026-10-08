@@ -143,9 +143,24 @@ pub enum VirtioError {
     MalformedCompletion,
     /// The device reported a transport-level fault on the wire.
     DeviceFault,
+    /// The host could not supply the memory a queue needs: its rings' DMA
+    /// memory or the driver's own bookkeeping for them.
+    OutOfMemory,
+    /// The host refused the driver's request for a reason of its own, such
+    /// as a capability it does not hold.
+    Host(DriverError),
 }
 
 impl VirtioError {
+    /// A host's refusal of memory the driver asked it for.
+    #[must_use]
+    pub const fn host_refused(refusal: DriverError) -> Self {
+        match refusal {
+            DriverError::OutOfMemory => Self::OutOfMemory,
+            refusal => Self::Host(refusal),
+        }
+    }
+
     /// Map a transport-level error onto the stable
     /// [`DriverError`] surface that crosses the driver-class trait
     /// boundary.
@@ -156,11 +171,69 @@ impl VirtioError {
             | Self::DeviceFault
             | Self::DescriptorTableOverflow
             | Self::MalformedCompletion => DriverError::DeviceFault,
+            Self::OutOfMemory => DriverError::OutOfMemory,
+            Self::Host(refusal) => refusal,
             Self::QueueIndexOutOfRange | Self::QueueSizeTooLarge => DriverError::OutOfRange,
             Self::QueueTooShallow => DriverError::Unsupported,
             Self::QueueFull | Self::NoCompletion => DriverError::Busy,
         }
     }
+}
+
+impl From<VirtioError> for DriverError {
+    fn from(err: VirtioError) -> Self {
+        err.as_driver_error()
+    }
+}
+
+/// What feature negotiation left a device with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Negotiated {
+    /// The features the driver took.
+    pub features: u64,
+    /// The status written, to which the driver adds [`Status::DRIVER_OK`]
+    /// once its queues are live.
+    pub status: Status,
+}
+
+/// Take the device at `transport` through reset and feature negotiation to
+/// `FEATURES_OK` (virtio 1.2 §3.1.1). `quiesced` runs once the reset
+/// confirms, so memory an earlier instance left with the device can be
+/// released; `accept` takes, from the features the device offers, those the
+/// driver implements, or refuses a device it cannot drive.
+///
+/// # Errors
+///
+/// What the reset answers — [`VirtioError::DeviceFault`] for a device whose
+/// reset never confirms — `accept`'s refusal, or
+/// [`VirtioError::FeaturesRejected`] for one that clears
+/// [`Status::FEATURES_OK`].
+pub fn negotiate<T: Transport + ?Sized, E: From<VirtioError>>(
+    transport: &mut T,
+    quiesced: impl FnOnce(),
+    accept: impl FnOnce(u64) -> Result<u64, E>,
+) -> Result<Negotiated, E> {
+    transport.reset()?;
+    quiesced();
+    let mut status = Status::default().with(Status::ACKNOWLEDGE);
+    transport.set_status(status);
+    status = status.with(Status::DRIVER);
+    transport.set_status(status);
+    let features = accept(transport.device_features())?;
+    transport.set_driver_features(features);
+    status = status.with(Status::FEATURES_OK);
+    transport.set_status(status);
+    if !transport.status().contains(Status::FEATURES_OK) {
+        return Err(VirtioError::FeaturesRejected.into());
+    }
+    Ok(Negotiated { features, status })
+}
+
+/// Where byte `i` of a configuration access at `offset` falls in a window
+/// whose device configuration starts at `base`, or [`None`] past the address
+/// space, so no offset wraps onto another register.
+pub(crate) fn config_byte(base: usize, offset: usize, i: usize) -> Option<usize> {
+    base.checked_add(offset)?.checked_add(i)
 }
 
 /// Split a 64-bit register value into the low and high `u32` halves the
@@ -256,9 +329,38 @@ pub trait Transport {
     /// `queue`.
     fn notify(&mut self, queue: u16);
 
+    /// Bytes of device-configuration area the device exposes: a read past
+    /// them answers zero and a write past them is dropped, so a driver that
+    /// relies on a field being there checks it first.
+    fn config_len(&self) -> usize;
+
     /// Read `buf.len()` bytes from the device-configuration area
     /// starting at byte `offset`.
     fn read_config(&self, offset: usize, buf: &mut [u8]);
+
+    /// The little-endian `u16` field at byte `offset` of the
+    /// device-configuration area.
+    fn read_config_u16(&self, offset: usize) -> u16 {
+        let mut bytes = [0; 2];
+        self.read_config(offset, &mut bytes);
+        u16::from_le_bytes(bytes)
+    }
+
+    /// The little-endian `u32` field at byte `offset` of the
+    /// device-configuration area.
+    fn read_config_u32(&self, offset: usize) -> u32 {
+        let mut bytes = [0; 4];
+        self.read_config(offset, &mut bytes);
+        u32::from_le_bytes(bytes)
+    }
+
+    /// The little-endian `u64` field at byte `offset` of the
+    /// device-configuration area.
+    fn read_config_u64(&self, offset: usize) -> u64 {
+        let mut bytes = [0; 8];
+        self.read_config(offset, &mut bytes);
+        u64::from_le_bytes(bytes)
+    }
 
     /// Write `data` to the device-configuration area starting at byte
     /// `offset`, one byte at a time in ascending order.

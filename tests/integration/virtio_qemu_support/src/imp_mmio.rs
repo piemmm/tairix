@@ -6,34 +6,35 @@
 //! that produces an [`MmioTransport`] and an interrupt path: build the
 //! `virt`-board virtio-MMIO bus from the published device tree, provision
 //! the transport through the `CAP_MMIO_MAP`-gated [`KernelMmioMapper`],
-//! walk the DTB for the device's interrupt source, bind it into the
+//! walk the DTB for the device's interrupt line, bind it into the
 //! IRQ table the production boot published, arm it through the
-//! boot-built PLIC controller, and park on a race-free `wfi`.
+//! boot-built controller, and park on a race-free `wfi`.
 
 use core::num::NonZeroU16;
 
-use tairix_abi::{CapabilityId, IrqHandle};
-use tairix_arch_riscv64::plic::VolatilePlicMmio;
+use tairix_abi::{CapabilityId, DmaCoherence, IrqHandle};
+use tairix_arch_api::fdtwalk::FdtPlatform;
+use tairix_arch_riscv64::platform::Riscv64Fdt;
 use tairix_arch_riscv64::{qemu_exit, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
 use tairix_fdt::Fdt;
-use tairix_kernel_irq::{IrqTable, IrqWaitAbort, IrqWaiter};
+use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, Trigger};
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
 };
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{
-    provision_virtio_mmio, KernelMmioMapper, KernelVirtioFactory, KernelVirtioFactoryConfig,
-    KernelVirtioHost,
+    first_virtio_slot, provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost,
 };
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_test_riscv64_boot::{
-    plic_controller, published_dtb, published_irq_table, published_memory_map, PlicIrqController,
+    controller, published_dtb, published_irq_table, published_memory_map,
 };
-use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
+use tairix_virtio::transport_mmio::COMPATIBLE;
+use tairix_virtio::{PoolId, VirtioHost};
 
 /// Re-export so the verticals name the concrete transport for the shared
 /// device-tail turbofish under the same name as the PCI vertical.
@@ -126,9 +127,6 @@ const MMIO_CAP_PAGES: usize = 64;
 /// lost-wake-up window without a bounding timer.
 const SSTATUS_SIE: u64 = 1 << 1;
 
-/// virtio-MMIO transport `compatible` string.
-const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
-
 // --- QEMU environment ------------------------------------------------
 
 /// riscv64 [`QemuEnv`]: serial breadcrumbs over the SBI console sink,
@@ -161,19 +159,20 @@ impl QemuEnv for MmioEnv {
 
 // --- Device-tree helpers ---------------------------------------------
 
-/// Find the PLIC interrupt source of the `virtio,mmio` slot whose `reg`
-/// base equals `slot_base` (its single `interrupts` cell).
+/// The line the `virtio,mmio` slot whose `reg` base equals `slot_base`
+/// names on the tree's controller.
 fn device_interrupt(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
+    let platform = Riscv64Fdt::from_tree(dtb);
     for node in dtb.nodes() {
         let node = node.ok()?;
-        if !node.is_compatible(VIRTIO_MMIO_COMPATIBLE) {
+        if !node.is_compatible(COMPATIBLE) {
             continue;
         }
         let reg = node.property("reg")?;
         if reg.read_be_u64(0).ok()? != slot_base {
             continue;
         }
-        return node.property("interrupts")?.read_be_u32(0).ok();
+        return platform.node_line(&node).map(|line| line.line);
     }
     None
 }
@@ -182,17 +181,16 @@ fn device_interrupt(dtb: &Fdt<'_>, slot_base: u64) -> Option<u32> {
 
 /// [`IrqWaiter`] that parks the boot hart on a race-free `wfi`.
 ///
-/// Before parking it unmasks the device's PLIC source (a prior
-/// [`IrqTable::fire`] dropped its priority to zero) so the next
-/// completion can deliver. The park itself clears `sstatus.SIE`, re-reads
+/// Before parking it re-arms the device's line (a prior [`IrqTable::fire`]
+/// masked it) so the next completion can deliver. The park itself clears `sstatus.SIE`, re-reads
 /// the line's ready flag, parks on `wfi` only if still not ready, then
 /// restores `SIE`. Clearing `SIE` makes a completion that lands between
 /// the check and the `wfi` *pending* rather than taken, so `wfi` observes
 /// it and wakes — no edge is lost and no bounding timer is needed
 /// (no unbounded sleep loop, no hack).
 struct WfiWaiter {
-    plic: &'static PlicIrqController<VolatilePlicMmio>,
-    source: u32,
+    controller: &'static (dyn IrqController + Sync),
+    line: u32,
     table: &'static IrqTable,
     handle: IrqHandle,
 }
@@ -214,9 +212,9 @@ impl IrqWaiter for WfiWaiter {
         // harness's own no-progress budget rather than by this park — which
         // is the scenario the vertical is asserting against.
         //
-        // The loop only yields when the line is not yet ready. Unmask the
-        // source so the next completion delivers.
-        let _ = self.plic.unmask(self.source);
+        // The loop only yields when the line is not yet ready. Re-arm it so
+        // the next completion delivers.
+        let _ = self.controller.rearm(self.line);
         // SAFETY: clearing `sstatus.SIE` masks interrupt *taking* (not
         // pending); `wfi` still wakes on a pending enabled interrupt;
         // restoring `SIE` lets the trap fire. The sequence is the
@@ -233,48 +231,39 @@ impl IrqWaiter for WfiWaiter {
     }
 }
 
-/// Bind this device's interrupt into the external-IRQ path the production
-/// boot pipeline already stood up, and arm the source.
-///
-/// The boot harness runs the full `boot_riscv64` pipeline before this
-/// scenario, and that pipeline builds the single-context S-mode PLIC
-/// controller from the firmware device tree, publishes the kernel
-/// [`IrqTable`], installs the S-mode external-interrupt dispatcher
-/// (claim → [`IrqTable::fire`] → complete → wake), and enables `sie.SEIE`.
-/// The set-once trap dispatch and the one-controller-per-boot rule mean the
-/// scenario must **reuse** that path, not build a second: it resolves the
-/// device's PLIC source from the device tree, binds it into the published
-/// table, and arms it through the published controller. The `wfi` waiter
-/// manages `sstatus.SIE` itself, and the loaded driver acknowledges the
-/// device-level virtio-MMIO interrupt through its transport, so no
-/// scenario-owned dispatch is needed. Any failure flips QEMU failure via
-/// `env`.
+/// Bind this device's line into the external-interrupt path the production
+/// boot stood up — its table, controller and set-once dispatch — and arm it.
+/// Any failure flips QEMU failure via `env`.
 fn arm_external_irq(
     env: &MmioEnv,
     dtb: &Fdt<'_>,
     slot_base: u64,
 ) -> (
     &'static IrqTable,
-    &'static PlicIrqController<VolatilePlicMmio>,
+    &'static (dyn IrqController + Sync),
     IrqHandle,
     u32,
 ) {
     let Some(table) = published_irq_table() else {
         env.fail("kernel IRQ table unpublished");
     };
-    let Some(controller) = plic_controller() else {
-        env.fail("kernel PLIC controller unpublished");
+    let Some(controller) = controller() else {
+        env.fail("kernel interrupt controller unpublished");
     };
-    let Some(source) = device_interrupt(dtb, slot_base) else {
+    let Some(line) = device_interrupt(dtb, slot_base) else {
         env.fail("no device interrupt in DTB");
     };
-    let Ok(bind) = table.bind(source, TASK) else {
-        env.fail("bind device source");
+    let Ok(bind) = table.bind(line, TASK) else {
+        env.fail("bind device line");
     };
-    if controller.arm(source).is_err() {
-        env.fail("arm PLIC source");
+    if controller
+        .set_trigger(line, Trigger::Level)
+        .and_then(|()| controller.rearm(line))
+        .is_err()
+    {
+        env.fail("arm device line");
     }
-    (table, controller, bind.handle, source)
+    (table, controller, bind.handle, line)
 }
 
 // --- Shared scenario -------------------------------------------------
@@ -344,27 +333,36 @@ where
     };
     let (transport, slot_base) = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
-        let Ok(prov) = provision_virtio_mmio(&bus, device_id, &mapper, MmioTransport::new) else {
+        let slot = first_virtio_slot(&bus, device_id);
+        let Ok(prov) = slot.and_then(|slot| {
+            provision_virtio_mmio(&bus, device_id, slot, &mapper, MmioTransport::new)
+        }) else {
             env.fail("virtio-MMIO provisioning walk");
         };
         (prov.transport, prov.base)
     };
     env.log("virtio-qemu: MMIO transport provisioned");
 
-    // 5. Bind + arm this device's interrupt in the boot-published PLIC
+    // 5. Bind + arm this device's interrupt in the boot-published
     //    path (the production dispatch is already installed).
-    let (table, controller, handle, source) = arm_external_irq(&env, &dtb, slot_base);
-    env.log("virtio-qemu: PLIC source armed on the published table");
+    let (table, controller, handle, line) = arm_external_irq(&env, &dtb, slot_base);
+    env.log("virtio-qemu: device line armed on the published table");
 
     // 6. Mint the per-device DMA host the driver allocates through.
     let space = AddressSpace::new(HostPageTable::new());
-    let Ok(pool) = DmaPool::new(space, VirtAddr::new(POOL_VBASE), POOL_PAGES, &frames, &phys)
-    else {
+    let Ok(pool) = DmaPool::new(
+        space,
+        VirtAddr::new(POOL_VBASE),
+        POOL_PAGES,
+        &frames,
+        &phys,
+        DmaCoherence::Snooped,
+    ) else {
         env.fail("DMA pool construct");
     };
     let waiter = WfiWaiter {
-        plic: controller,
-        source,
+        controller,
+        line,
         table,
         handle,
     };
@@ -378,24 +376,8 @@ where
         &waiter,
     );
 
-    // 7. Mint the per-driver factory, then drive the shared lifecycle
-    //    with `body` against the reloaded driver.
-    let factory = KernelVirtioFactory::new(
-        KernelVirtioFactoryConfig {
-            frames: &frames,
-            phys: &phys,
-            caller: &caller,
-            audit: &SERIAL_SINK,
-            irq: table,
-            irq_handle: handle,
-            waiter: &waiter,
-            pool_base: VirtAddr::new(POOL_VBASE),
-            pool_pages: POOL_PAGES,
-        },
-        HostPageTable::new,
-    );
-    let factory: &dyn VirtioHostFactory = &factory;
-    drive_driver_lifecycle(&env, cfg, factory, transport, &vhost, body)
+    // 7. Drive the shared lifecycle with `body` against the reloaded driver.
+    drive_driver_lifecycle(&env, cfg, transport, &vhost, body)
 }
 
 // --- Boot harness ----------------------------------------------------

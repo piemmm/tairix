@@ -607,7 +607,9 @@ earlier assumption that QEMU `virt` was `Unsupported`; it was never measured).
 A two-Security-state GIC (QEMU `virt,secure=on`, or a real Pi 4 GIC-400 whose
 Group 0 belongs to the secure world) returns `Unsupported`, and the debug
 image falls back to the complete cross-CPU buddy detector with no broken
-channel (fail closed).
+channel (fail closed). A GICv3 is asked first (`GICD_CTLR.DS`), before any
+Group 0 system register is touched, since firmware owning Group 0 traps those
+accesses from non-secure EL1.
 
 **B3 — QEMU masked-section vertical — DONE.** `tests/integration/
 fiq_selfsample_qemu_aarch64` (enrolled in `cargo xtask test --qemu`) boots the

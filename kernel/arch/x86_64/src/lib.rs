@@ -116,6 +116,7 @@ pub mod coreclock;
 /// `tairix-arch-api` dependency this module's traits live in.
 #[cfg(feature = "sched-arch")]
 pub mod cpufeatures;
+pub mod cpumap;
 /// Boot-CPU model-name discovery: the CPUID processor brand string
 /// (leaves `0x8000_0002..=0x8000_0004`) the boot facts report.
 pub mod cpuname;
@@ -250,6 +251,7 @@ pub mod uaccess;
 /// neither this module nor the dependency.
 #[cfg(feature = "sched-arch")]
 pub mod userentry;
+pub mod viot;
 /// Per-task extended register state (x87/MMX, the YMM and ZMM upper halves,
 /// the AVX-512 opmask): the per-CPU XSAVE setup, the area at the top of each
 /// user task's kernel stack, and the park, resume and return-to-ring-3 moves.
@@ -283,3 +285,9 @@ pub(crate) fn interrupts_default_isr_addr() -> u64 {
 /// Re-exported as a `const` so test binaries can include their own
 /// regression test that the value never drifts from the multiboot2 spec.
 pub const MULTIBOOT2_BOOTLOADER_MAGIC: u32 = 0x36D7_6289;
+
+/// How every x86 DMA master's accesses meet the CPU's caches: the
+/// architecture keeps device accesses coherent with them, and a PCI Express
+/// function masters only once it may not ask for No Snoop requests
+/// (`tairix_pci::Pci::set_bus_master`).
+pub const DMA_COHERENCE: tairix_abi::DmaCoherence = tairix_abi::DmaCoherence::Snooped;

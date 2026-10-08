@@ -2,10 +2,10 @@
 //! run on. Built only for tests, behind the crate's `mock` feature.
 
 use super::{CompletionSignal, DmaHost, VirtioHost};
-use crate::dma::{DmaSlab, PoolId};
+use crate::dma::{DmaSlab, PoolId, SlabEnd};
 use crate::transport::MockTransport;
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -18,13 +18,15 @@ use tairix_abi::DriverError;
 /// In-process [`VirtioHost`] the unit tests of this crate and of every virtio
 /// driver run against.
 ///
-/// DMA comes from leaked boxes. A slab's device address is its CPU address
-/// with a tag no CPU pointer carries, and the mock device reaches memory only
-/// through such an address, so a driver that hands its device a CPU pointer —
-/// or dereferences a device address — fails its tests rather than passing
-/// them. A slab's drop only records the release, and whether the slab came
-/// back zeroed (see [`Self::slabs_outstanding`] and
-/// [`Self::released_zeroed`]).
+/// A slab's device address is its CPU address with a tag no CPU pointer
+/// carries, and a device that [reaches](MockTransport::reach) the host's
+/// memory finds a slab only by such an address, so a driver that hands its
+/// device a CPU pointer — or dereferences a device address — fails its tests
+/// rather than passing them. A slab's drop only records the release, and
+/// whether the slab came back zeroed (see [`Self::slabs_outstanding`] and
+/// [`Self::released_zeroed`]); its bytes stay reachable by device address
+/// until the host is gone. The host and the slab each hold a count of the
+/// slab's storage, so whichever goes last frees it.
 ///
 /// A wait plays the next [`MockWait`] a test [scripted](Self::script_waits),
 /// else the host's standing one ([`MockWait::Answer`] unless built
@@ -36,13 +38,116 @@ pub struct MockHost {
     notify_log: RefCell<Vec<u16>>,
     bytes_allocated: Cell<usize>,
     quiesced: Cell<usize>,
-    /// What became of each slab minted so far, indexed by slot.
-    slabs: RefCell<Vec<Arc<AtomicU8>>>,
     clock_ns: Cell<u64>,
     clock_reads: Cell<usize>,
     script: RefCell<VecDeque<MockWait>>,
     standing: MockWait,
     device: RefCell<Option<Rc<RefCell<MockTransport>>>>,
+    memory: Rc<MockMemory>,
+    /// No allocation succeeds: a host with no DMA memory left.
+    exhausted: bool,
+}
+
+/// The memory a [`MockHost`] handed out: each slab's storage by slot, found
+/// by device address and reached through the slab's own pointer, so a device
+/// access keeps the provenance the driver's has.
+#[derive(Default)]
+pub(crate) struct MockMemory {
+    slots: RefCell<Vec<Arc<Storage>>>,
+    by_device: RefCell<BTreeMap<u64, usize>>,
+}
+
+/// One slab's bytes and what became of it, freed once neither the host's
+/// memory nor the slab holds a count of it.
+struct Storage {
+    base: NonNull<u8>,
+    len: usize,
+    fate: AtomicU8,
+}
+
+// SAFETY: the bytes are reached by the one slab holding them, or by device
+// address on the host's own thread; the record is atomic, and the allocation
+// may be freed on any thread.
+unsafe impl Send for Storage {}
+// SAFETY: as above.
+unsafe impl Sync for Storage {}
+
+impl Storage {
+    /// Whether every byte is zero.
+    fn zeroed(&self) -> bool {
+        // SAFETY: `base` covers `len` initialised bytes, alive while this
+        // count is held, and the slab handing them back borrows them no more.
+        let bytes = unsafe { core::slice::from_raw_parts(self.base.as_ptr(), self.len) };
+        bytes.iter().all(|byte| *byte == 0)
+    }
+}
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        let storage = core::ptr::slice_from_raw_parts_mut(self.base.as_ptr(), self.len);
+        // SAFETY: `base` is the pointer `Box::leak` gave for exactly `len`
+        // bytes, freed once, by the last count's drop.
+        drop(unsafe { Box::from_raw(storage) });
+    }
+}
+
+/// A slab just minted: where the device and the CPU find it, its slot, and
+/// the count of its storage it holds.
+struct Mint {
+    device: u64,
+    cpu: NonNull<u8>,
+    slot: usize,
+    storage: *const Storage,
+}
+
+impl MockMemory {
+    /// The `len` bytes at device address `device`, or [`None`] unless they lie
+    /// wholly inside one slab the host handed out: a device reaching past its
+    /// buffer finds nothing, as one confined by a translation unit does.
+    pub(crate) fn view(&self, device: u64, len: usize) -> Option<*mut u8> {
+        let (&start, &slot) = self.by_device.borrow().range(..=device).next_back()?;
+        let slots = self.slots.borrow();
+        let storage = slots.get(slot)?;
+        let offset = usize::try_from(device - start).ok()?;
+        if offset.checked_add(len)? > storage.len {
+            return None;
+        }
+        Some(storage.base.as_ptr().wrapping_add(offset))
+    }
+
+    /// Mint `len` zeroed bytes.
+    fn mint(&self, len: usize) -> Result<Mint, DriverError> {
+        let bytes: Box<[u8]> = alloc::vec![0u8; len].into_boxed_slice();
+        let cpu = u64::try_from(bytes.as_ptr().addr()).map_err(|_| DriverError::OutOfRange)?;
+        if cpu & DEVICE_TAG != 0 {
+            return Err(DriverError::OutOfRange);
+        }
+        let device = cpu | DEVICE_TAG;
+        let base = NonNull::from(Box::leak(bytes)).cast::<u8>();
+        let storage = Arc::new(Storage {
+            base,
+            len,
+            fate: AtomicU8::new(HELD),
+        });
+        let held = Arc::into_raw(Arc::clone(&storage));
+        let mut slots = self.slots.borrow_mut();
+        let slot = slots.len();
+        slots.push(storage);
+        self.by_device.borrow_mut().insert(device, slot);
+        Ok(Mint {
+            device,
+            cpu: base,
+            slot,
+            storage: held,
+        })
+    }
+
+    fn fate(&self, slot: usize) -> Option<u8> {
+        self.slots
+            .borrow()
+            .get(slot)
+            .map(|storage| storage.fate.load(Ordering::Relaxed))
+    }
 }
 
 /// How one [`MockHost`] wait plays out.
@@ -80,27 +185,29 @@ const RELEASED_ZEROED: u8 = 1;
 /// A slab released still holding data.
 const RELEASED_DIRTY: u8 = 2;
 
-/// Records one mock slab's release and whether it came back zeroed. Each slab
-/// owns one strong count of its record, so the record stays valid however
-/// long the slab outlives its host.
+/// Records one mock slab's end, and whether a released one came back
+/// zeroed, then gives up the slab's count of its storage.
 ///
 /// # Safety
 ///
-/// `fate` is the pointer [`Arc::into_raw`] minted for this slab alone, and
-/// `cpu`/`len` are the storage the slab was minted over.
-unsafe fn record_mock_release(fate: *const (), cpu: NonNull<u8>, _slot: usize, len: usize) {
-    // SAFETY: the caller passes the slab's own `into_raw` pointer, and a
-    // slab's drop runs once, so this consumes the count exactly once.
-    let fate = unsafe { Arc::from_raw(fate.cast::<AtomicU8>()) };
-    // SAFETY: the storage is a leaked, initialised `len`-byte allocation, and
-    // the slab handing it back holds no borrow of it any more.
-    let bytes = unsafe { core::slice::from_raw_parts(cpu.as_ptr(), len) };
-    let outcome = if bytes.iter().all(|b| *b == 0) {
-        RELEASED_ZEROED
-    } else {
-        RELEASED_DIRTY
-    };
-    fate.store(outcome, Ordering::Relaxed);
+/// `storage` is the count [`MockMemory::mint`] gave the slab, taken back once.
+unsafe fn record_mock_release(
+    storage: *const (),
+    _cpu: NonNull<u8>,
+    _slot: usize,
+    _len: usize,
+    end: SlabEnd,
+) {
+    // SAFETY: the slab's own count, and a slab's drop runs once.
+    let storage = unsafe { Arc::from_raw(storage.cast::<Storage>()) };
+    if end == SlabEnd::Released {
+        let outcome = if storage.zeroed() {
+            RELEASED_ZEROED
+        } else {
+            RELEASED_DIRTY
+        };
+        storage.fate.store(outcome, Ordering::Relaxed);
+    }
 }
 
 impl MockHost {
@@ -117,24 +224,40 @@ impl MockHost {
         Self::with_standing(MockWait::Silent)
     }
 
+    /// A host with no DMA memory left to hand out.
+    #[must_use]
+    pub fn exhausted() -> Self {
+        Self {
+            exhausted: true,
+            ..Self::default()
+        }
+    }
+
     fn with_standing(standing: MockWait) -> Self {
         Self {
             notify_log: RefCell::new(Vec::new()),
             bytes_allocated: Cell::new(0),
             quiesced: Cell::new(0),
-            slabs: RefCell::new(Vec::new()),
             clock_ns: Cell::new(0),
             clock_reads: Cell::new(0),
             script: RefCell::new(VecDeque::new()),
             standing,
             device: RefCell::new(None),
+            memory: Rc::new(MockMemory::default()),
+            exhausted: false,
         }
     }
 
     /// Answer waits by draining `device`, the mock the driver under test
-    /// drives through its own handle.
+    /// drives through its own handle, which reaches this host's memory.
     pub fn attach(&self, device: &Rc<RefCell<MockTransport>>) {
+        device.borrow_mut().reach(self);
         *self.device.borrow_mut() = Some(Rc::clone(device));
+    }
+
+    /// The memory this host hands out, as its device reaches it.
+    pub(crate) fn memory(&self) -> Rc<MockMemory> {
+        Rc::clone(&self.memory)
     }
 
     /// Play `waits`, in order, for the next waits.
@@ -164,11 +287,8 @@ impl MockHost {
         self.notify_log.borrow().clone()
     }
 
-    /// Total number of bytes ever handed out by this host.
-    ///
-    /// Because the test mock leaks its backing allocations for the
-    /// lifetime of the unit-test process (see
-    /// [`Self::alloc_dma_zeroed`]) this counter is monotonic.
+    /// Total number of bytes ever handed out by this host: it keeps every
+    /// allocation until it is dropped, so the counter only grows.
     #[must_use]
     pub fn bytes_allocated(&self) -> usize {
         self.bytes_allocated.get()
@@ -184,10 +304,11 @@ impl MockHost {
     /// still holds, or deliberately withheld from a device it could not stop.
     #[must_use]
     pub fn slabs_outstanding(&self) -> usize {
-        self.slabs
+        self.memory
+            .slots
             .borrow()
             .iter()
-            .filter(|fate| fate.load(Ordering::Relaxed) == HELD)
+            .filter(|storage| storage.fate.load(Ordering::Relaxed) == HELD)
             .count()
     }
 
@@ -195,10 +316,7 @@ impl MockHost {
     /// zero, as memory that carried a secret must be.
     #[must_use]
     pub fn released_zeroed(&self, slot: usize) -> bool {
-        self.slabs
-            .borrow()
-            .get(slot)
-            .is_some_and(|fate| fate.load(Ordering::Relaxed) == RELEASED_ZEROED)
+        self.memory.fate(slot) == Some(RELEASED_ZEROED)
     }
 }
 
@@ -208,23 +326,16 @@ impl MockHost {
 /// of a device address faults.
 const DEVICE_TAG: u64 = 1 << 55;
 
-/// The memory behind `device`, a device address the mock handed out, or
-/// [`None`] for one it never did.
-pub(crate) fn device_view(device: u64) -> Option<*mut u8> {
-    if device & DEVICE_TAG == 0 {
-        return None;
-    }
-    let address = usize::try_from(device & !DEVICE_TAG).ok()?;
-    Some(core::ptr::with_exposed_provenance_mut(address))
-}
-
 impl DmaHost for MockHost {
-    /// Hand out a zeroed [`DmaSlab`] backed by a leaked `Box<[u8]>`, so the
-    /// slab carries its pointer with no borrow; the 64 MiB cap bounds what a
-    /// test can leak.
+    /// Hand out a zeroed [`DmaSlab`] over memory the host owns, so the slab
+    /// carries its pointer with no borrow; the 64 MiB cap bounds what one
+    /// test can hold.
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
         if size == 0 {
             return Err(DriverError::BufferTooSmall);
+        }
+        if self.exhausted {
+            return Err(DriverError::OutOfMemory);
         }
         // 64 MiB pool cap is far above the Stage-4 unit-test budget;
         // exceeding it signals a runaway test rather than real
@@ -234,33 +345,21 @@ impl DmaHost for MockHost {
             return Err(DriverError::LengthOutOfRange);
         };
         if bytes_after > 64 * 1024 * 1024 {
-            return Err(DriverError::LengthOutOfRange);
+            return Err(DriverError::OutOfMemory);
         }
-        let storage: Box<[u8]> = alloc::vec![0u8; size].into_boxed_slice();
-        let ptr = NonNull::from(Box::leak(storage)).cast::<u8>();
-        // Exposed after the leak, which invalidates any pointer taken before
-        // it: the device reaches the bytes by this address.
-        let cpu = ptr.as_ptr().expose_provenance() as u64;
-        if cpu & DEVICE_TAG != 0 {
-            return Err(DriverError::OutOfRange);
-        }
-        let device = cpu | DEVICE_TAG;
-        let fate = Arc::new(AtomicU8::new(HELD));
-        let slot = self.slabs.borrow().len();
-        self.slabs.borrow_mut().push(Arc::clone(&fate));
+        let mint = self.memory.mint(size)?;
         self.bytes_allocated.set(bytes_after);
-        let fate = Arc::into_raw(fate).cast::<()>();
-        // SAFETY: `ptr` is the only handle on a leaked, `'static` allocation
-        // of exactly `size` bytes, so the slab owns it alone. `fate` is the
-        // slab's own strong count, which `record_mock_release` consumes.
+        // SAFETY: `mint.cpu` is the only CPU handle on `size` bytes kept alive
+        // by the count `mint.storage` the slab holds, so the slab owns them
+        // alone; `record_mock_release` takes that count back once.
         Ok(unsafe {
             DmaSlab::from_pool(
-                device,
-                ptr,
+                mint.device,
+                mint.cpu,
                 size,
                 PoolId::MOCK,
-                slot,
-                fate,
+                mint.slot,
+                mint.storage.cast::<()>(),
                 record_mock_release,
             )
         })
@@ -416,20 +515,57 @@ mod tests {
         assert_ne!(a.slot(), c.slot());
     }
 
+    /// A slab is released once, and one withheld from a device the driver
+    /// could not stop is never released, though the host frees its bytes.
     #[test]
-    fn a_mock_slab_counts_its_release_once_even_past_its_host() {
+    fn a_withheld_slab_is_never_released_and_the_host_frees_it() {
         let host = MockHost::new();
         let kept = host.alloc_dma_zeroed(8).unwrap();
         let dropped = host.alloc_dma_zeroed(8).unwrap();
-        let withheld = host.alloc_dma_zeroed(8).unwrap();
+        let mut withheld = host.alloc_dma_zeroed(8).unwrap();
         assert_eq!(host.slabs_outstanding(), 3);
         drop(dropped);
-        core::mem::forget(withheld);
+        withheld.withhold();
+        drop(withheld);
         assert_eq!(host.slabs_outstanding(), 2);
-        drop(host);
-        // Each slab owns a count of its own record, so a release after its
-        // host is gone is still sound.
         drop(kept);
+        assert_eq!(host.slabs_outstanding(), 1, "the withheld one");
+        drop(host);
+    }
+
+    /// A slab holds a count of its own storage, so dropping its host first
+    /// leaves the slab's bytes and its release sound.
+    #[test]
+    fn a_mock_slab_counts_its_release_once_even_past_its_host() {
+        let host = MockHost::new();
+        let mut outlives = host.alloc_dma_zeroed(8).unwrap();
+        let mut withheld = host.alloc_dma_zeroed(8).unwrap();
+        withheld.withhold();
+        drop(host);
+        outlives.as_bytes_mut()[7] = 0x5A;
+        assert_eq!(outlives.as_bytes()[7], 0x5A);
+        drop(outlives);
+        drop(withheld);
+    }
+
+    /// A device finds only the bytes of one slab: an extent running past its
+    /// slab, or an address no slab was minted at, is nothing.
+    #[test]
+    fn a_device_reaches_only_within_one_slab() {
+        let host = MockHost::new();
+        let slab = host.alloc_dma_zeroed(16).unwrap();
+        let memory = host.memory();
+        let base = slab.device_addr();
+        assert!(memory.view(base, 16).is_some());
+        assert!(memory.view(base + 8, 8).is_some());
+        assert!(
+            memory.view(base + 16, 0).is_some(),
+            "one past its end, empty"
+        );
+        assert!(memory.view(base + 8, 9).is_none(), "past its end");
+        assert!(memory.view(base - 1, 1).is_none(), "before it");
+        let cpu = u64::try_from(slab.as_bytes().as_ptr().addr()).unwrap();
+        assert!(memory.view(cpu, 1).is_none(), "a CPU address");
     }
 
     #[test]

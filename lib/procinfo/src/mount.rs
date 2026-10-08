@@ -10,11 +10,10 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::driver::filesystem::MountFlags;
-use tairix_abi::sysinfo::{MountListRequest, MountRecord, SysinfoQueryId};
+use tairix_abi::sysinfo::{MountRecord, SysinfoQueryId};
 use tairix_abi::Errno;
 
-use crate::list::{field_lossy, walk_pages, ListError, WalkStep};
-use crate::request::CallError;
+use crate::list::{field_lossy, walk_records, ListError, WalkStep};
 use crate::transport::Transport;
 use crate::volume::availability_marker;
 
@@ -50,27 +49,15 @@ pub const MOUNT_PAGE: u16 = tairix_abi::reply_page(MountRecord::WIRE_LEN);
 ///   walk stops at that record.
 pub fn for_each_mount(
     transport: &dyn Transport,
-    mut sink: impl FnMut(&MountRecord) -> Result<WalkStep, Errno>,
+    sink: impl FnMut(&MountRecord) -> Result<WalkStep, Errno>,
 ) -> Result<(), ListError> {
-    walk_pages(
+    walk_records(
         transport,
         SysinfoQueryId::MOUNT_LIST,
         MountRecord::WIRE_LEN,
         MOUNT_PAGE,
-        |offset, limit| {
-            MountListRequest {
-                offset,
-                limit,
-                flags: 0,
-            }
-            .to_le_bytes()
-            .to_vec()
-        },
-        |chunk| {
-            let record = MountRecord::from_bytes(chunk)
-                .map_err(|errno| ListError::Call(CallError::Service(errno)))?;
-            sink(&record).map_err(ListError::Sink)
-        },
+        MountRecord::from_bytes,
+        sink,
     )
 }
 
@@ -134,7 +121,7 @@ mod tests {
     use tairix_abi::blkio::BlkDeviceClass;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountListRequest, MountRecord, MountVolumeState, SysinfoQueryId,
+        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
         SysinfoRequestHeader,
     };
     use tairix_abi::Errno;
@@ -166,7 +153,7 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = MountListRequest::from_bytes(payload)?;
+            let req = PageRequest::from_bytes(payload)?;
             let offset = req.offset as usize;
             if offset >= self.records.len() {
                 return Ok(Vec::new());

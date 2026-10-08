@@ -273,12 +273,14 @@ impl<K: RangeKey, V> RangeMap<K, V> {
     }
 
     /// The lowest start inside `within` where `count` free elements fit,
-    /// first-fit over the gaps between held ranges.
+    /// first-fit over the gaps between held ranges: where [`Self::place`]
+    /// would put them, asked without placing them.
     ///
     /// Costs one pass over the ranges intersecting `within`, so a window's
     /// placement scales with what it has handed out rather than with how
     /// large the window is.
-    fn first_free(&self, within: Range<K>, count: u64) -> Option<K> {
+    #[must_use]
+    pub fn first_free(&self, within: Range<K>, count: u64) -> Option<K> {
         if count == 0 {
             return None;
         }

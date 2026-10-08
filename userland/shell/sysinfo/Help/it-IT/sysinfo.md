@@ -66,6 +66,17 @@ Le interrogazioni:
   il suo ruolo (candidate/held/in-sync/resyncing/faulted), la sua
   dimensione e la generazione di metadati che porta (richiede
   `CAP_SYSINFO_HW`).
+- `dma`, `iommu` — le unità di traduzione DMA: una riga per unità — il suo
+  nodo nell'albero hardware, la sua famiglia, se traduce o perché no, come
+  segnala i suoi errori, dove risiedono le sue traduzioni, i proprietari e i
+  flussi del firmware che detiene, e i suoi errori registrati e scartati, e
+  i flussi che una tempesta ha silenziato, dall'avvio — poi una riga per
+  gruppo di isolamento detenuto da un proprietario — la sua unità, il nodo e
+  la generazione del detentore e lo stato di quel proprietario — poi una
+  riga per nodo che un'unità traduce per un proprietario — la sua unità e il
+  suo gruppo, la generazione e lo stato del suo proprietario, i suoi flussi,
+  e le mappature del suo dominio con i byte che coprono (richiede
+  `CAP_SYSINFO_HW`).
 - `show <resource-ref>` — legge un riferimento a risorsa
   `info:`/`state:`/`stats:` e stampa il suo valore. Quegli spazi dei nomi
   servono valori tipizzati tramite questa API, mai flussi di byte: `cat` non

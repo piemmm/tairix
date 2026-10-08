@@ -548,19 +548,21 @@ HAL *modules* compile). Docs:
 #### Stage W5b-4 — coherent-DMA page attribute (`PageFlags::DMA_COHERENT`)
 
 The MMU HAL `PageFlags` set carries a `DMA_COHERENT` attribute for a buffer
-shared with a DMA-capable device that must stay coherent without per-access
-cache maintenance — distinct from `DEVICE` (a DMA buffer holds ring/context
-structures the driver accesses with ordinary, possibly unaligned, loads and
-stores, which Device-nGnRE memory forbids). The kernel DMA carve
-(`kernel/mem::dma`) maps the device-shared buffer with it, so the buffer is
-coherent by construction and a user-space driver needs no EL0 cache
-maintenance (which is disabled — SCTLR_EL1.UCI clear) and stays arch-neutral
-(§2.20). Per-port leaf: **aarch64** maps it **Normal Non-Cacheable** (a new
-`MAIR_EL1` attribute index 2 = `0x44`, `el0_dma_coherent_leaf_attrs`); on a
-non-I/O-coherent platform (the BCM2711 PCIe root complex, which does not snoop
-the CPU caches) this is what makes a descriptor the driver writes visible to
-the controller. **x86_64 / riscv64** are I/O-coherent, so they ignore the bit
-and map ordinary cacheable RAM; **wasm32** has no page table (n/a). Decoded
+shared with a DMA master that does not snoop the CPU's caches, which must
+stay coherent without per-access cache maintenance — distinct from `DEVICE`
+(a DMA buffer holds ring/context structures the driver accesses with
+ordinary, possibly unaligned, loads and stores, which Device-nGnRE memory
+forbids). Whether a master snoops is a discovered fact on its `Dma` grant
+(`HwResource::dma_coherence`); the kernel DMA carve (`kernel/mem::dma`) maps
+an unsnooped device's buffer with the attribute, so the buffer is coherent by
+construction and a user-space driver needs no EL0 cache maintenance (which is
+disabled — SCTLR_EL1.UCI clear) and stays arch-neutral (§2.20), and maps a
+snooping device's buffer as ordinary RAM. Per-port leaf: **aarch64** maps it
+**Normal Non-Cacheable** (`MAIR_EL1` attribute index 2 = `0x44`,
+`el0_dma_coherent_leaf_attrs`). **riscv64** (Sv39 states no memory type) and
+**x86_64** (every master snoops) refuse it with `MapError::Unsupported`, so a
+device that does not snoop is refused DMA rather than handed cached memory;
+**wasm32** has no page table (n/a). Decoded
 back through `page_flags_from_leaf` (the [4:2] attr-index field distinguishes
 Normal-WB / Device / Normal-NC). Host-proven by the aarch64 `paging_tests`
 (`mair_pairs_normal_device_and_normal_nc`,
@@ -1144,11 +1146,11 @@ DTB-embedding device verticals had grown.
   test-environment knowledge on par with the fixed two-core MPIDR layout,
   exactly as their module docs state — and the production discovery path
   (`fdt::psci_method`) stays host-tested + conformance-gated (W1).
-- **§2.2 consolidation that did land.** The four aarch64 device build
-  scripts had four byte-identical `dump_virt_dtb` copies. They now reuse a
-  single build-glue helper, `tairix_itest_harness::dump_aarch64_virt_dtb`
-  (with the unit-testable `dump_virt_dtb_args`), so the
-  `qemu ... dumpdtb` invocation lives in one audited place.
+- **One `dumpdtb` path.** An aarch64 vertical's device-tree fixture comes
+  from the harness (`tairix_itest_harness::aarch64_virt_guest_build` and its
+  siblings, over the unit-testable `dump_virt_dtb_args`), whatever else its
+  build script composes, so the `qemu ... dumpdtb` invocation and the
+  fixture it writes live in one audited place.
 - **Trimmed embed (image size).** `dumpdtb` pads the blob to the
   machine's 1 MiB device-tree region; `trim_fdt_to_extent` now trims it to
   the extent its FDT header describes and rewrites `totalsize`, so each

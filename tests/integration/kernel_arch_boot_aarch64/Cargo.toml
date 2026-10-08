@@ -29,6 +29,10 @@ workspace = true
 name = "tairix-test-kernel-arch-boot-aarch64"
 path = "src/main.rs"
 
+[[bin]]
+name = "tairix-test-kernel-arch-boot-gicv3-aarch64"
+path = "src/gicv3.rs"
+
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }

@@ -9,6 +9,7 @@
 //! Reference: Intel Virtualization Technology for Directed I/O, Architecture
 //! Specification, rev. 4.1, chapter 8.
 
+use crate::acpi::unit_dma;
 use tairix_abi::{
     HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuReservedWindow, ReservedAccess,
     HW_NODE_ROOT_ID,
@@ -617,6 +618,7 @@ pub fn emit_unit_nodes<'w>(
             .and_then(|()| {
                 node.push_resource(HwResource::mmio(unit.register_base(), unit.register_len()))
             })
+            .and_then(|()| node.push_resource(unit_dma()))
             .map_err(|_| DiscoveryError::MalformedSource)?;
         if let Some(fabric) = fabric(unit.segment()) {
             keep_windows(

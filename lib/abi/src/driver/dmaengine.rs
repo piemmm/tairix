@@ -371,7 +371,8 @@ pub enum DmaEngineRequest {
         /// The channel.
         channel: u8,
     },
-    /// Abort `channel`'s chain and reset the channel.
+    /// Abort `channel`'s chain and reset the channel. A channel that will not
+    /// reset is answered `DeviceFault`: its buffer may still be written.
     Stop {
         /// The channel.
         channel: u8,
@@ -763,7 +764,7 @@ pub fn decode_wait_reply(bytes: &[u8]) -> Result<WaitReport, Errno> {
         (WaitEnd::STOPPED, None) => WaitEnd::Stopped,
         (WaitEnd::FAULTED, Some(bits)) => WaitEnd::Faulted(bits),
         (WaitEnd::BOUNDARY | WaitEnd::STOPPED | WaitEnd::FAULTED, _) => {
-            return Err(Errno::BadMagic)
+            return Err(Errno::BadMagic);
         }
         _ => return Err(Errno::OutOfRange),
     };

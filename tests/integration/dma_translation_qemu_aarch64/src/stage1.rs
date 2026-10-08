@@ -8,10 +8,18 @@
 #[cfg(itest_aarch64)]
 mod vertical;
 
-/// The stage the run proves: the only stage the unit offers.
+/// Where the run proves the unit keeps its translations: the tables of the
+/// only stage it offers.
 #[cfg(itest_aarch64)]
-const STAGE: tairix_itest_translation_witness::Stage =
-    tairix_itest_translation_witness::Stage::First;
+const TABLES: tairix_itest_translation_witness::Tables =
+    tairix_itest_translation_witness::Tables::Walked(
+        tairix_itest_translation_witness::Stage::First,
+    );
+
+/// How the board's interrupts arrive: on the GICv2's wired lines.
+#[cfg(itest_aarch64)]
+const INTERRUPTS: tairix_itest_translation_witness::Interrupts =
+    tairix_itest_translation_witness::Interrupts::Wired;
 
 #[cfg(itest_aarch64)]
 mod tree {

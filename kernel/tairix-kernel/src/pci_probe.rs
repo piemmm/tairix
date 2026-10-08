@@ -6,6 +6,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{PciAddress, PciBus, BUS_MASTER_ENABLE, COMMAND_OFFSET};
@@ -295,7 +296,11 @@ fn identity(
 /// PCI above it, which tags them with its secondary bus; or the topmost
 /// conventional bridge's own id — Linux's `set_msi_sid`, without
 /// device-specific aliases.
-fn interrupt_source(topology: &Topology, index: usize, firmware: Option<u16>) -> InterruptSource {
+pub(crate) fn interrupt_source(
+    topology: &Topology,
+    index: usize,
+    firmware: Option<u16>,
+) -> InterruptSource {
     if let Some(alias) = firmware {
         return InterruptSource::Requester(alias);
     }
@@ -479,6 +484,42 @@ pub trait UnitTopology {
     fn contested(&self, segment: u16, unit: u32, stream: u32) -> bool;
 }
 
+/// The units a malformed firmware table described: there may be units on
+/// any segment, and none can be read, so every segment's translation is
+/// undescribed and no function on it is published.
+pub struct Undescribed;
+
+impl UnitTopology for Undescribed {
+    fn covers(&self, _segment: u16) -> bool {
+        true
+    }
+
+    fn emit(
+        &mut self,
+        _walks: &[(u16, &Topology)],
+        _sink: &mut dyn HwNodeSink,
+        _log: &dyn Sink,
+    ) -> Result<(), Unconfined> {
+        Ok(())
+    }
+
+    fn strands(&self, _segment: u16) -> bool {
+        true
+    }
+
+    fn stream(&self, _segment: u16, _walk: &Topology, _requester: u16) -> Option<(u32, u32)> {
+        None
+    }
+
+    fn firmware_alias(&self, _segment: u16, _requester: u16) -> Option<u16> {
+        None
+    }
+
+    fn contested(&self, _segment: u16, _unit: u32, _stream: u32) -> bool {
+        false
+    }
+}
+
 /// One segment's view of the units, as [`SegmentDma`] reads it.
 struct SegmentStreams<'u> {
     units: &'u dyn UnitTopology,
@@ -619,31 +660,28 @@ pub fn probe(
             "dma translation units undiscovered; none published",
         );
     }
+    let none = FirmwareWindows(Vec::new());
+    let windows = described.as_ref().unwrap_or(&none);
     for (ordinal, (segment, walk)) in segments.into_iter().zip(&walks).enumerate() {
         let covered = units.covers(segment.number);
-        let probed = match walk {
-            Some(_) if covered && described.is_err() => Err(Unconfined),
+        let (probed, decoded) = match walk {
+            Some(_) if covered && described.is_err() => (Err(Unconfined), Vec::new()),
             Some(_) if units.strands(segment.number) => {
                 log_discovery(
                     log,
                     Level::Error,
                     "segment's dma translation undescribed; none published",
                 );
-                Err(Unconfined)
+                (Err(Unconfined), Vec::new())
             }
             Some(topology) => {
-                let at = PciSegment {
-                    number: segment.number,
-                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                };
-                let none = FirmwareWindows(Vec::new());
                 let translation = Translation {
                     units: &*units,
-                    windows: described.as_ref().unwrap_or(&none),
+                    windows,
                 };
-                probe_segment(&*segment.bus, at, topology, translation, publish, sink, log)
+                probe_walked(&segment, ordinal, topology, translation, publish, sink, log)
             }
-            None => Err(Unconfined),
+            None => (Err(Unconfined), Vec::new()),
         };
         let bridges = match (&probed, walk) {
             (Ok(_), Some(topology)) => bridges_of(topology).unwrap_or_else(|| {
@@ -665,14 +703,35 @@ pub fn probe(
             );
             Vec::new()
         });
-        owned.push(HostSegment::new(
-            segment.number,
-            segment.bus,
-            functions,
-            bridges,
-        ));
+        owned.push(
+            HostSegment::new(segment.number, segment.bus, functions, bridges).decoding(decoded),
+        );
     }
     owned
+}
+
+/// Probe `segment`, the `ordinal`th, over its `topology`: what
+/// [`probe_segment`] publishes of it, and the windows its bridges decode,
+/// where a translated device's IOVA must not land.
+fn probe_walked(
+    segment: &ProbeSegment,
+    ordinal: usize,
+    topology: &Topology,
+    translation: Translation<'_>,
+    publish: Publish<'_>,
+    sink: &mut CollectingHwNodeSink,
+    log: &dyn Sink,
+) -> (Result<Vec<Function>, Unconfined>, Vec<Range<u64>>) {
+    let Ok(decoded) = segment.bus.decoded_windows(topology) else {
+        log_discovery(log, Level::Error, "pci windows unrecorded; none published");
+        return (Err(Unconfined), Vec::new());
+    };
+    let at = PciSegment {
+        number: segment.number,
+        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+    };
+    let probed = probe_segment(&*segment.bus, at, topology, translation, publish, sink, log);
+    (probed, decoded)
 }
 
 /// Every bridge `topology` gave buses, each to forward its buses' DMA once a

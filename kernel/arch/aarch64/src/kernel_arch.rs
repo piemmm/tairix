@@ -529,10 +529,9 @@ impl SchedulerArch for Aarch64Arch {
 
         #[cfg(all(target_arch = "aarch64", target_os = "none"))]
         {
-            // Raise a GICv2 software-generated interrupt on the target
-            // CPU; its IRQ exception path runs the scheduler entry. The
-            // result is best-effort — a single-CPU image targets itself.
-            crate::gic::send_sgi(target);
+            // A CPU that has not brought its interface up cannot take the
+            // IPI, and runs nothing an IPI would reschedule.
+            let _ = crate::gic::send_sgi(target);
         }
 
         #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]

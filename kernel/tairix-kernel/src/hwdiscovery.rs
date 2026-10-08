@@ -26,10 +26,13 @@ use tairix_abi::driver::virtio_pci::{
 };
 use tairix_abi::driver::MmioMapper;
 use tairix_abi::hwtree::HwResource;
-use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID};
+use tairix_abi::{
+    DmaCoherence, DriverError, HwDeviceClass, HwMatchKey, HwNode, IommuStreams, HW_NODE_ROOT_ID,
+};
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
 use tairix_drv_audio_virtio_snd::VIRTIO_SND_DEVICE_ID;
 use tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
+use tairix_fdt::{Fdt, Node};
 use tairix_kernel_virtio::MAX_SLOTS;
 use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
@@ -40,6 +43,8 @@ use crate::hwtree_node_ids::{
     pci_function_node_id, VIRTIO_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
     VIRTIO_INPUT_PROBE_NODE_BASE_ID, VIRTIO_NET_PROBE_NODE_BASE_ID,
 };
+use crate::iommu_fdt::SlotDma;
+use crate::pci_host::HostBus;
 use crate::pci_probe::FunctionDma;
 
 /// PCI device-ID base of a **modern** virtio function: the device ID is
@@ -49,6 +54,29 @@ use crate::pci_probe::FunctionDma;
 /// so it emits the *same* [`HwMatchKey::virtio`]`(type)` node the
 /// MMIO probe does — one signed driver bundle binds on either bus.
 const VIRTIO_PCI_MODERN_DEVICE_ID_BASE: u32 = 0x1040;
+
+/// The base of the registers of the `virtio,mmio` slot `node` describes, as
+/// the MMIO bus enumerates it: the first address of its `reg`. [`None`] for
+/// a node that is no slot.
+#[must_use]
+pub fn virtio_mmio_slot_base(node: &Node<'_>) -> Option<u64> {
+    if !node.is_compatible(tairix_virtio::transport_mmio::COMPATIBLE) {
+        return None;
+    }
+    node.property("reg")?.read_be_u64(0).ok()
+}
+
+/// The operational `virtio,mmio` slot whose registers are at `base`.
+#[must_use]
+pub fn virtio_mmio_slot<'a>(fdt: &Fdt<'a>, base: u64) -> Option<Node<'a>> {
+    for node in fdt.operational_nodes() {
+        let node = node.ok()?;
+        if virtio_mmio_slot_base(&node) == Some(base) {
+            return Some(node);
+        }
+    }
+    None
+}
 
 /// The PCI device id a **modern** virtio function of virtio *type*
 /// `virtio_type` reports: `0x1040 + virtio_type` (virtio 1.1 §4.1.2). The
@@ -72,9 +100,12 @@ pub fn virtio_pci_modern_device_id(virtio_type: u32) -> u32 {
 /// synthesises the probed child node keyed by [`HwMatchKey::virtio`] — the
 /// genuine probed identity (never a fabricated key), exactly the node
 /// shape the root-storage gate models. The bring-up
-/// ([`crate::unlock_service`]) derives the slot's register window and GIC
-/// SPI from the same device tree by base, so the probed child carries only
-/// its bind identity.
+/// ([`crate::unlock_service`]) derives the slot's register window and
+/// interrupt from the same device tree, so the probed child carries only its
+/// bind identity, its slot's position on the bus as its address
+/// ([`virtio_mmio_block_slot`]) and, behind a unit, the streams `dma` says
+/// its slot masters DMA as; a slot whose DMA the tree cannot describe yields
+/// none.
 ///
 /// The probed child is **emitted into the same [`HwNodeSink`] the platform
 /// discovery walk writes to**, so it becomes part of the one buffered
@@ -97,6 +128,7 @@ pub fn virtio_pci_modern_device_id(virtio_type: u32) -> u32 {
 /// leaves the root unbound on any error (fail closed).
 pub fn observe_virtio_mmio_block_devices(
     bus: &dyn Bus,
+    dma: &SlotDma,
     sink: &mut dyn HwNodeSink,
 ) -> Result<(), DriverError> {
     let blank = BusDevice {
@@ -109,14 +141,36 @@ pub fn observe_virtio_mmio_block_devices(
     let mut table = [blank; MAX_SLOTS];
     let count = bus.enumerate(&mut table)?;
     let mut next_id = VIRTIO_BLOCK_PROBE_NODE_BASE_ID;
-    for device in &table[..count] {
+    for (slot, device) in table.iter().take(count).enumerate() {
         if device.device != VIRTIO_BLK_DEVICE_ID {
             continue;
         }
-        emit_virtio_block_node(sink, next_id, None)?;
+        let (Ok(streams), Some(address)) =
+            (dma.streams(device.address), u32::try_from(slot + 1).ok())
+        else {
+            continue;
+        };
+        emit_virtio_block_node(sink, next_id, |node| {
+            node.set_address(address);
+            push_streams(node, streams)
+        })?;
         next_id = next_id.wrapping_add(1);
     }
     Ok(())
+}
+
+/// The position in its bus's enumeration of the slot the virtio-MMIO block
+/// `node` was discovered at, which it records from 1 as its address.
+#[must_use]
+pub fn virtio_mmio_block_slot(node: &HwNode) -> Option<usize> {
+    usize::try_from(node.address().checked_sub(1)?).ok()
+}
+
+/// Put every stream of `streams` on `node`; `false` when it cannot hold
+/// them all, as a translated device is never published with part of its
+/// identity.
+fn push_streams(node: &mut HwNode, mut streams: impl Iterator<Item = IommuStreams>) -> bool {
+    streams.all(|range| node.push_resource(HwResource::iommu_stream(range)).is_ok())
 }
 
 /// How a translation unit knows the DMA of the PCI function at a
@@ -155,6 +209,8 @@ pub struct PciWalk<'a> {
     pub registers: &'a dyn MmioMapper,
     /// How a unit knows each function's DMA.
     pub dma: DmaIdentity<'a>,
+    /// How its functions' DMA meets the CPU's caches: their host's.
+    pub coherence: DmaCoherence,
 }
 
 /// One discovered PCI function: where the machine names it and how a unit
@@ -255,7 +311,9 @@ fn log_bypass(log: &dyn Sink, address: PciAddress, dma: &FunctionDma, reason: &'
 }
 
 /// Emit one match-key-only virtio-block [`HwDeviceClass::Storage`] node
-/// (id `node_id`, parented to the tree root) into `sink`.
+/// (id `node_id`, parented to the tree root) into `sink`, with what `dma`
+/// records of how a unit knows its DMA; one `dma` cannot record wholly is
+/// not emitted.
 ///
 /// The bootstrap-floor block bring-up re-derives the device's register
 /// window and interrupt line from the platform source at bind time (the
@@ -279,13 +337,13 @@ fn log_bypass(log: &dyn Sink, address: PciAddress, dma: &FunctionDma, reason: &'
 fn emit_virtio_block_node(
     sink: &mut dyn HwNodeSink,
     node_id: u32,
-    function: Option<PciFunction>,
+    dma: impl FnOnce(&mut HwNode) -> bool,
 ) -> Result<(), DriverError> {
     let mut node = HwNode::new(node_id, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
     if node
         .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
         .is_ok()
-        && function.is_none_or(|function| function.describe(&mut node))
+        && dma(&mut node)
     {
         sink.emit(node)
             .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
@@ -319,7 +377,7 @@ pub fn observe_virtio_pci_block_devices(
         let Some(function) = PciFunction::admit(walk, device, log) else {
             continue;
         };
-        emit_virtio_block_node(sink, id, Some(function))?;
+        emit_virtio_block_node(sink, id, |node| function.describe(node))?;
     }
     Ok(())
 }
@@ -382,17 +440,21 @@ pub fn observe_virtio_pci_block_devices(
 pub fn observe_virtio_mmio_input_devices(
     bus: &dyn VirtioMmioBus,
     slot_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: &SlotDma,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     observe_virtio_mmio_interrupt_devices(
         bus,
         slot_irq,
+        dma,
         sink,
         log,
-        VIRTIO_INPUT_DEVICE_ID,
-        HwDeviceClass::Input,
-        VIRTIO_INPUT_PROBE_NODE_BASE_ID,
+        Probe {
+            device_id: VIRTIO_INPUT_DEVICE_ID,
+            class: HwDeviceClass::Input,
+            node_base_id: VIRTIO_INPUT_PROBE_NODE_BASE_ID,
+        },
     )
 }
 
@@ -419,17 +481,21 @@ pub fn observe_virtio_mmio_input_devices(
 pub fn observe_virtio_mmio_network_devices(
     bus: &dyn VirtioMmioBus,
     slot_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: &SlotDma,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     observe_virtio_mmio_interrupt_devices(
         bus,
         slot_irq,
+        dma,
         sink,
         log,
-        VIRTIO_NET_DEVICE_ID,
-        HwDeviceClass::Network,
-        VIRTIO_NET_PROBE_NODE_BASE_ID,
+        Probe {
+            device_id: VIRTIO_NET_DEVICE_ID,
+            class: HwDeviceClass::Network,
+            node_base_id: VIRTIO_NET_PROBE_NODE_BASE_ID,
+        },
     )
 }
 
@@ -453,37 +519,53 @@ pub fn observe_virtio_mmio_network_devices(
 pub fn observe_virtio_mmio_audio_devices(
     bus: &dyn VirtioMmioBus,
     slot_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: &SlotDma,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     observe_virtio_mmio_interrupt_devices(
         bus,
         slot_irq,
+        dma,
         sink,
         log,
-        VIRTIO_SND_DEVICE_ID,
-        HwDeviceClass::Audio,
-        VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
+        Probe {
+            device_id: VIRTIO_SND_DEVICE_ID,
+            class: HwDeviceClass::Audio,
+            node_base_id: VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
+        },
     )
+}
+
+/// What one interrupt-driven probe looks for, and how it numbers what it
+/// finds.
+struct Probe {
+    device_id: u32,
+    class: HwDeviceClass,
+    node_base_id: u32,
 }
 
 /// The shared core of the interrupt-driven virtio-MMIO class probes
 /// ([`observe_virtio_mmio_input_devices`],
 /// [`observe_virtio_mmio_network_devices`]): enumerate the bus, and for every
-/// populated slot whose `DeviceID` equals `device_id` emit a node of `class`
-/// (numbered from `node_base_id`) carrying its register window, a coherent DMA
-/// constraint, and its discovered interrupt line. Input and network devices are
+/// populated slot whose `DeviceID` equals the probe's emit a node of its
+/// class (numbered from its base) carrying its register window, a coherent
+/// DMA constraint, its discovered interrupt line and, behind a unit, the
+/// streams `dma` says the slot masters DMA as. Input and network devices are
 /// identical here — both are autoloaded into a user-space process that parks on
 /// the device interrupt — so the walk is written once; the block probe differs
 /// (a different resource shape) and stays separate.
 fn observe_virtio_mmio_interrupt_devices(
     bus: &dyn VirtioMmioBus,
     slot_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: &SlotDma,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
-    device_id: u32,
-    class: HwDeviceClass,
-    node_base_id: u32,
+    Probe {
+        device_id,
+        class,
+        node_base_id,
+    }: Probe,
 ) -> Result<(), DriverError> {
     let blank = BusDevice {
         vendor: 0,
@@ -552,37 +634,30 @@ fn observe_virtio_mmio_interrupt_devices(
         let Some(intid) = slot_irq(device.address) else {
             continue;
         };
+        let (Ok(streams), Some(coherence)) =
+            (dma.streams(device.address), dma.coherence(device.address))
+        else {
+            continue;
+        };
         // A top-level discovered device parents to the tree root
         // ([`HW_NODE_ROOT_ID`]), never the `HW_NODE_ROOT` parent sentinel
         // (which marks the root itself and is skipped by the autoload
         // walk, `HwNode::is_root`).
         let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, class);
         next_id = next_id.wrapping_add(1);
-        // The probed bind identity, the register window, a coherent DMA
-        // constraint, **and** the interrupt line — the four things the
-        // autoloaded user-space driver needs and the spawn path mints one
-        // grant each for. A virtio device drives its split virtqueues out of
-        // driver-allocated DMA memory, so without a DMA resource the
-        // autoloaded driver is granted no DMA region and its queue bring-up
-        // fails closed — the input node must request DMA exactly as it
-        // requests its register window. The QEMU `virt` virtio interconnect
-        // is cache-coherent with no IOMMU, so the device can address all of
-        // RAM: `addr_limit = 0` declares no upper bound and `max_len = 0` no
-        // per-buffer cap (the driver's DMA footprint is bounded by its fixed
-        // queue sizes and the kernel's deterministic OOM) — a discovered
-        // property of the coherent transport, never a board constant. The
-        // IRQ resource carries the discovered line so the driver can
-        // `irq_bind` it (it requests `CAP_IRQ_BIND`). All four fit a fresh
-        // node by the ABI's capacity; a node that somehow could not hold
-        // them is dropped rather than emitted on a partial identity.
+        // The driver is granted what the node requests: its registers, DMA
+        // for its virtqueues, unbounded and as coherent as its slot, and its
+        // line. A node that cannot hold all of it is dropped rather than
+        // emitted on a partial identity.
         if node.push_match_key(HwMatchKey::virtio(device_id)).is_ok()
             && node
                 .push_resource(HwResource::mmio(device.address, len))
                 .is_ok()
-            && node.push_resource(HwResource::dma(0, 0)).is_ok()
+            && node.push_resource(HwResource::dma(0, 0, coherence)).is_ok()
             && node
                 .push_resource(HwResource::irq(u64::from(intid), 1))
                 .is_ok()
+            && push_streams(&mut node, streams)
         {
             // A full sink (`DiscoveryError::SinkFull`) is the only emit
             // failure a buffering sink raises; surface it as the same
@@ -592,6 +667,28 @@ fn observe_virtio_mmio_interrupt_devices(
         }
     }
     Ok(())
+}
+
+/// The interrupt a discovered function is granted: its line, and where it
+/// raises that line by a message a translation unit translates, the doorbell
+/// its messages are written to, which its domain must map.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DeviceInterrupt {
+    /// The line its driver binds.
+    pub line: HwResource,
+    /// A [`tairix_abi::HwResourceKind::MsiDoorbell`] its node carries.
+    pub doorbell: Option<HwResource>,
+}
+
+impl DeviceInterrupt {
+    /// `line`, raised on a wire or by a message no unit translates.
+    #[must_use]
+    pub const fn line(line: HwResource) -> Self {
+        Self {
+            line,
+            doorbell: None,
+        }
+    }
 }
 
 /// Emit each modern virtio-net function `walk` found as a
@@ -604,7 +701,7 @@ fn observe_virtio_mmio_interrupt_devices(
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_network_devices(
     walk: &PciWalk<'_>,
-    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
+    dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
@@ -625,7 +722,7 @@ pub fn observe_virtio_pci_network_devices(
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_input_devices(
     walk: &PciWalk<'_>,
-    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
+    dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
@@ -647,7 +744,7 @@ pub fn observe_virtio_pci_input_devices(
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_audio_devices(
     walk: &PciWalk<'_>,
-    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
+    dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
@@ -676,7 +773,7 @@ struct VirtioPciKind {
 /// resolved, or whose node cannot hold all of it, is left undiscovered.
 fn observe_virtio_pci_devices(
     walk: &PciWalk<'_>,
-    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
+    dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
     kind: VirtioPciKind,
@@ -708,8 +805,8 @@ fn observe_virtio_pci_devices(
         let Some(function) = PciFunction::admit(walk, device, log) else {
             continue;
         };
-        let Some(interrupt) =
-            dev_irq(bdf).filter(|r| r.kind() == Some(tairix_abi::HwResourceKind::Irq))
+        let Some(interrupt) = dev_irq(bdf)
+            .filter(|interrupt| interrupt.line.kind() == Some(tairix_abi::HwResourceKind::Irq))
         else {
             continue;
         };
@@ -723,10 +820,11 @@ fn observe_virtio_pci_devices(
                 window(VIRTIO_PCI_CFG_NOTIFY, notify, multiplier),
                 window(VIRTIO_PCI_CFG_ISR, isr, 0),
                 window(VIRTIO_PCI_CFG_DEVICE, devcfg, 0),
-                HwResource::dma(0, 0),
-                interrupt,
+                HwResource::dma(0, 0, walk.coherence),
+                interrupt.line,
             ]
             .into_iter()
+            .chain(interrupt.doorbell)
             .all(|resource| node.push_resource(resource).is_ok())
             && function.describe(&mut node)
         {
@@ -735,6 +833,70 @@ fn observe_virtio_pci_devices(
         }
     }
     Ok(())
+}
+
+/// Give each translation unit among `nodes` that is a virtio-iommu function
+/// on `segment` its four configuration windows — its registers, which no
+/// process may map — and the line `dev_irq` resolves for it, where it raises
+/// its faults on a wire. The function the node's address names must answer
+/// as a modern virtio-iommu: a node no such function backs is given nothing,
+/// and the kernel takes it over as no unit.
+pub fn describe_virtio_units(
+    segment: u16,
+    bus: &dyn HostBus,
+    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
+    nodes: &mut [HwNode],
+) {
+    let Ok(key) = HwMatchKey::compatible(tairix_kernel_iommu_virtio::COMPATIBLE) else {
+        return;
+    };
+    let identity = u32::from(VIRTIO_PCI_VENDOR_ID)
+        | virtio_pci_modern_device_id(tairix_kernel_iommu_virtio::DEVICE_ID) << 16;
+    for node in nodes.iter_mut().filter(|node| {
+        node.class() == Some(HwDeviceClass::Iommu) && node.match_keys().contains(&key)
+    }) {
+        let function = PciAddress::from_node_address(node.address());
+        let bdf = function.config_address();
+        if function.segment() != segment || bus.read_config(bdf, 0) != Ok(identity) {
+            continue;
+        }
+        let (Ok(common), Ok(notify), Ok(isr), Ok(devcfg), Ok(multiplier)) = (
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_COMMON),
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_NOTIFY),
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_ISR),
+            bus.virtio_window_region(bdf, VIRTIO_PCI_CFG_DEVICE),
+            bus.notify_off_multiplier(bdf),
+        ) else {
+            continue;
+        };
+        let window = |role, (base, len): (u64, usize), multiplier| {
+            virtio_pci_window_resource(role, base, len as u64, multiplier)
+        };
+        describe_whole(
+            node,
+            [
+                window(VIRTIO_PCI_CFG_COMMON, common, 0),
+                window(VIRTIO_PCI_CFG_NOTIFY, notify, multiplier),
+                window(VIRTIO_PCI_CFG_ISR, isr, 0),
+                window(VIRTIO_PCI_CFG_DEVICE, devcfg, 0),
+            ]
+            .into_iter()
+            .chain(dev_irq(bdf)),
+        );
+    }
+}
+
+/// Give `node` every one of `resources`, or none where it cannot hold them
+/// all: a unit missing a window, or the line it raises its faults on, is no
+/// unit to take over.
+fn describe_whole(node: &mut HwNode, resources: impl IntoIterator<Item = HwResource>) {
+    let mut described = *node;
+    if resources
+        .into_iter()
+        .all(|resource| described.push_resource(resource).is_ok())
+    {
+        *node = described;
+    }
 }
 
 /// Emit the per-function virtio-PCI discovery diagnostic: the wanted PCI
@@ -813,6 +975,22 @@ mod tests {
         }
     }
 
+    /// A unit is described whole or not at all.
+    #[test]
+    fn a_unit_without_room_for_its_whole_description_is_given_none_of_it() {
+        let irq = HwResource::irq(u64::from(TEST_INPUT_INTID), 1);
+        let mut room = HwNode::new(7, 0, HwDeviceClass::Iommu);
+        describe_whole(&mut room, [irq, irq]);
+        assert_eq!(room.resources(), &[irq, irq]);
+        let mut full = HwNode::new(8, 0, HwDeviceClass::Iommu);
+        for _ in 1..tairix_abi::HW_NODE_MAX_RESOURCES {
+            full.push_resource(irq).unwrap();
+        }
+        let before = full;
+        describe_whole(&mut full, [irq, irq]);
+        assert_eq!(full, before, "nothing of the description was kept");
+    }
+
     #[test]
     fn a_probed_virtio_input_slot_is_discovered_with_its_mmio_window() {
         // A populated virtio-input slot (DeviceID 18) is emitted as a
@@ -821,8 +999,14 @@ mod tests {
         // the discovery the input-driver autoload binds against.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
@@ -839,10 +1023,30 @@ mod tests {
             node.resources(),
             &[
                 HwResource::mmio(0x0A00_0000, 0x200),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
+    }
+
+    #[test]
+    fn a_slot_s_device_masters_dma_as_coherently_as_its_slot() {
+        let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::every(DmaCoherence::Unsnooped),
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
+        let dma: alloc::vec::Vec<_> = sink.nodes[0]
+            .resources()
+            .iter()
+            .filter_map(HwResource::dma_coherence)
+            .collect();
+        assert_eq!(dma, [DmaCoherence::Unsnooped]);
     }
 
     #[test]
@@ -851,8 +1055,14 @@ mod tests {
         // devices, so the input probe emits nothing.
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, 1]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -863,8 +1073,14 @@ mod tests {
         // base, so it can never collide with a block probe child.
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
@@ -875,7 +1091,7 @@ mod tests {
             node.resources(),
             &[
                 HwResource::mmio(0x0A00_0200, 0x200),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
@@ -887,8 +1103,14 @@ mod tests {
         // discovered window, so a keyboard and a pointer are never merged.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID + 1);
@@ -896,7 +1118,7 @@ mod tests {
             sink.nodes[0].resources(),
             &[
                 HwResource::mmio(0x0A00_0000, 0x200),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
@@ -904,7 +1126,7 @@ mod tests {
             sink.nodes[1].resources(),
             &[
                 HwResource::mmio(0x0A00_0200, 0x200),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
@@ -921,7 +1143,8 @@ mod tests {
         // block and the input probe.
         let blk_bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID]);
         let mut blk = CollectingSink::default();
-        observe_virtio_mmio_block_devices(&blk_bus, &mut blk).expect("enumerate");
+        observe_virtio_mmio_block_devices(&blk_bus, &SlotDma::UNTRANSLATED, &mut blk)
+            .expect("enumerate");
         assert_eq!(blk.nodes.len(), 1);
         assert_eq!(blk.nodes[0].parent(), HW_NODE_ROOT_ID);
         assert!(
@@ -934,6 +1157,7 @@ mod tests {
         observe_virtio_mmio_input_devices(
             &kbd_bus,
             &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
             &mut kbd,
             &NullSink,
         )
@@ -959,6 +1183,7 @@ mod tests {
         observe_virtio_mmio_network_devices(
             &bus,
             &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
             &mut sink,
             &NullSink,
         )
@@ -980,7 +1205,7 @@ mod tests {
             node.resources(),
             &[
                 HwResource::mmio(0x0A00_0000, 0x200),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
@@ -993,8 +1218,14 @@ mod tests {
         // that nothing can match and the machine has no audio device.
         let bus = FakeBus::with(&[VIRTIO_SND_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_audio_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_audio_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Audio));
@@ -1008,7 +1239,7 @@ mod tests {
             node.resources(),
             &[
                 HwResource::mmio(0x0A00_0000, 0x200),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::irq(u64::from(TEST_INPUT_INTID), 1)
             ]
         );
@@ -1022,8 +1253,14 @@ mod tests {
             tairix_virtio_net::VIRTIO_NET_DEVICE_ID,
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_audio_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_audio_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert!(sink.nodes.is_empty(), "only a sound card is a sound card");
     }
 
@@ -1037,6 +1274,7 @@ mod tests {
         observe_virtio_mmio_network_devices(
             &bus,
             &|_| Some(TEST_INPUT_INTID),
+            &SlotDma::UNTRANSLATED,
             &mut sink,
             &NullSink,
         )
@@ -1056,6 +1294,7 @@ mod tests {
             observe_virtio_mmio_input_devices(
                 &bus,
                 &|_| Some(TEST_INPUT_INTID),
+                &SlotDma::UNTRANSLATED,
                 &mut sink,
                 &NullSink
             ),
@@ -1071,9 +1310,107 @@ mod tests {
         // on.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &|_| None, &mut sink, &NullSink)
-            .expect("enumerate");
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| None,
+            &SlotDma::UNTRANSLATED,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
         assert!(sink.nodes.is_empty());
+    }
+
+    /// A device probed in a slot behind a unit masters DMA as the slot's
+    /// streams; one whose slot the tree cannot describe is not published at
+    /// all, never as a device reaching memory around every unit.
+    #[test]
+    fn a_probed_device_masters_dma_as_its_slot_is_described() {
+        let streams = tairix_abi::IommuStreams::new(0x8000_0004, 0x20, 2).unwrap();
+        let dma = SlotDma::of(
+            alloc::vec![(0x0A00_0000, streams)],
+            alloc::vec![0x0A00_0200],
+        );
+        let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_input_devices(
+            &bus,
+            &|_| Some(TEST_INPUT_INTID),
+            &dma,
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
+        assert_eq!(
+            sink.nodes.len(),
+            1,
+            "the undescribed slot's device is withheld"
+        );
+        assert_eq!(
+            sink.nodes[0].resources(),
+            &[
+                HwResource::mmio(0x0A00_0000, 0x200),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
+                HwResource::irq(u64::from(TEST_INPUT_INTID), 1),
+                HwResource::iommu_stream(streams),
+            ]
+        );
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_block_devices(&bus, &dma, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1);
+        assert_eq!(
+            sink.nodes[0].resources(),
+            &[HwResource::iommu_stream(streams)]
+        );
+        assert_eq!(virtio_mmio_block_slot(&sink.nodes[0]), Some(0));
+    }
+
+    /// A block node names the slot it was found at, so the floor drives that
+    /// slot, never the first on the bus when the first was withheld.
+    #[test]
+    fn a_block_node_names_the_slot_it_was_found_at() {
+        let dma = SlotDma::of(alloc::vec![], alloc::vec![0x0A00_0000]);
+        let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_DEVICE_ID]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_mmio_block_devices(&bus, &dma, &mut sink).expect("enumerate");
+        assert_eq!(sink.nodes.len(), 1, "the first slot is withheld");
+        assert_eq!(virtio_mmio_block_slot(&sink.nodes[0]), Some(1));
+        let unplaced = HwNode::new(1, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+        assert_eq!(virtio_mmio_block_slot(&unplaced), None);
+    }
+
+    /// A slot is found by its registers' base among the operational
+    /// `virtio,mmio` nodes alone.
+    #[test]
+    fn a_slot_is_found_by_its_base_while_it_is_operational() {
+        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        b.begin_node("");
+        for (base, compatible, status) in [
+            (0x0A00_0000u64, "virtio,mmio", "okay"),
+            (0x0A00_0200, "virtio,mmio", "disabled"),
+            (0x0A00_0400, "arm,pl011", "okay"),
+        ] {
+            b.begin_node(&alloc::format!("dev@{base:x}"));
+            b.prop_str("compatible", compatible);
+            b.prop_str("status", status);
+            let mut reg = alloc::vec::Vec::new();
+            reg.extend_from_slice(&base.to_be_bytes());
+            reg.extend_from_slice(&0x200u64.to_be_bytes());
+            b.prop("reg", &reg);
+            b.end_node();
+        }
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).unwrap();
+        let found = virtio_mmio_slot(&fdt, 0x0A00_0000).unwrap();
+        assert_eq!(virtio_mmio_slot_base(&found), Some(0x0A00_0000));
+        assert!(virtio_mmio_slot(&fdt, 0x0A00_0200).is_none(), "disabled");
+        assert!(virtio_mmio_slot(&fdt, 0x0A00_0400).is_none(), "no slot");
+        assert!(
+            virtio_mmio_slot(&fdt, 0x0B00_0000).is_none(),
+            "nothing there"
+        );
     }
 
     // --- virtio-PCI probe ------------------------------------------------
@@ -1186,6 +1523,7 @@ mod tests {
             bus,
             registers: &NoRegisters,
             dma,
+            coherence: DmaCoherence::Snooped,
         }
     }
 
@@ -1230,7 +1568,12 @@ mod tests {
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
             &walk_of(&bus, SEGMENT, &|_| None),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
@@ -1273,7 +1616,7 @@ mod tests {
                     0x8,
                     0,
                 ),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::message_irq(u64::from(TEST_PCI_INTID), 0),
             ]
         );
@@ -1288,6 +1631,36 @@ mod tests {
         );
     }
 
+    /// A function whose messages a unit translates carries the doorbell they
+    /// are written to beside its line, so its domain maps it; one raising
+    /// them on a wire carries none.
+    #[test]
+    fn a_function_raising_messages_through_a_unit_carries_their_doorbell() {
+        let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
+        let doorbell = HwResource::msi_doorbell(0x0809_0000, 0x1000).expect("a page");
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_network_devices(
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| {
+                Some(DeviceInterrupt {
+                    line: HwResource::message_irq(u64::from(TEST_PCI_INTID), 0),
+                    doorbell: Some(doorbell),
+                })
+            },
+            &mut sink,
+            &NullSink,
+        )
+        .expect("enumerate");
+        let resources = sink.nodes[0].resources();
+        assert_eq!(
+            resources[resources.len() - 2..],
+            [
+                HwResource::message_irq(u64::from(TEST_PCI_INTID), 0),
+                doorbell
+            ]
+        );
+    }
+
     #[test]
     fn a_non_net_virtio_pci_function_emits_no_network_node() {
         // A virtio-blk PCI function (0x1042) and a non-virtio device id are
@@ -1296,7 +1669,12 @@ mod tests {
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
             &walk_of(&bus, SEGMENT, &|_| None),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
@@ -1315,7 +1693,12 @@ mod tests {
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
             &walk_of(&bus, SEGMENT, &|_| None),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
@@ -1399,7 +1782,12 @@ mod tests {
         .expect("enumerate");
         observe_virtio_pci_network_devices(
             &walk_of(&bus, SEGMENT, &translated),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
@@ -1440,7 +1828,10 @@ mod tests {
             &walk_of(&bus, SEGMENT, &translated),
             &|_| {
                 routed.set(routed.get() + 1);
-                Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0))
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
             },
             &mut sink,
             &log,
@@ -1565,6 +1956,7 @@ mod tests {
                 bus: &bus,
                 registers: &bus,
                 dma: &translated,
+                coherence: DmaCoherence::Snooped,
             };
             assert_eq!(
                 PciFunction::admit(&walk, &function, &NullSink).is_some(),
@@ -1720,7 +2112,12 @@ mod tests {
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
             &walk_of(&bus, SEGMENT, &|_| None),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
@@ -1761,7 +2158,7 @@ mod tests {
                     0x8,
                     0,
                 ),
-                HwResource::dma(0, 0),
+                HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
                 HwResource::message_irq(u64::from(TEST_PCI_INTID), 0),
             ]
         );
@@ -1788,7 +2185,12 @@ mod tests {
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
             &walk_of(&bus, SEGMENT, &|_| None),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
@@ -1807,7 +2209,12 @@ mod tests {
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
             &walk_of(&bus, SEGMENT, &|_| None),
-            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
             &mut sink,
             &NullSink,
         )
