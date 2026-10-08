@@ -9,7 +9,7 @@
 //!
 //! The body is a closure (`FnMut(&mut TaskContext) -> TaskAction`) so the
 //! scheduler is host-testable; the real context-switch machinery lands
-//! with the architecture ports. `park`, `unpark`, and `exit` are
+//! with the architecture ports. `unpark`, `stop`, `resume`, and `exit` are
 //! *cancellation-safe*: they may be issued while the task is running on
 //! another CPU and take effect at the next safe point.
 
@@ -160,6 +160,13 @@ impl TaskInner {
     /// Unconditionally store the state.
     pub(crate) fn store_state(&self, new: TaskState) {
         self.state.store(new.as_u8(), Ordering::Release);
+    }
+
+    /// Unconditionally store the state, returning the one it replaced.
+    pub(crate) fn swap_state(&self, new: TaskState) -> TaskState {
+        let raw = self.state.swap(new.as_u8(), Ordering::AcqRel);
+        // A corrupt byte reads as terminal, as `load_state` reads it.
+        TaskState::from_u8(raw).unwrap_or(TaskState::Exited)
     }
 
     /// Store the task's virtual runtime the dispatcher computed.

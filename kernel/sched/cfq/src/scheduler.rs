@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_kernel_sched_api::park::{self, Settled};
+use tairix_kernel_sched_api::park::{self, Settled, Taken};
 use tairix_kernel_sched_api::share::{vslice, Competition, Counted};
 use tairix_kernel_sched_api::{ParkableTask, StealScan};
 use tairix_sync::{RwLock, SpinLock};
@@ -240,6 +240,31 @@ impl<A: SchedulerArch> Scheduler<A> {
             .ok_or(SchedError::NoSuchTask)
     }
 
+    /// Drop a retired task's record, unless its id already names another
+    /// task: an id is drawn again once no record holds it.
+    fn drop_record(&self, task: &TaskInner) {
+        let mut tasks = self.tasks.write();
+        if tasks
+            .get(&task.id)
+            .is_some_and(|held| core::ptr::eq(Arc::as_ptr(held), task))
+        {
+            tasks.remove(&task.id);
+        }
+    }
+
+    /// Decide a run-queue entry for `task` just taken from a queue or the
+    /// overflow list ([`park::take_entry`]). The entry of a retired task was
+    /// its last reference, so its record goes with it.
+    fn take_entry(&self, task: &TaskInner, take: impl Fn() -> bool) -> Taken {
+        let taken = park::take_entry(task, take, |transition: &dyn Fn() -> bool| {
+            task.ledger.depart(transition, &self.competition())
+        });
+        if taken == Taken::Exited {
+            self.drop_record(task);
+        }
+        taken
+    }
+
     fn competition(&self) -> Cpus<'_> {
         Cpus(&self.cpus)
     }
@@ -249,7 +274,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     fn count_on(&self, task: &TaskInner, cpu: CpuId) -> bool {
         task.ledger.count(
             Counted::of(cpu, task.load_priority(), task.load_sched_class()),
-            || task.is_runnable(),
+            || task.in_competition(),
             &self.competition(),
         )
     }
@@ -424,32 +449,28 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(id)
     }
 
-    /// Block a task. Cancellation-safe.
+    /// Stop a task for job control until [`Self::resume`] — see
+    /// [`SchedulerPolicy::stop`].
     ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if no task ever held that id.
     /// * [`SchedError::InvalidState`] if the task is terminal.
-    pub fn park(&self, id: TaskId) -> SchedResult<()> {
+    pub fn stop(&self, id: TaskId) -> SchedResult<()> {
         let task = self.lookup(id)?;
-        loop {
-            match task.load_state() {
-                TaskState::Exited => return Err(SchedError::InvalidState),
-                TaskState::Parked => {
-                    self.release_current_slot(&task, id);
-                    return Ok(());
-                }
-                cur @ (TaskState::Ready | TaskState::Running) => {
-                    let parked = task.ledger.depart(
-                        || task.cas_state(cur, TaskState::Parked).is_ok(),
-                        &self.competition(),
-                    );
-                    if parked {
-                        self.release_current_slot(&task, id);
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        park::stop_task(&*task)?;
+        self.release_current_slot(&task, id);
+        Ok(())
+    }
+
+    /// End a stop — see [`SchedulerPolicy::resume`]. A task whose stop had
+    /// completed is placed like a woken one.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn resume(&self, id: TaskId) -> SchedResult<()> {
+        let task = self.lookup(id)?;
+        park::resume_task(&*task, |resumed| self.admit_woken(resumed))
     }
 
     /// Release `id`'s per-CPU current-task slot, but only once no CPU is
@@ -535,7 +556,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // Retire under the body lock, then drop it (end of this block)
         // before touching the registry, so no lock-guard temporary outlives
         // the `task` handle.
-        {
+        let retired_from = {
             let Some(mut body) = task.body.try_lock() else {
                 // A dispatch owns the body and, by `doom`'s pairing, reads the
                 // mark when it returns and retires the task itself.
@@ -543,18 +564,21 @@ impl<A: SchedulerArch> Scheduler<A> {
                 return Ok(ExitDisposition::Deferred);
             };
             *body = None;
+            let mut retired_from = TaskState::Exited;
             task.ledger.depart(
                 || {
-                    task.store_state(TaskState::Exited);
+                    retired_from = task.swap_state(TaskState::Exited);
                     true
                 },
                 &self.competition(),
             );
+            retired_from
+        };
+        // A queued task's record goes with its entry, and a settling one's
+        // with its dispatch; one holding neither would otherwise stay for good.
+        if matches!(retired_from, TaskState::Parked | TaskState::Stopped) {
+            self.drop_record(&task);
         }
-        // Leave the now-`Exited` registry entry in place (a repeat `exit`
-        // finds it `AlreadyExited` via the `doomed` mark, so teardown is
-        // idempotent). Any stale run-queue entry is dropped when a later
-        // `step` picks it and `dispatch` observes `Exited`.
         self.clear_current_matching(id);
         Ok(ExitDisposition::Quiesced)
     }
@@ -677,7 +701,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         drop(g);
         for id in pending {
             let Ok(task) = self.lookup(id) else { continue };
-            if task.load_state() != TaskState::Ready {
+            if self.take_entry(&task, || true) != Taken::Ready {
                 continue;
             }
             let home = task.home_cpu.load(Ordering::Acquire);
@@ -724,13 +748,15 @@ impl<A: SchedulerArch> Scheduler<A> {
                     continue;
                 };
                 // Migrate: the ledger moves the weight off the victim. An entry
-                // whose task is no longer ready is stale, so keep looking.
-                let moved = task.ledger.count(
-                    Counted::of(cpu, task.load_priority(), task.load_sched_class()),
-                    || task.load_state() == TaskState::Ready,
-                    &self.competition(),
-                );
-                if !moved {
+                // whose task is no longer ready is spent, so keep looking.
+                let moved = self.take_entry(&task, || {
+                    task.ledger.count(
+                        Counted::of(cpu, task.load_priority(), task.load_sched_class()),
+                        || task.load_state() == TaskState::Ready,
+                        &self.competition(),
+                    )
+                });
+                if moved != Taken::Ready {
                     continue;
                 }
                 task.home_cpu.store(cpu, Ordering::Release);
@@ -768,18 +794,10 @@ impl<A: SchedulerArch> Scheduler<A> {
         let Some(task) = self.tasks.read().get(&id).cloned() else {
             return StepOutcome::Idle;
         };
-        match task.load_state() {
-            TaskState::Exited => {
-                self.tasks.write().remove(&id);
-                return StepOutcome::Idle;
-            }
-            TaskState::Parked | TaskState::Running => return StepOutcome::Idle,
-            TaskState::Ready => {}
-        }
-        if task
-            .cas_state(TaskState::Ready, TaskState::Running)
-            .is_err()
-        {
+        let claimed = self.take_entry(&task, || {
+            task.cas_state(TaskState::Ready, TaskState::Running).is_ok()
+        });
+        if claimed != Taken::Ready {
             return StepOutcome::Idle;
         }
 
@@ -842,9 +860,10 @@ impl<A: SchedulerArch> Scheduler<A> {
                 if let Some(mut guard) = task.body.try_lock() {
                     *guard = None;
                 }
-                self.tasks.write().remove(&id);
+                self.drop_record(&task);
             }
             Settled::Park => park::commit_park(&*task, |woken| self.admit_woken(woken)),
+            Settled::Released => {}
             Settled::Requeue => {
                 // vruntime was already charged for this run above (every
                 // dispatch pays, not just yields); do not charge again here.
@@ -865,7 +884,6 @@ impl<A: SchedulerArch> Scheduler<A> {
                     self.arch.send_ipi(dest);
                 }
             }
-            Settled::Readmitted => {}
         }
         StepOutcome::Ran(id)
     }
@@ -1138,12 +1156,16 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
         Scheduler::spawn_parked_as(self, id, home_cpu, priority, body)
     }
 
-    fn park(&self, id: TaskId) -> SchedResult<()> {
-        Scheduler::park(self, id)
-    }
-
     fn unpark(&self, id: TaskId) -> SchedResult<()> {
         Scheduler::unpark(self, id)
+    }
+
+    fn stop(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::stop(self, id)
+    }
+
+    fn resume(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::resume(self, id)
     }
 
     fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition> {
@@ -1366,7 +1388,7 @@ mod tests {
     /// the console IRQ with it. The running CPU clears its own slot when
     /// the body returns; the killer only nudges it.
     #[test]
-    fn park_of_an_executing_task_leaves_its_current_slot_intact() {
+    fn stop_of_an_executing_task_leaves_its_current_slot_intact() {
         let (arch, sched) = mk(4);
         let id = sched
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
@@ -1377,32 +1399,32 @@ mod tests {
         sched.set_current(2, id);
         let before = arch.ipi_count(2);
 
-        sched.park(id).expect("park");
+        sched.stop(id).expect("stop");
 
         assert_eq!(
             sched.current_task(2),
             Some(id),
-            "the caller-identity slot must outlive a remote park of a running task"
+            "the caller-identity slot must outlive a remote stop of a running task"
         );
         assert_eq!(
             arch.ipi_count(2),
             before + 1,
-            "park must nudge the CPU running the victim"
+            "a stop must nudge the CPU running the victim"
         );
         drop(body_guard);
     }
 
-    /// The same park on a task no dispatch owns clears the slot at once:
+    /// The same stop on a task no dispatch owns clears the slot at once:
     /// the body lock is free, which proves no CPU can trap as this task.
     #[test]
-    fn park_of_a_quiescent_task_clears_its_current_slot() {
+    fn stop_of_a_quiescent_task_clears_its_current_slot() {
         let (_arch, sched) = mk(4);
         let id = sched
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("spawn");
         sched.set_current(2, id);
 
-        sched.park(id).expect("park");
+        sched.stop(id).expect("stop");
 
         assert_eq!(sched.current_task(2), None);
     }
@@ -1739,7 +1761,7 @@ mod tests {
             .expect("spawn");
         assert_eq!(sched.cpus[0].queue.competing_weight(), 2);
         sched.set_priority(id, Priority::Low).expect("lower it");
-        sched.park(id).expect("park");
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "it parks itself");
         assert_eq!(sched.cpus[0].queue.competing_weight(), 0);
     }
 
@@ -1793,9 +1815,9 @@ mod tests {
         );
     }
 
-    /// A steal that finds the entry of a task parked since it was queued must
-    /// neither take the weight off the victim again nor count it on the
-    /// stealer, where nothing would ever take it off.
+    /// A steal that finds the entry of a task stopped since it was queued
+    /// completes the stop, taking the weight off the victim once and never
+    /// counting it on the stealer, where nothing would ever take it off.
     #[test]
     fn a_stale_entry_a_steal_finds_moves_no_weight() {
         let (arch, sched) = mk(2);
@@ -1808,12 +1830,12 @@ mod tests {
             .home_cpu
             .load(Ordering::Acquire);
         let other = 1 - home;
-        sched.park(id).expect("park while queued");
+        sched.stop(id).expect("stop while queued");
         arch.set_current_cpu(other);
         assert_eq!(sched.step(other), Ok(StepOutcome::Idle));
         assert_eq!(sched.cpus[0].queue.competing_weight(), 0);
         assert_eq!(sched.cpus[1].queue.competing_weight(), 0);
-        assert_eq!(sched.state_of(id), TaskState::Parked);
+        assert_eq!(sched.state_of(id), TaskState::Stopped);
     }
 
     #[test]

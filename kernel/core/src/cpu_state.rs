@@ -15,6 +15,7 @@ use core::sync::atomic::AtomicU32;
 use tairix_kernel_sched_api::TaskAction;
 use tairix_sync::{OnceCell, SpinLock};
 
+use crate::procsignal::ThreadGate;
 use crate::procspace::ProcessSpace;
 
 /// Type-erased continuation handle for the task currently running on a CPU.
@@ -181,6 +182,10 @@ unsafe impl Send for LiveSpacePtr {}
 pub(crate) struct CpuState {
     pub(crate) resume: SpinLock<Option<ResumeHandle>>,
     pub(crate) live_space: SpinLock<Option<LiveSpacePtr>>,
+    /// The kill gate of the thread switched in here, published by its
+    /// dispatcher for the run, so the thread's syscalls and faults reach their
+    /// own gate rather than a structure every CPU contends on.
+    pub(crate) gate: SpinLock<Option<Arc<ThreadGate>>>,
     pub(crate) preempt_pending: AtomicBool,
     pub(crate) preemptions: AtomicU64,
     /// Watchdog **scheduler-progress** heartbeat: the monotonic-ns
@@ -424,6 +429,7 @@ impl CpuState {
         Self {
             resume: SpinLock::new(None),
             live_space: SpinLock::new(None),
+            gate: SpinLock::new(None),
             preempt_pending: AtomicBool::new(false),
             preemptions: AtomicU64::new(0),
             last_progress_ns: AtomicU64::new(0),

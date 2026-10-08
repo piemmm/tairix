@@ -13681,18 +13681,20 @@ where
             // lock and its wait-queue registration: the lock is then closed
             // for ever and every later load on that volume parks behind a
             // holder that no longer exists (`plans/OPEN-DEFECTS.md` D112).
-            let built = if crate::procsignal::kernel_enter(task) {
-                Err(Errno::Interrupted)
-            } else {
-                build_child_image(
+            // The admission installed the gate before the first wake, so a body
+            // without one fails closed rather than run outside it.
+            let gate = crate::procsignal::gate_of(task);
+            let built = match &gate {
+                Some(gate) if !gate.enter() => build_child_image(
                     services, sec_id, task, &plan, &body_seed, &arg_refs, &env_refs,
                 )
-                .map(|ready| upgrade_built_child(yielder, ready))
+                .map(|ready| upgrade_built_child(yielder, ready)),
+                _ => Err(Errno::Interrupted),
             };
             // The gate closes only once the upgrade's own yield is behind us,
             // so nothing between here and user mode can be reclaimed
             // mid-flight.
-            let pending_kill = crate::procsignal::kernel_exit_take_kill(task);
+            let pending_kill = gate.as_ref().and_then(|gate| gate.exit_take());
             if let Some(entry) = dispose_finished_load(services, sec_id, pending_kill, built) {
                 // SAFETY: the upgrade installed this thread's switch-in hook
                 // and process address space, and the dispatch step that
@@ -13840,6 +13842,12 @@ where
             self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
             return Err(AdmitError::OutOfMemory);
         }
+        // Before the child can run, and before the table holds it where a
+        // kill could claim it.
+        if crate::procsignal::install_gate(task_id, sec_id).is_err() {
+            self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
+            return Err(AdmitError::OutOfMemory);
+        }
 
         self.release_admitted(task_id, sec_id, &seed, services.peer_watch());
         Ok(task_id)
@@ -13918,6 +13926,9 @@ where
             status,
             &departed,
         );
+        // The table may never have held the child, so its own gate is cleared
+        // here rather than left to the group's.
+        crate::procsignal::clear_kill_gate(task_id);
         let _ = self.sched.exit(task_id);
     }
 }
@@ -14727,6 +14738,13 @@ where
             self.audit_no_caller_context(cpu, "no_current_task");
             return DispatchOutcome::NoCallerContext { cpu };
         };
+        // The caller's own kill gate, which its dispatcher publishes for the
+        // run: the boundary below closes the same gate wherever the call
+        // resumes. Every admitted user thread has one.
+        let Some(gate) = crate::kthread::current_gate(cpu) else {
+            self.audit_no_caller_context(cpu, "no_kill_gate");
+            return DispatchOutcome::NoCallerContext { cpu };
+        };
 
         // Snapshot the caller's capability record under a *briefly* held
         // read lock, then drop the guard before dispatching. The dispatcher
@@ -14741,17 +14759,14 @@ where
         // takes effect from the caller's *next* syscall, the same
         // credential-snapshot semantics a POSIX kernel gives a syscall in
         // flight; the mutating handlers operate on the live table under
-        // their own write lock, so the revocation itself is not lost.
+        // their own write lock, so the revocation itself is not lost. The
+        // snapshot shares the record rather than copying it, so taking one
+        // allocates nothing.
         let task_id = SecTaskId(sched_task_id);
-        let caps_snapshot = {
-            let guard = self.caps.read();
-            if let Some(record) = guard.caps_for(task_id) {
-                record.clone()
-            } else {
-                drop(guard);
-                self.audit_no_caller_context(cpu, "no_capability_record");
-                return DispatchOutcome::NoCallerContext { cpu };
-            }
+        let snapshot = self.caps.read().snapshot_of(task_id);
+        let Some(caps_snapshot) = snapshot else {
+            self.audit_no_caller_context(cpu, "no_capability_record");
+            return DispatchOutcome::NoCallerContext { cpu };
         };
 
         let caller = CallerContext {
@@ -14769,7 +14784,7 @@ where
         // hold kernel state only its own unwind can release). Both early
         // returns above sit before this point, so the window never leaks.
         // A thread that already owes a death runs no handler at all.
-        let killed_at_entry = crate::procsignal::kernel_enter(sched_task_id);
+        let killed_at_entry = gate.enter();
 
         // Frame-budget boundary (entry): record which call this watched
         // thread is entering, together with the user frame the port
@@ -14827,7 +14842,7 @@ where
         // unwind released everything the handler held, and the task never
         // returns to user space. A signalled death carries the status the
         // parent's `wait` reaps; a driver unload's carries none.
-        if let Some(teardown) = crate::procsignal::kernel_exit_take_kill(sched_task_id) {
+        if let Some(teardown) = gate.exit_take() {
             // An `exit` or `thread_exit` that ran already retired this thread
             // through the shared landing rule, which supersedes the death.
             if killed_at_entry
@@ -14877,21 +14892,22 @@ where
             return UserFaultOutcome::Unhandled;
         };
         let thread = SecTaskId(sched_task_id);
-        // The faulting thread's process owns every mapping the resolvers
-        // consult; the thread itself owns only its stack span. A thread with
-        // no thread-group entry has no process to resolve against, so the
-        // fault is unattributable and the port takes its fatal path (fail
-        // closed — the resolvers never materialise memory for a task the
-        // kernel does not know).
-        let Some(process) = self.caps.read().process_of(thread) else {
+        // The faulting thread's kill gate, published for its run, names the
+        // process that owns every mapping the resolvers consult; the thread
+        // itself owns only its stack span. A thread no admission gave a gate
+        // has no process to resolve against, so the fault is unattributable
+        // and the port takes its fatal path (fail closed — the resolvers never
+        // materialise memory for a task the kernel does not know).
+        let Some(gate) = crate::kthread::current_gate(cpu) else {
             return UserFaultOutcome::Unhandled;
         };
+        let process = gate.process();
         // The resolvers read through the filesystem and park there, so a fault
         // is a kernel body like a syscall: a death is taken at its boundary,
         // never inside it, and one already owed skips the resolution.
-        let outcome = (!crate::procsignal::kernel_enter(sched_task_id))
+        let outcome = (!gate.enter())
             .then(|| self.resolve_attributed_fault(cpu, process, thread, fault_va, write, regs));
-        let owed = crate::procsignal::kernel_exit_take_kill(sched_task_id);
+        let owed = gate.exit_take();
         // A resolver that parked may have resumed on another core, and the
         // port suspends the task on the core this names.
         let cpu = SchedulerArch::current_cpu(self.arch);

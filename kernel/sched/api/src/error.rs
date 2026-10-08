@@ -24,10 +24,10 @@ pub enum SchedError {
     QueueFull,
     /// No task is registered under the given [`crate::TaskId`].
     ///
-    /// Returned by [`crate::SchedulerPolicy::park`],
-    /// [`crate::SchedulerPolicy::unpark`], and
-    /// [`crate::SchedulerPolicy::exit`] when the supplied identifier has
-    /// already exited or was never spawned.
+    /// Returned by [`crate::SchedulerPolicy::unpark`],
+    /// [`crate::SchedulerPolicy::stop`], [`crate::SchedulerPolicy::resume`],
+    /// and [`crate::SchedulerPolicy::exit`] when no record holds the
+    /// identifier: it was never spawned, or its retired task's record is gone.
     NoSuchTask,
     /// The task is not in a state that allows the requested transition.
     ///

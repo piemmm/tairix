@@ -426,9 +426,9 @@ through the task's weight ledger (`kernel/sched/api`'s
 counted and takes exactly that off when the task leaves, so a level
 changed while the task is counted cannot leave a CPU's total drifting. The
 same lock orders a count against a departure: a steal or wake racing a
-remote park re-reads under it whether the task still competes, and a park
-or exit changes state under it, so no interleaving counts a task twice or
-leaves a parked one counted. **MLFQ** treats the recorded level as the
+stop re-reads under it whether the task still competes, and a park, a
+completed stop, or an exit changes state under it, so no interleaving counts
+a task twice or leaves a parked or stopped one counted. **MLFQ** treats the recorded level as the
 task's *current band* with fresh yield residency — its demotion rule and
 anti-starvation boost keep adjusting the band afterwards, exactly as they
 do for every other task, so an externally lowered task is still boosted
@@ -929,14 +929,34 @@ unwakeable, which is the other half of D129;
 `unpark_errs_only_for_a_task_that_can_never_run` pins the contract for every
 policy.
 
-There is a second valid ordering: `park()` may publish `Parked` while the
-stackful task body is still switching back. If `unpark()` then changes the
-task to `Ready` and enqueues it, the old body's eventual `Park` result is
-stale. Dispatch preserves the waker-owned `Ready` transition without
-re-enqueuing it; otherwise the stale result could undo the wake while leaving
-an unusable queue entry. CFQ's
-`a_wake_after_park_publication_survives_the_stale_body_return` regression pins
-that transition.
+### Job-control stop
+
+`stop` takes a task into `Stopped`, which no `unpark` leaves — only `resume`
+or `exit` — so the dispatch path checks nothing for it, and a broadcast wake
+(a console byte waking every parked reader) leaves a stopped reader stopped.
+A queued task keeps its entry (`StoppedOnQueue`) and a running one its CPU
+(`StoppedOnCpu`) until the scheduler next reaches it: whoever takes the entry,
+or the dispatch whose body returns, completes the stop, and a `resume` before
+then simply withdraws it. A task therefore holds exactly one run-queue entry
+while `Ready` or `StoppedOnQueue` and none in any other state, so a stop never
+leaves a stale entry for a later wake to queue a second one beside, and no
+transition can queue a task whose body is still running on another CPU. Every
+party that takes an entry — a pick, a steal, the overflow drain — decides it
+through `park::take_entry`, which completes a stop requested while the task
+was queued; dropping that entry instead would strand the task, since `resume`
+re-queues only a task whose stop has completed. The shared conformance suite
+pins each property (`a_wake_leaves_a_stopped_task_stopped`,
+`a_task_stopped_while_queued_keeps_one_entry`,
+`a_stop_withdrawn_while_the_body_ran_leaves_its_request_standing`,
+`an_exit_over_a_stop_retires_the_task`).
+
+`kernel/core`'s `Signal::Stop` and `Signal::Continue` fan out over a process's
+threads under the thread-group table's read lock, and `thread_create`
+registers a thread under its write lock, stopping it there when its creator
+is stopped, so no thread is born running into a stopped group. A stop that
+lands on a thread already owing a death is withdrawn, so a killed thread
+always reaches its boundary. Introspection reports a stopped process as
+`ProcessState::Stopped` once every live thread is stopped.
 
 `SleepLock` builds fair mutex contention on the same wait queue. Contenders
 retain FIFO registration order and release wakes only the oldest waiter,
@@ -991,7 +1011,7 @@ not caller-supplied).
 | -------------------------------- | ---------------------------------------- |
 | `Scheduler::dispatch` (entry)    | publishes the about-to-run task's id     |
 | `Scheduler::dispatch` (exit)     | clears the slot, every branch            |
-| `Scheduler::park(id)`            | clears the slot **only** once the body lock proves no CPU is running `id`; otherwise IPIs the running CPU, which clears its own slot on dispatch exit |
+| `Scheduler::stop(id)`            | clears the slot **only** once the body lock proves no CPU is running `id`; otherwise IPIs the running CPU, which clears its own slot on dispatch exit |
 | `Scheduler::exit(id)`            | same proof, same fallback: clears the slot only when it holds the body lock, else defers and IPIs |
 
 The slot is exposed read-only through
@@ -1007,7 +1027,7 @@ ground truth.
   same-CPU `dispatch` set/clear pair under
   `lib/sync::RwLock`'s process-only contract
   (`AGENTS.md` §1).
-* The clear-by-id helper used by `park` / `exit` is a per-slot
+* The clear-by-id helper used by `stop` / `exit` is a per-slot
   compare-exchange; a concurrent
   `dispatch` of a *different* task on a sibling CPU is therefore
   untouched.
@@ -1015,7 +1035,7 @@ ground truth.
   still executing.** The slot is the identity every syscall from that
   task is attributed through, so clearing it from another CPU while the
   task runs in user mode would leave its next trap unattributable.
-  `park` and `exit` therefore clear it only while holding the task's
+  `stop` and `exit` therefore clear it only while holding the task's
   body lock — which no CPU can hold while dispatching that task — and
   otherwise leave the clear to the running CPU's own dispatch exit,
   sending an IPI so it gets there promptly.
@@ -1173,28 +1193,27 @@ These hold at every API boundary:
    routes the task into the overflow list rather than panicking.
 3. **No `panic!`, `unwrap`, `expect` in the dispatch path.** Every
    reachable failure produces a typed [`SchedError`].
-4. **Cancellation safety.** `park`, `unpark`, `exit` can race with the
-   task's own body. After the body returns, every policy settles the
-   task through the one shared `park::settle` (`kernel/sched/api`), whose
-   every transition is a compare-exchange from the state it was decided
-   on — a remote park, wake or yield landing while the body unwinds is
-   honoured rather than overwritten, and a lost exchange is decided again
-   against the new state:
+4. **Cancellation safety.** `unpark`, `stop`, `resume` and `exit` can race
+   with the task's own body. After the body returns, every policy settles
+   the task through the one shared `park::settle` (`kernel/sched/api`),
+   whose every transition is a compare-exchange from the state it was
+   decided on — a stop, its withdrawal, or an exit landing while the body
+   unwinds is honoured rather than overwritten, and a lost exchange is
+   decided again against the new state:
 
    | observed state | body returned              | settled                          |
    | -------------- | -------------------------- | -------------------------------- |
    | `Exited`       | *anything*                 | retire                           |
    | *any other*    | `Exit`, or `doomed` (§5) and not `Park` | → `Exited`, retire  |
-   | `Ready`        | `Park` / `Yield`           | nothing owed: a remote wake already queued it |
-   | `Parked`       | `Park` / `Yield`           | commit the park: a remote park already took it out of the competition |
+   | `StoppedOnCpu` | `Park` / `Yield`           | → `Stopped`, nothing more owed   |
    | `Running`      | `Park`                     | → `Parked`, commit the park      |
    | `Running`      | `Yield`                    | → `Ready`, re-enqueue            |
 
-   A store over a remote wake is what a job-control stop and continue
-   reaching a running child produced before: a body's `Park` applied over
-   the wake stranded the task, and its `Yield` queued it a second time. The
-   shared conformance suite pins both
-   (`a_rewake_while_the_body_ran_leaves_the_task_queued_once`).
+   No other state is reachable from a running task: it holds no queue
+   entry, so no wake or resume can queue it, and an `unpark` of a running
+   task only leaves the token its coming park consumes. A stop wins over
+   the body's own `Park` or `Yield`, either of which would leave the task
+   where a wake or its own entry could run it.
 
 5. **SMP quiescence and reclamation ownership.** `exit(id)` returns an
    `ExitDisposition` so its caller can reclaim a task's resources
@@ -1230,6 +1249,14 @@ These hold at every API boundary:
      *still executing* re-sends the nudge before reporting: it owes no
      teardown, but the `Kill` a grace window escalates to must still be
      able to escalate rather than issue nothing at all.
+
+   A retired task's record goes when nothing will reach it again: with its
+   last run-queue entry, with the dispatch that settles it, and at once in
+   `exit` for a task holding neither — never started, parked, or stopped —
+   which would otherwise stay in the policy's table for good, lengthening
+   every lookup and MLFQ's boost walk. A repeat `exit` then answers
+   `SchedError::NoSuchTask`, which owes no teardown just as `AlreadyExited`
+   does (`a_task_retired_off_every_queue_leaves_no_record`).
 
    A `doomed` task that returns `Park` (it blocked mid-body holding kernel
    state) is **not** force-exited: its kill is landed at that body's own

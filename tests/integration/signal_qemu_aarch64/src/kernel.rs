@@ -37,7 +37,7 @@ use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::foreground::ForegroundOwner;
 use tairix_kernel_core::{
-    drain_pending_foreground, install_foreground_signal, intake_enable, intake_take,
+    drain_pending_foreground, install_foreground_signal, install_gate, intake_enable, intake_take,
     reschedule_current, spawn_image, spawn_user_kthread, ConsoleDevice, ConsoleInput,
     KernelProcessSignal, KernelProcessWait, ProcessSignal, ProcessWait, RescheduleAction,
     SpawnMode, SpawnRequest, Yielder, NULL_CONSOLE, NULL_CONSOLE_READ,
@@ -508,10 +508,15 @@ fn admit(sched: &Scheduler<Aarch64Arch>, root_phys: u64, entry: tairix_arch_api:
         // installed, so the program's `svc`s are handled.
         unsafe { user_mode.enter_user(entry) }
     };
-    match spawn_user_kthread(sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work) {
-        Ok(id) => id,
-        Err(_) => qemu_exit::exit_failure(FAIL_SPAWN),
+    let Ok(id) = spawn_user_kthread(sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work) else {
+        qemu_exit::exit_failure(FAIL_SPAWN)
+    };
+    // Before the dispatch loop runs anything, as every admission gives a thread
+    // its kill gate before it can run: a signal reaches only a gated thread.
+    if install_gate(id, ProcessId(id)).is_err() {
+        qemu_exit::exit_failure(FAIL_SPAWN);
     }
+    id
 }
 
 /// Format `value` as decimal into `buf`, returning the written slice. Used to

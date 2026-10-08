@@ -281,6 +281,9 @@ pub struct Compositor {
     /// to write over. Held here, and cleared per use, so a frame's segments
     /// reuse its buffers instead of allocating a region each.
     uncovered: Region,
+    /// The client damage [`repaint_window`](Self::repaint_window) clips and
+    /// paints, kept so a repaint copies into storage it already has.
+    repaint_scratch: Region,
     /// What the frame in flight has cost so far, reset by each
     /// [`composite`](Compositor::composite) and read back through
     /// [`frame_stats`](Compositor::frame_stats).
@@ -438,6 +441,7 @@ impl Compositor {
             damage: Region::new(),
             scanout: Region::new(),
             uncovered: Region::new(),
+            repaint_scratch: Region::new(),
             stats: FrameCounters::new(),
             presented: None,
             undelivered: Region::new(),
@@ -1848,8 +1852,23 @@ impl Compositor {
             paint(&mut fresh, &[local]);
             return self.set_surface(id, fresh);
         }
-        let mut painted = area.clone();
+        let mut painted = core::mem::take(&mut self.repaint_scratch);
+        painted.clone_from(area);
         painted.clip(local);
+        let repainted = self.paint_kept(index, id, &mut painted, paint);
+        self.repaint_scratch = painted;
+        repainted
+    }
+
+    /// Paint `painted`, already clipped to the window's content, into the
+    /// content of the window at `index` and mark it on screen.
+    fn paint_kept(
+        &mut self,
+        index: usize,
+        id: WindowId,
+        painted: &mut Region,
+        paint: impl FnOnce(&mut Surface, &[Rect]),
+    ) -> bool {
         if painted.is_empty() {
             return true;
         }

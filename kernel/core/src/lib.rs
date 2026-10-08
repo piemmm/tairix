@@ -58,6 +58,9 @@
 //! items here carry rustdoc.
 
 #![no_std]
+// `Arc::try_new`, so per-thread state an admission builds refuses the
+// admission on an exhausted heap instead of aborting the kernel.
+#![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
@@ -265,11 +268,11 @@ pub use preempt::{
 pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};
 pub use procsignal::{
     clear_intake, drain_pending_foreground, foreground_signal_installed,
-    install_deferred_kill_lander, install_foreground_signal, intake_disable, intake_enable,
-    intake_enabled, intake_ready, intake_take, land_retired_kill, queue_foreground_signal,
-    task_is_stopped, DeferredKillLander, DeferredKillLanderAlreadyInstalled, DeferredTeardown,
-    ForegroundSignal, ForegroundSignalAlreadyInstalled, KernelProcessSignal, NullProcessSignal,
-    ProcessSignal, NULL_PROCESS_SIGNAL,
+    install_deferred_kill_lander, install_foreground_signal, install_gate, intake_disable,
+    intake_enable, intake_enabled, intake_ready, intake_take, land_retired_kill,
+    queue_foreground_signal, DeferredKillLander, DeferredKillLanderAlreadyInstalled,
+    DeferredTeardown, ForegroundSignal, ForegroundSignalAlreadyInstalled, KernelProcessSignal,
+    NullProcessSignal, ProcessSignal, NULL_PROCESS_SIGNAL,
 };
 pub use procspace::{new_space_tlb, ProcessSpace};
 pub use procwait::{

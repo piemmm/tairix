@@ -11,7 +11,7 @@
 //! * work-stealing,
 //! * IPI-based preemption,
 //! * starvation-freedom under the priority boost rule,
-//! * cancellation-safe lifecycle (`spawn`, `park`, `unpark`, `exit`).
+//! * cancellation-safe lifecycle (`spawn`, `unpark`, `stop`, `exit`).
 //!
 //! The tests use a single host thread and the deterministic [`TestArch`]
 //! so they are reproducible (no flaky tests).
@@ -241,9 +241,7 @@ fn starvation_freedom_via_priority_boost() {
 }
 
 #[test]
-fn cancellation_safe_park_during_dispatch() {
-    // External park while the task is mid-run: the body's next
-    // intent must be overridden to "Parked".
+fn a_stop_of_a_queued_task_runs_no_body() {
     let (arch, sched) = mk(1);
     let park_after = Arc::new(AtomicU32::new(0));
     let park_after_clone = park_after.clone();
@@ -255,12 +253,16 @@ fn cancellation_safe_park_during_dispatch() {
         .expect("spawn");
     arch.set_current_cpu(0);
     let _ = sched.step(0).expect("step"); // first run, yielded
-    sched.park(id).expect("park");
-    assert_eq!(sched.state_of(id), TaskState::Parked);
-    // No subsequent step should run the body.
+    sched.stop(id).expect("stop");
+    assert_eq!(sched.state_of(id), TaskState::StoppedOnQueue);
     let runs_before = park_after.load(Ordering::Relaxed);
     let _ = sched.step(0).expect("step");
     assert_eq!(park_after.load(Ordering::Relaxed), runs_before);
+    assert_eq!(
+        sched.state_of(id),
+        TaskState::Stopped,
+        "taking the entry completed the stop"
+    );
 }
 
 #[test]

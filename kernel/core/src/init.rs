@@ -1731,6 +1731,12 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // manifest-as-ceiling shape; a user session's ceiling is its
         // account grant, threaded through `SpawnCredential`).
         let sec_id = SecProcessId::leader(SecTaskId(task_id));
+        // A gate refused leaves PID 1 unkillable at a kernel boundary; fail
+        // closed to the halt like every other refused piece of its state.
+        if crate::procsignal::install_gate(task_id, sec_id).is_err() {
+            let _ = self.scheduler.exit(task_id);
+            return;
+        }
         // Attach PID 1's process-instance identity (a kernel-trusted bootstrap
         // principal minted from the shared per-boot counter), so its syscalls
         // are attributed to this instance distinctly from any task that later
@@ -1985,8 +1991,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         for claim in crate::procsignal::claim_group_kill(Some(self.caps), teardown, None) {
             let quiesced = match claim.site {
                 // Every in-kernel park loop re-tests the gate after a wake and
-                // unwinds, so even an unbounded `irq_wait` reaches its boundary.
+                // unwinds, so even an unbounded `irq_wait` reaches its boundary;
+                // no wake ends a stop, so a stopped thread is resumed first.
                 crate::procsignal::KillSite::Boundary => {
+                    let _ = self.scheduler.resume(claim.thread);
                     let _ = self.scheduler.unpark(claim.thread);
                     false
                 }
@@ -4051,6 +4059,9 @@ mod tests {
             CapabilitySet::empty(),
             audit_sink,
         ));
+        // Still a member, so still gated, until the landing under way retires it.
+        crate::procsignal::clear_kill_gate(retired_elsewhere);
+        crate::procsignal::install_gate(retired_elsewhere, sec).expect("a gate installs");
 
         assert_eq!(ctx.terminate_driver_process(retired_elsewhere), Ok(()));
         assert!(
@@ -4119,6 +4130,9 @@ mod tests {
             .write()
             .register_thread(SecTaskId(sibling), sec)
             .expect("the sibling aliases the live record");
+        for thread in [leader, sibling] {
+            crate::procsignal::install_gate(thread, sec).expect("each thread is gated");
+        }
         let live_before = state.scheduler.live_task_count();
 
         assert_eq!(ctx.terminate_driver_process(leader), Ok(()));
@@ -4212,14 +4226,18 @@ mod tests {
         let mut body = Some(body);
         let task = state
             .scheduler
-            .spawn(0, Priority::Normal, move |_| {
+            .spawn(0, Priority::Normal, move |ctx| {
                 if let Some(body) = body.take() {
+                    // What the kthread shim does for a thread it dispatches.
+                    let gate = crate::procsignal::gate_of(ctx.task_id).expect("admitted with one");
+                    let _published = crate::kthread::publish_gate_for_test(ctx.cpu, gate);
                     body(hook);
                 }
                 tairix_kernel_sched_api::TaskAction::Exit
             })
             .expect("the task is admitted");
         let process = SecProcessId(task);
+        crate::procsignal::install_gate(task, process).expect("a gate installs");
         state.caps.write().insert(TaskCapabilities::derive(
             process,
             UserId(0),

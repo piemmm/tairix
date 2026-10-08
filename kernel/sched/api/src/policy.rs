@@ -10,9 +10,10 @@
 //! The trait deliberately mirrors the operational surface enumerates:
 //! task admission ([`spawn`](SchedulerPolicy::spawn)), picking the next
 //! runnable task on a CPU ([`step`](SchedulerPolicy::step)) and settling the
-//! yield, park or exit its body returns, block/wake
-//! ([`park`](SchedulerPolicy::park) / [`unpark`](SchedulerPolicy::unpark) /
-//! [`exit`](SchedulerPolicy::exit)), priority/quantum accounting (driven by
+//! yield, park or exit its body returns, wake and job control
+//! ([`unpark`](SchedulerPolicy::unpark) / [`stop`](SchedulerPolicy::stop) /
+//! [`resume`](SchedulerPolicy::resume) / [`exit`](SchedulerPolicy::exit)),
+//! priority/quantum accounting (driven by
 //! [`on_timer_tick`](SchedulerPolicy::on_timer_tick) and observable through
 //! [`preemption_count`](SchedulerPolicy::preemption_count)), and the SMP
 //! hooks (per-CPU run queues, work stealing, IPI-driven preemption) which
@@ -34,7 +35,8 @@ use crate::task::{Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskSta
 ///
 /// Implementations are required to honour the lifecycle state machine in
 /// [`crate::task`] and the cancellation-safety guarantees documented on
-/// [`park`](Self::park) / [`unpark`](Self::unpark) / [`exit`](Self::exit).
+/// [`unpark`](Self::unpark) / [`stop`](Self::stop) /
+/// [`resume`](Self::resume) / [`exit`](Self::exit).
 /// The shared `conformance` suite asserts the behaviour every
 /// policy must exhibit (fairness, no starvation, correct yield/wake
 /// semantics, SMP stress on ≥ 4 cores).
@@ -122,24 +124,42 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
 
-    /// Block a task. Cancellation-safe.
-    ///
-    /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
-    /// * [`crate::SchedError::InvalidState`] if the task is terminal.
-    fn park(&self, id: TaskId) -> SchedResult<()>;
-
     /// Wake a parked task. Cancellation-safe.
     ///
     /// An error means the task can **never run again** and nothing else:
     /// callers rely on that reading, so a wake another waker already
-    /// satisfied — the task is already runnable — reports `Ok`. The shared
-    /// [`crate::park::unpark_task`] handshake is the one definition.
+    /// satisfied — the task is already runnable — reports `Ok`, as does a
+    /// wake of a stopped task, which only [`resume`](Self::resume) ends. The
+    /// shared [`crate::park::unpark_task`] handshake is the one definition.
     ///
     /// # Errors
     /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.
     fn unpark(&self, id: TaskId) -> SchedResult<()>;
+
+    /// Stop a task for job control until [`resume`](Self::resume).
+    /// Cancellation-safe and idempotent.
+    ///
+    /// No [`unpark`](Self::unpark) ends a stop, so nothing need re-check it
+    /// when the task is next dispatched. A task executing on another CPU is
+    /// signalled so its stop takes effect at its next stopping point rather
+    /// than its next quantum. The shared [`crate::park::stop_task`] is the
+    /// one definition of the transition.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::InvalidState`] if the task is terminal.
+    fn stop(&self, id: TaskId) -> SchedResult<()>;
+
+    /// End a [`stop`](Self::stop), making the task runnable again.
+    /// Cancellation-safe; resuming a task that is not stopped is `Ok`.
+    ///
+    /// The shared [`crate::park::resume_task`] is the one definition.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::InvalidState`] if the task is terminal.
+    fn resume(&self, id: TaskId) -> SchedResult<()>;
 
     /// Terminate a task. Cancellation-safe and idempotent.
     ///
@@ -156,8 +176,13 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// dispatch returns to the scheduler, so no policy exposes an `Exited`
     /// task that is still running.
     ///
+    /// A retired task's record is dropped as soon as nothing will reach it
+    /// again — at once for a task holding neither a run-queue entry nor a
+    /// CPU — after which a repeat `exit` answers
+    /// [`crate::SchedError::NoSuchTask`]; that too owes no teardown.
+    ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if no task holds that id.
     fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition>;
 
     /// Observation point the arch port's timer ISR calls after

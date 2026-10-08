@@ -270,14 +270,28 @@ where
         release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(Errno::OutOfMemory);
     }
+    // Before the thread joins a group a kill could claim, and before it runs.
+    if crate::procsignal::install_gate(task_id, process).is_err() {
+        let _ = handlers.sched.exit(task_id);
+        tairix_kernel_sched_api::release_task_id(task_id);
+        release_reservation(handlers, &space, process, reserve_base, reserve_pages);
+        return Err(Errno::OutOfMemory);
+    }
 
     // Alias the new thread onto the process's one capability record, so it acts
     // under exactly the same authority and a revocation binds it too. A refusal
     // (an unknown process, or an id already registered) is a kernel invariant
     // violation: retire the task and fail closed rather than run a thread whose
     // authority the dispatcher cannot resolve.
-    if let Err(errno) = register_unless_dying(handlers.caps, caller.task_id, thread, process) {
+    if let Err(errno) = register_unless_dying(
+        handlers.caps,
+        handlers.sched,
+        caller.task_id,
+        thread,
+        process,
+    ) {
         let _ = handlers.sched.exit(task_id);
+        crate::procsignal::clear_kill_gate(task_id);
         tairix_kernel_sched_api::release_task_id(task_id);
         release_reservation(handlers, &space, process, reserve_base, reserve_pages);
         return Err(errno);
@@ -326,25 +340,32 @@ where
     false
 }
 
-/// Register `thread` as a member of `process`, refused while its `creator`
-/// owes a death.
+/// Register the parked `thread` as a member of `process`, refused while its
+/// `creator` owes a death, and stopped if its creator is.
 ///
-/// A group death is claimed under the table's read lock over the members it
-/// holds, and this check runs under the write lock, so a thread either joins
-/// before the claim and is claimed with the rest, or finds its creator dying
-/// and is never born: it cannot outlive the group it would have belonged to.
+/// A group death is claimed, and a group stopped or resumed, under the table's
+/// read lock over the members it holds, and this runs under the write lock. So
+/// a thread either joins before the claim and is claimed with the rest, or
+/// finds its creator dying and is never born: it cannot outlive the group it
+/// would have belonged to. Likewise it joins a stopped group stopped, and
+/// never runs while the rest of the group is held.
 ///
 /// # Errors
 ///
 /// [`Errno::Interrupted`] when `creator` owes a death; [`Errno::AlreadyExists`]
 /// for an id already registered; [`Errno::NotFound`] when `process` has no
 /// record.
-fn register_unless_dying(
+fn register_unless_dying<A, P>(
     caps: &RwLock<CapTable>,
+    sched: &P,
     creator: SecTaskId,
     thread: SecTaskId,
     process: ProcessId,
-) -> Result<(), Errno> {
+) -> Result<(), Errno>
+where
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+{
     let mut caps = caps.write();
     if crate::procsignal::kill_pending(creator.0) {
         return Err(Errno::Interrupted);
@@ -355,7 +376,12 @@ fn register_unless_dying(
             // `UnknownProcess` and any future variant: the caller's own record
             // vanished under us.
             _ => Errno::NotFound,
-        })
+        })?;
+    // Refused only for a thread already retired, which can never run anyway.
+    if sched.state_of(creator.0).is_stopped() {
+        let _ = sched.stop(thread.0);
+    }
+    Ok(())
 }
 
 /// End the calling thread, releasing what it alone owns.
@@ -547,6 +573,8 @@ mod tests {
             .expect("sibling registers");
         for id in [leader, sibling] {
             tairix_kernel_sched_api::reserve_task_id(id).expect("the id is held");
+            crate::procsignal::clear_kill_gate(id);
+            crate::procsignal::install_gate(id, process).expect("a gate installs");
         }
         (caps, RwLock::new(AddressSpaceRegistry::new()))
     }
@@ -612,9 +640,11 @@ mod tests {
         let (caps, _aspaces) = group_with_a_sibling(leader, creator);
 
         assert_eq!(claim_death_of(&caps, leader).len(), 2, "both threads die");
+        let sched = scheduler();
         assert_eq!(
             register_unless_dying(
                 &caps,
+                &sched,
                 SecTaskId(creator),
                 SecTaskId(newborn),
                 ProcessId(leader)
@@ -629,18 +659,77 @@ mod tests {
         }
     }
 
+    /// A one-CPU scheduler of the test's own.
+    fn scheduler() -> crate::sched::Scheduler<crate::test_arch::TestArch> {
+        let arch = alloc::sync::Arc::new(crate::test_arch::TestArch::with_cpus(1));
+        crate::sched::Scheduler::new(
+            tairix_kernel_sched_api::SchedulerConfig::defaults_for(1),
+            arch,
+        )
+        .expect("the scheduler builds")
+    }
+
+    /// A thread born to a creator its group's stop already holds joins the
+    /// group stopped, and starting it does not run it; one born to a running
+    /// creator starts as usual. Admitted runnable, it would run on while the
+    /// job-control shell believes the whole process stopped.
+    #[test]
+    fn a_thread_born_into_a_stopped_group_is_born_stopped() {
+        for stopped in [true, false] {
+            let sched = scheduler();
+            let spawn = |parked: bool| {
+                let body = |_: &mut tairix_kernel_sched_api::TaskContext| {
+                    tairix_kernel_sched_api::TaskAction::Yield
+                };
+                if parked {
+                    sched.spawn_parked(0, Priority::Normal, body)
+                } else {
+                    sched.spawn(0, Priority::Normal, body)
+                }
+                .expect("admitted")
+            };
+            let (leader, newborn) = (spawn(false), spawn(true));
+            let (caps, _aspaces) = group_with_a_sibling(leader, newborn + 1);
+            if stopped {
+                assert_eq!(sched.stop(leader), Ok(()));
+            }
+
+            assert_eq!(
+                register_unless_dying(
+                    &caps,
+                    &sched,
+                    SecTaskId(leader),
+                    SecTaskId(newborn),
+                    ProcessId(leader)
+                ),
+                Ok(())
+            );
+            assert!(start_parked(&sched, newborn, || {}));
+            let expected = if stopped {
+                tairix_kernel_sched_api::TaskState::Stopped
+            } else {
+                tairix_kernel_sched_api::TaskState::Ready
+            };
+            assert_eq!(
+                sched.state_of(newborn),
+                expected,
+                "creator stopped: {stopped}"
+            );
+
+            for id in [leader, newborn + 1] {
+                crate::procsignal::clear_kill_gate(id);
+                tairix_kernel_sched_api::release_task_id(id);
+            }
+        }
+    }
+
     /// A thread killed with its group before its creator could start it is
     /// landed by its killer; the creator's failure path lands only a thread
     /// it retired itself, so the process is not read as down around the live
     /// creator.
     #[test]
     fn a_thread_its_group_killed_before_it_started_is_landed_once() {
-        let arch = alloc::sync::Arc::new(crate::test_arch::TestArch::with_cpus(1));
-        let sched = crate::sched::Scheduler::new(
-            tairix_kernel_sched_api::SchedulerConfig::defaults_for(1),
-            arch,
-        )
-        .expect("the scheduler builds");
+        let sched = scheduler();
         let parked = || {
             sched
                 .spawn_parked(0, Priority::Normal, |_| {

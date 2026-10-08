@@ -9087,6 +9087,31 @@ fn repainting_part_of_the_desktop_layer_marks_only_that_part() {
     assert!(!c.has_damage(), "no pixel of the layer was asked for");
 }
 
+/// A repaint of a window's kept content copies its damage into storage the
+/// compositor keeps, so a repaint — every screensaver frame, every menu
+/// highlight — allocates nothing of its own once that storage has grown. The
+/// damage a composite drains is not reused, so the second repaint here is
+/// measured before any composite.
+#[test]
+fn a_repaint_of_kept_content_allocates_nothing_of_its_own() {
+    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(4, 5), opaque(8, 6, GREEN));
+    c.composite();
+    let mut area = Region::new();
+    area.add(Rect::new(1, 2, 3, 2));
+    area.add(Rect::new(0, 5, 8, 1));
+    let repaint = |c: &mut Compositor| {
+        c.repaint_window(id, (8, 6), &area, |surface, rects| {
+            paint_marked_rects(surface, rects, RED);
+        })
+    };
+    assert!(repaint(&mut c));
+
+    let (repainted, metering) = tairix_fuzzseed::meter::metered(|| repaint(&mut c));
+    assert!(repainted);
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+}
+
 /// A window the embedder paints itself — a menu plate — is retained chrome:
 /// repainting part of it keeps the rest of its pixels and marks only that
 /// part, which is what makes a menu highlight cost two rows rather than a

@@ -210,6 +210,14 @@ impl Clone for Region {
             budget: self.budget,
         }
     }
+
+    /// Copies into this region's own storage, so a region a consumer keeps
+    /// takes a copy without allocating once it has grown to size.
+    fn clone_from(&mut self, source: &Self) {
+        self.rects.clone_from(&source.rects);
+        self.bounds = source.bounds;
+        self.budget = source.budget;
+    }
 }
 
 /// Two regions are equal when they cover the same pixels; the canonical form

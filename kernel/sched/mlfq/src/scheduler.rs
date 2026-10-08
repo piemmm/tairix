@@ -9,7 +9,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_kernel_sched_api::park::{self, Settled};
+use tairix_kernel_sched_api::park::{self, Settled, Taken};
 use tairix_kernel_sched_api::{ParkableTask, StealScan};
 use tairix_sync::{RwLock, SpinLock};
 
@@ -186,9 +186,9 @@ pub struct Scheduler<A: SchedulerArch> {
     /// "no task currently running on this CPU". The slot is updated
     /// exclusively by [`Self::dispatch`] (set immediately before the
     /// body is invoked, cleared as soon as the body returns) and
-    /// defensively by [`Self::park`] / [`Self::exit`] when their
+    /// defensively by [`Self::stop`] / [`Self::exit`] when their
     /// argument matches an entry — that covers the case where a task
-    /// running on one CPU is parked or exited by another CPU.
+    /// running on one CPU is stopped or exited by another CPU.
     ///
     /// The slot is the publication point read by the syscall entry
     /// path (`kernel/tairix-kernel::dispatch::production_dispatch`,
@@ -461,38 +461,49 @@ impl<A: SchedulerArch> Scheduler<A> {
         Ok(id)
     }
 
-    /// Park a task. Cancellation-safe: the call is a no-op if the task
-    /// has already exited.
-    ///
-    /// Also clears any per-CPU current-task slot whose entry equals
-    /// `id` so the slot does not outlive the task's run
-    /// (fail-closed: no syscall must reach a parked
-    /// task as its caller).
+    /// Stop a task for job control until [`Self::resume`] — see
+    /// [`SchedulerPolicy::stop`].
     ///
     /// # Errors
     /// * [`SchedError::NoSuchTask`] if no task ever held that id.
-    /// * [`SchedError::InvalidState`] if the task is in a terminal state.
-    pub fn park(&self, id: TaskId) -> SchedResult<()> {
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn stop(&self, id: TaskId) -> SchedResult<()> {
         let task = self
             .tasks
             .read()
             .get(&id)
             .cloned()
             .ok_or(SchedError::NoSuchTask)?;
-        loop {
-            match task.load_state() {
-                TaskState::Exited => return Err(SchedError::InvalidState),
-                TaskState::Parked => {
-                    self.release_current_slot(&task, id);
-                    return Ok(());
-                }
-                cur @ (TaskState::Ready | TaskState::Running) => {
-                    if task.cas_state(cur, TaskState::Parked).is_ok() {
-                        self.release_current_slot(&task, id);
-                        return Ok(());
-                    }
-                }
-            }
+        park::stop_task(&*task)?;
+        self.release_current_slot(&task, id);
+        Ok(())
+    }
+
+    /// End a stop — see [`SchedulerPolicy::resume`]. A task whose stop had
+    /// completed is placed like a woken one.
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`SchedError::InvalidState`] if the task is terminal.
+    pub fn resume(&self, id: TaskId) -> SchedResult<()> {
+        let task = self
+            .tasks
+            .read()
+            .get(&id)
+            .cloned()
+            .ok_or(SchedError::NoSuchTask)?;
+        park::resume_task(&*task, |resumed| self.admit_woken(resumed))
+    }
+
+    /// Drop a retired task's record, unless its id already names another
+    /// task: an id is drawn again once no record holds it.
+    fn drop_record(&self, task: &TaskInner) {
+        let mut tasks = self.tasks.write();
+        if tasks
+            .get(&task.id)
+            .is_some_and(|held| core::ptr::eq(Arc::as_ptr(held), task))
+        {
+            tasks.remove(&task.id);
         }
     }
 
@@ -594,7 +605,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // caller reclaim: the task can take no further fault. Drop the guard
         // (end of this block) before touching the registry, so no lock-guard
         // temporary outlives the `task` handle.
-        {
+        let retired_from = {
             let Some(mut body) = task.body.try_lock() else {
                 // A dispatch owns the body and, by `doom`'s pairing, reads the
                 // mark when it returns and retires the task itself.
@@ -602,12 +613,13 @@ impl<A: SchedulerArch> Scheduler<A> {
                 return Ok(ExitDisposition::Deferred);
             };
             *body = None;
-            task.store_state(TaskState::Exited);
+            task.swap_state(TaskState::Exited)
+        };
+        // A queued task's record goes with its entry, and a settling one's
+        // with its dispatch; one holding neither would otherwise stay for good.
+        if matches!(retired_from, TaskState::Parked | TaskState::Stopped) {
+            self.drop_record(&task);
         }
-        // Leave the now-`Exited` registry entry in place (a repeat `exit`
-        // finds it `AlreadyExited` via the `doomed` mark, so teardown is
-        // idempotent). Any stale run-queue entry is dropped when a later
-        // `step` picks it and `dispatch` observes `Exited`.
         self.clear_current_matching(id);
         Ok(ExitDisposition::Quiesced)
     }
@@ -873,25 +885,18 @@ impl<A: SchedulerArch> Scheduler<A> {
         // migrating queued tasks (see `maybe_priority_boost`), so reading
         // from `task` here is what makes the boost visible.
         let prio = task.load_priority();
-        // Filter out tasks that were parked/exited while queued.
-        match task.load_state() {
-            TaskState::Parked => return StepOutcome::Idle,
-            TaskState::Exited => {
-                self.tasks.write().remove(&id);
+        // MLFQ keeps no competing weight, so a departure is the transition alone.
+        match park::take_entry(
+            &*task,
+            || task.cas_state(TaskState::Ready, TaskState::Running).is_ok(),
+            |transition: &dyn Fn() -> bool| transition(),
+        ) {
+            Taken::Ready => {}
+            Taken::Exited => {
+                self.drop_record(&task);
                 return StepOutcome::Idle;
             }
-            TaskState::Ready => {}
-            TaskState::Running => {
-                // Already running elsewhere (a stale steal); drop on the
-                // floor — it will be re-enqueued by its owner.
-                return StepOutcome::Idle;
-            }
-        }
-        if task
-            .cas_state(TaskState::Ready, TaskState::Running)
-            .is_err()
-        {
-            return StepOutcome::Idle;
+            Taken::Spent => return StepOutcome::Idle,
         }
         // Publish the current-task slot for this CPU **before** invoking
         // the body: a syscall issued from inside the body must observe
@@ -961,11 +966,11 @@ impl<A: SchedulerArch> Scheduler<A> {
                 if let Some(mut guard) = task.body.try_lock() {
                     *guard = None;
                 }
-                self.tasks.write().remove(&id);
+                self.drop_record(task);
             }
             Settled::Park => park::commit_park(&**task, |woken| self.admit_woken(woken)),
             Settled::Requeue => self.reenqueue_after_yield(task, id, prio, cpu),
-            Settled::Readmitted => {}
+            Settled::Released => {}
         }
     }
 
@@ -1170,9 +1175,9 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///
     /// The slot is published exclusively by the scheduler's internal
     /// `dispatch` path (set immediately before the task body is
-    /// invoked, cleared as soon as the body returns). [`Self::park`]
+    /// invoked, cleared as soon as the body returns). [`Self::stop`]
     /// and [`Self::exit`] also clear
-    /// matching entries so a parked or exited task can never be the
+    /// matching entries so a stopped or exited task can never be the
     /// current task on any CPU.
     ///
     /// This is the lookup the syscall entry path uses to recover the
@@ -1297,7 +1302,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     }
 
     /// Defensively clear every per-CPU current-task slot whose entry
-    /// equals `id`. Used by [`Self::park`] and [`Self::exit`] so a task
+    /// equals `id`. Used by [`Self::stop`] and [`Self::exit`] so a task
     /// that just transitioned out of
     /// [`TaskState::Running`] cannot remain the current task on any
     /// CPU. The CAS is per-slot, so a concurrent `dispatch` of a
@@ -1365,12 +1370,16 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
         Scheduler::spawn_parked_as(self, id, home_cpu, priority, body)
     }
 
-    fn park(&self, id: TaskId) -> SchedResult<()> {
-        Scheduler::park(self, id)
-    }
-
     fn unpark(&self, id: TaskId) -> SchedResult<()> {
         Scheduler::unpark(self, id)
+    }
+
+    fn stop(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::stop(self, id)
+    }
+
+    fn resume(&self, id: TaskId) -> SchedResult<()> {
+        Scheduler::resume(self, id)
     }
 
     fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition> {
@@ -1560,7 +1569,7 @@ mod tests {
         drop(body_guard);
     }
 
-    /// Parking a task that is still executing must leave its per-CPU
+    /// Stopping a task that is still executing must leave its per-CPU
     /// current-task slot alone.
     ///
     /// That slot is how the syscall dispatcher attributes the task's next
@@ -1569,7 +1578,7 @@ mod tests {
     /// halt the CPU outright. The running CPU clears its own slot when the
     /// body returns; the killer only nudges it.
     #[test]
-    fn park_of_an_executing_task_leaves_its_current_slot_intact() {
+    fn stop_of_an_executing_task_leaves_its_current_slot_intact() {
         let (arch, sched) = mk(4);
         let id = sched
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
@@ -1579,32 +1588,32 @@ mod tests {
         sched.set_current(2, id);
         let before = arch.ipi_count(2);
 
-        sched.park(id).expect("park");
+        sched.stop(id).expect("stop");
 
         assert_eq!(
             sched.current_task(2),
             Some(id),
-            "the caller-identity slot must outlive a remote park of a running task"
+            "the caller-identity slot must outlive a remote stop of a running task"
         );
         assert_eq!(
             arch.ipi_count(2),
             before + 1,
-            "park must nudge the CPU running the victim"
+            "a stop must nudge the CPU running the victim"
         );
         drop(body_guard);
     }
 
-    /// The same park on a task no dispatch owns clears the slot at once:
+    /// The same stop on a task no dispatch owns clears the slot at once:
     /// the body lock is free, which proves no CPU can trap as this task.
     #[test]
-    fn park_of_a_quiescent_task_clears_its_current_slot() {
+    fn stop_of_a_quiescent_task_clears_its_current_slot() {
         let (_arch, sched) = mk(4);
         let id = sched
             .spawn(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("spawn");
         sched.set_current(2, id);
 
-        sched.park(id).expect("park");
+        sched.stop(id).expect("stop");
 
         assert_eq!(sched.current_task(2), None);
     }
@@ -1778,7 +1787,8 @@ mod tests {
     #[test]
     fn unknown_task_is_error() {
         let (_arch, sched) = mk(1);
-        assert_eq!(sched.park(999), Err(SchedError::NoSuchTask));
+        assert_eq!(sched.stop(999), Err(SchedError::NoSuchTask));
+        assert_eq!(sched.resume(999), Err(SchedError::NoSuchTask));
         assert_eq!(sched.unpark(999), Err(SchedError::NoSuchTask));
         assert_eq!(sched.exit(999), Err(SchedError::NoSuchTask));
     }
@@ -1962,27 +1972,6 @@ mod tests {
         assert_eq!(observed.load(Ordering::Acquire), id);
         // And cleared once the body returned.
         assert_eq!(sched.current_task(0), None);
-    }
-
-    #[test]
-    fn park_clears_matching_current_task_slot() {
-        // Simulate a state where the slot has been published by a
-        // dispatch in flight and then the task is externally parked
-        // before dispatch returns. The public contract of `park` is
-        // that, after it returns Ok, no per-CPU slot still points at
-        // the parked task.
-        let (_arch, sched) = mk(2);
-        let id = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Park)
-            .expect("spawn");
-        // Publish the slot by hand to mimic an in-flight dispatch on
-        // CPU 1 (a sibling); we then park the task and assert the slot
-        // is cleared. We do not use a private helper here on purpose
-        // — the assertion goes through the public `current_task`.
-        sched.set_current(1, id);
-        assert_eq!(sched.current_task(1), Some(id));
-        sched.park(id).expect("park");
-        assert_eq!(sched.current_task(1), None);
     }
 
     #[test]

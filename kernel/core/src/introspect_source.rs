@@ -111,13 +111,15 @@ fn counts_toward_load(state: TaskState, task: TaskId, observer: Option<TaskId>) 
 }
 
 /// How active a scheduler state is, for reading a thread group as one process:
-/// a group is as active as its most active thread.
+/// a group is as active as its most active thread, so it reads as stopped only
+/// once every live thread is.
 const fn activity(state: TaskState) -> u8 {
     match state {
         TaskState::Exited => 0,
-        TaskState::Parked => 1,
-        TaskState::Ready => 2,
-        TaskState::Running => 3,
+        TaskState::Stopped | TaskState::StoppedOnQueue | TaskState::StoppedOnCpu => 1,
+        TaskState::Parked => 2,
+        TaskState::Ready => 3,
+        TaskState::Running => 4,
     }
 }
 
@@ -261,13 +263,17 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
     /// Map a scheduler [`TaskState`] to the ABI [`ProcessState`].
     ///
     /// `Ready` (queued, runnable) reports `Runnable`; `Running` reports
-    /// `Running`; `Parked` (blocked on a wait) reports `Blocked`; `Exited`
+    /// `Running`; `Parked` (blocked on a wait) reports `Blocked`; a job-control
+    /// stop reports `Stopped` from the moment it is requested; `Exited`
     /// reports `Zombie` (terminated, record not yet reaped).
     fn process_state(state: TaskState) -> ProcessState {
         match state {
             TaskState::Ready => ProcessState::Runnable,
             TaskState::Running => ProcessState::Running,
             TaskState::Parked => ProcessState::Blocked,
+            TaskState::Stopped | TaskState::StoppedOnQueue | TaskState::StoppedOnCpu => {
+                ProcessState::Stopped
+            }
             TaskState::Exited => ProcessState::Zombie,
         }
     }
@@ -1248,10 +1254,43 @@ mod tests {
     }
 
     #[test]
-    fn parked_and_exited_tasks_never_count() {
-        for state in [TaskState::Parked, TaskState::Exited] {
-            assert!(!counts_toward_load(state, 7, None));
-            assert!(!counts_toward_load(state, 7, Some(7)));
+    fn parked_stopped_and_exited_tasks_never_count() {
+        for state in [
+            TaskState::Parked,
+            TaskState::Stopped,
+            TaskState::StoppedOnQueue,
+            TaskState::StoppedOnCpu,
+            TaskState::Exited,
+        ] {
+            assert!(!counts_toward_load(state, 7, None), "{state:?}");
+            assert!(!counts_toward_load(state, 7, Some(7)), "{state:?}");
+        }
+    }
+
+    /// The regression this pins: a stopped process read as `Blocked`, so `ps`
+    /// never showed its `T`, `top` never counted it stopped, and the
+    /// Switchboard never offered to continue it. A group reads as stopped once
+    /// every live thread is, and a thread the stop has not reached outranks it.
+    #[test]
+    fn a_stopped_group_reports_stopped() {
+        for state in [
+            TaskState::Stopped,
+            TaskState::StoppedOnQueue,
+            TaskState::StoppedOnCpu,
+        ] {
+            assert_eq!(
+                super::KernelIntrospectSource::<crate::test_arch::TestArch>::process_state(state),
+                tairix_abi::sysinfo::ProcessState::Stopped,
+                "{state:?}"
+            );
+            let group = GroupReading::default()
+                .with(TaskState::Exited, None, 0)
+                .with(state, None, 0);
+            assert_eq!(group.state, state, "a stopped thread outranks one gone");
+            assert_eq!(
+                group.with(TaskState::Parked, None, 0).state,
+                TaskState::Parked
+            );
         }
     }
 

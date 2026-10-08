@@ -1642,9 +1642,9 @@ deliverer is `kernel/core::procsignal::KernelProcessSignal` (`plans/SPAWN.md`
 SP7b): it composes over the `KernelProcessWait` producer — the one owner of
 the parent/child + exit-status bookkeeping, so authorisation and the reaped
 status share a single definition — and the live scheduler, and delivers by
-driving it: `Continue` resumes a stopped child (`SchedulerPolicy::unpark`, a
-no-op for a running one, also clearing the stop overlay and any unobserved
-stop), `Terminate` / `Kill` / `Interrupt` terminate the child
+driving it: `Continue` resumes a stopped child (`SchedulerPolicy::resume`, a
+no-op for a running one, also clearing any unobserved stop), `Terminate` /
+`Kill` / `Interrupt` terminate the child
 (`SchedulerPolicy::exit`) — unless the target has opted its
 termination-request signals into observable delivery through
 `signal_intake` (below), in which case a `Terminate`/`Interrupt` with a
@@ -1654,11 +1654,10 @@ POSIX-familiar
 termination status (`Signal::termination_status`: `Interrupt` → 130,
 `Kill` → 137, `Terminate` → 143 — the `128 + n` codes a shell user already
 scripts against, deliberately not our wire discriminants) so the parent's
-`wait` reaps it — distinguishable from a self-`exit` — and `Stop` parks the
-child (`SchedulerPolicy::park`), marks it in the kernel's stop overlay (a
-broadcast waitq wake can otherwise make a parked task runnable; the kthread
-dispatch shim re-parks an overlay-held task, so only `Continue` genuinely
-resumes it) and records the stop for a `WaitFlags::STOPPED` wait. The
+`wait` reaps it — distinguishable from a self-`exit` — and `Stop` stops every
+thread of the child (`SchedulerPolicy::stop`, a scheduler state no wake leaves,
+so only `Continue` or a kill ends it) and records the stop for a
+`WaitFlags::STOPPED` wait. The
 first-party Rust wrapper is
 `tairix_rt::signal`; the C stub is `tairix_sys_signal` and the header defines
 `TAIRIX_SIGNAL_CONTINUE` / `TAIRIX_SIGNAL_TERMINATE` / `TAIRIX_SIGNAL_KILL` /
@@ -1699,13 +1698,21 @@ Four rules make each death land exactly once:
   anything, so a victim retired by its own CPU before the killer returns still
   finds it; recorded afterwards, it could arrive after the only point that
   looks for it.
-* **Owed where the victim is.** Whether a death is owed at a boundary or at a
-  retire is one decision on the gate's in-kernel set, under the lock the
-  victim's own entry into the kernel takes. A thread that enters a kernel body
-  — a syscall, the deferred-load body, the user-fault resolver — with a death
+* **Owed where the victim is.** Each thread has its own gate, one word an
+  admission installs before the thread can run. Whether a death is owed at a
+  boundary or at a retire is decided on that word: the victim's entry into the
+  kernel sets its in-kernel bit with one read-modify-write and a claim records
+  the death with another, so the two linearise. The thread reaches its gate
+  through the copy its dispatcher publishes on its CPU while it runs, so a
+  syscall or a fault touches no structure another CPU contends on; killers find
+  it by id in the gate registry. A thread that enters a kernel body — a
+  syscall, the deferred-load body, the user-fault resolver — with a death
   already owed never runs that body: it goes straight to its boundary. The
   scheduler retires a thread told to die at its next stopping point, and inside
-  a body that would free a stack whose frames still own kernel state.
+  a body that would free a stack whose frames still own kernel state. No wake
+  ends a stop, so a stopped thread owing its death at a boundary is resumed
+  before it is woken, and a stop that lands on a thread already owing one is
+  withdrawn.
 * **Landed only once retired.** A dispatch returns on a yield and a park as
   well as on a retire, so the dispatch loop lands a death only for a thread the
   scheduler reports `Exited`.

@@ -807,7 +807,7 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   `&'static P: SchedulerPolicy`. It authorises the target through the new
   `KernelProcessWait::authorise_child` (a live child of the sender, else
   fail-closed `NotFound`; a zombie is not signallable), then delivers:
-  `Continue` → `SchedulerPolicy::unpark` (a continue to a non-stopped child is
+  `Continue` → `SchedulerPolicy::resume` (a continue to a non-stopped child is
   a harmless no-op — `InvalidState` is folded to `Ok`); `Terminate` / `Kill` →
   `SchedulerPolicy::exit` + `KernelProcessWait::record_signalled_exit`, which
   records the signal's POSIX-familiar termination status (the shared
@@ -898,7 +898,7 @@ clears the foreground job. Binding design decisions:
 
 - **Signal set.** The closed `tairix_abi::Signal` gains `Interrupt` (4, the
   `^C` interrupt request; default disposition terminates) and `Stop` (5, the
-  `^Z` stop; parks the child, never terminates it). `Signal::
+  `^Z` stop; stops the child, never terminates it). `Signal::
   termination_status` follows the POSIX-familiar `128 + <signal a script
   expects>` codes — `Interrupt` → 130, `Terminate` → 143, `Kill` → 137
   (`Continue`/`Stop` → `None`) — because §16.7 familiarity binds the codes a
@@ -919,8 +919,9 @@ clears the foreground job. Binding design decisions:
   `WaitFlags` and return `WaitedChild { pid, status: WaitStatus }` (the
   `ReapedChild` successor), and stop events wake `PROCWAIT_WAITQ` exactly as
   exits do. `KernelProcessSignal` delivers `Stop` →
-  `SchedulerPolicy::park(child)` + `record_stop`, `Continue` → `unpark` +
-  `record_continue`, `Interrupt` → the terminate path with its 130 status.
+  `SchedulerPolicy::stop` on every thread + `record_stop`, `Continue` →
+  `resume` + `record_continue`, `Interrupt` → the terminate path with its 130
+  status.
 - **Console line discipline.** `ConsoleDevice` owns an atomic `foreground`
   slot (lock-free — the filter runs in the UART RX interrupt handler, where
   spinning on a lock held by the interrupted task would deadlock a single
@@ -945,13 +946,15 @@ clears the foreground job. Binding design decisions:
   is gone may be drawn again, so a stale slot must never reach whoever
   inherited the number. A delivery whose target has exited is dropped
   fail-closed.
-- **Stop overlay.** The scheduler's park/unpark state is shared with every
-  blocking wait, so a broadcast wake (a console byte waking all parked
-  readers) could resume a "stopped" task. `procsignal` owns a
-  `STOPPED_TASKS` overlay set: `Stop` marks before parking, the kthread
-  dispatch shim re-parks an overlay-held task instead of running it, and
-  only `Continue` (or termination) lifts the entry — so a stopped job stays
-  genuinely stopped across spurious wakes.
+- **Stop state.** A stop is the scheduler's own `Stopped` state, which no
+  wake leaves — a broadcast wake (a console byte waking all parked readers)
+  leaves a stopped reader stopped, and the dispatch path checks nothing for
+  it. Only `Continue` (`resume`) or a kill ends it; a kill resumes a stopped
+  thread owing its death at a kernel boundary so it can unwind there, and a
+  stop landing on a thread already owing a death is withdrawn. The fan-out
+  runs under the thread-group table's read lock and `thread_create` stops a
+  thread born to a stopped creator, so no thread of a stopped job runs
+  (`docs/src/architecture/scheduler.md`, "Job-control stop").
 - **Foreground marking.** New unprivileged-beyond-console syscall
   `SyscallNumber::CONSOLE_FOREGROUND` (**70**): `(fd: u32, pid: i64)`; `fd`
   must be a `StreamMode::Read` descriptor of the caller's own table (the

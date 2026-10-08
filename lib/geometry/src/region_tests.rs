@@ -450,3 +450,33 @@ fn differential_sweep_against_a_pixel_grid() {
         }
     }
 }
+
+/// A copy taken into a region a consumer keeps is its source, budget and all,
+/// whatever the keeper held before — the compositor's repaint scratch copies
+/// each call's damage this way.
+#[test]
+fn clone_from_copies_the_source_over_what_was_kept() {
+    let mut kept = Region::new();
+    for column in 0..8 {
+        kept.add(Rect::new(column * 3, 0, 2, 2));
+    }
+    let mut source = Region::with_budget(2);
+    source.add(Rect::new(0, 0, 4, 4));
+
+    kept.clone_from(&source);
+    assert_eq!(kept, source);
+    assert_eq!(kept.bounds(), source.bounds());
+    assert_eq!(kept.budget(), Some(2));
+
+    let mut expected = source.clone();
+    for region in [&mut kept, &mut expected] {
+        region.add(Rect::new(10, 10, 1, 1));
+        region.add(Rect::new(20, 20, 1, 1));
+    }
+    assert_eq!(kept, expected, "the copy degrades at the source's budget");
+    assert_eq!(
+        source.rects(),
+        &[Rect::new(0, 0, 4, 4)],
+        "the source is untouched"
+    );
+}

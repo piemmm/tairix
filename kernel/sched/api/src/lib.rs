@@ -12,8 +12,9 @@
 //!   [`SchedulerArch`]) and the host [`TestArch`] double;
 //! * [`StealScan`], the per-CPU work-stealing scan start every per-CPU-queue
 //!   policy shares;
-//! * the [`park`] handshake — the park/unpark window, its wake token, and the
-//!   settle after a body returns, which are task lifecycle rather than policy;
+//! * the [`park`] handshake — the park/unpark window, its wake token, the
+//!   job-control stop, taking a task from a run-queue entry, and the settle
+//!   after a body returns, which are task lifecycle rather than policy;
 //! * the [`share`] accounting the proportional-share policies divide a CPU
 //!   by — band weights, the per-run charge, and the ledger of where each
 //!   task's weight is counted; and

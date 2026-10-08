@@ -77,8 +77,8 @@ static NEXT_CLAIM: AtomicU32 = AtomicU32::new(0);
 /// reserved range.
 ///
 /// Task ids are issued far above every id the suite spells by hand or draws
-/// from a test scheduler, so a claimed task's entries in the process-wide
-/// signal kill gate, wait queues, and the registries the reclaim path scrubs
+/// from a test scheduler, so a claimed task's entries in the kill-gate
+/// registry, wait queues, and the registries the reclaim path scrubs
 /// by id can neither be mistaken for nor cleared by another test's. An id
 /// below this floor is therefore one no claim ever answers.
 pub(crate) const CLAIM_TASK_BASE: TaskId = 1 << 56;
@@ -96,7 +96,7 @@ const CLAIM_TASK_STRIDE: u32 = 16;
 /// This test's own task id.
 ///
 /// A test whose call path reads kernel state keyed by task id alone — the
-/// signal kill gate, the stopped-task overlay, a wait queue — needs an id no
+/// kill-gate registry, a wait queue — needs an id no
 /// other test can name. A scheduler-minted one will not do: every test
 /// builds its own scheduler and each mints the same low ids, so a
 /// termination one test legitimately defers against *its* task 1 is

@@ -1116,7 +1116,11 @@ impl tairix_abi::CapabilityQuery for TaskCapabilities {
 #[derive(Debug, Default)]
 pub struct CapTable {
     /// One record per process, keyed by the process (its leader's id).
-    entries: BTreeMap<ProcessId, TaskCapabilities>,
+    ///
+    /// Shared, so a syscall's point-in-time snapshot ([`Self::snapshot_of`])
+    /// is a reference count rather than a copy; a mutation copies the record
+    /// only while some snapshot of it is still held.
+    entries: BTreeMap<ProcessId, Arc<TaskCapabilities>>,
     /// Every live thread, mapped to the process it belongs to. A process's
     /// leader maps to its own process, so [`Self::process_of`] is a single
     /// lookup for leaders and additional threads alike.
@@ -1224,7 +1228,9 @@ impl CapTable {
         if !caps.proc_id().is_kernel() {
             self.instances.insert(caps.proc_id(), process);
         }
-        self.entries.insert(process, caps)
+        self.entries
+            .insert(process, Arc::new(caps))
+            .map(Arc::unwrap_or_clone)
     }
 
     /// Attach `thread` to the already-registered process `process`, so the
@@ -1286,7 +1292,15 @@ impl CapTable {
     /// the one shared record.
     #[must_use]
     pub fn caps_for(&self, thread: TaskId) -> Option<&TaskCapabilities> {
-        self.entries.get(&self.process_of(thread)?)
+        self.entries.get(&self.process_of(thread)?).map(Arc::as_ref)
+    }
+
+    /// The record authorising `thread`, shared rather than copied: the
+    /// point-in-time snapshot a syscall is checked and served against, which a
+    /// later mutation of the table's record leaves as it was.
+    #[must_use]
+    pub fn snapshot_of(&self, thread: TaskId) -> Option<Arc<TaskCapabilities>> {
+        self.entries.get(&self.process_of(thread)?).cloned()
     }
 
     /// Borrow the capability record authorising `thread` mutably. Used by the
@@ -1296,7 +1310,7 @@ impl CapTable {
     /// a mutation by one thread is immediately in force for its siblings.
     pub fn caps_for_mut(&mut self, thread: TaskId) -> Option<&mut TaskCapabilities> {
         let process = self.process_of(thread)?;
-        self.entries.get_mut(&process)
+        self.entries.get_mut(&process).map(Arc::make_mut)
     }
 
     /// Borrow a process's record directly, without resolving a thread.
@@ -1306,13 +1320,13 @@ impl CapTable {
     /// query naming a process.
     #[must_use]
     pub fn caps_of_process(&self, process: ProcessId) -> Option<&TaskCapabilities> {
-        self.entries.get(&process)
+        self.entries.get(&process).map(Arc::as_ref)
     }
 
     /// Mutably borrow a process's record directly, without resolving a
     /// thread. The counterpart of [`Self::caps_of_process`].
     pub fn caps_of_process_mut(&mut self, process: ProcessId) -> Option<&mut TaskCapabilities> {
-        self.entries.get_mut(&process)
+        self.entries.get_mut(&process).map(Arc::make_mut)
     }
 
     /// Narrow the process `target` belongs to down to `requested`, on behalf
@@ -1460,7 +1474,10 @@ impl CapTable {
         let released = self
             .sessions
             .depart(process, record.proc_id(), record.session());
-        Some(Removed { record, released })
+        Some(Removed {
+            record: Arc::unwrap_or_clone(record),
+            released,
+        })
     }
 
     /// Hold `exit` until the session anchored at `anchor` has no member left —
@@ -1580,7 +1597,7 @@ impl CapTable {
     /// consumer building a process view reads authoritative identity, never
     /// a caller claim.
     pub fn iter(&self) -> impl Iterator<Item = &TaskCapabilities> {
-        self.entries.values()
+        self.entries.values().map(Arc::as_ref)
     }
 
     /// Number of processes currently registered. Primarily for tests.
@@ -2191,6 +2208,53 @@ mod tests {
             .caps_of_process(ProcessId(21))
             .expect("present")
             .has(CapabilityId::DRV_KERNEL));
+    }
+
+    /// A syscall's snapshot is the table's record itself, not a copy — the
+    /// copy allocated on every syscall through the heap's one lock — and it
+    /// keeps its point in time when the record is then changed, while the
+    /// process's I/O totals stay one count across the change.
+    #[test]
+    fn a_snapshot_shares_the_record_and_keeps_its_point_in_time() {
+        let sink = RecordingSink::new();
+        let process = ProcessId(0x51);
+        let thread = process.leader_task();
+        let mut table = CapTable::new();
+        let mount = caps_of(&[CapabilityId::FS_MOUNT]);
+        table.insert(TaskCapabilities::derive(
+            process,
+            UserId(1000),
+            mount,
+            mount,
+            &sink,
+        ));
+
+        let before = table.snapshot_of(thread).expect("registered");
+        let again = table.snapshot_of(thread).expect("registered");
+        assert!(Arc::ptr_eq(&before, &again), "shared, not copied");
+        drop(again);
+
+        let record = table.caps_for_mut(thread).expect("registered");
+        assert!(record.revoke(CapabilityId::FS_MOUNT, &sink));
+        assert!(
+            before.has(CapabilityId::FS_MOUNT),
+            "the snapshot keeps its time"
+        );
+        assert!(!table
+            .caps_for(thread)
+            .expect("registered")
+            .has(CapabilityId::FS_MOUNT));
+
+        before.record_bytes_read(5);
+        assert_eq!(
+            table.caps_for(thread).expect("registered").io_bytes_read(),
+            5,
+            "one I/O count across the copy"
+        );
+        assert!(
+            table.snapshot_of(TaskId(0x52)).is_none(),
+            "no record, no snapshot"
+        );
     }
 
     #[test]

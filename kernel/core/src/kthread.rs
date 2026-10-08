@@ -74,6 +74,7 @@ use tairix_sync::once::OnceCell;
 
 use crate::cpu_state::{self, LiveSpacePtr, ResumeHandle as UserResumeHandle};
 use crate::dispatch_slot::RescheduleAction;
+use crate::procsignal::ThreadGate;
 use crate::procspace::ProcessSpace;
 
 /// Default per-kthread kernel-stack size, in bytes — a **release-tuned
@@ -760,6 +761,10 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// §2.6.5). `None` for every task not mid-upgrade — a plain kernel or
     /// already-formed user kthread never carries one.
     pending_upgrade: Option<UserUpgrade>,
+    /// The thread's kill gate, adopted from the gate registry at its first
+    /// dispatch and published on its CPU for every run ([`publish_gate`]).
+    /// `None` for a kernel service, which no admission gives one.
+    gate: Option<Arc<ThreadGate>>,
 }
 
 /// A user kthread's pre-resume hook: see [`ThreadControl::pre_resume`].
@@ -1167,6 +1172,7 @@ where
         pre_resume,
         live,
         pending_upgrade: None,
+        gate: None,
     });
 
     // The `move` closure owns the boxed control block, so its heap address
@@ -1174,13 +1180,10 @@ where
     // the `&mut ThreadControl` the shim step takes. `step.cpu` keys the
     // per-CPU resume table for a user kthread.
     let body = move |step: &mut tairix_kernel_sched_api::TaskContext| {
-        // A task stopped by `Signal::Stop` is re-parked instead of run: the
-        // scheduler's park state is shared with every blocking wait, so a
-        // broadcast wake (a console byte waking all parked readers) can make
-        // a stopped task runnable again — the stop overlay is what keeps it
-        // genuinely stopped until an explicit `Signal::Continue` lifts it.
-        if crate::procsignal::task_is_stopped(step.task_id) {
-            return TaskAction::Park;
+        // Every admission of a user thread installs its gate before the first
+        // dispatch, so one lookup for the thread's whole life finds it.
+        if control.state == RunState::NotStarted {
+            control.gate = crate::procsignal::gate_of(step.task_id);
         }
         // Kernel-activity breadcrumb: the CFQ dispatch handed control to
         // this task's body shim (still inside `Scheduler::dispatch`, so the
@@ -1252,6 +1255,9 @@ where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
+    // Taken before the one derivation below, which a later reborrow would
+    // invalidate.
+    let gate = control.gate.clone();
     // One derivation from `control`, which everything below hangs off: a
     // second reborrow of it would invalidate the raw pointer the field
     // accesses run through.
@@ -1370,6 +1376,8 @@ where
         // starving the dispatch loop — the whole system then hangs.
         publish_resume::<C, S>(cpu, block, suspend_thunk_body::<C, S>);
     }
+    let gated = gate.is_some();
+    publish_gate(cpu, gate);
 
     // Kernel-activity breadcrumb: the shim prologue is done and we are about
     // to context-switch into the task. A wedge in the arch switch itself or
@@ -1430,6 +1438,9 @@ where
     // dispatcher's own stack.
     clear_resume(cpu);
     clear_running_stack(cpu);
+    if gated {
+        clear_gate(cpu);
+    }
     if is_user {
         clear_live_space(cpu);
         // Park this CPU's translation off the task's user root before the
@@ -1606,6 +1617,57 @@ where
 fn clear_live_space(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         *state.live_space.lock() = None;
+    }
+}
+
+/// Publish the kill gate of the thread about to be switched in on `cpu`, when
+/// it has one. Out-of-range or unconfigured `cpu` is a silent no-op, exactly as
+/// [`publish_resume`].
+fn publish_gate(cpu: CpuId, gate: Option<Arc<ThreadGate>>) {
+    if let (Some(gate), Some(state)) = (gate, cpu_state::get(cpu)) {
+        *state.gate.lock() = Some(gate);
+    }
+}
+
+/// Clear `cpu`'s published kill gate once its thread has switched back (the
+/// counterpart of [`publish_gate`]).
+fn clear_gate(cpu: CpuId) {
+    if let Some(state) = cpu_state::get(cpu) {
+        let released = state.gate.lock().take();
+        drop(released);
+    }
+}
+
+/// The kill gate of the thread switched in on `cpu`: the one the syscall
+/// dispatcher and the fault resolver bracket a kernel body with, reached
+/// without a structure another CPU contends on. [`None`] for a CPU running no
+/// thread that has one.
+#[must_use]
+pub(crate) fn current_gate(cpu: CpuId) -> Option<Arc<ThreadGate>> {
+    cpu_state::get(cpu)?.gate.lock().clone()
+}
+
+/// Test-only: publish `gate` as the kill gate of the thread running on `cpu`,
+/// returning a guard that clears the slot when dropped — the stand-in for a
+/// dispatch of a thread that carries it.
+#[cfg(test)]
+pub(crate) fn publish_gate_for_test(cpu: CpuId, gate: Arc<ThreadGate>) -> GatePublishGuard {
+    if let Some(state) = cpu_state::get(cpu) {
+        *state.gate.lock() = Some(gate);
+    }
+    GatePublishGuard { cpu }
+}
+
+/// Clears a test publication of a kill gate when dropped.
+#[cfg(test)]
+pub(crate) struct GatePublishGuard {
+    cpu: CpuId,
+}
+
+#[cfg(test)]
+impl Drop for GatePublishGuard {
+    fn drop(&mut self) {
+        clear_gate(self.cpu);
     }
 }
 
@@ -1790,6 +1852,8 @@ mod tests {
         observed_cpu: AtomicU32,
         /// The observed CPU's resume slot was published at switch time.
         published_during_switch: AtomicBool,
+        /// The observed CPU's kill-gate slot was published at switch time.
+        gate_during_switch: AtomicBool,
         /// The observed CPU's kernel-activity crumb at switch time.
         #[cfg(feature = "watchdog-diagnostics")]
         crumb_during_switch: core::sync::atomic::AtomicU8,
@@ -1809,6 +1873,7 @@ mod tests {
                 brackets: AtomicUsize::new(0),
                 observed_cpu: AtomicU32::new(u32::MAX),
                 published_during_switch: AtomicBool::new(false),
+                gate_during_switch: AtomicBool::new(false),
                 #[cfg(feature = "watchdog-diagnostics")]
                 crumb_during_switch: core::sync::atomic::AtomicU8::new(u8::MAX),
             }
@@ -1855,6 +1920,9 @@ mod tests {
             if let Some(state) = cpu_state::get(self.0.observed_cpu.load(Ordering::SeqCst)) {
                 if state.resume.lock().is_some() {
                     self.0.published_during_switch.store(true, Ordering::SeqCst);
+                }
+                if state.gate.lock().is_some() {
+                    self.0.gate_during_switch.store(true, Ordering::SeqCst);
                 }
                 #[cfg(feature = "watchdog-diagnostics")]
                 self.0
@@ -1937,6 +2005,7 @@ mod tests {
             pre_resume: None,
             live: None,
             pending_upgrade: None,
+            gate: None,
         })
     }
 
@@ -1962,6 +2031,7 @@ mod tests {
             })),
             live: None,
             pending_upgrade: None,
+            gate: None,
         })
     }
 
@@ -2535,6 +2605,54 @@ mod tests {
         );
         // Retired after the switch-back: nothing to reschedule now.
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+    }
+
+    /// A thread's syscalls reach their kill gate through its CPU's slot, so
+    /// the shim adopts the gate its admission installed at the first dispatch
+    /// and publishes it for exactly the run: a gate left published after the
+    /// switch-back would hand the next thread on the CPU another's.
+    #[test]
+    fn a_dispatch_adopts_the_installed_gate_and_publishes_it_for_the_run() {
+        let rec = recorder!();
+        let cpu = crate::test_boot::claim_cpu();
+        rec.observed_cpu.store(cpu, Ordering::SeqCst);
+        let arch = Arc::new(crate::test_arch::TestArch::with_cpus(cpu + 1));
+        let scheduler = crate::sched::Scheduler::new(
+            tairix_kernel_sched_api::SchedulerConfig::defaults_for(cpu + 1),
+            arch,
+        )
+        .expect("the scheduler builds");
+        let id = spawn_kthread_with_stack_parked(
+            &scheduler,
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            cpu,
+            Priority::Normal,
+            |_y: &mut Yielder<RecordingCs>| {},
+        )
+        .expect("admitted parked");
+        crate::procsignal::install_gate(id, tairix_kernel_sec::ProcessId(id))
+            .expect("a gate installs");
+        let gate = crate::procsignal::gate_of(id).expect("installed");
+        scheduler.unpark(id).expect("woken");
+
+        assert!(matches!(
+            scheduler.step(cpu),
+            Ok(tairix_kernel_sched_api::StepOutcome::Ran(_))
+        ));
+        assert!(
+            rec.gate_during_switch.load(Ordering::SeqCst),
+            "the thread's gate is published while it runs"
+        );
+        assert!(
+            current_gate(cpu).is_none(),
+            "and retracted when it switches back"
+        );
+        assert!(
+            Arc::strong_count(&gate) > 2,
+            "the thread holds its own share"
+        );
+        crate::procsignal::clear_kill_gate(id);
     }
 
     #[test]
