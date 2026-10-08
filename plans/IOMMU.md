@@ -687,8 +687,9 @@ holds a group at a time.
   routes INTx only through ACPI's `_PRT`, so there its faults wait on
   `plans/ACPI.md` A5, which must hand the kernel the line after boot: the
   AML interpreter runs in user space, after the units are taken over. On
-  QEMU, a `virtio-iommu-pci,addr=0x2`, ahead of every device it translates,
-  on a slot whose INTx no other function shares.
+  QEMU, a `virtio-iommu-pci,addr=0x2,granule=4k`, ahead of every device it
+  translates, on a slot whose INTx no other function shares; QEMU's default
+  granule is the host's page, and a unit offering no 4 KiB page is refused.
 - **MSI isolation off x86.** GICv3 with the ITS (the ITS validates each MSI's
   DeviceID) and its doorbell mapped into each domain; AIA with the IMSIC
   reached through the RISC-V IOMMU's MSI page tables, each device given a

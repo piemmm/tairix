@@ -15137,27 +15137,21 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     Ok(pen.steps())
 }
 
-/// Cascade slot of the *n*-th manager window the hand-over script opens, in
-/// the order the session places them.
-///
-/// The desktop's own surfaces are session-painted compositor windows and never
-/// go through the served-window path, and the autostarted file manager (a
-/// desktop component) opens none of its own — so the script's first gesture
-/// into a window is also the session's first cascade slot.
-///
-/// Each activation then opens exactly one viewer window between two manager
-/// windows: the viewer's is placed over the manager window the activation was
-/// aimed into and large enough to cover the item, which is why the next
-/// activation is aimed into a fresh manager window rather than that one. So the
-/// manager's windows take every second slot.
-const fn handover_manager_window(nth: u32) -> u64 {
-    nth as u64 * 2
-}
+/// Cascade slot of the one manager window every hand-over activation aims
+/// into: the session's first, since the desktop's own surfaces never go
+/// through the served-window path and the autostarted manager opens none until
+/// its slot is pressed.
+const HANDOVER_MANAGER_WINDOW: u64 = 0;
+
+/// Serial marker a vertical gates a press on a window an application has just
+/// brought forward on: the session's own record that the compositor restacked
+/// it, so the next press lands on it.
+const WINDOW_RAISED_MARKER: &str = tairix_desktop_session::WINDOW_RAISED_MESSAGE;
 
 /// Open a file-manager window from the manager's own icon-bar slot and
-/// activate the planted picture in it — [`ACTIVATIONS`](tairix_test_handover_qemu_aarch64::ACTIVATIONS)
-/// times, each in a
-/// fresh manager window.
+/// activate the planted picture in it
+/// [`ACTIVATIONS`](tairix_test_handover_qemu_aarch64::ACTIVATIONS) times, the
+/// slot bringing that one window back above the viewer before each later one.
 ///
 /// The gesture this vertical exists for is **activating an item in the file
 /// manager's own window**: activating a regular file is what makes the manager
@@ -15199,7 +15193,7 @@ const fn handover_manager_window(nth: u32) -> u64 {
 ///   session announces, so one occurrence is the bar carrying the slot the
 ///   click aims at. Nothing about a window would do — a desktop component
 ///   opens none until its slot is pressed.
-/// - Each activation's secondary press waits on the session's per-window
+/// - The first activation's secondary press waits on the session's per-window
 ///   [`WINDOW_SHOWN_MARKER`] for the manager window it aims at — the witness
 ///   that a frame carrying that window's painted pixels reached the display. A
 ///   create reply would say only that the window exists, and the listing
@@ -15212,13 +15206,12 @@ const fn handover_manager_window(nth: u32) -> u64 {
 ///   drawn plate is proof the gesture landed where the reconstruction aimed
 ///   it, and its absence localises a failure to the aim rather than leaving a
 ///   silent timeout.
-/// - Each later manager window is opened from the same slot rather than by
-///   reusing an earlier one, because the viewer's window is placed over the
-///   manager window the previous activation was aimed into and a component's
-///   slot click opens a window rather than raising one. That click waits on
-///   the *viewer's* window witness, not merely on the relay having had a
-///   chance to happen: it is what fixes the cascade order the next aim is
-///   reconstructed from — manager, viewer, manager, viewer, …
+/// - The viewer's window is placed over the manager window, so each later
+///   activation first presses the manager's slot, which asks for the folder
+///   the manager window shows and so raises it. That press waits on the
+///   viewer window the previous activation opened, and the item press after
+///   it on the session's [`WINDOW_RAISED_MARKER`], the witness that the
+///   compositor has restacked the manager window above the viewer.
 ///
 /// The final activation is what completes the run: it drives the last relay,
 /// whose four audit records are the guest's verdict.
@@ -15237,29 +15230,24 @@ fn handover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    let (item, open) =
+        reconstruct_manager_item_menu(theme, HANDOVER_MANAGER_WINDOW, picture, WHAT)?;
     for nth in 0..ACTIVATIONS {
-        // The manager is a desktop component, so a primary click on its slot
-        // opens a window at the user's home rather than raising one. The first
-        // waits on the bar; each later one waits on the viewer window the
-        // previous activation opened, which is what fixes the cascade order
-        // the aim below is reconstructed from.
-        match nth {
-            0 => pen.click(APPBAR_SLOT_MARKER, 1, MouseButton::Primary, manager_slot),
-            _ => pen.click(
+        // The first slot press opens the manager's window and the first frame
+        // of it gates the item press; each later one waits on the viewer
+        // window the previous activation opened and raises the manager's.
+        if nth == 0 {
+            pen.click(APPBAR_SLOT_MARKER, 1, MouseButton::Primary, manager_slot);
+            pen.click(WINDOW_SHOWN_MARKER, 1, MouseButton::Secondary, item);
+        } else {
+            pen.click(
                 WINDOW_SHOWN_MARKER,
-                nth * 2,
+                nth + 1,
                 MouseButton::Primary,
                 manager_slot,
-            ),
+            );
+            pen.click(WINDOW_RAISED_MARKER, nth, MouseButton::Secondary, item);
         }
-        let (item, open) =
-            reconstruct_manager_item_menu(theme, handover_manager_window(nth), picture, WHAT)?;
-        pen.click(
-            WINDOW_SHOWN_MARKER,
-            nth * 2 + 1,
-            MouseButton::Secondary,
-            item,
-        );
         pen.click(MENU_SHOWN_MARKER, nth + 1, MouseButton::Primary, open);
     }
     Ok(pen.steps())
@@ -17541,11 +17529,10 @@ mod tests {
     #[test]
     fn a_manager_window_gesture_lands_on_the_planted_picture() {
         use super::{
-            handover_manager_window, planted_entry_index, planted_home_browser,
-            reconstruct_manager_item_click, served_window_layout, RECONSTRUCTION_SCALE,
+            planted_entry_index, planted_home_browser, reconstruct_manager_item_click,
+            served_window_layout, HANDOVER_MANAGER_WINDOW, RECONSTRUCTION_SCALE,
         };
         use tairix_geometry::Rect;
-        use tairix_test_handover_qemu_aarch64::ACTIVATIONS;
 
         let theme = tairix_theme::Theme::dark();
         let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
@@ -17555,57 +17542,58 @@ mod tests {
         browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
         let want = planted_entry_index(&browser, name, "test").expect("the picture is listed");
 
-        for slot in (0..ACTIVATIONS).map(handover_manager_window) {
-            let at = reconstruct_manager_item_click(&theme, slot, picture, "test")
-                .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
-            let (width, height) = super::manager_window_size(&theme, "test").expect("sized");
-            let client =
-                served_window_layout(slot, width, height, tairix_browse::WIN_RESIZABLE, &theme)
-                    .client;
-            assert!(
-                at.x > client.left()
-                    && at.x < client.right()
-                    && at.y > client.top()
-                    && at.y < client.bottom(),
-                "slot {slot}: {at:?} is outside the window's client {client:?}",
-            );
-            // Back through the renderer's own inverse, in the window-local
-            // coordinates the application receives a press in.
-            let local = tairix_geometry::Point::new(at.x - client.left(), at.y - client.top());
-            let viewport = Rect::new(0, 0, client.width, client.height);
-            assert_eq!(
-                tairix_browse::render::entry_index_at(
-                    &browser,
-                    RECONSTRUCTION_SCALE,
-                    &theme,
-                    viewport,
-                    tairix_browse::MANAGER_TOOLBAR_BAND,
-                    local,
-                ),
-                Some(want),
-                "slot {slot}: the aim resolves to another entry",
-            );
-        }
+        let at = reconstruct_manager_item_click(&theme, HANDOVER_MANAGER_WINDOW, picture, "test")
+            .expect("the manager window's aim reconstructs");
+        let (width, height) = super::manager_window_size(&theme, "test").expect("sized");
+        let client = served_window_layout(
+            HANDOVER_MANAGER_WINDOW,
+            width,
+            height,
+            tairix_browse::WIN_RESIZABLE,
+            &theme,
+        )
+        .client;
+        assert!(
+            at.x > client.left()
+                && at.x < client.right()
+                && at.y > client.top()
+                && at.y < client.bottom(),
+            "{at:?} is outside the window's client {client:?}",
+        );
+        // Back through the renderer's own inverse, in the window-local
+        // coordinates the application receives a press in.
+        let local = tairix_geometry::Point::new(at.x - client.left(), at.y - client.top());
+        let viewport = Rect::new(0, 0, client.width, client.height);
+        assert_eq!(
+            tairix_browse::render::entry_index_at(
+                &browser,
+                RECONSTRUCTION_SCALE,
+                &theme,
+                viewport,
+                tairix_browse::MANAGER_TOOLBAR_BAND,
+                local,
+            ),
+            Some(want),
+            "the aim resolves to another entry",
+        );
     }
 
     /// The *Open* row the hand-over script clicks is one the manager actually
-    /// offers, and it is drawn somewhere the pointer can reach — for *both*
-    /// manager windows the script opens.
+    /// offers, and it is drawn somewhere the pointer can reach in the manager
+    /// window the script opens.
     ///
     /// Two regressions, both silent: the row is enabled only while an entry is
     /// selected, so a reconstruction that stopped selecting one would aim at a
     /// disabled row and the click would do nothing at all; and the plate is
-    /// placed at the item's own screen point, which for a deeper cascade slot
-    /// sits further into the screen, so a placement that stopped folding the
-    /// plate back would put the row off the edge. Either leaves a run that
-    /// fails by timing out with no gesture refused.
+    /// placed at the item's own screen point, so a placement that stopped
+    /// folding the plate back would put the row off the edge. Either leaves a
+    /// run that fails by timing out with no gesture refused.
     #[test]
     fn the_manager_item_menus_open_row_is_offered_and_reachable() {
         use super::{
-            handover_manager_window, planted_entry_index, planted_home_browser, ramfb_screen,
-            reconstruct_manager_item_menu,
+            planted_entry_index, planted_home_browser, ramfb_screen, reconstruct_manager_item_menu,
+            HANDOVER_MANAGER_WINDOW,
         };
-        use tairix_test_handover_qemu_aarch64::ACTIVATIONS;
 
         let theme = tairix_theme::Theme::dark();
         let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
@@ -17624,24 +17612,14 @@ mod tests {
         );
 
         let (width, height) = ramfb_screen();
-        let mut rows = Vec::new();
-        for slot in (0..ACTIVATIONS).map(handover_manager_window) {
-            let (_, row) = reconstruct_manager_item_menu(&theme, slot, picture, "test")
-                .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
-            #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
-            let (w, h) = (width as i32, height as i32);
-            assert!(
-                row.x >= 0 && row.x < w && row.y >= 0 && row.y < h,
-                "slot {slot}: the Open row at {row:?} is off a {width}x{height} screen",
-            );
-            rows.push(row);
-        }
-        // Each window is a fresh cascade slot, so its menu opens somewhere
-        // else. Equal rows would mean the slot stopped reaching the placement
-        // and the second activation aimed into the first window's plate.
-        assert_ne!(
-            rows[0], rows[1],
-            "both manager windows' Open rows reconstruct to one point",
+        let (_, row) =
+            reconstruct_manager_item_menu(&theme, HANDOVER_MANAGER_WINDOW, picture, "test")
+                .expect("the manager window's menu reconstructs");
+        #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+        let (w, h) = (width as i32, height as i32);
+        assert!(
+            row.x >= 0 && row.x < w && row.y >= 0 && row.y < h,
+            "the Open row at {row:?} is off a {width}x{height} screen",
         );
     }
 
@@ -17663,12 +17641,11 @@ mod tests {
     #[test]
     fn the_open_rows_aim_stays_inside_the_row_whatever_the_candidates_add() {
         use super::{
-            handover_manager_window, planted_entry_index, planted_home_browser,
-            reconstruct_manager_item_menu, reconstruction_chain_geometry,
+            planted_entry_index, planted_home_browser, reconstruct_manager_item_menu,
+            reconstruction_chain_geometry, HANDOVER_MANAGER_WINDOW,
         };
         use tairix_desktop_session::menu::{ChainOwner, MenuChain};
         use tairix_geometry::Rect;
-        use tairix_test_handover_qemu_aarch64::ACTIVATIONS;
 
         let theme = tairix_theme::Theme::dark();
         let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
@@ -17684,82 +17661,77 @@ mod tests {
             alloc_vec_of(&["image/png"]),
         );
 
-        for slot in (0..ACTIVATIONS).map(handover_manager_window) {
-            let (press, aim) = reconstruct_manager_item_menu(&theme, slot, picture, "test")
-                .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
+        let (press, aim) =
+            reconstruct_manager_item_menu(&theme, HANDOVER_MANAGER_WINDOW, picture, "test")
+                .expect("the manager window's menu reconstructs");
 
-            // The same plate the guest draws once its scan has landed.
-            let mut browser = planted_home_browser("test").expect("the planted home opens");
-            browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
-            let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
-            browser.select(index).expect("the picture selects");
-            let candidates: [&tairix_browse::AppAssociation; 1] = [&viewer];
-            let declared = tairix_browse::context_menu(
-                tairix_browse::ContextMenuModel::for_browser(&browser, false),
-                tairix_browse::MANAGER_MENU_TITLE,
-                tairix_browse::ContextQuick {
-                    name,
-                    candidates: &candidates,
-                    documents: &[],
-                },
+        // The same plate the guest draws once its scan has landed.
+        let mut browser = planted_home_browser("test").expect("the planted home opens");
+        browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+        let index = planted_entry_index(&browser, name, "test").expect("the picture is listed");
+        browser.select(index).expect("the picture selects");
+        let candidates: [&tairix_browse::AppAssociation; 1] = [&viewer];
+        let declared = tairix_browse::context_menu(
+            tairix_browse::ContextMenuModel::for_browser(&browser, false),
+            tairix_browse::MANAGER_MENU_TITLE,
+            tairix_browse::ContextQuick {
+                name,
+                candidates: &candidates,
+                documents: &[],
+            },
+        )
+        .expect("the manager's context menu is valid");
+        let model = tairix_controls::ChainModel::from_app_menu(declared.title(), &declared, None);
+        // The candidate really reached the plate, so this is a wider plate
+        // than the reconstruction's rather than the same one twice.
+        assert!(
+            model.rows().iter().any(|row| row.drawn().label()
+                == tairix_browse::ContextCommand::OpenWith.label()
+                && row.drawn().is_submenu()),
+            "the viewer candidate put no submenu on the Open With… row",
+        );
+        let row = model
+            .rows()
+            .iter()
+            .position(|row| row.drawn().label() == tairix_browse::ContextCommand::Open.label())
+            .expect("the menu has an Open row");
+        let mut chain = MenuChain::new();
+        chain
+            .open(
+                ChainOwner::Backdrop,
+                model,
+                tairix_desktop_session::windows::window_menu_placement(Rect::new(
+                    press.x, press.y, 0, 0,
+                )),
+                &geom,
             )
-            .expect("the manager's context menu is valid");
-            let model =
-                tairix_controls::ChainModel::from_app_menu(declared.title(), &declared, None);
-            // The candidate really reached the plate, so this is a wider plate
-            // than the reconstruction's rather than the same one twice.
-            assert!(
-                model.rows().iter().any(|row| row.drawn().label()
-                    == tairix_browse::ContextCommand::OpenWith.label()
-                    && row.drawn().is_submenu()),
-                "the viewer candidate put no submenu on the Open With… row",
-            );
-            let row = model
-                .rows()
-                .iter()
-                .position(|row| row.drawn().label() == tairix_browse::ContextCommand::Open.label())
-                .expect("the menu has an Open row");
-            let mut chain = MenuChain::new();
-            chain
-                .open(
-                    ChainOwner::Backdrop,
-                    model,
-                    tairix_desktop_session::windows::window_menu_placement(Rect::new(
-                        press.x, press.y, 0, 0,
-                    )),
-                    &geom,
-                )
-                .expect("the wider menu opens");
-            let drawn = chain
-                .row_rect(0, row, &geom)
-                .expect("the Open row lays out on the wider plate");
+            .expect("the wider menu opens");
+        let drawn = chain
+            .row_rect(0, row, &geom)
+            .expect("the Open row lays out on the wider plate");
 
-            assert!(
-                drawn.contains(aim),
-                "slot {slot}: the aim {aim:?} falls outside the Open row {drawn:?} \
-                 the guest draws once its candidate scan has landed",
-            );
-        }
+        assert!(
+            drawn.contains(aim),
+            "the aim {aim:?} falls outside the Open row {drawn:?} the guest draws once its \
+             candidate scan has landed",
+        );
     }
 
-    /// The viewer's window covers the first manager window's item area, which
-    /// is why the hand-over script opens a *second* manager window rather than
-    /// activating twice in the first.
-    ///
-    /// A gesture aimed at a covered client reaches whatever is on top of it,
-    /// so this is the reason for the extra window — and if it ever stops
-    /// holding, the extra window is pointless complexity to be removed rather
-    /// than a failure to work around.
+    /// The viewer's window covers the manager window's item, which is why the
+    /// hand-over script raises the manager window before each later
+    /// activation: a gesture aimed at a covered client reaches whatever is on
+    /// top of it. If it ever stops holding, the raise is pointless and is to be
+    /// removed rather than worked around.
     #[test]
-    fn the_viewers_window_is_why_the_script_opens_a_second_manager_window() {
+    fn the_viewers_window_is_why_the_script_raises_the_manager_window() {
         use super::{
-            handover_manager_window, reconstruct_manager_item_click, served_window_layout,
+            reconstruct_manager_item_click, served_window_layout, HANDOVER_MANAGER_WINDOW,
         };
 
         let theme = tairix_theme::Theme::dark();
         let aim = reconstruct_manager_item_click(
             &theme,
-            handover_manager_window(0),
+            HANDOVER_MANAGER_WINDOW,
             tairix_test_arxfs_image::HOME_PICTURE_NAME,
             "test",
         )
@@ -17769,7 +17741,7 @@ mod tests {
         // `served_window_layout_insets_the_client_inside_its_furniture`), so
         // the viewer's sizing need not be plumbed out of its crate.
         let viewer = served_window_layout(
-            handover_manager_window(0) + 1,
+            HANDOVER_MANAGER_WINDOW + 1,
             tairix_view::WIN_WIDTH,
             tairix_view::WIN_HEIGHT,
             true,
@@ -17781,8 +17753,8 @@ mod tests {
                 && aim.x <= viewer.right()
                 && aim.y >= viewer.top()
                 && aim.y <= viewer.bottom(),
-            "the viewer's window {viewer:?} no longer covers {aim:?}: the second manager \
-             window the script opens is now unnecessary",
+            "the viewer's window {viewer:?} no longer covers {aim:?}: the raise before each \
+             later activation is now unnecessary",
         );
     }
 

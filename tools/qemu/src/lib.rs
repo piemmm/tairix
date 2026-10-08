@@ -1029,8 +1029,10 @@ impl DmaTranslation {
             // QEMU leaves AMD-Vi's own translation off by default.
             Self::AmdVi => Some("amd-iommu,dma-remap=on,intremap=on,xtsup=on"),
             // In a slot of its own, whose INTx line on an FDT board no other
-            // function's pin shares.
-            Self::VirtioIommu => Some("virtio-iommu-pci,addr=0x2"),
+            // function's pin shares. QEMU's default granule is the host's
+            // page, which on a 16 KiB-page host offers the kernel's 4 KiB
+            // mappings nothing.
+            Self::VirtioIommu => Some("virtio-iommu-pci,addr=0x2,granule=4k"),
             Self::Absent
             | Self::Smmuv3Stage1
             | Self::Smmuv3Stage2
@@ -5564,6 +5566,18 @@ mod dma_translation_tests {
         assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
         let alone = validate_boot_inputs(&spec()).expect_err("no kernel");
         assert_eq!(alone.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// QEMU's default granule is the host's page, so a run pins the kernel's.
+    #[test]
+    fn a_virtio_iommu_maps_four_kib_pages_whatever_the_host() {
+        let device = DmaTranslation::VirtioIommu
+            .unit_device()
+            .expect("a run creates the virtio-iommu");
+        assert!(
+            device.split(',').any(|property| property == "granule=4k"),
+            "{device}"
+        );
     }
 
     /// A shared input line needs an FDT board's generic host bridge.

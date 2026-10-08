@@ -1398,7 +1398,8 @@ what lets a vertical reconstruct where a later one was placed: the cascade slot
 a window lands in is a function of how many opened before it, so a gesture into
 the third window is aimed from a slot only a script that waited for the first
 two can name. The three-principal hand-over vertical
-([apps](apps.md#rendering)) is built on exactly that.
+([apps](apps.md#rendering)) counts it to know the viewer's window, cascaded
+over the manager's, is on screen before it raises the manager's again.
 
 ### And a later frame's: the window's new title on screen
 

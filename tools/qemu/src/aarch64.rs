@@ -649,7 +649,7 @@ mod tests {
             .iter()
             .position(|a| a == "-device")
             .expect("a device is attached");
-        assert_eq!(argv[first + 1], "virtio-iommu-pci,addr=0x2");
+        assert_eq!(argv[first + 1], "virtio-iommu-pci,addr=0x2,granule=4k");
         assert!(argv
             .iter()
             .any(|a| a.starts_with("virtio-mouse-pci") && a.contains("iommu_platform=on")));

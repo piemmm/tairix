@@ -415,7 +415,7 @@ mod tests {
             ),
             (
                 crate::DmaTranslation::VirtioIommu,
-                "virtio-iommu-pci,addr=0x2",
+                "virtio-iommu-pci,addr=0x2,granule=4k",
                 false,
             ),
         ] {

@@ -188,12 +188,12 @@ an **activation**:
 Anything else is `PermissionDenied`, a window the caller does not own is
 `NotFound`, and the session refuses a raise while the seat is held — by the
 lock, the picker, the elevation prompt or a confirmation (`seat_held`) — or a
-drag is carried. While the seat is held no popup or pick opens and a window's first
-frame shows it beneath the surface holding the keyboard, so nothing can take
-the keys typed at a prompt. Refused raises (`RAISE_REFUSED`) and withheld
-hand-overs (`HAND_OVER_WITHHELD`) are on the audit trail. The policy is the
-engine's (`WindowServer`); the session answers which window has the keyboard
-and performs the raise.
+drag is carried. While the seat is held no popup or pick opens and a window's
+first frame shows it beneath the surface holding the keyboard, so nothing can
+take the keys typed at a prompt. Granted raises (`WINDOW_RAISED`), refused
+ones (`RAISE_REFUSED`) and withheld hand-overs (`HAND_OVER_WITHHELD`) are on
+the audit trail. The policy is the engine's (`WindowServer`); the session
+answers which window has the keyboard and performs the raise.
 
 This is how the file manager keeps one window per folder: asked to show a
 folder a window of its own already shows — from its slot, its slot's menu, or
@@ -1473,8 +1473,11 @@ The activation is the item's own context-menu *Open* row, which runs the
 manager's same `activate`: two single presses, each gated on a witness the
 emitting side states for itself, where the drawn plate is the only statement
 anywhere that the press reached an entry — no audit record names a pointer
-action. The *double-click* path to `activate` is host-tested where it is
-decided rather than stated by this run (`plans/OPEN-DEFECTS.md` D132).
+action. The viewer's window opens over the manager's, so each later activation
+first presses the manager's slot, which asks for the folder that window shows
+and so raises it, and the item press waits on `WINDOW_RAISED`. The
+*double-click* path to `activate` is host-tested where it is decided rather
+than stated by this run (`plans/OPEN-DEFECTS.md` D132).
 
 Attributing each half to the principal the kernel says made the call is what
 makes the run a statement about a hand-off *between* two processes rather than

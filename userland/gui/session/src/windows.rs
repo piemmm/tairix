@@ -125,6 +125,14 @@ pub const HAND_OVER_WITHHELD: EventId = EventId(20_021);
 /// The exact message [`HAND_OVER_WITHHELD`] is emitted with.
 pub const HAND_OVER_WITHHELD_MESSAGE: &str = "hand-over raise withheld";
 
+/// Event id of an application's own window brought forward with the keyboard
+/// on its request: the compositor has restacked it, so what is pressed next
+/// lands on it.
+pub const WINDOW_RAISED: EventId = EventId(20_022);
+
+/// The exact message [`WINDOW_RAISED`] is emitted with.
+pub const WINDOW_RAISED_MESSAGE: &str = "window raised on request";
+
 /// The name [`WINDOW_SIZED`] records `state` under.
 #[must_use]
 pub const fn size_state_name(state: WindowSizeState) -> &'static str {
@@ -1725,11 +1733,32 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::SeatBusy);
         }
         let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
-        if self.shell.raise_window(self.compositor, wm) {
-            Ok(())
-        } else {
-            Err(Errno::NotFound)
+        if !self.shell.raise_window(self.compositor, wm) {
+            return Err(Errno::NotFound);
         }
+        let owner = self
+            .windows
+            .owner_of(window_id)
+            .and_then(|owner| self.apps.attested_identity(owner));
+        tairix_log::log(
+            self.shell.audit(),
+            &tairix_log::Event {
+                level: tairix_log::Level::Info,
+                id: WINDOW_RAISED,
+                message: WINDOW_RAISED_MESSAGE,
+                fields: &[
+                    Field {
+                        key: "caller",
+                        value: FieldValue::Str(owner.as_ref().map_or("", |app| app.name.as_str())),
+                    },
+                    Field {
+                        key: "window",
+                        value: FieldValue::UnsignedInt(window_id),
+                    },
+                ],
+            },
+        );
+        Ok(())
     }
 
     fn raise_refused(&mut self, caller: ProcId, window_id: u64) {
@@ -2924,8 +2953,9 @@ mod tests {
         });
     }
 
-    /// Counts the raise refusals and withheld hand-overs it records.
+    /// Counts the raises, raise refusals and withheld hand-overs it records.
     struct RaiseAudit {
+        raised: core::sync::atomic::AtomicUsize,
         refused: core::sync::atomic::AtomicUsize,
         withheld: core::sync::atomic::AtomicUsize,
     }
@@ -2933,6 +2963,7 @@ mod tests {
     impl tairix_log::Sink for RaiseAudit {
         fn write_event(&self, event: &tairix_log::Event<'_>) {
             let counter = match event.id {
+                WINDOW_RAISED => &self.raised,
                 RAISE_REFUSED => &self.refused,
                 HAND_OVER_WITHHELD => &self.withheld,
                 _ => return,
@@ -2941,11 +2972,13 @@ mod tests {
         }
     }
 
-    /// A raise refused for a held seat or for no standing, and a hand-over
-    /// that may bring nothing forward, are each on the audit trail.
+    /// A raise granted, a raise refused for a held seat or for no standing,
+    /// and a hand-over that may bring nothing forward, are each on the audit
+    /// trail.
     #[test]
-    fn a_refused_raise_and_a_withheld_hand_over_are_recorded() {
+    fn a_raise_its_refusals_and_a_withheld_hand_over_are_recorded() {
         static AUDIT: RaiseAudit = RaiseAudit {
+            raised: core::sync::atomic::AtomicUsize::new(0),
             refused: core::sync::atomic::AtomicUsize::new(0),
             withheld: core::sync::atomic::AtomicUsize::new(0),
         };
@@ -2963,6 +2996,8 @@ mod tests {
         assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
         assert_eq!(count(&AUDIT.withheld), 1, "a raise lent is not withheld");
 
+        assert_eq!(bench.host().raise_requested(9), Ok(()));
+        assert_eq!(count(&AUDIT.raised), 1);
         bench.host().raise_refused(caller(), 9);
         assert_eq!(count(&AUDIT.refused), 1);
         bench.seat_held = true;

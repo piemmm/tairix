@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 337 open, 463 closed, 800 total.
+**closed**, and a partial fix stays **open**. 338 open, 463 closed, 801 total.
 
-### Open (337)
+### Open (338)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -365,6 +365,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D803 | no bit-identity case exercises the lossy decoder's segmentation or loop-filter deltas: every `drawn_keyframe` writes segmentation off and no filter adjustment, so `Segmentation::read`, the per-macroblock segment read and quantiser, `FilterDeltas::read` and the per-macroblock filter level are reached by no pinned frame, though most real lossy WebP files use segments | **medium**; noticed checking the row-at-a-time decode against the whole one, which is built on it, so only the pinned `DRAWN` hashes are an independent oracle. The fix is a fixture that writes the segment map, its quantiser and filter values and the mode and reference deltas in the order the decoder reads them, with hashes pinned from the independent whole-frame decoder at `eaeaa98ae^:lib/image/src/vp8.rs`. `lib/image/src/vp8_fixture.rs` `drawn_keyframe`, `lib/image/src/vp8_tests.rs` `DRAWN` |
 | D804 | ext4 writes only through the first two levels of the classic block map: every file and directory the driver creates is block-mapped even on a volume with `extents`, and growth past the twelve direct blocks and the single indirect block is refused as a device fault, so a file written past 268 KiB on a 1 KiB-block volume, or 4 MiB on a 4 KiB one, fails, as does a directory grown past as many blocks | **medium**; noticed indexing ext4 directories, whose growth tests reached the limit. The fix is to create extent-mapped inodes where the volume carries `extents`, which the extent writer already grows, and to write the double and triple indirect levels for a volume without it; reading already follows both. `drivers/filesystem/ext4/src/lib.rs` `map_or_alloc_classic`, `create`, `lay_new_inode` |
 | D805 | ext4 verifies `metadata_csum` only on directory blocks: the superblock, group descriptors, bitmaps, inodes and extent blocks are sealed on every write and read unchecked, so a block changed under its checksum is used as if sound — a corrupted bitmap hands out an allocated block, a corrupted inode reads a wrong size or map | **medium**; noticed adding directory-block verification. The fix is the same fail-closed check on each read: the superblock and descriptors at mount, a bitmap and an inode table entry as they are read, an extent block's tail as it is walked, each refused as a device fault. `drivers/filesystem/ext4/src/lib.rs` `read_inode_raw`, the bitmap readers, the extent walk, `open` |
+| D807 | the virtio-iommu family refuses a unit whose smallest page is larger than 4 KiB, so behind QEMU's default `virtio-iommu-pci` on a 16 KiB- or 64 KiB-page host (Apple silicon, a 64 KiB Arm server) the unit translates nothing and every device behind it is stranded without DMA: fail closed, but such a guest loses its storage and network | **medium**; noticed when the 77c389493 merge's live virtio verticals failed on a 16 KiB-page host; logged rather than absorbed, by the user's decision for this merge, the verticals now pinning `granule=4k`. Wanted: a domain whose mapping unit is the unit's granule, each buffer a device is handed allocated and mapped in whole granules so no neighbouring frame is exposed, a host test of a 16 KiB and a 64 KiB unit, and a live run at `granule=16k`. `kernel/iommu/virtio/src/lib.rs` `negotiate`, `kernel/iommu/api` |
 
 ### D453 — a process's scheduling level reaches only its leader thread
 
