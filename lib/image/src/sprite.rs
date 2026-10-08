@@ -46,12 +46,13 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
 use crate::channel::{Channel, Sampler};
 use crate::pages::{PageSource, Pages};
 use crate::picture::{IndexDepth, Picture, Rgba8};
-use crate::{DecodeError, DecodeLimits, RasterImage, RGBA_BYTES};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, RGBA_BYTES};
 
 /// A file holds the sprite area control block without its first word — the
 /// area's total size, which the file's own length already gives — so every
@@ -1104,6 +1105,18 @@ struct Located<'a> {
     mask: Option<MaskRows<'a>>,
 }
 
+/// How a sprite's stored row becomes colours: resolved once, before its rows.
+enum Expand {
+    Indexed {
+        bits: u32,
+        palette: IndexedPalette,
+    },
+    Packed {
+        bytes: usize,
+        samplers: [Sampler; RGBA_BYTES],
+    },
+}
+
 /// Read and bound the sprite whose control block sits at `at`.
 fn locate<'a>(bytes: &'a [u8], at: u32, limits: &DecodeLimits) -> Result<Located<'a>, DecodeError> {
     let header = read_header(bytes, at)?;
@@ -1160,10 +1173,68 @@ impl Located<'_> {
         self.image.chunks_exact(self.header.stride as usize)
     }
 
-    /// The sprite as straight-alpha RGBA8.
-    fn rgba(&self) -> Result<RasterImage, DecodeError> {
+    /// Hand each row of the sprite to `row` as straight-alpha RGBA8, top
+    /// first, holding one row.
+    fn stream_rows(
+        &self,
+        mut row: impl FnMut(&[u8]) -> Result<(), DecodeError>,
+    ) -> Result<(), DecodeError> {
         let width = self.header.width as usize;
         let row_bytes = width
+            .checked_mul(RGBA_BYTES)
+            .ok_or(DecodeError::DimensionsOverflow)?;
+        let mut line = fallible::filled(row_bytes, 0u8).ok_or(DecodeError::OutOfMemory)?;
+        let mut scratch = fallible::filled(width, 0u8).ok_or(DecodeError::OutOfMemory)?;
+        let expand = match self.header.mode.layout {
+            Layout::Indexed { bits } => Expand::Indexed {
+                bits,
+                palette: IndexedPalette::new(
+                    bits,
+                    self.palette_bytes()?,
+                    self.header.palette_entries,
+                ),
+            },
+            Layout::Packed { bytes, channels } => Expand::Packed {
+                bytes: bytes as usize,
+                samplers: channels.map(Sampler::new),
+            },
+        };
+        for (y, src) in self.rows().enumerate() {
+            match &expand {
+                Expand::Indexed { bits, palette } => {
+                    indices_row(*bits, self.header.left_wastage, src, &mut scratch);
+                    for (pixel, &index) in line
+                        .as_chunks_mut::<RGBA_BYTES>()
+                        .0
+                        .iter_mut()
+                        .zip(&scratch)
+                    {
+                        *pixel = palette.entries[usize::from(index)];
+                    }
+                }
+                Expand::Packed { bytes, samplers } => {
+                    expand_packed(*bytes, samplers, src, &mut line);
+                }
+            }
+            if let Some(mask) = &self.mask {
+                mask.read(y, &mut scratch);
+                for (pixel, &alpha) in line
+                    .as_chunks_mut::<RGBA_BYTES>()
+                    .0
+                    .iter_mut()
+                    .zip(&scratch)
+                {
+                    pixel[3] = alpha;
+                }
+            }
+            row(&line)?;
+        }
+        Ok(())
+    }
+
+    /// The sprite as straight-alpha RGBA8.
+    fn rgba(&self) -> Result<RasterImage, DecodeError> {
+        let row_bytes = (self.header.width as usize)
             .checked_mul(RGBA_BYTES)
             .ok_or(DecodeError::DimensionsOverflow)?;
         let mut out = fallible::filled(
@@ -1173,41 +1244,30 @@ impl Located<'_> {
             0u8,
         )
         .ok_or(DecodeError::OutOfMemory)?;
-        let mut scratch = fallible::filled(width, 0u8).ok_or(DecodeError::OutOfMemory)?;
-        match self.header.mode.layout {
-            Layout::Indexed { bits } => {
-                let palette =
-                    IndexedPalette::new(bits, self.palette_bytes()?, self.header.palette_entries);
-                for (dst, src) in out.chunks_exact_mut(row_bytes).zip(self.rows()) {
-                    indices_row(bits, self.header.left_wastage, src, &mut scratch);
-                    for (pixel, &index) in
-                        dst.as_chunks_mut::<RGBA_BYTES>().0.iter_mut().zip(&scratch)
-                    {
-                        *pixel = palette.entries[usize::from(index)];
-                    }
-                }
-            }
-            Layout::Packed { bytes, channels } => {
-                let samplers = channels.map(Sampler::new);
-                for (dst, src) in out.chunks_exact_mut(row_bytes).zip(self.rows()) {
-                    expand_packed(bytes as usize, &samplers, src, dst);
-                }
-            }
-        }
-        if let Some(mask) = &self.mask {
-            for (y, dst) in out.chunks_exact_mut(row_bytes).enumerate() {
-                mask.read(y, &mut scratch);
-                for (pixel, &alpha) in dst.as_chunks_mut::<RGBA_BYTES>().0.iter_mut().zip(&scratch)
-                {
-                    pixel[3] = alpha;
-                }
-            }
-        }
+        let mut rows = out.chunks_exact_mut(row_bytes.max(1));
+        self.stream_rows(|line| {
+            rows.next()
+                .ok_or(DecodeError::SpriteTruncated)?
+                .copy_from_slice(line);
+            Ok(())
+        })?;
         Ok(RasterImage::from_parts(
             self.header.width,
             self.header.height,
             out,
         ))
+    }
+
+    /// The sprite no smaller than it must be to cover `fit`, its rows
+    /// streamed through a reduction.
+    fn fitted(&self, fit: FitBox) -> Result<RasterImage, DecodeError> {
+        let source = (self.header.width, self.header.height);
+        let (width, height) = fit.reduction(source.0, source.1);
+        let mut reducer = RowReducer::new(source, (width, height), RowOrder::TopDown)
+            .map_err(crate::reduction_refused)?;
+        self.stream_rows(|line| reducer.push_row(line).map_err(crate::reduction_refused))?;
+        let out = reducer.finish().map_err(crate::reduction_refused)?;
+        Ok(RasterImage::from_parts(width, height, out))
     }
 
     /// The sprite in the representation its file stores.
@@ -1455,6 +1515,41 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let (mut area, measured) = Area::open(bytes)?;
     area.decode(bytes, measured.largest, limits)
+}
+
+/// Decode the area's largest sprite no smaller than it must be to cover
+/// `fit`, its rows streamed through a reduction so the sprite is never held.
+/// It admits what [`decode`] admits.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let (mut area, measured) = Area::open(bytes)?;
+    let at = area.locate(bytes, measured.largest)?;
+    locate(bytes, at, limits)?.fitted(fit)
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once, from the control blocks: the row being expanded, its indices or
+/// mask, and the reduction it is fed into.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse before decoding.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let (width, height) = probe(bytes)?;
+    limits.check(width, height)?;
+    Ok(u64::from(width)
+        .saturating_mul(RGBA_BYTES as u64 + 1)
+        .saturating_add(RowReducer::peak_bytes(
+            (width, height),
+            fit.reduction(width, height),
+        )))
 }
 
 /// Validate the area and measure its sprites, decoding none of them.

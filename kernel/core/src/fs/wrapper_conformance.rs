@@ -32,8 +32,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NodeId, NodeKind, NodeSecurity, WritebackHost,
+    DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
+    FilesystemWrite, NodeId, NodeKind, NodeSecurity, WritebackHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 
@@ -122,12 +122,15 @@ pub fn assert_read_forwards<W: FilesystemRead + ?Sized>(wrapper: &mut W) {
     };
     assert_eq!(&target[..len], FILE_NAME);
 
-    let mut name = [0u8; 64];
-    let entry = wrapper
-        .read_dir(root, 0, &mut name)
+    let mut listed = 0usize;
+    wrapper
+        .read_dir(root, 0, &[], &mut |_, _| {
+            listed += 1;
+            DirVisit::Take
+        })
         .expect("`read_dir` is not being forwarded");
     assert!(
-        entry.is_some(),
+        listed > 0,
         "the wrapper reports an empty listing for a populated directory"
     );
 }

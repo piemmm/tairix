@@ -37,6 +37,9 @@ A stream that is present whole goes through a plain function:
   blocks, canonical Huffman tables built by the reference count/offset walk
   (a real table-driven decode, not a linear scan over every code), and
   overlapping back-references copied byte-by-byte.
+- `inflate::inflate_prefix(src, dst) -> Result<usize, Error>` — the opening
+  `dst.len()` bytes of a stream, decoding no further: a header read out of a
+  compressed member costs the header, not the member.
 - `zlib::decompress_into(src, dst) -> Result<usize, Error>` — the RFC 1950
   envelope: header validation (compression method, window size, header
   check, refusing a preset dictionary), the wrapped `inflate` body, and the

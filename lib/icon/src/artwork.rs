@@ -58,7 +58,11 @@ use tairix_reclaim::{
 };
 
 use crate::badge::badge_picture;
+use crate::folder::{card_slots, paper_card, FolderSample, MIN_COMPOSITE_SIDE};
 use crate::glyph::{builtin_icon, IconKind};
+use crate::thumbnail::{render_thumbnail, ArtworkDocument, Reading, Thumbnail};
+use tairix_abi::fs::FileId;
+use tairix_abi::time::Time64;
 
 /// Where the OS ships its desktop graphics assets.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
@@ -146,6 +150,15 @@ pub fn artwork_kind_for_file(name: &str) -> Option<IconKind> {
 pub trait ArtworkReader {
     /// The bytes at `path`, or `None` when the path is missing or unreadable.
     fn read(&mut self, path: &str) -> Option<Vec<u8>>;
+
+    /// The file at `path`, opened to stream a thumbnail from, or `None` when
+    /// it is missing or unreadable.
+    ///
+    /// The default opens nothing, which is right for a reader of icon assets
+    /// alone: every picture file then draws its class picture.
+    fn open(&mut self, _path: &str) -> Option<alloc::boxed::Box<dyn ArtworkDocument + '_>> {
+        None
+    }
 }
 
 /// Turns encoded icon bytes into `side`×`side` straight-alpha RGBA8.
@@ -158,17 +171,44 @@ pub trait ArtworkRasteriser {
     /// Rasterise `bytes` to a `side`-pixel square of straight-alpha RGBA8, or
     /// refuse with `None`.
     fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>>;
+
+    /// Decode the picture `document` holds, its format read as `reading`
+    /// says, fitted inside a `side`-pixel square of straight-alpha RGBA8 and
+    /// centred on it, or refuse with `None`.
+    ///
+    /// The default refuses, which is right for a rasteriser of icons alone.
+    fn thumbnail(
+        &mut self,
+        _side: u32,
+        _reading: Reading,
+        _document: &mut dyn ArtworkDocument,
+    ) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 impl<T: ArtworkReader + ?Sized> ArtworkReader for &mut T {
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {
         (**self).read(path)
     }
+
+    fn open(&mut self, path: &str) -> Option<alloc::boxed::Box<dyn ArtworkDocument + '_>> {
+        (**self).open(path)
+    }
 }
 
 impl<T: ArtworkRasteriser + ?Sized> ArtworkRasteriser for &mut T {
     fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<Vec<u8>> {
         (**self).rasterise(side, bytes)
+    }
+
+    fn thumbnail(
+        &mut self,
+        side: u32,
+        reading: Reading,
+        document: &mut dyn ArtworkDocument,
+    ) -> Option<Vec<u8>> {
+        (**self).thumbnail(side, reading, document)
     }
 }
 
@@ -243,6 +283,11 @@ impl<R: ArtworkReader, D: ArtworkRasteriser> InlineArtwork<R, D> {
 
 impl<R: ArtworkReader, D: ArtworkRasteriser> ArtworkResolver for InlineArtwork<R, D> {
     fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        // A thumbnail reads and decodes a whole picture file, which a thread
+        // that owes a frame cannot afford: the tile draws its class picture.
+        if matches!(key, ArtworkKey::Thumbnail(_)) {
+            return Resolved::Done(None);
+        }
         Resolved::Done(render_artwork(
             &mut self.reader,
             &mut self.rasteriser,
@@ -270,6 +315,21 @@ pub(crate) enum OwnIcon<'a> {
         name: &'a str,
         /// The asking session's home root, if it has one.
         home: Option<&'a str>,
+    },
+    /// A folder's picture of what it holds.
+    Folder(FolderSample),
+    /// A picture file drawn as its own content.
+    Thumbnail {
+        /// The file's absolute path.
+        path: &'a str,
+        /// Its length when it was listed.
+        size: u64,
+        /// Its modification time when it was listed.
+        modified: Time64,
+        /// The file it was when it was listed.
+        id: FileId,
+        /// How its format is read.
+        reading: Reading,
     },
 }
 
@@ -332,6 +392,45 @@ impl<'a> IconRequest<'a> {
         }
     }
 
+    /// A picture file at `path`, listed as file `id` at `size` bytes and
+    /// modified at `modified`, drawn as its own content and falling back to
+    /// `kind` where that will not serve.
+    #[must_use]
+    pub const fn thumbnail(
+        kind: IconKind,
+        path: &'a str,
+        size: u64,
+        modified: Time64,
+        id: FileId,
+        reading: Reading,
+    ) -> Self {
+        Self {
+            kind,
+            own: Some(OwnIcon::Thumbnail {
+                path,
+                size,
+                modified,
+                id,
+                reading,
+            }),
+        }
+    }
+
+    /// A picture of a folder holding `sample`: its cards standing in it,
+    /// falling back to the plain filled folder where that picture will not
+    /// draw, and the plain filled folder outright for an empty sample.
+    #[must_use]
+    pub const fn folder(sample: FolderSample) -> Self {
+        Self {
+            kind: IconKind::FolderFilled,
+            own: if sample.is_empty() {
+                None
+            } else {
+                Some(OwnIcon::Folder(sample))
+            },
+        }
+    }
+
     /// The kind that resolves when nothing of the thing's own does.
     #[must_use]
     pub const fn icon_kind(&self) -> IconKind {
@@ -374,6 +473,20 @@ impl Tier<'_> {
                 name: String::from(name),
                 home: home.map(String::from),
             },
+            Self::Own(OwnIcon::Folder(sample)) => ArtworkKey::Folder(sample),
+            Self::Own(OwnIcon::Thumbnail {
+                path,
+                size,
+                modified,
+                id,
+                reading,
+            }) => ArtworkKey::Thumbnail(Thumbnail {
+                path: String::from(path),
+                size,
+                modified,
+                id,
+                reading,
+            }),
             Self::Raster(kind) => ArtworkKey::Asset(icon_artwork_path(kind)),
             Self::Vector(kind) => ArtworkKey::Asset(icon_vector_path(kind)),
         }
@@ -594,6 +707,12 @@ pub enum ArtworkKey {
     /// expensive part of vector art: a glyph's coverage mask serves every tint
     /// and state, and a badge carries its own colours.
     Builtin(IconKind),
+    /// A folder's picture of what it holds: its back, a card for each kind
+    /// sampled, and its front, composed from their own artwork. Keyed by the
+    /// sample, so every folder holding the same kinds shares one picture.
+    Folder(FolderSample),
+    /// A picture file drawn as its own content.
+    Thumbnail(Thumbnail),
 }
 
 /// The outcome of building one cache slot.
@@ -914,7 +1033,38 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
         // Built-in art is first-party and compiled into this binary, so the
         // cache rasterises it in place and no resolver is ever handed one.
         ArtworkKey::Builtin(kind) => builtin_picture(*kind, side),
+        ArtworkKey::Folder(sample) => folder_picture(reader, rasteriser, *sample, side),
+        ArtworkKey::Thumbnail(thumbnail) => render_thumbnail(reader, rasteriser, thumbnail, side),
     }
+}
+
+/// A folder's picture of `sample` at `side` pixels: its back, a card for each
+/// kind standing in its mouth, and its front over them. `None` where the
+/// back or front will not draw, or the cards would be too small to read, so
+/// the request falls to the plain filled folder.
+fn folder_picture<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
+    reader: &mut R,
+    rasteriser: &mut D,
+    sample: FolderSample,
+    side: u32,
+) -> Option<Surface> {
+    if side < MIN_COMPOSITE_SIDE {
+        return None;
+    }
+    let mut part = |kind: IconKind, side: u32| {
+        render_icon(reader, rasteriser, &icon_artwork_path(kind), side)
+            .or_else(|| render_icon(reader, rasteriser, &icon_vector_path(kind), side))
+    };
+    let back = part(IconKind::FolderBack, side)?;
+    let front = part(IconKind::FolderFront, side)?;
+    let mut picture = Surface::new(side, side)?;
+    picture.blit(0, 0, &back);
+    for ((x, y, card_side), kind) in card_slots(sample, side) {
+        let card = part(kind, card_side).or_else(|| paper_card(kind, card_side))?;
+        picture.blit(x, y, &card);
+    }
+    picture.blit(0, 0, &front);
+    Some(picture)
 }
 
 /// The coverage mask for `kind`'s built-in glyph at `side` pixels: the glyph

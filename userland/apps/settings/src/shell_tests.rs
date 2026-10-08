@@ -3834,6 +3834,18 @@ fn every_screensaver_option_posts_its_own_key() {
     }
 }
 
+/// The kept-pictures sentence names the folders a home keeps them in.
+#[test]
+fn the_kept_pictures_option_names_where_pictures_go() {
+    use tairix_abi::home::{
+        HOME_USER_FILES_DIR, USER_FILES_DOCUMENTS_DIR, USER_FILES_PICTURES_DIR,
+    };
+    let text = SaverOption::RaytraceSave.description();
+    assert!(text.contains(HOME_USER_FILES_DIR), "{text}");
+    assert!(text.contains(USER_FILES_PICTURES_DIR), "{text}");
+    assert!(!text.contains(USER_FILES_DOCUMENTS_DIR), "{text}");
+}
+
 /// The slideshow is narrowed to a category the catalog files a picture under,
 /// or to one an update has since taken away, which is still offered.
 #[test]

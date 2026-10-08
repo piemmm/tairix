@@ -8,14 +8,16 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{
-    AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, BundleRunPath, DropTarget,
+    AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, BundleRunPath, DocumentName,
+    DragItems, DropTarget,
 };
 use tairix_abi::Errno;
 use tairix_icon::IconKind;
 use tairix_taskbar::TaskbarResponse;
+use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 
-use crate::drag::DragEnd;
+use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport};
 use crate::drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
 use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 use crate::lock::ScreenLock;
@@ -43,8 +45,12 @@ struct Program {
     /// What every icon-bar slot does with a dragged file: `None` claims
     /// nothing.
     target: Option<DropTarget>,
+    /// Every report the drain handed over.
+    reports: Vec<OwedReport>,
     /// Every drag the drain handed back, in the order it ended.
     drags: Vec<DragEnd>,
+    /// How many times a place was resolved into what is there.
+    surfaces_built: usize,
 }
 
 impl Program {
@@ -56,7 +62,9 @@ impl Program {
             decide: |_| Routed::Continue,
             switch_accepted: false,
             target: None,
+            reports: Vec::new(),
             drags: Vec::new(),
+            surfaces_built: 0,
         }
     }
 
@@ -131,8 +139,27 @@ impl SeatRouter for Program {
         self.switch_accepted
     }
 
-    fn drop_target(&mut self, _slot: usize, _name: &str) -> Option<DropTarget> {
-        self.target
+    fn drag_place(&mut self, seat: &mut Seat<'_>, at: Point) -> DragPlace {
+        let scale = seat.compositor.scale();
+        match seat.shell.session().taskbar().app_slot_at(at, scale) {
+            Some(index) => DragPlace::Slot { index },
+            None => DragPlace::Nothing,
+        }
+    }
+
+    fn drag_surface(&mut self, _seat: &mut Seat<'_>, place: DragPlace) -> DragSurface {
+        self.surfaces_built += 1;
+        match place {
+            DragPlace::Slot { index } => DragSurface::Slot {
+                index,
+                target: self.target.map(alloc::boxed::Box::new),
+            },
+            _ => DragSurface::Nothing,
+        }
+    }
+
+    fn report_drag(&mut self, _seat: &mut Seat<'_>, report: OwedReport) {
+        self.reports.push(report);
     }
 
     fn settle_drag(&mut self, _seat: &mut Seat<'_>, ended: DragEnd) {
@@ -296,6 +323,16 @@ fn pressed_desk() -> (Desk, tairix_wm::WindowId) {
     (desk, window)
 }
 
+/// One openable file, `notes.txt`.
+fn notes() -> DragItems {
+    DragItems::new(
+        DocumentName::new("notes.txt").expect("a valid name"),
+        1,
+        true,
+    )
+    .expect("one file")
+}
+
 /// The target the program's slots offer a dragged file to.
 fn editor() -> DropTarget {
     DropTarget {
@@ -312,12 +349,12 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
     let (mut desk, window) = pressed_desk();
     let other = opaque_window(&mut desk.comp, Point::new(300, 100), 40, 40);
     assert_eq!(
-        desk.shell.begin_drag(&mut desk.comp, 7, other, "notes.txt"),
+        desk.shell.begin_drag(&mut desk.comp, 7, other, notes()),
         Err(Errno::PermissionDenied),
         "no press is held there"
     );
     desk.shell
-        .begin_drag(&mut desk.comp, 7, window, "notes.txt")
+        .begin_drag(&mut desk.comp, 7, window, notes())
         .expect("the held press carries on");
     let slot = app_slot_point(&desk.shell, 0);
     let mut pointer = MemoryInput::new(&[moved(slot.x, slot.y), PRIMARY_RELEASE, moved(1, 1)]);
@@ -332,7 +369,7 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
         program.drags,
         [DragEnd {
             source: 7,
-            target: Some(editor())
+            ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
         }]
     );
     assert!(!desk.shell.drag_active());
@@ -350,13 +387,47 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
     );
 }
 
+/// A burst of motion over one slot resolves what the slot does once, as the
+/// pointer arrives; only arriving somewhere else resolves again.
+#[test]
+fn a_drag_resolves_a_place_once_as_the_pointer_arrives_on_it() {
+    let (mut desk, window) = pressed_desk();
+    desk.shell
+        .begin_drag(&mut desk.comp, 7, window, notes())
+        .expect("carried");
+    let slot = app_slot_point(&desk.shell, 0);
+    let mut pointer = MemoryInput::new(&[
+        moved(slot.x, slot.y),
+        moved(slot.x + 1, slot.y),
+        moved(slot.x + 2, slot.y),
+        moved(slot.x + 1, slot.y + 1),
+    ]);
+    let mut program = Program::new();
+    program.target = Some(editor());
+    assert_eq!(
+        desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
+        Ok(SeatWake::Served)
+    );
+    assert_eq!(program.surfaces_built, 1);
+
+    let mut pointer = MemoryInput::new(&[moved(1, 1), moved(2, 1), moved(slot.x, slot.y)]);
+    assert_eq!(
+        desk.wake(&mut pointer, &mut keyboard(&[]), &mut program),
+        Ok(SeatWake::Served)
+    );
+    assert_eq!(
+        program.surfaces_built, 3,
+        "off the slot once, and back once"
+    );
+}
+
 /// A drop on nothing that takes the file ends with no target, and `Escape`
 /// ends a drag where it is.
 #[test]
 fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
     let (mut desk, window) = pressed_desk();
     desk.shell
-        .begin_drag(&mut desk.comp, 7, window, "notes.txt")
+        .begin_drag(&mut desk.comp, 7, window, notes())
         .expect("carried");
     let slot = app_slot_point(&desk.shell, 0);
     let mut program = Program::new();
@@ -366,14 +437,14 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
         program.drags,
         [DragEnd {
             source: 7,
-            target: None
+            ended: DragConclusion::Nothing,
         }],
         "the slot claims nothing"
     );
 
     let (mut desk, window) = pressed_desk();
     desk.shell
-        .begin_drag(&mut desk.comp, 9, window, "notes.txt")
+        .begin_drag(&mut desk.comp, 9, window, notes())
         .expect("carried");
     let mut program = Program::new();
     program.target = Some(editor());
@@ -387,9 +458,10 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
         program.drags,
         [DragEnd {
             source: 9,
-            target: None
+            ended: DragConclusion::Nothing,
         }]
     );
+    assert!(program.reports.is_empty(), "a slot is never reported");
 }
 
 /// Under load a right-click on a slot and the click on the row of the menu

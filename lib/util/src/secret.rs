@@ -149,10 +149,10 @@ impl<const N: usize> Drop for Wiped<N> {
 /// A heap buffer erased with [`wipe`] at the end of its scope, including on
 /// an early return or an unwind: [`Wiped`] for a buffer sized at run time.
 ///
-/// It is reached only as a slice, so it never grows: a buffer that grew
-/// would leave what it held in the block it outgrew, past any wipe's reach.
-/// The whole block is erased, spare capacity too, since a vector handed in
-/// truncated still holds what it was truncated from.
+/// It never grows past the block it was made with: a buffer that moved to a
+/// larger block would leave what it held in the one it outgrew, past any
+/// wipe's reach. The whole block is erased, spare capacity too, since a
+/// vector handed in truncated still holds what it was truncated from.
 #[derive(Debug)]
 pub struct WipedBuf(Vec<u8>);
 
@@ -161,6 +161,30 @@ impl WipedBuf {
     #[must_use]
     pub const fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+
+    /// An empty buffer with a block of `capacity` bytes, filled as it is used
+    /// by [`Self::extend_zeroed`] rather than zeroed whole up front.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`](alloc::collections::TryReserveError) when the
+    /// block cannot be allocated.
+    pub fn with_capacity(capacity: usize) -> Result<Self, alloc::collections::TryReserveError> {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(capacity)?;
+        Ok(Self(bytes))
+    }
+
+    /// Grow by `additional` zeroed bytes and hand them out, or `None`, leaving
+    /// the buffer as it was, when its block cannot hold them.
+    pub fn extend_zeroed(&mut self, additional: usize) -> Option<&mut [u8]> {
+        let held = self.0.len();
+        let len = held
+            .checked_add(additional)
+            .filter(|&len| len <= self.0.capacity())?;
+        self.0.resize(len, 0);
+        self.0.get_mut(held..)
     }
 
     /// Erase the buffer now, rather than waiting for the end of the scope.
@@ -217,6 +241,22 @@ mod tests {
         // SAFETY: the wipe just wrote every spare byte, so each is
         // initialised, and the borrow is the buffer's own.
         assert!(spare.iter().all(|byte| unsafe { byte.assume_init() } == 0));
+    }
+
+    /// Growth stays inside the block the buffer was made with, so it never
+    /// moves and leaves a copy behind; past it, nothing changes.
+    #[test]
+    fn a_wiped_buffer_grows_only_within_its_block() {
+        let mut buf = WipedBuf::with_capacity(10).expect("a small block");
+        assert!(buf.is_empty());
+        let block = buf.0.as_ptr();
+        buf.extend_zeroed(4).expect("fits").copy_from_slice(b"abcd");
+        assert_eq!(buf.extend_zeroed(6).expect("fills the block"), [0; 6]);
+        assert_eq!(buf.extend_zeroed(1), None);
+        assert_eq!(buf.extend_zeroed(usize::MAX), None);
+        assert_eq!(&buf[..4], b"abcd");
+        assert_eq!(buf.len(), 10);
+        assert_eq!(buf.0.as_ptr(), block);
     }
 
     #[test]

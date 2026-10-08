@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Folder front</title>
+  <!-- The folder's front pocket, set lower than the plain folder's so the
+       cards standing in it show above it. Rounded corners are cut as integer
+       line segments: the desktop's SVG subset has no curves. -->
+  <polygon fill="#4C9AF0" points="28,131 29,124 34,118 40,113 47,112 209,112 216,113 222,118 227,124 228,131 228,192 227,199 222,205 216,210 209,211 47,211 40,210 34,205 29,199 28,192"/>
+  <polygon fill="#65AAF5" points="28,131 29,124 34,118 40,113 47,112 209,112 216,113 222,118 227,124 228,131 228,139 28,139"/>
+</svg>

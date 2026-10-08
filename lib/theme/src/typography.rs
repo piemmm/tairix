@@ -59,6 +59,9 @@ pub enum TextRole {
     WindowTitle,
     /// Ordinary interface text: button labels, menu rows, fields, list rows.
     Body,
+    /// An item's name in a dense collection view: under an icon tile, or in a
+    /// listing's row.
+    ItemLabel,
     /// A numeric readout beside a meter — a percentage, a byte count, a rate.
     Metric,
     /// The secondary line under an item title, a clock, or any de-emphasised
@@ -71,14 +74,14 @@ pub enum TextRole {
 }
 
 impl TextRole {
-    /// Every role, in descending nominal size — the order the ladder is
-    /// authored and tested in.
-    pub const ALL: [Self; 9] = [
+    /// Every role, in the order the ladder is authored and tested in.
+    pub const ALL: [Self; 10] = [
         Self::Display,
         Self::Heading,
         Self::ItemTitle,
         Self::WindowTitle,
         Self::Body,
+        Self::ItemLabel,
         Self::Metric,
         Self::Caption,
         Self::SectionHeader,
@@ -98,10 +101,11 @@ impl TextRole {
             Self::ItemTitle => 2,
             Self::WindowTitle => 3,
             Self::Body => 4,
-            Self::Metric => 5,
-            Self::Caption => 6,
-            Self::SectionHeader => 7,
-            Self::Monospace => 8,
+            Self::ItemLabel => 5,
+            Self::Metric => 6,
+            Self::Caption => 7,
+            Self::SectionHeader => 8,
+            Self::Monospace => 9,
         }
     }
 }
@@ -151,6 +155,14 @@ pub const fn lifted(weight: FontWeight) -> FontWeight {
     }
 }
 
+/// The rung a point below body, as a percentage of the base.
+///
+/// Ladder sizes are line-box heights, and the shipped face's line box is about
+/// six fifths of its em, so a point of em (four thirds of a pixel at the
+/// reference density) is about 1.6 px of line box: at the shipped base this
+/// rung is two pixels below body.
+const POINT_BELOW_BODY: u32 = 89;
+
 /// One rung of the ladder: a role's size as a percentage of the base size,
 /// and the weight the boards set it in.
 struct Rung {
@@ -166,7 +178,7 @@ struct Rung {
 /// The percentages are measured from the reference boards, where a button
 /// label, an item title, and its detail line sit within one point of each
 /// other and the weight — not the size — carries most of the hierarchy.
-const LADDER: [Rung; 9] = [
+const LADDER: [Rung; TextRole::ALL.len()] = [
     // The one deliberate break from that tight cluster: a screen-filling
     // readout carries its hierarchy on size alone, and stays on the regular
     // rung so it reads light rather than heavy at that size.
@@ -187,12 +199,17 @@ const LADDER: [Rung; 9] = [
     },
     Rung {
         role: TextRole::WindowTitle,
-        percent: 100,
+        percent: POINT_BELOW_BODY,
         weight: FontWeight::MEDIUM,
     },
     Rung {
         role: TextRole::Body,
         percent: 100,
+        weight: FontWeight::REGULAR,
+    },
+    Rung {
+        role: TextRole::ItemLabel,
+        percent: POINT_BELOW_BODY,
         weight: FontWeight::REGULAR,
     },
     Rung {
@@ -229,8 +246,19 @@ pub struct Fonts {
     ui_family: FamilyKey,
     monospace_family: FamilyKey,
     base_size_px: u16,
-    specs: [FontSpec; 9],
+    specs: [FontSpec; TextRole::ALL.len()],
 }
+
+// `Fonts::ladder` builds each role's spec from the rung at that role's slot.
+const _: () = {
+    let mut slot = 0;
+    while slot < LADDER.len() {
+        assert!(LADDER[slot].role.index() == slot);
+        assert!(TextRole::ALL[slot].index() == slot);
+        slot += 1;
+    }
+    assert!(LADDER.len() == TextRole::ALL.len());
+};
 
 impl Fonts {
     /// The smallest base size a ladder may be authored at, in logical pixels.

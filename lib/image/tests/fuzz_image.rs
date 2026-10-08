@@ -47,12 +47,13 @@
 use tairix_fuzzseed::meter::{metered, refusing_above, Metered};
 use tairix_fuzzseed::Prng;
 use tairix_image::{
-    decode, decode_as, decode_fitted, decode_peak_bytes, encode_bmp, encode_gif, encode_jpeg,
-    encode_ora, encode_png, encode_sprite_area, encode_tiff, open_native, probe_as, sniff,
-    DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat, IndexDepth,
-    JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind, PictureSource,
-    RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteInput,
-    SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
+    decode, decode_as, decode_fitted, decode_fitted_as, decode_peak_bytes, decode_peak_bytes_as,
+    encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png, encode_sprite_area, encode_tiff,
+    open_native, probe_as, sniff, DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions,
+    ImageFormat, IndexDepth, JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture,
+    PictureKind, PictureSource, RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader,
+    SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions,
+    MOST_ORA_LAYERS,
 };
 
 #[global_allocator]
@@ -2205,6 +2206,16 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     // bytes at all are a candidate sprite area. Naming the format is both
     // the only way in and free extra coverage for every fixture here.
     let _ = probe_as(ImageFormat::Sprite, bytes);
+    let reduced = FitBox::new(3, 3);
+    let bound = decode_peak_bytes_as(ImageFormat::Sprite, bytes, &limits, reduced);
+    let (fitted, held) = peak_of(|| decode_fitted_as(ImageFormat::Sprite, bytes, &limits, reduced));
+    match bound {
+        Ok(bound) => assert!(held <= bound, "a fitted sprite held {held} past {bound}"),
+        Err(refusal) => assert!(
+            fitted.is_err(),
+            "a fitted sprite the bound refused ({refusal:?}) decoded"
+        ),
+    }
     if let Ok(image) = decode_as(ImageFormat::Sprite, bytes, &limits) {
         assert!(image.width() <= limits.max_width());
         assert!(image.height() <= limits.max_height());

@@ -1573,8 +1573,8 @@ outside world are injected seams, the same discipline as `cat`'s
 
 - `Listing` — stat a path in the `stat` or `lstat` reading the posture
   selects *per path* (`FinalLink`), read a symbolic link's stored target,
-  and read a directory's whole listing in one call, mirroring the kernel's
-  one-shot `fs_readdir` contract. An entry's kind is the VFS's own
+  and read a directory's whole listing in one call, which `lib/rt` reads
+  from the kernel a batch at a time. An entry's kind is the VFS's own
   `FileKind` — no parallel kind enum to drift. The per-entry stat behind
   the long format's columns, the `-S` size sort, `-F`'s execute-bit check,
   and `-L`'s resolution is paid only when one of them asks for it, and a
@@ -2144,7 +2144,7 @@ entry point) wires the production seams: a resolve-only `fs_open` +
 `fs_stat` learns each operand's kind and current bits, `fs_set_mode`
 (syscall 74) applies the change — the kernel enforces the owner-only
 rule, the mount flags, and every per-inode check — and the one shared
-grow-on-`BufferTooSmall` `fs_readdir` walk feeds `-R`.
+batched `fs_readdir` listing feeds `-R`.
 
 ### Grammar
 

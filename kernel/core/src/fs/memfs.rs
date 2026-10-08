@@ -12,14 +12,17 @@
 //! `0o755` (the delegation tests vary only the node they care about); a test
 //! that needs a different creator uses [`RwMockFs::with_create_owner`].
 
-use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use core::ops::Bound;
+
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, NodeTimes, VolumeStats, WritebackHost,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_fsmeta::{AttrFlags, AttrSet};
@@ -60,6 +63,16 @@ pub struct RwMockFs {
     /// Folding by default, so the cache's and the watch's folding paths stay
     /// exercised; [`Self::with_exact_names`] stands in for an exact format.
     name_matching: NameMatching,
+    /// Bumped by every name added or removed, so a listing cursor names a
+    /// place in one version of a directory and no other.
+    generation: u32,
+    /// The numbers of nodes whose last name went, which a create takes again
+    /// lowest first, as FAT's clusters and ext4's inodes are; `None` keeps
+    /// every number for good.
+    free: Option<BTreeSet<usize>>,
+    /// Run on entry to every lookup, so a test can check what its caller
+    /// holds while inside the driver.
+    lookup_probe: Option<Box<dyn Fn() + Send>>,
 }
 
 impl Default for RwMockFs {
@@ -78,11 +91,14 @@ impl RwMockFs {
             // can vary just the node it cares about.
             sec: alloc::vec![NodeSecurity::new(0o755, ADMIN_UID, ADMIN_GID)],
             nlink: alloc::vec![1],
+            generation: 0,
             attrs: alloc::vec![AttrSet::new()],
             create_uid: ADMIN_UID,
             create_gid: ADMIN_GID,
             create_mode: 0o755,
             name_matching: NameMatching::AsciiCaseInsensitive,
+            free: None,
+            lookup_probe: None,
         }
     }
 
@@ -91,6 +107,40 @@ impl RwMockFs {
     pub fn with_exact_names(mut self) -> Self {
         self.name_matching = NameMatching::Exact;
         self
+    }
+
+    /// Give a removed node's number to the next node made, lowest first.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_reused_numbers(mut self) -> Self {
+        self.free = Some(BTreeSet::new());
+        self
+    }
+
+    /// Run `probe` on entry to every lookup.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_lookup_probe(mut self, probe: Box<dyn Fn() + Send>) -> Self {
+        self.lookup_probe = Some(probe);
+        self
+    }
+
+    /// Place a new node, owned as a create makes it, under a freed number
+    /// where one is reused, else a fresh one.
+    fn place(&mut self, node: RwNode) -> usize {
+        let sec = NodeSecurity::new(self.create_mode, self.create_uid, self.create_gid);
+        if let Some(index) = self.free.as_mut().and_then(BTreeSet::pop_first) {
+            self.nodes[index] = node;
+            self.sec[index] = sec;
+            self.attrs[index] = AttrSet::new();
+            self.nlink[index] = 1;
+            return index;
+        }
+        self.nodes.push(node);
+        self.sec.push(sec);
+        self.attrs.push(AttrSet::new());
+        self.nlink.push(1);
+        self.nodes.len() - 1
     }
 
     fn names_match(matching: NameMatching, stored: &str, wanted: &str) -> bool {
@@ -165,10 +215,16 @@ impl RwMockFs {
             .find(|k| Self::names_match(matching, k, name))
             .cloned()?;
         let child = children.remove(&key)?;
+        self.generation = self.generation.wrapping_add(1);
         // A detached name is one fewer name; the node itself lives on for as
         // long as another entry reaches it.
         if let Some(count) = self.nlink.get_mut(child) {
             *count = count.saturating_sub(1);
+            if *count == 0 {
+                if let Some(free) = self.free.as_mut() {
+                    free.insert(child);
+                }
+            }
         }
         Some(child)
     }
@@ -231,6 +287,9 @@ impl FilesystemRead for RwMockFs {
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        if let Some(probe) = &self.lookup_probe {
+            probe();
+        }
         match self.child_index(dir, name)? {
             Some(i) => Ok(NodeId::from_raw(i as u64 + 1)),
             None => Err(DriverError::NotFound),
@@ -271,33 +330,48 @@ impl FilesystemRead for RwMockFs {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        // In-RAM, the cursor is simply the entry's position in the map's
-        // stable order; any value past the end — including an arbitrary one
-        // that was never returned — falls off the map and ends the listing.
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         let idx = Self::index(dir)?;
         let RwNode::Dir(children) = self.nodes.get(idx).ok_or(DriverError::NotFound)? else {
             return Err(DriverError::Unsupported);
         };
-        let Ok(i) = usize::try_from(cursor) else {
-            return Ok(None);
+        // Names are kept in order, so a listing resumes just past the one it
+        // last took, a place no insertion or removal moves. The cursor adds
+        // the generation and position only so that each names one version
+        // of the directory.
+        let rest: Vec<(usize, String, usize)> = if cursor == 0 {
+            children
+                .iter()
+                .enumerate()
+                .map(|(at, (name, &child))| (at, name.clone(), child))
+                .collect()
+        } else {
+            let Ok(after) = core::str::from_utf8(after) else {
+                return Ok(());
+            };
+            let skipped = children
+                .range::<str, _>((Bound::Unbounded, Bound::Included(after)))
+                .count();
+            children
+                .range::<str, _>((Bound::Excluded(after), Bound::Unbounded))
+                .enumerate()
+                .map(|(at, (name, &child))| (skipped + at, name.clone(), child))
+                .collect()
         };
-        let Some((name, &child)) = children.iter().nth(i) else {
-            return Ok(None);
-        };
-        if name_out.len() < name.len() {
-            return Err(DriverError::BufferTooSmall);
+        for (at, name, child) in rest {
+            let node = NodeId::from_raw(child as u64 + 1);
+            let entry = DirEntry {
+                node,
+                info: self.node_info(node)?,
+                next_cursor: (u64::from(self.generation) << 32) | (at as u64 + 1),
+            };
+            if visit(&entry, name.as_bytes()) == DirVisit::Stop {
+                break;
+            }
         }
-        let name_len = name.len();
-        name_out[..name_len].copy_from_slice(name.as_bytes());
-        let info = self.node_info(NodeId::from_raw(child as u64 + 1))?;
-        Ok(Some(DirEntry {
-            node: NodeId::from_raw(child as u64 + 1),
-            info,
-            name_len,
-            next_cursor: cursor + 1,
-        }))
+        Ok(())
     }
 }
 
@@ -315,18 +389,11 @@ impl FilesystemWrite for RwMockFs {
             // A link carries a target this call has nowhere to put.
             NodeKind::Symlink => return Err(DriverError::Unsupported),
         };
-        let new_index = self.nodes.len();
-        self.nodes.push(node);
-        self.sec.push(NodeSecurity::new(
-            self.create_mode,
-            self.create_uid,
-            self.create_gid,
-        ));
-        self.attrs.push(AttrSet::new());
-        self.nlink.push(1);
+        let new_index = self.place(node);
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, new_index);
+            self.generation = self.generation.wrapping_add(1);
         }
         Ok(NodeId::from_raw(new_index as u64 + 1))
     }
@@ -346,18 +413,11 @@ impl FilesystemWrite for RwMockFs {
         let name = core::str::from_utf8(name)
             .map_err(|_| DriverError::LengthOutOfRange)?
             .to_string();
-        let new_index = self.nodes.len();
-        self.nodes.push(RwNode::Link(target.to_vec()));
-        self.sec.push(NodeSecurity::new(
-            self.create_mode,
-            self.create_uid,
-            self.create_gid,
-        ));
-        self.attrs.push(AttrSet::new());
-        self.nlink.push(1);
+        let new_index = self.place(RwNode::Link(target.to_vec()));
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, new_index);
+            self.generation = self.generation.wrapping_add(1);
         }
         Ok(NodeId::from_raw(new_index as u64 + 1))
     }
@@ -383,6 +443,7 @@ impl FilesystemWrite for RwMockFs {
         let dir_idx = Self::index(dir)?;
         if let RwNode::Dir(children) = &mut self.nodes[dir_idx] {
             children.insert(name, target);
+            self.generation = self.generation.wrapping_add(1);
         }
         Ok(())
     }
@@ -480,6 +541,7 @@ impl FilesystemWrite for RwMockFs {
         self.unlink_name(src_dir_idx, src_key);
         if let RwNode::Dir(children) = &mut self.nodes[dst_dir_idx] {
             children.insert(dst_key, src_idx);
+            self.generation = self.generation.wrapping_add(1);
         }
         if let Some(count) = self.nlink.get_mut(src_idx) {
             *count = count.saturating_add(1);

@@ -2,8 +2,8 @@
 
 use super::*;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
+    DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
 };
 use tairix_abi::DriverError;
 use tairix_kernel_core::fs::wrapper_conformance as conformance;
@@ -66,10 +66,11 @@ impl FilesystemRead for TwoNodeFs {
     fn read_dir(
         &mut self,
         _dir: NodeId,
-        _index: u64,
-        _name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        Ok(None)
+        _cursor: u64,
+        _after: &[u8],
+        _visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 

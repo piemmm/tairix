@@ -86,7 +86,7 @@ pub enum TrashStrategy {
 /// The name of the per-user library directory the Trash lives inside — the
 /// fixed `/Users/<u>/Library/` subtree (never a new sibling of `Library`), the
 /// one the charter's home layout reserves for per-user state.
-pub const TRASH_LIBRARY_DIR: &str = "Library";
+pub const TRASH_LIBRARY_DIR: &str = tairix_abi::home::HOME_LIBRARY_DIR;
 
 /// The name of the Trash directory itself, inside [`TRASH_LIBRARY_DIR`].
 pub const TRASH_LEAF_DIR: &str = "Trash";

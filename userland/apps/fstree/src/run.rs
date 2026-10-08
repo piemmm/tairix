@@ -42,7 +42,7 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_SYMLINK_MAX};
+    use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
@@ -62,15 +62,6 @@ mod program {
     /// line, whose remote terminal size only the far-end emulator knows).
     const FALLBACK_ROWS: u16 = 24;
     const FALLBACK_COLS: u16 = 80;
-
-    /// Initial byte size of the directory-listing buffer: one page covers a
-    /// typical directory; `BufferTooSmall` grows it (below).
-    const DIR_BUF_INITIAL: usize = 4096;
-
-    /// Ceiling for the directory-listing buffer: the kernel's own per-call
-    /// staging cap ([`FS_IO_MAX`]), so the buffer grows exactly as far as
-    /// one `fs_readdir` transfer can ever fill and no further.
-    const DIR_BUF_MAX: usize = FS_IO_MAX;
 
     /// The usage banner printed when the arguments cannot be understood.
     const USAGE: &str = "usage: fstree [-h | -?] [directory]";
@@ -202,24 +193,10 @@ mod program {
 
     impl Fs for RtFs {
         fn list_dir(&mut self, path: &str) -> Result<Vec<FsEntry>, Errno> {
-            let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
-            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-            let used = loop {
-                match dir.read(&mut buf) {
-                    Ok(used) => break used,
-                    Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                            buf.resize((buf.len() * 2).min(DIR_BUF_MAX), 0);
-                        }
-                        other => return Err(other),
-                    },
-                }
-            };
+            let buf = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
-            let mut rest = &buf[..used];
-            while !rest.is_empty() {
-                let (entry, consumed) = DirEntry::decode(rest)?;
-                rest = &rest[consumed..];
+            for entry in DirEntries::new(&buf) {
+                let entry = entry?;
                 // The ABI contract makes every entry name UTF-8; a name
                 // that is not is a corrupt or hostile stream, refused whole
                 // rather than silently dropped from the listing.

@@ -298,6 +298,13 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_FS_ATTR_KEY_MAX 255u
 #define TAIRIX_FS_ATTR_VALUE_MAX 3072u
 
+/* fs_readdir() reads a directory a batch at a time from the open description's
+* position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,
+* 0 at the end. `from` is NEXT, or START to restart the listing. */
+#define TAIRIX_READDIR_BATCH_MAX 65536u
+#define TAIRIX_READDIR_FROM_NEXT 0u
+#define TAIRIX_READDIR_FROM_START 1u
+
 /* fs_watch() / fs_watch_read(). A watch is armed with a latency of at most
 * TAIRIX_DIR_WATCH_LATENCY_MAX_NS and drained into a buffer of at least
 * TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER bytes. A batch is a header of
@@ -527,7 +534,7 @@ uint64_t tairix_sys_fs_open(void * a0, uintptr_t a1, uint32_t a2);
 int32_t tairix_sys_fs_close(uint32_t a0);
 uint64_t tairix_sys_fs_read(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fs_write(uint32_t a0, uint64_t a1, void * a2, uintptr_t a3);
-uint64_t tairix_sys_fs_readdir(uint32_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_fs_readdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3);
 uint64_t tairix_sys_fs_stat(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_fs_truncate(uint32_t a0, uint64_t a1);
 int32_t tairix_sys_fs_sync(uint32_t a0);

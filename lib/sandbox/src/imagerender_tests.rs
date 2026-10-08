@@ -494,8 +494,10 @@ fn every_refusal_has_non_empty_terse_display_text() {
         IconRefusal::UnsupportedFormat,
         IconRefusal::MalformedImage,
         IconRefusal::Unrenderable,
+        IconRefusal::TooLarge,
     ] {
         assert!(!format!("{refusal}").is_empty());
+        assert_eq!(IconRefusal::from_wire(refusal.to_wire()), Some(refusal));
     }
 }
 
@@ -2546,6 +2548,7 @@ fn every_operation_this_worker_serves_has_its_own_opcode() {
         super::OP_VIEW_RENDER,
         super::OP_VIEW_BAND,
         super::OP_VIEW_RELEASE,
+        super::OP_THUMBNAIL,
     ];
     for (at, op) in ops.iter().enumerate() {
         assert!(!ops[at + 1..].contains(op), "opcode {op} served twice");
@@ -2554,4 +2557,180 @@ fn every_operation_this_worker_serves_has_its_own_opcode() {
             "opcode {op} is also the editor's"
         );
     }
+}
+
+/// Upload `document` and draw it as a `side` thumbnail.
+fn thumbnailed(
+    sandbox: &mut TestSandbox,
+    document: &[u8],
+    side: u32,
+    format: Option<super::ViewFormat>,
+) -> Result<Vec<u8>, IconRasterFailure> {
+    super::send_document(sandbox, document).expect("uploaded");
+    super::render_thumbnail(sandbox, side, format)
+}
+
+#[test]
+fn a_thumbnail_is_its_picture_fitted_and_centred() {
+    let mut sandbox = sandbox();
+    let (red, blue) = ([200, 0, 0, 255], [0, 0, 200, 255]);
+    let png = png_with(8, 4, |x, _| if x < 4 { red } else { blue });
+    let pixels = thumbnailed(&mut sandbox, &png, 4, None).expect("drawn");
+    assert_eq!(pixels.len(), 4 * 4 * 4);
+    for x in 0..4 {
+        assert_eq!(rgba_at(&pixels, 4, x, 0)[3], 0, "padding above");
+        assert_eq!(rgba_at(&pixels, 4, x, 3)[3], 0, "padding below");
+    }
+    assert_eq!(rgba_at(&pixels, 4, 0, 1), red);
+    assert_eq!(rgba_at(&pixels, 4, 3, 2), blue);
+}
+
+/// What a thumbnail shows of a picture smaller than its tile is the picture,
+/// at its own size, rather than a blur of it.
+#[test]
+fn a_picture_smaller_than_its_tile_is_not_enlarged() {
+    let mut sandbox = sandbox();
+    let colour = [10, 120, 30, 255];
+    let pixels = thumbnailed(&mut sandbox, &png_with(2, 2, |_, _| colour), 6, None).expect("drawn");
+    for y in 0..6 {
+        for x in 0..6 {
+            let inside = (2..4).contains(&x) && (2..4).contains(&y);
+            let expected = if inside { colour } else { [0, 0, 0, 0] };
+            assert_eq!(rgba_at(&pixels, 6, x, y), expected, "({x}, {y})");
+        }
+    }
+}
+
+/// The worker lets the file go once it is drawn, so it holds no picture file
+/// longer than the one picture it was sent for.
+#[test]
+fn a_thumbnail_takes_its_document_with_it() {
+    let mut sandbox = sandbox();
+    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    assert!(thumbnailed(&mut sandbox, &png, 2, None).is_ok());
+    assert_eq!(
+        super::render_thumbnail(&mut sandbox, 2, None),
+        Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest))
+    );
+}
+
+/// A named format is the format read: a PNG named a sprite area is refused by
+/// the sprite parser rather than sniffed back into a PNG.
+#[test]
+fn a_named_format_is_the_one_read() {
+    let mut sandbox = sandbox();
+    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    assert_eq!(
+        thumbnailed(&mut sandbox, &png, 2, Some(super::ViewFormat::Sprite)),
+        Err(IconRasterFailure::Refused(IconRefusal::MalformedImage))
+    );
+    assert_eq!(
+        thumbnailed(&mut sandbox, &png, 2, Some(super::ViewFormat::Svg)),
+        Err(IconRasterFailure::Refused(IconRefusal::UnsupportedFormat)),
+        "a thumbnail is a raster picture"
+    );
+}
+
+/// A picture whose decode would cost past the bound is refused from its
+/// header alone, however small its tile.
+#[test]
+fn a_picture_too_dear_to_decode_is_refused_from_its_header() {
+    let mut sandbox = sandbox();
+    // A row this wide costs far past the bound to reconstruct, though the
+    // picture is well inside what the viewer opens.
+    let png = build_png(1 << 24, 1, &[0]);
+    assert_eq!(
+        thumbnailed(&mut sandbox, &png, 16, None),
+        Err(IconRasterFailure::Refused(IconRefusal::TooLarge))
+    );
+}
+
+#[test]
+fn the_worker_refuses_every_malformed_thumbnail_request() {
+    let request = |side: u32, format: u8, trailing: bool| {
+        let mut w = Writer::new();
+        w.u8(super::OP_THUMBNAIL);
+        w.u32(side);
+        w.u8(format);
+        if trailing {
+            w.u8(0);
+        }
+        w.finish()
+    };
+    let refused = |reply: Vec<u8>, refusal: IconRefusal| {
+        assert_eq!(reply, super::encode_error(refusal.to_wire()));
+    };
+    let mut worker = ImageRenderService::default();
+    refused(
+        worker.handle(&request(4, 0, false)),
+        IconRefusal::MalformedRequest,
+    );
+    refused(
+        worker.handle(&request(0, 0, false)),
+        IconRefusal::MalformedRequest,
+    );
+    refused(
+        worker.handle(&request(MAX_ICON_SIDE + 1, 0, false)),
+        IconRefusal::MalformedRequest,
+    );
+    refused(
+        worker.handle(&request(4, 0, true)),
+        IconRefusal::MalformedRequest,
+    );
+    refused(
+        worker.handle(&request(4, 200, false)),
+        IconRefusal::UnsupportedFormat,
+    );
+    refused(
+        worker.handle(&[super::OP_THUMBNAIL]),
+        IconRefusal::MalformedRequest,
+    );
+}
+
+#[test]
+fn a_thumbnail_reply_of_the_wrong_length_is_refused() {
+    let mut w = Writer::new();
+    w.u8(super::REPLY_PIXELS);
+    w.u32(2);
+    w.bytes(&[0u8; 3]);
+    let mut sandbox = scripted(w.finish());
+    assert_eq!(
+        super::render_thumbnail(&mut sandbox, 2, None),
+        Err(IconRasterFailure::ReplyMalformed)
+    );
+}
+
+/// The whole of what a program pays for a thumbnail: the file streamed from
+/// its handle, the picture drawn, through the one entry point every program
+/// uses.
+#[test]
+fn a_thumbnail_streams_its_document_and_draws_it() {
+    struct Held(Vec<u8>);
+    impl tairix_icon::ArtworkDocument for Held {
+        fn stamp(&self) -> tairix_icon::DocumentStamp {
+            tairix_icon::DocumentStamp {
+                size: self.0.len() as u64,
+                modified: tairix_abi::time::Time64::UNIX_EPOCH,
+                id: tairix_abi::FileId::NONE,
+            }
+        }
+
+        fn read_at(&mut self, offset: u64, into: &mut [u8]) -> Option<usize> {
+            let held = self.0.get(usize::try_from(offset).ok()?..)?;
+            let len = held.len().min(into.len());
+            into[..len].copy_from_slice(&held[..len]);
+            Some(len)
+        }
+    }
+    let mut sandbox = sandbox();
+    let colour = [9, 8, 7, 255];
+    let mut document = Held(png_with(4, 4, |_, _| colour));
+    let pixels = super::thumbnail(
+        &mut sandbox,
+        2,
+        tairix_icon::Reading::Signature,
+        &mut document,
+    )
+    .expect("drawn");
+    assert_eq!(rgba_at(&pixels, 2, 1, 1), colour);
 }

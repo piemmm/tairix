@@ -526,6 +526,12 @@ impl DesktopShell {
         compositor.move_cursor(at);
     }
 
+    /// The pointer's shape controller, for a gesture of the seat's own that
+    /// holds the pointer in one shape.
+    pub(crate) fn cursor_mut(&mut self) -> &mut CursorController {
+        &mut self.cursor
+    }
+
     /// Install the cursor sets read from the shipped store as the pointer
     /// artwork this seat chooses from, and re-render the current shape so
     /// they show without waiting for the next interaction.
@@ -711,6 +717,28 @@ impl DesktopShell {
         self.sync_active_frame(compositor);
         self.present(compositor);
         true
+    }
+
+    /// Put the already-open `window` on screen beneath the window holding the
+    /// keyboard, leaving the keyboard where it is — a served window's first
+    /// present while a lock, the picker or a prompt holds the seat.
+    ///
+    /// Returns `false`, changing nothing, when `window` is not a tracked task.
+    pub fn map_window_behind(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        if !self
+            .tasks
+            .map_behind(compositor, self.router.focused(), window)
+        {
+            return false;
+        }
+        self.present(compositor);
+        true
+    }
+
+    /// The sink the session records its security decisions on.
+    #[must_use]
+    pub fn audit(&self) -> &'static (dyn Sink + Sync) {
+        self.audit
     }
 
     /// Open `surface` as an undecorated window at `origin` belonging to
@@ -1135,6 +1163,22 @@ impl DesktopShell {
         let scale = compositor.scale();
         self.session.taskbar_mut().adopt_icon_artwork(landed, scale);
         self.present(compositor);
+    }
+
+    /// Ask for the picture of every icon `desktop` shows, drawing nothing, so
+    /// the artwork producer learns what is on screen after a pass that
+    /// repainted only some of it.
+    pub fn want_desktop_artwork<S: DirectorySource>(
+        &mut self,
+        compositor: &Compositor,
+        desktop: &Desktop<S>,
+    ) {
+        let layout = self.desktop_layout(compositor, desktop);
+        let theme = self.session.active_theme();
+        let (artwork, resolver) = (&mut self.artwork, self.artwork_resolver.as_mut());
+        desktop.want_shown_artwork(&layout, compositor.scale(), theme, |request, side| {
+            artwork.prefetch(resolver, request, side);
+        });
     }
 
     /// Add to `damage` the cells of `desktop`'s icons whose picture the

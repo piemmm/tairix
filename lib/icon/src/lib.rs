@@ -51,10 +51,12 @@ pub mod account;
 pub mod artwork;
 pub mod badge;
 pub mod desk;
+pub mod folder;
 pub mod glyph;
 pub mod load;
 pub mod svg;
 mod symbol;
+pub mod thumbnail;
 pub mod vector;
 
 #[cfg(test)]
@@ -70,7 +72,11 @@ pub use artwork::{
 };
 pub use badge::BadgeHue;
 pub use desk::{ArtworkDesk, ArtworkJob, Delivered, Landed};
+pub use folder::FolderSample;
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use svg::decode as decode_svg;
+#[cfg(feature = "rt")]
+pub use thumbnail::RtDocument;
+pub use thumbnail::{ArtworkDocument, DocumentStamp, Reading, Thumbnail, MAX_THUMBNAIL_BYTES};
 pub use vector::{IconLayer, VectorIcon};

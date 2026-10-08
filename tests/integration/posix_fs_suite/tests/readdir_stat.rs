@@ -17,9 +17,7 @@ fn readdir_lists_created_children() {
         .expect("mkdir gamma");
 
     let mut names: Vec<(NodeKind, String)> = vfs
-        .list_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow, |entry| {
-            entry
-        })
+        .list_all_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow, usize::MAX)
         .expect("list mount root")
         .into_iter()
         .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
@@ -44,12 +42,12 @@ fn readdir_of_a_file_is_not_a_directory() {
     vfs.create_via_secured(&owner, &vol_path("file"), &mut fs)
         .expect("create");
     assert_eq!(
-        vfs.list_via_secured(
+        vfs.list_all_via_secured(
             &owner,
             &vol_path("file"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry
+            usize::MAX
         ),
         Err(VfsError::NotADirectory)
     );
@@ -64,12 +62,12 @@ fn readdir_of_empty_directory_is_empty() {
     vfs.mkdir_via_secured(&owner, &vol_path("empty"), &mut fs)
         .expect("mkdir");
     let names = vfs
-        .list_via_secured(
+        .list_all_via_secured(
             &owner,
             &vol_path("empty"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry,
+            usize::MAX,
         )
         .expect("list");
     assert!(names.is_empty());

@@ -1025,7 +1025,7 @@ impl SectionView for TasksSection {
                 // The row's leading icon is the application's own picture
                 // where the desktop attests a bundle for the process, resolved
                 // at the side the row will draw it at.
-                let side = TableRow::icon_side(item, ctx.scale, ctx.theme);
+                let side = entry.row.icon_side(item, ctx.scale, ctx.theme);
                 let request = task_icon(entry.bundle.as_deref(), &entry.name, self.home.as_deref());
                 let picture = artwork.artwork(request, side);
                 entry

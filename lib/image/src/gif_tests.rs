@@ -374,8 +374,7 @@ fn the_still_entry_point_returns_the_first_composited_frame() {
     let image = crate::decode(&gif, &limits()).expect("decodes");
     assert_eq!((image.width(), image.height()), (2, 1));
     assert_eq!(image.pixels(), canvas(&[colour(2), colour(0)]));
-    // No reduced-scale decode exists for GIF, so a fitted decode is the same
-    // picture whatever box is asked for.
+    // A box the screen cannot reduce into keeps it whole: the same picture.
     let fitted = crate::decode_fitted(&gif, &limits(), crate::FitBox::new(1, 1)).expect("decodes");
     assert_eq!(fitted, image);
 }
@@ -1157,4 +1156,116 @@ fn a_refused_step_is_remembered_until_a_rewind() {
         first,
         "a rewind puts the sequence back at a blank canvas"
     );
+}
+
+/// The frame index the fitted-decode fixtures give pixel `(x, y)`.
+fn shade(x: u32, y: u32) -> u8 {
+    u8::try_from((x + 2 * y) % 4).expect("below four")
+}
+
+/// What `gif` decodes to with every `step`-th row kept, reduced to `size` by
+/// the shared resampler: what a fitted decode must produce byte for byte.
+fn reduced(gif: &[u8], step: u32, size: (u32, u32)) -> Vec<u8> {
+    let whole = crate::decode(gif, &limits()).expect("decodes");
+    let (width, height) = (whole.width(), whole.height());
+    let kept: Vec<u8> = whole
+        .pixels()
+        .chunks_exact(width as usize * 4)
+        .step_by(step as usize)
+        .flatten()
+        .copied()
+        .collect();
+    let source =
+        tairix_raster::Rgba8Image::new(width, height.div_ceil(step), &kept).expect("image");
+    tairix_raster::resample(&source, source.whole(), size.0, size.1).expect("resamples")
+}
+
+/// A fitted decode streams the canvas, a frame inside a larger screen and its
+/// transparent index among it, into exactly the whole decode reduced.
+#[test]
+fn a_fitted_decode_streams_the_canvas_into_its_reduction() {
+    let indices: Vec<u8> = (0..6 * 5).map(|at| shade(at % 6, at / 6)).collect();
+    let frame = FrameSpec {
+        left: 2,
+        top: 1,
+        width: 6,
+        height: 5,
+        interlaced: false,
+        local_palette: false,
+        indices: &indices,
+        compressed: true,
+    };
+    let gif = file(&[
+        &header(9, 7, true),
+        &graphic_control(0, 0, Some(2)),
+        &frame.bytes(),
+    ]);
+    let fitted = crate::decode_fitted(&gif, &limits(), crate::FitBox::new(3, 3)).expect("decodes");
+    assert_eq!((fitted.width(), fitted.height()), (4, 3));
+    assert_eq!(fitted.pixels(), reduced(&gif, 1, (4, 3)).as_slice());
+}
+
+/// An interlaced frame's fitted decode reads only the passes whose rows its
+/// box needs: the every-eighth, fourth, or second rows of the whole decode.
+#[test]
+fn an_interlaced_frame_decodes_only_the_rows_its_box_needs() {
+    let side = 16u32;
+    let stream: Vec<u8> = (0..side)
+        .flat_map(|stream_row| {
+            let row = interlaced_row(stream_row, side);
+            (0..side).map(move |x| shade(x, row))
+        })
+        .collect();
+    let frame = FrameSpec {
+        interlaced: true,
+        compressed: true,
+        ..FrameSpec::whole(16, 16, &stream)
+    };
+    let gif = file(&[&header(16, 16, true), &frame.bytes()]);
+    for (fit, step) in [(2, 8), (4, 4), (8, 2)] {
+        let fitted =
+            crate::decode_fitted(&gif, &limits(), crate::FitBox::new(fit, fit)).expect("decodes");
+        assert_eq!(
+            fitted.pixels(),
+            reduced(&gif, step, (fit, fit)).as_slice(),
+            "step {step}"
+        );
+    }
+}
+
+/// An interlaced frame whose top is off the coarse passes' step is read at a
+/// step its top is on, so each canvas row shows the frame row it holds rather
+/// than one a few rows above it.
+#[test]
+fn an_interlaced_frame_off_the_step_is_placed_where_it_lies() {
+    let (width, height) = (16u16, 13u16);
+    let stream: Vec<u8> = (0..u32::from(height))
+        .flat_map(|stream_row| {
+            let row = interlaced_row(stream_row, u32::from(height));
+            (0..u32::from(width)).map(move |x| shade(x, row))
+        })
+        .collect();
+    // The box covers to 4×8, which needs every fourth row of the 32: a top on
+    // four reads at four, and one off it reads at the finest step it is on.
+    for (top, step) in [(1, 1), (2, 2), (4, 4), (8, 4), (12, 4), (6, 2)] {
+        let frame = FrameSpec {
+            left: 0,
+            top,
+            width,
+            height,
+            interlaced: true,
+            local_palette: false,
+            indices: &stream,
+            compressed: true,
+        };
+        let gif = file(&[&header(16, 32, true), &frame.bytes()]);
+        let fitted =
+            crate::decode_fitted(&gif, &limits(), crate::FitBox::new(4, 4)).expect("decodes");
+        let size = (fitted.width(), fitted.height());
+        assert_eq!(
+            fitted.pixels(),
+            reduced(&gif, step, size).as_slice(),
+            "top {top}"
+        );
+    }
 }

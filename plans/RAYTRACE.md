@@ -18,7 +18,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 |---|---|---|
 | RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each paint repaints and marks only what its steps change, the paints half a second apart while the picture forms and slowing with the share shown to at most 3 s, each change crossfaded in over the wait until the next, only the tiles it touches, until a twentieth of the picture is shown; the finished picture is every pixel's own trace | done |
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
-| RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `Documents/Pictures/Raytracing/`, with no limit on how many | done |
+| RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `UserFiles/Pictures/Raytracing/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
 | RT5 | A 160 s preparation budget, every unit of preparation bounded and parallel (closes D464), spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
@@ -200,7 +200,7 @@ picture of its own as it traces, on the thread that will write it.
 Once the picture is whole and laid down for the loop, the tracing thread —
 never the serve loop — encodes it with `lib/image`'s PNG encoder (the smallest
 exact colour type, 8-bit RGB for an opaque picture) and writes it into
-`<home>/Documents/Pictures/Raytracing/` through the `Keeper` and
+`<home>/UserFiles/Pictures/Raytracing/` through the `Keeper` and
 `PictureFiles` seams, making each folder of the way as needed. A file is
 created exclusively and never through a link, named for the setting and the
 UTC moment it was finished (its scene's seed when the clock is not set), with

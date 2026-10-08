@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Folder back</title>
+  <!-- The folder's back plate and tab, standing down to where the low front
+       pocket covers it, so the cards a folder's picture shows stand clear
+       between the two. -->
+  <polygon fill="#3A86E8" points="28,64 29,57 34,51 40,46 47,45 100,45 109,47 116,53 128,70 209,70 216,71 222,76 227,82 228,89 228,124 28,124"/>
+</svg>

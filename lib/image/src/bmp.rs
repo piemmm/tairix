@@ -28,12 +28,13 @@
 
 use alloc::vec::Vec;
 
+use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
 use crate::channel::{Channel, Sampler};
 use crate::density::{Density, DensityUnit};
 use crate::picture::{IndexDepth, Picture};
-use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
 
 /// The two magic bytes every BMP file opens with.
 pub(crate) const MAGIC: [u8; 2] = *b"BM";
@@ -435,32 +436,6 @@ fn read_masks(
     ])
 }
 
-/// The output an indexed pixel array's colours are written to, row `y`
-/// counting from the top.
-struct Canvas<'a> {
-    out: &'a mut [u8],
-    row_bytes: usize,
-}
-
-impl Canvas<'_> {
-    fn put(&mut self, x: u32, y: u32, rgba: [u8; RGBA_BYTES]) -> Result<(), DecodeError> {
-        let at = usize::try_from(y)
-            .ok()
-            .and_then(|row| row.checked_mul(self.row_bytes))
-            .and_then(|row| row.checked_add(usize::try_from(x).ok()?.checked_mul(RGBA_BYTES)?))
-            .ok_or(DecodeError::DimensionsOverflow)?;
-        let end = at
-            .checked_add(RGBA_BYTES)
-            .ok_or(DecodeError::DimensionsOverflow)?;
-        let target = self
-            .out
-            .get_mut(at..end)
-            .ok_or(DecodeError::BmpRleOutOfBounds)?;
-        target.copy_from_slice(&rgba);
-        Ok(())
-    }
-}
-
 /// Expand `rows` rows of a DIB's pixel array into a straight-alpha RGBA8
 /// buffer, top row first.
 ///
@@ -476,38 +451,100 @@ pub(crate) fn decode_pixels(
     limits: &DecodeLimits,
 ) -> Result<(Vec<u8>, usize), DecodeError> {
     limits.check(dib.width, rows)?;
-    let row_bytes = usize::try_from(dib.width)
-        .ok()
-        .and_then(|width| width.checked_mul(RGBA_BYTES))
-        .ok_or(DecodeError::DimensionsOverflow)?;
+    let row_bytes = row_bytes(dib.width)?;
     let out_len = usize::try_from(rows)
         .ok()
         .and_then(|rows| rows.checked_mul(row_bytes))
         .ok_or(DecodeError::DimensionsOverflow)?;
     let mut out = fallible::filled(out_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    let consumed = match dib.packing {
-        Packing::Indexed { .. } => {
-            let colours = Palette {
-                entries: palette,
-                count: dib.palette_entries,
-                entry_len: dib.palette_entry_len,
-            }
-            .colours()?;
-            let mut canvas = Canvas {
-                out: &mut out,
-                row_bytes,
-            };
-            walk_indices(dib, data, rows, |x, y, index| {
-                let colour = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| colours.get(index))
-                    .ok_or(DecodeError::BmpPaletteIndexOutOfRange)?;
-                canvas.put(x, y, *colour)
-            })?
-        }
-        Packing::Packed { bytes } => read_packed(dib, bytes, data, rows, row_bytes, &mut out)?,
-    };
+    let consumed = stream_rows(dib, palette, data, rows, |y, line| {
+        let at = usize::try_from(y)
+            .ok()
+            .and_then(|y| y.checked_mul(row_bytes))
+            .ok_or(DecodeError::DimensionsOverflow)?;
+        out.get_mut(at..at + row_bytes)
+            .ok_or(DecodeError::DimensionsOverflow)?
+            .copy_from_slice(line);
+        Ok(())
+    })?;
     Ok((out, consumed))
+}
+
+/// The straight-alpha RGBA8 bytes of one `width`-pixel row.
+fn row_bytes(width: u32) -> Result<usize, DecodeError> {
+    usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(RGBA_BYTES))
+        .ok_or(DecodeError::DimensionsOverflow)
+}
+
+/// Hand each of the `rows` rows of a DIB's pixel array to `row` as
+/// straight-alpha RGBA8, with its row counted from the top, in the order the
+/// array stores them; answers the bytes the array occupied. One row is held
+/// at a time. A run-length array's row is handed over once its runs move past
+/// it, a pixel no run covers left clear.
+fn stream_rows(
+    dib: &Dib,
+    palette: &[u8],
+    data: &[u8],
+    rows: u32,
+    mut row: impl FnMut(u32, &[u8]) -> Result<(), DecodeError>,
+) -> Result<usize, DecodeError> {
+    let mut line = fallible::filled(row_bytes(dib.width)?, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    if let Packing::Packed { bytes } = dib.packing {
+        let (lines, needed) = uncompressed_rows(dib, data, rows)?;
+        let samplers = dib.channels.map(Sampler::new);
+        for (y, src) in lines {
+            expand_packed(bytes, dib.width, &samplers, src, &mut line)?;
+            row(y, &line)?;
+        }
+        return Ok(needed);
+    }
+    let colours = Palette {
+        entries: palette,
+        count: dib.palette_entries,
+        entry_len: dib.palette_entry_len,
+    }
+    .colours()?;
+    // Storage order: a run-length array is always bottom-up.
+    let stored = |handed: u32| {
+        if dib.top_down {
+            handed
+        } else {
+            rows - 1 - handed
+        }
+    };
+    let mut handed = 0u32;
+    let consumed = walk_indices(dib, data, rows, |x, y, index| {
+        // The walk never returns to a row it has left, so rows before this
+        // pixel's are complete.
+        while y != stored(handed) {
+            if handed + 1 >= rows {
+                return Err(DecodeError::BmpRleOutOfBounds);
+            }
+            row(stored(handed), &line)?;
+            line.fill(0);
+            handed += 1;
+        }
+        let colour = usize::try_from(index)
+            .ok()
+            .and_then(|index| colours.get(index))
+            .ok_or(DecodeError::BmpPaletteIndexOutOfRange)?;
+        let at = usize::try_from(x)
+            .ok()
+            .and_then(|x| x.checked_mul(RGBA_BYTES))
+            .ok_or(DecodeError::DimensionsOverflow)?;
+        line.get_mut(at..at + RGBA_BYTES)
+            .ok_or(DecodeError::BmpRleOutOfBounds)?
+            .copy_from_slice(colour);
+        Ok(())
+    })?;
+    while handed < rows {
+        row(stored(handed), &line)?;
+        line.fill(0);
+        handed += 1;
+    }
+    Ok(consumed)
 }
 
 /// The uncompressed rows of a pixel array of `rows` rows, top first, and the
@@ -530,29 +567,6 @@ fn uncompressed_rows<'d>(
         .zip(data.chunks_exact(stride.max(1)))
         .map(move |(stored, line)| (if top_down { stored } else { rows - 1 - stored }, line));
     Ok((lines, needed))
-}
-
-/// Expand an uncompressed array of packed pixels, answering the bytes it
-/// occupied.
-fn read_packed(
-    dib: &Dib,
-    bytes: u32,
-    data: &[u8],
-    rows: u32,
-    row_bytes: usize,
-    out: &mut [u8],
-) -> Result<usize, DecodeError> {
-    let (lines, needed) = uncompressed_rows(dib, data, rows)?;
-    let samplers = dib.channels.map(Sampler::new);
-    for (row, src) in lines {
-        let dst = usize::try_from(row)
-            .ok()
-            .and_then(|row| row.checked_mul(row_bytes))
-            .and_then(|at| out.get_mut(at..at.checked_add(row_bytes)?))
-            .ok_or(DecodeError::BmpPixelDataTruncated)?;
-        expand_packed(bytes, dib.width, &samplers, src, dst)?;
-    }
-    Ok(needed)
 }
 
 /// Hand every pixel of an indexed pixel array of `rows` rows to `put` as its
@@ -932,18 +946,63 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     Ok((dib.width, dib.height))
 }
 
-/// An upper bound of the bytes a [`decode`] of `bytes` holds at once: its
-/// RGBA picture, which every row is decoded straight into, and a palette
-/// picture's colours, resolved before the rows.
+/// What decoding a `width`×`height` pixel array into a whole picture holds:
+/// the picture, the row being expanded, and a palette picture's colours.
+pub(crate) fn picture_peak_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height).saturating_add(1))
+        .saturating_mul(RGBA_BYTES as u64)
+        .saturating_add(RESOLVED_PALETTE_BYTES)
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once: the row being expanded, a palette picture's colours, and the
+/// reduction it is fed into.
 ///
 /// # Errors
 ///
-/// What [`decode`] would refuse from the header: a malformed header or a
-/// size `limits` do not admit.
-pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+/// What [`decode_fitted`] would refuse from the header.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
     let (width, height) = probe(bytes)?;
     limits.check(width, height)?;
-    Ok(u64::from(width) * u64::from(height) * RGBA_BYTES as u64 + RESOLVED_PALETTE_BYTES)
+    let reduced = fit.reduction(width, height);
+    Ok(u64::from(width)
+        .saturating_mul(RGBA_BYTES as u64)
+        .saturating_add(RESOLVED_PALETTE_BYTES)
+        .saturating_add(RowReducer::peak_bytes((width, height), reduced)))
+}
+
+/// Decode a BMP file no smaller than it must be to cover `fit`, its rows
+/// streamed through a reduction in the order the file stores them, so the
+/// picture is never held. It admits what [`decode`] admits.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let (dib, palette, pixels) = parts(bytes)?;
+    limits.check(dib.width, dib.height)?;
+    let (width, height) = fit.reduction(dib.width, dib.height);
+    let order = if dib.top_down {
+        RowOrder::TopDown
+    } else {
+        RowOrder::BottomUp
+    };
+    let mut reducer = RowReducer::new((dib.width, dib.height), (width, height), order)
+        .map_err(crate::reduction_refused)?;
+    stream_rows(&dib, palette, pixels, dib.height, |_, line| {
+        reducer.push_row(line).map_err(crate::reduction_refused)
+    })?;
+    let out = reducer.finish().map_err(crate::reduction_refused)?;
+    Ok(RasterImage::from_parts(width, height, out))
 }
 
 /// Decode a BMP file at its natural size.

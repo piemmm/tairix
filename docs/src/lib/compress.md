@@ -30,7 +30,7 @@ never handed `RLZ1`.
 
 | Shape | Entry point | For |
 |---|---|---|
-| Whole stream | `compress` / `decompress`, `inflate::inflate_into`, `zlib::decompress_into` | data that is present in one buffer: a filesystem record, a PNG `IDAT` |
+| Whole stream | `compress` / `decompress`, `inflate::inflate_into`, `inflate::inflate_prefix`, `zlib::decompress_into` | data that is present in one buffer: a filesystem record, a PNG `IDAT`, the header of a compressed archive member |
 | Streaming | `deflate::Deflate`, `inflate::Inflater`, `zlib::Encoder`, `zlib::Decoder` | a conversation: one stream per direction, flushed per message |
 
 A one-shot function cannot express what a protocol needs. `zlib@openssh.com`

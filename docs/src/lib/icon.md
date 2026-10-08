@@ -123,6 +123,29 @@ different ways:
   *name* resolves to, through the program-store order, with the asking
   session's own home root. What a surface listing *processes* asks for (see
   below).
+- `IconRequest::thumbnail(kind, path, size, modified, id, reading)` — a
+  picture file drawn as its own content, keyed by the path and by the file's
+  identity, size and modification time as its listing reported, so a changed
+  or replaced file is decoded afresh. The reader opens it without following a
+  link (`ArtworkReader::open`, the production `RtDocument` under the `rt`
+  feature); a key naming no identity, a file past `MAX_THUMBNAIL_BYTES`, or an
+  open handle whose `DocumentStamp` differs from the key is refused before a
+  byte is read, and the rasteriser streams it to the sandbox
+  (`ArtworkRasteriser::thumbnail`). Both seams decline by default, and the
+  inline resolver declines a thumbnail outright: a whole file's read and
+  decode is not work for a thread that owes a frame. The desk queues
+  thumbnails apart and hands them out with `next_thumbnail`, after every icon,
+  and shows each as it lands. After a pass over every surface drawing
+  thumbnails the embedder calls `sweep_thumbnails`, which withdraws each one
+  nothing asked for since the last sweep and wipes any drawn and never
+  collected; `MAX_WANTED_THUMBNAILS` bounds what queues between sweeps.
+- `IconRequest::folder(sample)` — a folder drawn as a picture of what it
+  holds: the `FolderBack` artwork, a card per kind in its `FolderSample`, and
+  the `FolderFront` over them, composed once per (sample, side) and cached
+  under `ArtworkKey::Folder`. A card with no artwork tier is its glyph on a
+  fixed-ink paper card, so the picture does not change with the theme. An
+  empty sample, a side under `MIN_COMPOSITE_SIDE`, or a back or front that will
+  not draw resolves the plain `FolderFilled` picture instead.
 
 A bundle's manifest is authored by whoever built the bundle, so it is treated
 as untrusted input at that boundary: it is read under the ABI's own wire

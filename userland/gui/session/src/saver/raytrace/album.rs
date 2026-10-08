@@ -1,5 +1,5 @@
 //! Keeping a reveal's whole pictures: each one a PNG in the user's
-//! `Documents/Pictures/Raytracing/`, named for its setting and the moment it
+//! `UserFiles/Pictures/Raytracing/`, named for its setting and the moment it
 //! was finished, and never written over another.
 //!
 //! The work is the tracing thread's, behind [`PictureFiles`] — the VFS on a
@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_PICTURES_DIR};
 use tairix_abi::time::CivilTime;
 use tairix_abi::Errno;
 use tairix_image::{EncodeError, PictureKind, PictureSource};
@@ -18,7 +19,7 @@ use tairix_raster::Pixel;
 use tairix_raytrace::Setting;
 
 /// The folders within a home kept pictures go into, outermost first.
-pub const FOLDERS: [&str; 3] = ["Documents", "Pictures", "Raytracing"];
+pub const FOLDERS: [&str; 3] = [HOME_USER_FILES_DIR, USER_FILES_PICTURES_DIR, "Raytracing"];
 
 /// The most names one picture tries — its own, then numbered from two —
 /// before it is refused as crowded out: a bound on the probing, not on how

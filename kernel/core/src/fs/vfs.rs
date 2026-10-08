@@ -13,15 +13,18 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags, NodeId,
-    NodeKind as DriverNodeKind,
+    DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
+    NodeId, NodeKind as DriverNodeKind,
 };
 use tairix_abi::fs::{RealpathMode, FS_PATH_MAX};
 use tairix_abi::CapabilityId;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use super::delegate::{DelegatedEntry, DelegatedFs, DelegatedInfo, FinalLink, MountProjection};
+use super::delegate::{
+    DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, FinalLink, MountProjection,
+};
+use super::listing::{DirPosition, ListEnd};
 use super::mount::MountTable;
 use super::path::{spell, Path, MAX_PATH_COMPONENTS, ROOT_TEMPLATE};
 use super::perm::{Access, Credentials, Metadata, Mode};
@@ -151,6 +154,13 @@ impl Vfs {
         self.mounts.write()
     }
 
+    /// Whether the mount table could be write-locked now, so a test can prove
+    /// no operation holds a guard on it into a driver.
+    #[cfg(test)]
+    pub(crate) fn mounts_unlocked(&self) -> bool {
+        self.mounts.try_write().is_some()
+    }
+
     /// Read from a file under a driver-backed mount, delegating the I/O to
     /// `fs`.
     ///
@@ -193,22 +203,55 @@ impl Vfs {
     /// empty remainder (i.e. `path` is the mount point itself) lists the
     /// driver's root directory.
     ///
+    /// One batch, from `at`, as [`DelegatedFs::list_from`] hands it over.
+    ///
     /// # Errors
     ///
     /// * [`VfsError::NotFound`] if no driver-backed mount covers `path`.
     /// * [`VfsError::NotADirectory`] if `path` names a file.
+    /// * [`VfsError::Stale`] if `path` no longer names the position's
+    ///   directory.
     /// * [`VfsError::PermissionDenied`], [`VfsError::InvalidPath`], or
     ///   [`VfsError::Io`].
-    pub fn list_via<T>(
+    pub fn list_via(
         &self,
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
         final_link: FinalLink,
-        each: impl FnMut(DelegatedEntry) -> T,
-    ) -> Result<Vec<T>, VfsError> {
+        at: &mut DirPosition,
+        each: &mut dyn FnMut(&DelegatedRef<'_>) -> DirVisit,
+    ) -> Result<ListEnd, VfsError> {
         let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, mount).list(cred, &remainder, final_link, each)
+        DelegatedFs::new(fs, mount).list_from(cred, &remainder, final_link, at, each)
+    }
+
+    /// Every entry of the directory at `path`, owned, for a walk that keeps
+    /// them while it acts on each.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::list_via`], and [`VfsError::LimitExceeded`] past `limit`
+    /// entries, so no directory makes the kernel hold more than its caller
+    /// budgeted.
+    pub fn list_all_via(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut dyn FilesystemRead,
+        final_link: FinalLink,
+        limit: usize,
+    ) -> Result<Vec<DelegatedEntry>, VfsError> {
+        collect_listing(limit, |each| {
+            self.list_via(
+                cred,
+                path,
+                fs,
+                final_link,
+                &mut DirPosition::default(),
+                each,
+            )
+        })
     }
 
     /// Report the structural metadata of a node under a driver-backed
@@ -524,7 +567,8 @@ impl Vfs {
     /// See [`Vfs::create_via`] for the resolution and permission model.
     /// With `dir_only` the removal succeeds only when the name is an
     /// (empty) directory — the atomic `rmdir` posture, decided here under
-    /// the mount's lock, never by a caller-side stat.
+    /// the mount's lock, never by a caller-side stat. Returns the removed
+    /// node when it was a directory.
     ///
     /// # Errors
     ///
@@ -540,7 +584,7 @@ impl Vfs {
         path: &Path,
         fs: &mut F,
         dir_only: bool,
-    ) -> Result<(), VfsError> {
+    ) -> Result<Option<NodeId>, VfsError> {
         let (mount, remainder) = self.delegate_context(cred, path, true)?;
         DelegatedFs::new(fs, mount).remove(cred, &remainder, dir_only)
     }
@@ -580,16 +624,42 @@ impl Vfs {
     /// # Errors
     ///
     /// As [`Vfs::list_via`].
-    pub fn list_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized, T>(
+    pub fn list_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
         final_link: FinalLink,
-        each: impl FnMut(DelegatedEntry) -> T,
-    ) -> Result<Vec<T>, VfsError> {
+        at: &mut DirPosition,
+        each: &mut dyn FnMut(&DelegatedRef<'_>) -> DirVisit,
+    ) -> Result<ListEnd, VfsError> {
         let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).list(cred, &remainder, final_link, each)
+        DelegatedFs::new_secured(fs, mount).list_from(cred, &remainder, final_link, at, each)
+    }
+
+    /// Per-inode counterpart of [`Vfs::list_all_via`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Vfs::list_all_via`].
+    pub fn list_all_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        final_link: FinalLink,
+        limit: usize,
+    ) -> Result<Vec<DelegatedEntry>, VfsError> {
+        collect_listing(limit, |each| {
+            self.list_via_secured(
+                cred,
+                path,
+                fs,
+                final_link,
+                &mut DirPosition::default(),
+                each,
+            )
+        })
     }
 
     /// Per-inode lookup of `names` in the directory at `path`, under the
@@ -745,7 +815,7 @@ impl Vfs {
         path: &Path,
         fs: &mut F,
         dir_only: bool,
-    ) -> Result<(), VfsError> {
+    ) -> Result<Option<NodeId>, VfsError> {
         let (mount, remainder) = self.delegate_context(cred, path, true)?;
         DelegatedFs::new_secured(fs, mount).remove(cred, &remainder, dir_only)
     }
@@ -905,7 +975,8 @@ impl Vfs {
     ///
     /// Both paths must lie under the *same* writable driver-backed mount
     /// (rename never crosses mounts); see [`Vfs::create_via`] for the
-    /// resolution and permission model.
+    /// resolution and permission model. Returns the directory the move
+    /// replaced at `dst`, if it replaced one.
     ///
     /// # Errors
     ///
@@ -921,7 +992,7 @@ impl Vfs {
         src: &Path,
         dst: &Path,
         fs: &mut F,
-    ) -> Result<(), VfsError> {
+    ) -> Result<Option<NodeId>, VfsError> {
         let (mount, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
         DelegatedFs::new(fs, mount).rename(cred, &src_rem, &dst_rem)
     }
@@ -937,7 +1008,7 @@ impl Vfs {
         src: &Path,
         dst: &Path,
         fs: &mut F,
-    ) -> Result<(), VfsError> {
+    ) -> Result<Option<NodeId>, VfsError> {
         let (mount, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
         DelegatedFs::new_secured(fs, mount).rename(cred, &src_rem, &dst_rem)
     }
@@ -1309,6 +1380,36 @@ impl Vfs {
         }
         Ok(node)
     }
+}
+
+/// Collect one whole listing `list` hands over, up to `limit` entries.
+fn collect_listing(
+    limit: usize,
+    list: impl FnOnce(&mut dyn FnMut(&DelegatedRef<'_>) -> DirVisit) -> Result<ListEnd, VfsError>,
+) -> Result<Vec<DelegatedEntry>, VfsError> {
+    let mut entries = Vec::new();
+    let mut failed = None;
+    list(&mut |entry| {
+        if entries.len() == limit {
+            failed = Some(VfsError::LimitExceeded);
+            return DirVisit::Stop;
+        }
+        match entries
+            .try_reserve(1)
+            .map_err(|_| VfsError::OutOfMemory)
+            .and_then(|()| entry.owned())
+        {
+            Ok(owned) => {
+                entries.push(owned);
+                DirVisit::Take
+            }
+            Err(err) => {
+                failed = Some(err);
+                DirVisit::Stop
+            }
+        }
+    })?;
+    failed.map_or(Ok(entries), Err)
 }
 
 #[cfg(test)]

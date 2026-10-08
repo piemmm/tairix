@@ -29,6 +29,7 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
 use crate::density::{Density, DensityUnit, Stated};
@@ -36,7 +37,7 @@ use crate::encode::GifOptions;
 use crate::frames::{Animation, FrameSource};
 use crate::lzw::{CodeSource, Lzw, Widen};
 use crate::picture::{IndexDepth, Picture, Rgba8};
-use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
 
 /// The three magic bytes every GIF opens with.
 pub(crate) const MAGIC: [u8; 3] = *b"GIF";
@@ -648,44 +649,19 @@ impl Chain {
     /// aside only when another frame `follows` to restore it.
     fn composite_next(&mut self, bytes: &[u8], follows: bool) -> Result<u64, DecodeError> {
         self.dispose();
-        let mut control = Control::DEFAULT;
-        let mut reader = Reader::new(bytes, self.cursor);
-        loop {
-            match reader.byte()? {
-                IMAGE_SEPARATOR => {
-                    let screen = Screen {
-                        width: self.width,
-                        height: self.height,
-                        palette: self.global_palette.clone(),
-                        aspect: 0,
-                    };
-                    let descriptor = read_descriptor(&mut reader, &screen)?;
-                    if follows && control.disposal == Disposal::Previous {
-                        self.save(descriptor.rect)?;
-                    }
-                    self.cursor = self.draw(bytes, &descriptor, control)?;
-                    self.pending = Some((control.disposal, descriptor.rect));
-                    return Ok(control.delay_ns);
-                }
-                EXTENSION_INTRODUCER => match reader.byte()? {
-                    LABEL_GRAPHIC_CONTROL => control = read_graphic_control(&mut reader)?,
-                    // A Plain Text Extension is a rendered block this decoder
-                    // draws nothing for, so it consumes the control in force
-                    // exactly as a frame would.
-                    LABEL_PLAIN_TEXT => {
-                        reader.skip_sub_blocks()?;
-                        control = Control::DEFAULT;
-                    }
-                    LABEL_APPLICATION => {
-                        read_application(&mut reader)?;
-                    }
-                    _ => reader.skip_sub_blocks()?,
-                },
-                // The structural pass proved the chain reaches its trailer
-                // with `count` frames in it, so nothing else can be here.
-                _ => return Err(DecodeError::GifUnknownBlock),
-            }
+        let screen = Screen {
+            width: self.width,
+            height: self.height,
+            palette: self.global_palette.clone(),
+            aspect: 0,
+        };
+        let (descriptor, control) = next_frame(&mut Reader::new(bytes, self.cursor), &screen)?;
+        if follows && control.disposal == Disposal::Previous {
+            self.save(descriptor.rect)?;
         }
+        self.cursor = self.draw(bytes, &descriptor, control)?;
+        self.pending = Some((control.disposal, descriptor.rect));
+        Ok(control.delay_ns)
     }
 
     /// Apply the last frame's declared disposal to the canvas.
@@ -813,7 +789,6 @@ impl Chain {
             )?
         };
         let stride = usize::try_from(rect.width).unwrap_or(usize::MAX);
-        let entries = palette.len() / PALETTE_ENTRY_LEN;
         for stream_row in 0..rect.height {
             let frame_row = if descriptor.interlaced {
                 interlaced_row(stream_row, rect.height)
@@ -830,23 +805,242 @@ impl Chain {
             ) else {
                 return Err(DecodeError::GifTruncatedImageData);
             };
-            let (quads, _) = target.as_chunks_mut::<RGBA_BYTES>();
-            for (index, pixel) in row.iter().zip(quads) {
-                if control.transparent == Some(*index) {
-                    continue;
-                }
-                if usize::from(*index) >= entries {
-                    return Err(DecodeError::GifPaletteIndexOutOfRange);
-                }
-                let entry = usize::from(*index) * PALETTE_ENTRY_LEN;
-                pixel[0] = palette[entry];
-                pixel[1] = palette[entry + 1];
-                pixel[2] = palette[entry + 2];
-                pixel[3] = u8::MAX;
-            }
+            paint(row, target, palette, control.transparent)?;
         }
         Ok(after)
     }
+}
+
+/// The next frame's descriptor and the graphic control in force for it,
+/// read past the extensions before it.
+fn next_frame<'a>(
+    reader: &mut Reader<'a>,
+    screen: &Screen,
+) -> Result<(Descriptor<'a>, Control), DecodeError> {
+    let mut control = Control::DEFAULT;
+    loop {
+        match reader.byte()? {
+            IMAGE_SEPARATOR => return Ok((read_descriptor(reader, screen)?, control)),
+            EXTENSION_INTRODUCER => match reader.byte()? {
+                LABEL_GRAPHIC_CONTROL => control = read_graphic_control(reader)?,
+                // A Plain Text Extension is a rendered block this decoder
+                // draws nothing for, so it consumes the control in force
+                // exactly as a frame would.
+                LABEL_PLAIN_TEXT => {
+                    reader.skip_sub_blocks()?;
+                    control = Control::DEFAULT;
+                }
+                LABEL_APPLICATION => {
+                    read_application(reader)?;
+                }
+                _ => reader.skip_sub_blocks()?,
+            },
+            // The structural pass proved the chain reaches its trailer with
+            // its frames in it, so nothing else can be here.
+            _ => return Err(DecodeError::GifUnknownBlock),
+        }
+    }
+}
+
+/// Paint one row of a frame's `indices` over `target` in `palette`'s colours,
+/// leaving what lies beneath a `transparent` index.
+fn paint(
+    indices: &[u8],
+    target: &mut [u8],
+    palette: &[u8],
+    transparent: Option<u8>,
+) -> Result<(), DecodeError> {
+    let entries = palette.len() / PALETTE_ENTRY_LEN;
+    for (&index, pixel) in indices.iter().zip(target.as_chunks_mut::<RGBA_BYTES>().0) {
+        if transparent == Some(index) {
+            continue;
+        }
+        if usize::from(index) >= entries {
+            return Err(DecodeError::GifPaletteIndexOutOfRange);
+        }
+        let entry = usize::from(index) * PALETTE_ENTRY_LEN;
+        pixel[..3].copy_from_slice(&palette[entry..entry + 3]);
+        pixel[3] = u8::MAX;
+    }
+    Ok(())
+}
+
+/// The first frame a fitted decode reduces: its screen, where it lies, the
+/// control in force for it, and every `step`-th canvas row its reduction is
+/// fed, an interlaced frame decoding only the passes those rows need.
+struct Fitted<'a> {
+    screen: Screen,
+    descriptor: Descriptor<'a>,
+    control: Control,
+    reduced: (u32, u32),
+    step: u32,
+}
+
+impl<'a> Fitted<'a> {
+    /// Validate the stream as [`decode`] does and size the reduction of its
+    /// first frame to `fit`; `None` where `fit` does not reduce it.
+    fn plan(
+        bytes: &'a [u8],
+        limits: &DecodeLimits,
+        fit: FitBox,
+    ) -> Result<Option<Self>, DecodeError> {
+        let (screen, first_block) = read_screen(bytes)?;
+        limits.check(screen.width, screen.height)?;
+        scan(bytes, &screen, first_block)?;
+        let reduced = fit.reduction(screen.width, screen.height);
+        if reduced == (screen.width, screen.height) {
+            return Ok(None);
+        }
+        let (descriptor, control) = next_frame(&mut Reader::new(bytes, first_block), &screen)?;
+        // The canvas is sampled every `step`-th row, so the frame rows it
+        // needs are on the step — the rows the coarse passes decode — only
+        // when the frame's top is on it too.
+        let step = if descriptor.interlaced {
+            [8, 4, 2, 1]
+                .into_iter()
+                .find(|&step| {
+                    screen.height.div_ceil(step) >= reduced.1 && descriptor.rect.top % step == 0
+                })
+                .unwrap_or(1)
+        } else {
+            1
+        };
+        Ok(Some(Self {
+            screen,
+            descriptor,
+            control,
+            reduced,
+            step,
+        }))
+    }
+
+    /// The frame rows held as indices: an interlaced frame's every
+    /// `step`-th, a sequential frame's one at a time.
+    fn held_rows(&self) -> u32 {
+        if self.descriptor.interlaced {
+            self.descriptor.rect.height.div_ceil(self.step)
+        } else {
+            1
+        }
+    }
+
+    /// The reduction's source: the canvas, every `step`-th row of it.
+    fn source(&self) -> (u32, u32) {
+        (self.screen.width, self.screen.height.div_ceil(self.step))
+    }
+}
+
+/// Decode a GIF's first frame no smaller than it must be to cover `fit`, its
+/// canvas rows streamed through a reduction so neither the canvas nor a
+/// sequential frame's indices are held whole; an interlaced frame holds only
+/// the rows of the passes the box needs. A box that does not reduce the
+/// screen is [`decode`]. It admits what [`decode`] admits.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let Some(plan) = Fitted::plan(bytes, limits, fit)? else {
+        return decode(bytes, limits);
+    };
+    let (descriptor, rect) = (&plan.descriptor, plan.descriptor.rect);
+    let palette = descriptor
+        .palette
+        .or_else(|| {
+            plan.screen
+                .palette
+                .clone()
+                .and_then(|table| bytes.get(table))
+        })
+        .ok_or(DecodeError::GifMissingColourTable)?;
+    let invalid = DecodeError::GifInvalidCode;
+    let mut lzw = Lzw::new().ok_or(DecodeError::OutOfMemory)?;
+    let mut codes = CodeReader::new(bytes, descriptor.data);
+    let mut expansion = lzw.expansion(
+        u32::from(descriptor.min_code_size),
+        Widen::WhenFull,
+        &invalid,
+    )?;
+    let stride = rect.width as usize;
+    let mut held = fallible::filled(plan.held_rows() as usize * stride, 0u8)
+        .ok_or(DecodeError::OutOfMemory)?;
+    let mut read_row = |into: &mut [u8]| {
+        if expansion.fill(&mut codes, &invalid, into)? == into.len() {
+            Ok(())
+        } else {
+            Err(DecodeError::GifTruncatedImageData)
+        }
+    };
+    if descriptor.interlaced {
+        // The passes run coarsest first, so the first whose rows are not all
+        // on the step ends what the reduction needs.
+        for (start, step) in INTERLACE_PASSES {
+            if start % plan.step != 0 {
+                break;
+            }
+            for row in (start..rect.height).step_by(step as usize) {
+                let at = (row / plan.step) as usize * stride;
+                read_row(&mut held[at..at + stride])?;
+            }
+        }
+    }
+    let mut reducer = RowReducer::new(plan.source(), plan.reduced, RowOrder::TopDown)
+        .map_err(crate::reduction_refused)?;
+    let mut line = fallible::filled(plan.screen.width as usize * RGBA_BYTES, 0u8)
+        .ok_or(DecodeError::OutOfMemory)?;
+    let left = rect.left as usize * RGBA_BYTES;
+    for y in (0..plan.screen.height).step_by(plan.step as usize) {
+        line.fill(0);
+        if let Some(frame_row) = y.checked_sub(rect.top).filter(|&row| row < rect.height) {
+            let indices = if descriptor.interlaced {
+                let at = (frame_row / plan.step) as usize * stride;
+                &held[at..at + stride]
+            } else {
+                read_row(&mut held)?;
+                &held[..]
+            };
+            paint(
+                indices,
+                &mut line[left..left + stride * RGBA_BYTES],
+                palette,
+                plan.control.transparent,
+            )?;
+        }
+        reducer.push_row(&line).map_err(crate::reduction_refused)?;
+    }
+    let pixels = reducer.finish().map_err(crate::reduction_refused)?;
+    Ok(RasterImage::from_parts(
+        plan.reduced.0,
+        plan.reduced.1,
+        pixels,
+    ))
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once: [`peak_bytes`] where the box does not reduce the screen, and
+/// otherwise the LZW tables, the frame rows held as indices, one canvas row,
+/// and the reduction it is fed into.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse before decoding.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let Some(plan) = Fitted::plan(bytes, limits, fit)? else {
+        return peak_bytes(bytes, limits);
+    };
+    let held = u64::from(plan.held_rows()) * u64::from(plan.descriptor.rect.width);
+    Ok([
+        crate::lzw::TABLE_BYTES,
+        held,
+        u64::from(plan.screen.width) * RGBA_BYTES as u64,
+        RowReducer::peak_bytes(plan.source(), plan.reduced),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add))
 }
 
 impl FrameSource for Chain {

@@ -13,7 +13,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image};
+use super::{
+    resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image, RowOrder,
+    RowReducer,
+};
 use crate::Surface;
 
 /// The full-width window covering destination rows `[first, first + rows)`
@@ -785,4 +788,78 @@ fn a_scratch_keeps_the_buffers_it_grew() {
             "a repeat resample took new buffers"
         );
     }
+}
+
+/// Feed `pixels`, a `width`×`height` image, into a reduction to `dest` in
+/// `order`, a row at a time.
+fn streamed(pixels: &[u8], width: u32, height: u32, dest: (u32, u32), order: RowOrder) -> Vec<u8> {
+    let mut reducer = RowReducer::new((width, height), dest, order).expect("plans");
+    let row_len = width as usize * 4;
+    let rows: Vec<&[u8]> = pixels.chunks_exact(row_len).collect();
+    let fed: Vec<&[u8]> = match order {
+        RowOrder::TopDown => rows,
+        RowOrder::BottomUp => rows.into_iter().rev().collect(),
+    };
+    for row in fed {
+        reducer.push_row(row).expect("feeds");
+    }
+    reducer.finish().expect("finishes")
+}
+
+/// A streamed reduction is byte-for-byte the whole-image resample, in either
+/// row order, at ratios that do and do not divide.
+#[test]
+fn a_streamed_reduction_is_the_whole_image_resample() {
+    let mut pixels = gradient(37, 23);
+    // Translucent and clear pixels, so the alpha weighting is compared too.
+    for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        pixel[3] = [255, 128, 0, 64][index % 4];
+    }
+    let image = Rgba8Image::new(37, 23, &pixels).expect("image");
+    for dest in [(10, 7), (37, 5), (8, 23), (36, 22), (1, 1), (37, 23)] {
+        let whole = resample(&image, image.whole(), dest.0, dest.1).expect("resamples");
+        for order in [RowOrder::TopDown, RowOrder::BottomUp] {
+            assert_eq!(
+                streamed(&pixels, 37, 23, dest, order),
+                whole,
+                "{dest:?} fed {order:?}"
+            );
+        }
+    }
+}
+
+/// A reduction refuses what it cannot do rather than producing part of it.
+#[test]
+fn a_reduction_refuses_geometry_it_cannot_reduce() {
+    assert_eq!(
+        RowReducer::new((4, 4), (5, 4), RowOrder::TopDown).err(),
+        Some(ResampleError::Enlarging)
+    );
+    assert_eq!(
+        RowReducer::new((0, 4), (1, 1), RowOrder::TopDown).err(),
+        Some(ResampleError::SourceRegionOutOfBounds)
+    );
+    assert_eq!(
+        RowReducer::new((4, 4), (0, 1), RowOrder::TopDown).err(),
+        Some(ResampleError::EmptyDestination)
+    );
+    let mut reducer = RowReducer::new((2, 2), (1, 1), RowOrder::TopDown).expect("plans");
+    assert_eq!(
+        reducer.push_row(&[0; 4]),
+        Err(ResampleError::SourceSizeMismatch),
+        "a short row"
+    );
+    reducer.push_row(&[0; 8]).expect("feeds");
+    let unfinished = RowReducer::new((2, 2), (1, 1), RowOrder::TopDown).expect("plans");
+    assert_eq!(
+        unfinished.finish().err(),
+        Some(ResampleError::SourceSizeMismatch)
+    );
+    reducer.push_row(&[0; 8]).expect("feeds");
+    assert_eq!(
+        reducer.push_row(&[0; 8]),
+        Err(ResampleError::SourceSizeMismatch),
+        "a row past the last"
+    );
+    assert_eq!(reducer.finish().map(|pixels| pixels.len()), Ok(4));
 }

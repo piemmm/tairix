@@ -57,7 +57,7 @@ mod program {
     use core::cell::RefCell;
 
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
-    use tairix_abi::fs::{DirEntry, FS_IO_MAX};
+    use tairix_abi::fs::{DirEntries, FS_IO_MAX};
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
     use tairix_abi::time::Time64;
@@ -132,10 +132,6 @@ mod program {
         }
     }
 
-    /// Initial byte size of the completion directory-listing buffer; grown on
-    /// `BufferTooSmall` up to the kernel's per-call staging cap.
-    const DIR_BUF_INITIAL: usize = 4096;
-
     /// The completion engine's read-only directory seam, backed by the
     /// kernel-authorised `fs_readdir`: every path resolution and per-inode
     /// permission check stays kernel-side, and a refusal simply yields no
@@ -144,24 +140,10 @@ mod program {
 
     impl DirLister for RtDirLister {
         fn list_dir(&self, dir: &str) -> Result<Vec<DirEntryInfo>, Errno> {
-            let handle = tairix_rt::open_dir(dir.as_bytes()).map_err(Errno::from_syscall)?;
-            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-            let used = loop {
-                match handle.read(&mut buf) {
-                    Ok(used) => break used,
-                    Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::BufferTooSmall if buf.len() < FS_IO_MAX => {
-                            buf.resize((buf.len() * 2).min(FS_IO_MAX), 0);
-                        }
-                        other => return Err(other),
-                    },
-                }
-            };
+            let stream = tairix_rt::read_dir_all(dir.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
-            let mut rest = &buf[..used];
-            while !rest.is_empty() {
-                let (entry, consumed) = DirEntry::decode(rest)?;
-                rest = &rest[consumed..];
+            for entry in DirEntries::new(&stream) {
+                let entry = entry?;
                 // The ABI contract makes every entry name UTF-8; a stream
                 // that is not is refused whole rather than partially listed.
                 let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;

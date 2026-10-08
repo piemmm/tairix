@@ -1,8 +1,7 @@
-//! FAT32 read-only driver unit tests against an in-memory image.
+//! FAT32 driver unit tests against an in-memory image.
 //!
 //! The test image is a hand-built, specification-shaped FAT32 volume
-//! held in a fixed array (the crate is `no_std` and the tests stay
-//! allocation-free), driven through a [`MockBlock`] device:
+//! held in a fixed array, driven through a [`MockBlock`] device:
 //!
 //! ```text
 //! /
@@ -13,8 +12,12 @@
 
 extern crate std;
 
+extern crate alloc;
+
 use super::*;
+use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::DriverKind;
 
 const SECTOR_SIZE: usize = 512;
@@ -358,20 +361,293 @@ fn open_reports_directory_root() {
 fn root_directory_lists_its_entries_in_order() {
     let mut fs = mount();
     let root = fs.root();
-    let mut name = [0u8; 16];
+    let entries = listed(&mut fs, root, 0, &[]).expect("lists");
+    let names: Vec<&[u8]> = entries.iter().map(|(_, name)| name.as_slice()).collect();
+    assert_eq!(names, [&b"HELLO.TXT"[..], b"SUB"]);
+    assert_eq!(entries[0].0.info.kind, NodeKind::RegularFile);
+    assert_eq!(entries[1].0.info.kind, NodeKind::Directory);
 
-    let first = fs.read_dir(root, 0, &mut name).expect("ok").expect("entry");
-    assert_eq!(&name[..first.name_len], b"HELLO.TXT");
-    assert_eq!(first.info.kind, NodeKind::RegularFile);
+    // Resuming from each entry's cursor walks the same listing.
+    let mut chained = Vec::new();
+    let mut cursor = 0;
+    while let Some((entry, name)) = first_listed(&mut fs, root, cursor, &[]).expect("lists") {
+        chained.push(name);
+        cursor = entry.next_cursor;
+    }
+    assert_eq!(chained, names);
+}
 
-    let second = fs
-        .read_dir(root, first.next_cursor, &mut name)
-        .expect("ok")
-        .expect("entry");
-    assert_eq!(&name[..second.name_len], b"SUB");
-    assert_eq!(second.info.kind, NodeKind::Directory);
+/// A cursor is a position in the directory it is applied to: one naming
+/// another directory's cluster, as a stale or forged one would, never lists
+/// that directory.
+#[test]
+fn a_cursor_never_reaches_outside_its_directory() {
+    let mut fs = mount();
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+    let foreign = (u64::from(CLUSTER_ROOT) << 32) | 1;
+    let names: Vec<Vec<u8>> = listed(&mut fs, sub, foreign, &[])
+        .expect("lists")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == b"HELLO.TXT" || name == b"SUB"),
+        "the root's entries were listed through the subdirectory: {names:?}"
+    );
+}
 
-    assert_eq!(fs.read_dir(root, second.next_cursor, &mut name), Ok(None));
+/// Fill the slots of `cluster` after its first `used` with deleted entries,
+/// so a walk finds no end-of-directory mark inside it.
+fn fill_with_deleted(img: &mut [u8], cluster: u32, used: usize) {
+    let base = cluster_offset(cluster);
+    for slot in used..SECTOR_SIZE / DIR_ENTRY_LEN {
+        img[base + slot * DIR_ENTRY_LEN] = DELETED_ENTRY;
+    }
+}
+
+/// A directory whose chain loops back on itself, or leads off the volume,
+/// fails its listing closed instead of walking forever; so does the parent
+/// that reports the directory's allocation.
+#[test]
+fn a_corrupt_directory_chain_fails_its_listing_closed() {
+    let mut img = build_image();
+    fill_with_deleted(&mut img, CLUSTER_SUB, 6);
+    set_fat(&mut img, CLUSTER_SUB as usize, CLUSTER_SUB);
+    let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
+    let root = fs.root();
+    let sub = fs.lookup(root, b"sub").expect("subdir");
+    assert_eq!(listed(&mut fs, sub, 0, &[]), Err(DriverError::DeviceFault));
+    assert_eq!(listed(&mut fs, root, 0, &[]), Err(DriverError::DeviceFault));
+
+    let mut img = build_image();
+    fill_with_deleted(&mut img, CLUSTER_SUB, 6);
+    set_fat(&mut img, CLUSTER_SUB as usize, 16);
+    let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
+    let sub = fs.lookup(fs.root(), b"sub").expect("subdir");
+    assert_eq!(listed(&mut fs, sub, 0, &[]), Err(DriverError::DeviceFault));
+}
+
+/// A file's allocation is the clusters its size needs, so listing never
+/// walks a file's chain: a file whose chain loops is listed all the same.
+#[test]
+fn a_files_allocation_comes_from_its_size() {
+    let mut img = build_image();
+    set_fat(&mut img, CLUSTER_HELLO as usize, CLUSTER_HELLO);
+    let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
+    let root = fs.root();
+    let entries = listed(&mut fs, root, 0, &[]).expect("lists");
+    let (hello, _) = &entries[0];
+    assert_eq!(hello.info.allocated, SECTOR_SIZE as u64);
+}
+
+/// A long name past the VFS name limit is listed and reached by its short
+/// alias, so neither the file nor its directory becomes unreachable.
+#[test]
+fn a_long_name_past_the_name_limit_is_listed_by_its_alias() {
+    let mut fs = mount();
+    let root = fs.root();
+    // Eighty-six three-byte characters: 258 bytes of UTF-8.
+    let name: Vec<u8> = core::iter::repeat_n("\u{4E2D}", 86)
+        .collect::<alloc::string::String>()
+        .into_bytes();
+    assert!(name.len() > FS_NAME_MAX);
+    fs.create(root, &name, NodeKind::RegularFile)
+        .expect("create");
+    let entries = listed(&mut fs, root, 0, &[]).expect("lists");
+    let (_, alias) = entries.last().expect("the new entry");
+    assert!(alias.len() <= 12, "listed by its 8.3 alias: {alias:?}");
+    assert!(fs.lookup(root, alias).is_ok(), "the alias resolves");
+}
+
+/// A [`MockBlock`] that records the first block of every read.
+struct CountingBlock {
+    inner: MockBlock,
+    read_at: Vec<u64>,
+}
+
+impl Block for CountingBlock {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        self.inner.geometry()
+    }
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.read_at.push(lba);
+        self.inner.read_blocks(lba, buf)
+    }
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        self.inner.write_blocks(lba, buf)
+    }
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.inner.flush()
+    }
+}
+
+/// One listing reads each directory block once, not once per slot.
+#[test]
+fn a_listing_reads_each_directory_block_once() {
+    let mut fs = Fat32::open(CountingBlock {
+        inner: MockBlock {
+            data: build_image(),
+        },
+        read_at: Vec::new(),
+    })
+    .expect("valid volume");
+    let sub = fs.lookup(fs.root(), b"sub").expect("subdir");
+    fs.block.read_at.clear();
+    assert_eq!(listed(&mut fs, sub, 0, &[]).expect("lists").len(), 2);
+    let sub_block = u64::from(CLUSTER_SUB);
+    let reads = fs
+        .block
+        .read_at
+        .iter()
+        .filter(|at| **at == sub_block)
+        .count();
+    assert_eq!(reads, 1, "the directory's block is read once");
+}
+
+/// The 8.3 alias of every live entry of the directory at `cluster`, in slot
+/// order.
+fn aliases<B: Block>(fs: &mut Fat32<B>, cluster: u32) -> Vec<[u8; 11]> {
+    let mut walk = DirCursor::at(cluster);
+    let mut out = Vec::new();
+    while let Some(entry) = fs.next_entry(&mut walk).expect("walks") {
+        let mut raw = [0u8; DIR_ENTRY_LEN];
+        fs.read_bytes(entry.short_offset, &mut raw).expect("reads");
+        out.push(raw[..11].try_into().expect("eleven bytes"));
+    }
+    out
+}
+
+/// A new entry's alias takes the lowest `~N` tail no live alias holds, and
+/// placing it reads the directory once rather than once per tail tried.
+#[test]
+fn an_alias_takes_the_lowest_free_tail_in_one_pass() {
+    let mut fs = Fat32::open(CountingBlock {
+        inner: MockBlock {
+            data: build_image(),
+        },
+        read_at: Vec::new(),
+    })
+    .expect("valid volume");
+    let root = fs.root();
+    for name in [b"Report 1.txt", b"Report 2.txt", b"Report 3.txt"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    fs.remove(root, b"Report 2.txt").expect("remove");
+    fs.block.read_at.clear();
+    fs.create(root, b"Report 4.txt", NodeKind::RegularFile)
+        .expect("create");
+    let root_block = u64::from(CLUSTER_ROOT);
+    let reads = fs
+        .block
+        .read_at
+        .iter()
+        .filter(|at| **at == root_block)
+        .count();
+    // The lookup, the placement, and one read for each of its two slots'
+    // partial-block writes.
+    assert_eq!(reads, 4, "the directory was read per slot or per tail");
+    assert!(
+        aliases(&mut fs, CLUSTER_ROOT).contains(&short_name(b"REPORT~2", b"TXT")),
+        "the freed tail is taken again"
+    );
+}
+
+/// Removing an entry whose slots run over a cluster boundary deletes every
+/// one of them, leaving no long-name fragment behind.
+#[test]
+fn removing_an_entry_across_clusters_deletes_every_slot() {
+    let mut fs = mount();
+    let root = fs.root();
+    // Three slots each, from slot 2: the fifth takes slots 14, 15 and 16, the
+    // last in a cluster the create chains on.
+    let names: [&[u8]; 5] = [
+        b"Straddling one.txt",
+        b"Straddling two.txt",
+        b"Straddling six.txt",
+        b"Straddling ten.txt",
+        b"Straddling far.txt",
+    ];
+    for name in names {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    fs.remove(root, names[4]).expect("remove");
+    assert_eq!(fs.lookup(root, names[4]), Err(DriverError::NotFound));
+    let listed_names: Vec<Vec<u8>> = listed(&mut fs, root, 0, &[])
+        .expect("lists")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(listed_names.len(), 6, "{listed_names:?}");
+    let mut walk = DirCursor::at(CLUSTER_ROOT);
+    for _ in 0..17 {
+        let (at, raw) = fs.next_slot(&mut walk).expect("walks").expect("a slot");
+        if at.slot >= 14 {
+            assert_eq!(raw[0], DELETED_ENTRY, "slot {} survived", at.slot);
+        }
+    }
+}
+
+/// A create whose end-of-entries mark would move behind a broken chain link
+/// fails before writing, so a refused create leaves no entry behind.
+#[test]
+fn a_create_that_cannot_move_the_end_mark_writes_nothing() {
+    let mut img = build_image();
+    set_fat(&mut img, CLUSTER_ROOT as usize, 0x0FFF_FFF7);
+    let mut fs = Fat32::open(MockBlock { data: img }).expect("valid volume");
+    let root = fs.root();
+    // Thirteen long-name fragments and a short entry fill slots 2 to 15, so
+    // the mark goes to slot 16, past the root's broken link.
+    let name = [b'a'; 160];
+    assert_eq!(
+        fs.create(root, &name, NodeKind::RegularFile),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(fs.lookup(root, &name), Err(DriverError::NotFound));
+}
+
+/// A directory whose `..` links run in a circle, or name something that is
+/// not a parent, never reaches the root, so moving a directory beneath it
+/// fails closed instead of walking forever.
+#[test]
+fn a_broken_parent_chain_fails_a_directory_move_closed() {
+    let dotdot = |dir: NodeId| cluster_offset(node_cluster(dir)) + DIR_ENTRY_LEN;
+    let small = |dir: NodeId| u16::try_from(node_cluster(dir)).expect("a small cluster");
+
+    let mut fs = mount();
+    let root = fs.root();
+    let a = fs.create(root, b"A", NodeKind::Directory).expect("mkdir");
+    let b = fs.create(root, b"B", NodeKind::Directory).expect("mkdir");
+    set_le16(&mut fs.block.data, dotdot(a) + 26, small(b));
+    set_le16(&mut fs.block.data, dotdot(b) + 26, small(a));
+    assert_eq!(
+        fs.rename(root, b"SUB", a, b"SUB"),
+        Err(DriverError::DeviceFault)
+    );
+    assert!(fs.lookup(root, b"SUB").is_ok(), "the refused move moved");
+
+    let mut fs = mount();
+    let root = fs.root();
+    let a = fs.create(root, b"A", NodeKind::Directory).expect("mkdir");
+    set_le16(&mut fs.block.data, dotdot(a) + 26, 0xFFFF);
+    assert_eq!(
+        fs.rename(root, b"SUB", a, b"SUB"),
+        Err(DriverError::DeviceFault)
+    );
+
+    let mut fs = mount();
+    let root = fs.root();
+    let a = fs.create(root, b"A", NodeKind::Directory).expect("mkdir");
+    let at = dotdot(a);
+    fs.block.data[at..at + 11].copy_from_slice(&short_name(b"OTHER", b""));
+    assert_eq!(
+        fs.rename(root, b"SUB", a, b"SUB"),
+        Err(DriverError::DeviceFault)
+    );
 }
 
 #[test]
@@ -455,11 +731,7 @@ fn directory_operations_on_a_file_are_unsupported() {
     let root = fs.root();
     let file = fs.lookup(root, b"HELLO.TXT").expect("found");
     assert_eq!(fs.lookup(file, b"X"), Err(DriverError::Unsupported));
-    let mut name = [0u8; 16];
-    assert_eq!(
-        fs.read_dir(file, 0, &mut name),
-        Err(DriverError::Unsupported)
-    );
+    assert_eq!(listed(&mut fs, file, 0, &[]), Err(DriverError::Unsupported));
 }
 
 #[test]
@@ -468,17 +740,6 @@ fn reading_a_directory_as_a_file_is_unsupported() {
     let root = fs.root();
     let mut buf = [0u8; 8];
     assert_eq!(fs.read_at(root, 0, &mut buf), Err(DriverError::Unsupported));
-}
-
-#[test]
-fn read_dir_rejects_a_name_buffer_that_is_too_small() {
-    let mut fs = mount();
-    let root = fs.root();
-    let mut tiny = [0u8; 3];
-    assert_eq!(
-        fs.read_dir(root, 0, &mut tiny),
-        Err(DriverError::BufferTooSmall)
-    );
 }
 
 #[test]
@@ -514,21 +775,12 @@ fn long_file_name_is_reconstructed_in_listing() {
     let mut fs = mount();
     let root = fs.root();
     let sub = fs.lookup(root, b"sub").expect("subdir");
-
-    let mut name = [0u8; 64];
     // `.`/`..` are skipped, so the first entry is DEEP.BIN and the next is
     // the long-named file.
-    let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
-    assert_eq!(&name[..deep.name_len], b"DEEP.BIN");
-
-    let long = fs
-        .read_dir(sub, deep.next_cursor, &mut name)
-        .expect("ok")
-        .expect("entry");
-    assert_eq!(&name[..long.name_len], LONG_NAME_UTF8);
-    assert_eq!(long.info.kind, NodeKind::RegularFile);
-
-    assert_eq!(fs.read_dir(sub, long.next_cursor, &mut name), Ok(None));
+    let entries = listed(&mut fs, sub, 0, &[]).expect("lists");
+    let names: Vec<&[u8]> = entries.iter().map(|(_, name)| name.as_slice()).collect();
+    assert_eq!(names, [&b"DEEP.BIN"[..], LONG_NAME_UTF8]);
+    assert_eq!(entries[1].0.info.kind, NodeKind::RegularFile);
 }
 
 #[test]
@@ -576,30 +828,10 @@ fn corrupt_long_name_checksum_falls_back_to_short_name() {
     let root = fs.root();
     let sub = fs.lookup(root, b"sub").expect("subdir");
 
-    let mut name = [0u8; 64];
-    let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
-    let entry = fs
-        .read_dir(sub, deep.next_cursor, &mut name)
-        .expect("ok")
-        .expect("entry");
-    assert_eq!(&name[..entry.name_len], b"GREETI~1.TXT");
+    let entries = listed(&mut fs, sub, 0, &[]).expect("lists");
+    assert_eq!(entries[1].1, b"GREETI~1.TXT");
 
     assert_eq!(fs.lookup(sub, LONG_NAME_UTF8), Err(DriverError::NotFound));
-}
-
-#[test]
-fn read_dir_rejects_a_buffer_too_small_for_a_long_name() {
-    let mut fs = mount();
-    let root = fs.root();
-    let sub = fs.lookup(root, b"sub").expect("subdir");
-
-    let mut name = [0u8; 64];
-    let deep = fs.read_dir(sub, 0, &mut name).expect("ok").expect("entry");
-    let mut small = [0u8; LONG_NAME_UTF8.len() - 1];
-    assert_eq!(
-        fs.read_dir(sub, deep.next_cursor, &mut small),
-        Err(DriverError::BufferTooSmall)
-    );
 }
 
 #[test]
@@ -968,8 +1200,7 @@ mod format {
             NodeKind::Directory
         );
         // A freshly formatted root directory is empty.
-        let mut name = [0u8; MAX_NAME_BYTES];
-        assert_eq!(fs.read_dir(root, 0, &mut name), Ok(None));
+        assert_eq!(listed(&mut fs, root, 0, &[]), Ok(Vec::new()));
     }
 
     #[test]
@@ -1129,6 +1360,56 @@ mod format {
             offset >= (32 << 20),
             "only {offset} bytes written before full"
         );
+    }
+
+    /// Aliases are found past the first window of tails one walk examines.
+    #[test]
+    fn an_alias_past_a_thousand_held_tails_is_found() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        for n in 1..=1025u32 {
+            let name = std::format!("Report {n}.txt");
+            fs.create(root, name.as_bytes(), NodeKind::RegularFile)
+                .expect("create");
+        }
+        let root_cluster = node_cluster(root);
+        assert_eq!(
+            aliases(&mut fs, root_cluster).last(),
+            Some(&short_name(b"REP~1025", b"TXT"))
+        );
+    }
+
+    /// A directory holds no more than the specification's 65,536 slots: a
+    /// create that would grow it past them is refused, the directory stays
+    /// listable, and freed slots are taken again.
+    #[test]
+    fn a_full_directory_refuses_a_new_name_and_reuses_freed_slots() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        let dir = fs
+            .create(root, b"FULL", NodeKind::Directory)
+            .expect("mkdir");
+        let mut pos = SlotPos {
+            cluster: node_cluster(dir),
+            intra: 2 * DIR_ENTRY_LEN as u64,
+            slot: 2,
+        };
+        let name = |slot: u64| short_name(std::format!("F{slot:07X}").as_bytes(), b"BIN");
+        while pos.slot < u64::from(MAX_DIR_SLOTS) {
+            let entry = Fat32::<VecBlock>::build_short_entry(&name(pos.slot), 0x20, 0, 0);
+            fs.put_slot(&mut pos, &entry).expect("fill");
+        }
+        assert_eq!(
+            fs.create(dir, b"one.txt", NodeKind::RegularFile),
+            Err(DriverError::NoSpace)
+        );
+        assert_eq!(listed(&mut fs, dir, 0, &[]).expect("lists").len(), 65_534);
+
+        fs.remove(dir, b"F0000010.BIN").expect("remove");
+        fs.remove(dir, b"F0000011.BIN").expect("remove");
+        fs.create(dir, b"one.txt", NodeKind::RegularFile)
+            .expect("the freed slots hold it");
+        assert!(fs.lookup(dir, b"one.txt").is_ok());
     }
 
     #[test]
@@ -1391,4 +1672,124 @@ fn fat_has_no_second_name_for_a_file_and_reports_the_one_it_has() {
     assert_eq!(fs.lookup(root, b"ALIAS.TXT"), Err(DriverError::NotFound));
     assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
     assert_eq!(fs.node_info(root).expect("stat").nlink, 1);
+}
+
+/// The image's FAT occupies the sector after the boot sector.
+const FAT_LBA: u64 = 1;
+
+/// Reading a directory one entry per batch walks its cluster chain a small
+/// multiple of one whole listing's walk, not once from its start per batch.
+#[test]
+fn a_listing_read_a_batch_at_a_time_walks_its_chain_once() {
+    let mut fs = Fat32::open(CountingBlock {
+        inner: MockBlock {
+            data: build_image(),
+        },
+        read_at: Vec::new(),
+    })
+    .expect("valid volume");
+    let root = fs.root();
+    let big = fs.create(root, b"BIG", NodeKind::Directory).expect("dir");
+    for i in 0..40 {
+        fs.create(
+            big,
+            alloc::format!("F{i:02}.TXT").as_bytes(),
+            NodeKind::RegularFile,
+        )
+        .expect("file");
+    }
+    let fat_reads =
+        |fs: &Fat32<CountingBlock>| fs.block.read_at.iter().filter(|at| **at == FAT_LBA).count();
+    fs.block.read_at.clear();
+    assert_eq!(listed(&mut fs, big, 0, &[]).expect("lists").len(), 40);
+    let whole = fat_reads(&fs);
+    fs.block.read_at.clear();
+    let mut cursor = 0;
+    let mut batches = 0;
+    while let Some((entry, _)) = first_listed(&mut fs, big, cursor, &[]).expect("lists") {
+        cursor = entry.next_cursor;
+        batches += 1;
+    }
+    assert_eq!(batches, 40);
+    let one_by_one = fat_reads(&fs);
+    assert!(
+        one_by_one <= 3 * whole,
+        "{one_by_one} chain reads a batch at a time against {whole} for the whole listing"
+    );
+}
+
+/// An entry written across the slot a batch last took was not there when
+/// the listing passed it, so the next batch skips it, rather than listing it
+/// by its 8.3 alias, and goes on to what follows.
+#[test]
+fn a_listing_resumed_past_an_entry_written_across_its_place_skips_it() {
+    let mut fs = mount();
+    let root = fs.root();
+    let dir = fs.create(root, b"MID", NodeKind::Directory).expect("dir");
+    for name in [&b"A.TXT"[..], b"B.TXT", b"C.TXT"] {
+        fs.create(dir, name, NodeKind::RegularFile).expect("file");
+    }
+    let (first, name) = first_listed(&mut fs, dir, 0, &[])
+        .expect("lists")
+        .expect("an entry");
+    assert_eq!(name, b"A.TXT");
+    fs.remove(dir, b"A.TXT").expect("remove");
+    fs.remove(dir, b"B.TXT").expect("remove");
+    // Two long-name fragments and a short entry: the lowest free run, which
+    // runs through A's old short entry to the slot the cursor names.
+    fs.create(dir, b"two fragments.txt", NodeKind::RegularFile)
+        .expect("file");
+    let rest: Vec<Vec<u8>> = listed(&mut fs, dir, first.next_cursor, &[])
+        .expect("lists")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(rest, [b"C.TXT".to_vec()]);
+}
+
+/// A listing resumed across changes hands over every entry present for the
+/// whole of it exactly once, whatever was added or removed between batches.
+#[test]
+fn a_listing_resumed_across_changes_lists_each_lasting_entry_once() {
+    let mut fs = mount();
+    let root = fs.root();
+    let dir = fs.create(root, b"CHG", NodeKind::Directory).expect("dir");
+    for name in [&b"A.TXT"[..], b"B.TXT", b"C.TXT", b"D.TXT"] {
+        fs.create(dir, name, NodeKind::RegularFile).expect("file");
+    }
+    let mut taken = Vec::new();
+    let mut cursor = 0;
+    for _ in 0..2 {
+        let (entry, name) = first_listed(&mut fs, dir, cursor, &[])
+            .expect("lists")
+            .expect("an entry");
+        taken.push(name);
+        cursor = entry.next_cursor;
+    }
+    fs.remove(dir, b"B.TXT").expect("remove a listed entry");
+    fs.create(dir, b"E.TXT", NodeKind::RegularFile)
+        .expect("file");
+    taken.extend(
+        listed(&mut fs, dir, cursor, &[])
+            .expect("lists")
+            .into_iter()
+            .map(|(_, name)| name),
+    );
+    for lasting in [&b"A.TXT"[..], b"C.TXT", b"D.TXT"] {
+        assert_eq!(
+            taken
+                .iter()
+                .filter(|name| name.as_slice() == lasting)
+                .count(),
+            1,
+            "{lasting:?} in {taken:?}"
+        );
+    }
+    assert!(
+        taken
+            .iter()
+            .filter(|name| name.as_slice() == b"E.TXT")
+            .count()
+            <= 1
+    );
 }

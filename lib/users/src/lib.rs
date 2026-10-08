@@ -45,6 +45,7 @@ extern crate alloc;
 mod db;
 mod grants;
 mod groups;
+mod home;
 mod password;
 mod policy;
 mod provision;
@@ -61,6 +62,7 @@ pub use groups::{
     GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPNAME_LEN, MAX_GROUPS, MAX_GROUPS_DB_LEN,
     MAX_GROUP_LINE_LEN, STORAGE_GID, STORAGE_GROUP,
 };
+pub use home::{provision_home_shape, HomeShapeError, HomeTree};
 pub use password::{
     PasswordRecord, Salt, StoredPassword, DEFAULT_ITERATIONS, MAX_ITERATIONS, MAX_PASSWORD_LEN,
     MIN_ITERATIONS, NO_PASSWORD_MARKER, PASSWORD_SCHEME, SALT_LEN,

@@ -411,7 +411,7 @@ crates' tests hold their colours to as well.
 
 A theme sizes text by the **job** it does, never by the widget that draws it.
 `TextRole` is a closed set — `Display`, `Heading`, `ItemTitle`, `WindowTitle`,
-`Body`, `Metric`, `Caption`, `SectionHeader`, `Monospace` — and
+`Body`, `ItemLabel`, `Metric`, `Caption`, `SectionHeader`, `Monospace` — and
 `Fonts::spec(role)` is a constant-time array read, so a text draw can neither
 miss a lookup nor invent a size literal at the call site.
 
@@ -424,8 +424,9 @@ type scales together (`AGENTS.md` §2.2):
 | `Display` | 250% | Regular | 480 |
 | `Heading` | 133% | Medium | 580 |
 | `ItemTitle` | 113% | Medium | 580 |
-| `WindowTitle` | 100% | Medium | 580 |
+| `WindowTitle` | 89% | Medium | 580 |
 | `Body` | 100% | Regular | 480 |
+| `ItemLabel` | 89% | Regular | 480 |
 | `Metric` | 100% | Bold | 780 |
 | `Caption` | 87% | Regular | 480 |
 | `SectionHeader` | 100% | Bold | 780 |
@@ -435,6 +436,14 @@ The boards carry their hierarchy with a deliberately *tight* size ladder and a
 rising weight — a detail line sits within a point of the title above it, and a
 column header is the size of the rows it heads but bold — so weight, not size,
 does most of the work.
+
+Window titles and item names sit a point below body. Ladder sizes are line-box
+heights, and the shipped face's line box is about six fifths of its em, so a
+point of em is about 1.6 px of line box: at the shipped base those two rungs
+are 16 px against body's 18. `ItemLabel` is the name under every icon tile —
+the file manager's, the picker's, the desktop's, the greeter's accounts — and
+in every row of a file listing; a listing row keeps body's row pitch, so it
+stays on the places rail's grid beside it.
 
 Every role is set `TEXT_WEIGHT_LIFT` (80) heavier than its named weight along
 the face's own `wght` axis (`lifted`). The UI face's named weights are drawn

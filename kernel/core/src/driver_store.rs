@@ -47,7 +47,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
+use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead, FilesystemSecurity, NodeKind};
 use tairix_abi::Errno;
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -55,7 +55,7 @@ use tairix_log::{Field, Level, Sink};
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{Credentials, FinalLink, Path, Vfs, VfsError};
+use crate::fs::{Credentials, DirPosition, FinalLink, Path, Vfs, VfsError};
 
 /// Canonical, global absolute path of the signed-driver store
 /// (drivers live under `/System/Drivers/`).
@@ -173,18 +173,46 @@ fn walk_dir<F>(
     };
 
     // A directory the boot identity may not list, a driver fault, or a
-    // store that simply does not exist all leave this subtree empty. A non-root listing failure is a skipped entry;
-    // a missing store root is the legitimate "no drivers" case and is not
-    // counted, because the empty result already says so.
-    let entries = match vfs.list_via_secured(cred, &dir_path, fs, FinalLink::Follow, |entry| entry)
-    {
-        Ok(entries) => entries,
-        Err(_) if depth == 0 => return,
-        Err(_) => {
-            *skipped += 1;
-            return;
-        }
-    };
+    // store that simply does not exist all leave this subtree empty. A
+    // non-root listing failure is a skipped entry; a missing store root is
+    // the legitimate "no drivers" case and is not counted, because the empty
+    // result already says so. No directory holds more entries than the
+    // whole store may: the surplus is counted, never held.
+    let mut entries = Vec::new();
+    let mut surplus = 0usize;
+    let mut unheld = false;
+    let listed = vfs.list_via_secured(
+        cred,
+        &dir_path,
+        fs,
+        FinalLink::Follow,
+        &mut DirPosition::default(),
+        &mut |entry| {
+            if entries.len() >= MAX_STORE_DRIVERS {
+                surplus += 1;
+                return DirVisit::Take;
+            }
+            if let Some(owned) = entries
+                .try_reserve(1)
+                .ok()
+                .and_then(|()| entry.owned().ok())
+            {
+                entries.push(owned);
+                DirVisit::Take
+            } else {
+                unheld = true;
+                DirVisit::Stop
+            }
+        },
+    );
+    if listed.is_err() && depth == 0 {
+        return;
+    }
+    if listed.is_err() || unheld {
+        *skipped += 1;
+        return;
+    }
+    *skipped += surplus;
 
     for mut entry in entries {
         let name = core::mem::take(&mut entry.name);

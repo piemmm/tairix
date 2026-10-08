@@ -180,7 +180,7 @@ impl<O: GicOps + Send + Sync> IrqController for GicIrqController<O> {
         }
     }
 
-    /// Route `line` to [`DEVICE_IRQ_CPU`] and unmask it: the re-arm the
+    /// Route `line` to `DEVICE_IRQ_CPU` and unmask it: the re-arm the
     /// user-space `irq_wait` park path drives for a driver, which holds no
     /// GIC access. An out-of-range line fails closed as
     /// [`MaskError::OutOfRange`] without touching the distributor.

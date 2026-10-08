@@ -227,6 +227,8 @@ tairix-cpuops = { path = "../../lib/cpuops", version = "=0.0.0", default-feature
 zeroize = { version = "1.8.1", default-features = false }
 
 [dev-dependencies]
+# The shared driver listing fixtures (`listing::listed`, `first_listed`).
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0", features = ["test-util"] }
 # Mirrors `kernel/sched`'s self-link pattern: integration tests get the
 # host-only `test-arch` feature for free without ever leaking it into a
 # production build. `default-features = false` keeps this self-link from

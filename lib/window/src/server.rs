@@ -34,6 +34,7 @@
 //!   host, so an exited app never leaks a mapped grant or a ghost
 //!   taskbar entry.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -44,18 +45,19 @@ use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
-    encode_drop_target_reply, encode_hand_over_reply, encode_menu_text_reply,
-    encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
-    encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu,
-    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget, HandOverDocument,
+    encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
+    encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
+    encode_open_target_reply, encode_picked_name_reply, encode_terrain_reply,
+    encode_wallpapers_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
+    DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget, HandOverDocument,
     HandOverOutcome, LayerDepth, OpenTarget, PickPurpose, PreviewSubject, TerrainPlate,
     WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX,
     DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
     WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
-    WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
@@ -96,7 +98,10 @@ pub const WINDOW_REPLY_MAX: usize = {
                             WINDOW_CURSOR_SETS_REPLY_MAX,
                             wider(
                                 WINDOW_NOTIFY_SOURCES_REPLY_MAX,
-                                wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX),
+                                wider(
+                                    WINDOW_PICKED_NAME_REPLY_MAX,
+                                    wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
+                                ),
                             ),
                         ),
                     ),
@@ -105,6 +110,56 @@ pub const WINDOW_REPLY_MAX: usize = {
         ),
     )
 };
+
+/// Where a carried drag is, as the host reports it ([`WindowServer::report_drag`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DragReport<'a> {
+    /// Over one of the dragging application's own windows, at a point in it.
+    Window {
+        /// The window under the pointer.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+    },
+    /// Over the desktop, on the folder at the absolute path `folder`.
+    Desktop {
+        /// The folder a drop there would land in.
+        folder: &'a str,
+    },
+    /// Over nothing the application can drop on.
+    Nowhere,
+}
+
+/// Where a carried drag ended, as the host concludes it
+/// ([`WindowServer::conclude_drag`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DragConclusion {
+    /// On nothing that takes it.
+    Nothing,
+    /// On an application that opens the one file dragged. Boxed: a run path
+    /// is far wider than every other conclusion.
+    Application(Box<DropTarget>),
+    /// On one of the dragging application's own windows.
+    Window {
+        /// The window dropped on.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+        /// What the drop does: the verdict the pointer showed.
+        operation: DropOperation,
+    },
+    /// On the desktop folder the report numbered `serial` named.
+    Desktop {
+        /// The report that named the folder.
+        serial: u32,
+        /// What the drop does: the verdict the pointer showed.
+        operation: DropOperation,
+    },
+}
 
 /// The minted-id reply a menu open answers with is the shortest of the three,
 /// so the one buffer above already holds it.
@@ -464,16 +519,33 @@ pub trait WindowHost {
     fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno>;
 
     /// A validated `BeginDrag`: the attested owner of live window
-    /// `window_id` (which has no drag pending) began dragging the file
-    /// `name`. The host takes the gesture over and, when it ends, routes the
-    /// outcome back through [`WindowServer::conclude_drag`].
+    /// `window_id` (which has no drag pending) began dragging `items`. The
+    /// host takes the gesture over, reports where it goes through
+    /// [`WindowServer::report_drag`], and when it ends routes the outcome back
+    /// through [`WindowServer::conclude_drag`].
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the host cannot carry the drag for — the press that
     /// began it is not the window's, or the seat is held by something a drag
     /// may not displace. Nothing is recorded.
-    fn drag_requested(&mut self, _window_id: u64, _name: &DocumentName) -> Result<(), Errno> {
+    fn drag_requested(&mut self, _window_id: u64, _items: &DragItems) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    /// A validated `DragVerdict`: the owner of window `window_id`, whose drag
+    /// is still carried, answered the report numbered `serial` with
+    /// `verdict`. The host decides whether the answer is still current.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host refuses the answer with; nothing changes.
+    fn drag_verdict(
+        &mut self,
+        _window_id: u64,
+        _serial: u32,
+        _verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
 
@@ -590,6 +662,35 @@ pub trait WindowHost {
     fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
         let _ = (window_id, shape);
         Err(Errno::NotSupported)
+    }
+
+    /// The window holding the keyboard, if one of this engine's windows does.
+    ///
+    /// The default answers none: a host with no keyboard focuses nothing.
+    fn focused_window(&self) -> Option<u64> {
+        None
+    }
+
+    /// Raise window `window_id` and give it the keyboard. The engine asks only
+    /// once the caller owns the window and holds an activation or the
+    /// keyboard ([`WindowRequest::ActivateWindow`]).
+    ///
+    /// The default refuses: a host that stacks no windows has nothing to raise.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot raise the window with: a seat busy with
+    /// a lock or a carried drag, a window not on screen.
+    fn raise_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+        let _ = window_id;
+        Err(Errno::NotSupported)
+    }
+
+    /// `caller` asked to raise its window `window_id` holding neither an
+    /// activation the keyboard has not moved away from nor the keyboard, and
+    /// was refused: a decision for the host's audit trail.
+    fn raise_refused(&mut self, caller: ProcId, window_id: u64) {
+        let _ = (caller, window_id);
     }
 
     /// The caller's own window `window_id` asked to put the first `len`
@@ -934,16 +1035,17 @@ impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
     fn hand_over(
         &mut self,
         app: ProcId,
+        activation: Activation,
         make: &mut dyn FnMut() -> Result<OpenEntry, Errno>,
     ) -> bool {
         self.server
-            .hand_over_open_target(self.sink, app, make)
+            .hand_over_open_target(self.sink, app, activation, make)
             .is_ok()
     }
 
-    fn ask_default(&mut self, app: ProcId) -> bool {
+    fn ask_default(&mut self, app: ProcId, activation: Activation) -> bool {
         self.server
-            .deliver_app_event(self.sink, app, &WindowEvent::AppBarDefault)
+            .deliver_app_event(self.sink, app, &WindowEvent::AppBarDefault, activation)
             .is_ok()
     }
 
@@ -957,6 +1059,20 @@ impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
     }
 }
 
+/// Whether an application event lets its receiver raise one of its own
+/// windows ([`WindowRequest::ActivateWindow`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Activation {
+    /// The event was not the user's doing, so it brings nothing forward.
+    Withheld,
+    /// One raise, valid while the keyboard is still at `focus` — the window
+    /// holding it when the event was sent, `None` for none of the engine's.
+    Granted {
+        /// Where the keyboard was.
+        focus: Option<u64>,
+    },
+}
+
 /// The engine's half of reaching a live instance, lent to the host for the
 /// length of one hand-over.
 ///
@@ -967,8 +1083,8 @@ impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
 /// opened. So the engine hands these over rather than either party
 /// re-deriving the other's half.
 pub trait HandOverDesk {
-    /// Queue the entry `make` produces for `app` and wake it, answering
-    /// whether it was taken.
+    /// Queue the entry `make` produces for `app` and wake it, with what
+    /// `activation` lets it bring forward, answering whether it was taken.
     ///
     /// `make` runs only once `app` is known to take the entry, since it may
     /// mint a delegation nothing can take back. `false` is an unreachable
@@ -977,12 +1093,14 @@ pub trait HandOverDesk {
     fn hand_over(
         &mut self,
         app: ProcId,
+        activation: Activation,
         make: &mut dyn FnMut() -> Result<OpenEntry, Errno>,
     ) -> bool;
 
-    /// Ask `app` for its icon-bar default action. `false` when it declared no
-    /// icon-bar presence, so it has no default to be asked for.
-    fn ask_default(&mut self, app: ProcId) -> bool;
+    /// Ask `app` for its icon-bar default action, with what `activation` lets
+    /// it bring forward. `false` when it declared no icon-bar presence, so it
+    /// has no default to be asked for.
+    fn ask_default(&mut self, app: ProcId, activation: Activation) -> bool;
 
     /// The window `app` most recently opened, as its channel id, for a host
     /// that means to raise it. `None` when it owns none.
@@ -1121,6 +1239,9 @@ struct WindowRecord<R> {
     picked_name: Option<DocumentName>,
     /// A `BeginDrag` was accepted and its `DragEnded` is still owed.
     drag_pending: bool,
+    /// The desktop folder the host last named for this window's drag, and
+    /// the report that named it, until another drag begins.
+    drag_spot: Option<(u32, String)>,
     /// Where the last drag was dropped, until the owner takes it or begins
     /// another.
     drop_target: Option<DropTarget>,
@@ -1203,6 +1324,11 @@ pub struct WindowServer<M: ShmMapper> {
     /// [`WINDOW_MAX_OPEN_TARGETS`], and the whole queue dies with the client,
     /// so a target nobody drained is reachable by nothing and is dropped.
     open_targets: BTreeMap<ProcId, VecDeque<OpenEntry>>,
+    /// Applications holding an unspent activation, each with the window the
+    /// keyboard was at when it was minted: one raise of the application's own
+    /// windows ([`WindowRequest::ActivateWindow`]), void once the keyboard has
+    /// moved, so a gesture long past cannot be cashed in over the user's work.
+    activations: BTreeMap<ProcId, Option<u64>>,
     /// The next menu-open id to mint. Its own sequence rather than the
     /// window ids': an open names a gesture, not a window, and the two are
     /// never interchangeable. Ids start at 1 and are never reused, so an
@@ -1227,6 +1353,7 @@ impl<M: ShmMapper> WindowServer<M> {
             next_menu_open: 1,
             app_bars: BTreeMap::new(),
             open_targets: BTreeMap::new(),
+            activations: BTreeMap::new(),
             client_frame_max,
         }
     }
@@ -1443,7 +1570,9 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::PickFile { .. }
             | WindowRequest::TakePickedName { .. }
             | WindowRequest::BeginDrag { .. }
-            | WindowRequest::TakeDropTarget { .. } => {
+            | WindowRequest::TakeDropTarget { .. }
+            | WindowRequest::DragVerdict { .. }
+            | WindowRequest::QueryDragSpot { .. } => {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
             ref other => self.dispatch_status_op(host, &*sink, caller, other, reply),
@@ -1472,8 +1601,37 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             WindowRequest::BeginDrag {
                 window_id,
-                ref name,
-            } => status(reply, self.begin_drag(host, caller, window_id, name)),
+                ref items,
+            } => status(reply, self.begin_drag(host, caller, window_id, items)),
+            WindowRequest::DragVerdict {
+                window_id,
+                serial,
+                verdict,
+            } => {
+                let answered = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|record| {
+                        if record.drag_pending {
+                            Ok(())
+                        } else {
+                            Err(Errno::NotFound)
+                        }
+                    })
+                    .and_then(|()| host.drag_verdict(window_id, serial, verdict));
+                status(reply, answered)
+            }
+            WindowRequest::QueryDragSpot { window_id, serial } => {
+                let read =
+                    owned_window_mut(&mut self.windows, caller, window_id).and_then(|record| {
+                        match &record.drag_spot {
+                            Some((named, folder)) if *named == serial => Ok(folder.as_str()),
+                            _ => Err(Errno::NotFound),
+                        }
+                    });
+                let mut frame = [0u8; WINDOW_DRAG_SPOT_REPLY_MAX];
+                let len = encode_drag_spot_reply(&mut frame, read);
+                reply[..len].copy_from_slice(&frame[..len]);
+                len
+            }
             WindowRequest::TakeDropTarget { window_id } => {
                 let taken = owned_window_mut(&mut self.windows, caller, window_id)
                     .and_then(|record| record.drop_target.take().ok_or(Errno::NotFound));
@@ -1494,21 +1652,22 @@ impl<M: ShmMapper> WindowServer<M> {
         host: &mut dyn WindowHost,
         caller: ProcId,
         window_id: u64,
-        name: &DocumentName,
+        items: &DragItems,
     ) -> Result<(), Errno> {
         let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.drag_pending {
             return Err(Errno::AlreadyExists);
         }
-        host.drag_requested(window_id, name)?;
+        host.drag_requested(window_id, items)?;
         record.drag_pending = true;
+        record.drag_spot = None;
         record.drop_target = None;
         Ok(())
     }
 
     /// Act on a request a window makes of the seat — the tip shown over its
-    /// content, the pointer's shape there, the clipboard — each honoured
-    /// only for a window the caller owns.
+    /// content, the pointer's shape there, the keyboard, the clipboard — each
+    /// honoured only for a window the caller owns.
     fn dispatch_seat(
         &mut self,
         host: &mut dyn WindowHost,
@@ -1526,6 +1685,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 self.set_tooltip(host, caller, window_id, region, text.as_str()),
             );
+        }
+        if let WindowRequest::ActivateWindow { window_id } = *request {
+            return status(reply, self.activate(host, caller, window_id));
         }
         let owns = |window_id| self.owns(caller, window_id);
         match *request {
@@ -1598,26 +1760,17 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             WindowRequest::SetTooltip { .. }
             | WindowRequest::SetCursor { .. }
+            | WindowRequest::ActivateWindow { .. }
             | WindowRequest::SetClipboard { .. }
             | WindowRequest::GetClipboard { .. } => {
                 self.dispatch_seat(host, caller, decoded, reply)
             }
-            WindowRequest::Resize {
-                window_id,
-                shm_handle,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-            } => {
-                let spec = ResizeSpec {
-                    window_id,
-                    shm_handle,
-                    frame_count,
-                    surface: surface_of(width_px, height_px, stride_bytes, format),
-                };
-                status(reply, self.resize(host, caller, spec))
+            WindowRequest::Resize { .. } => {
+                let asked = resize_request(decoded).ok_or(Errno::NotSupported);
+                status(
+                    reply,
+                    asked.and_then(|spec| self.resize(host, caller, spec)),
+                )
             }
             WindowRequest::SetTitle { window_id, title } => status(
                 reply,
@@ -1674,7 +1827,9 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::PreviewScreensaver { .. }
             | WindowRequest::PickFile { .. }
             | WindowRequest::BeginDrag { .. }
-            | WindowRequest::TakeDropTarget { .. } => status(reply, Err(Errno::NotSupported)),
+            | WindowRequest::TakeDropTarget { .. }
+            | WindowRequest::DragVerdict { .. }
+            | WindowRequest::QueryDragSpot { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             WindowRequest::TakePickedName { .. } => {
@@ -1749,6 +1904,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 picked_name: None,
                 drag_pending: false,
+                drag_spot: None,
                 drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
@@ -1819,6 +1975,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 picked_name: None,
                 drag_pending: false,
+                drag_spot: None,
                 drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
@@ -1877,6 +2034,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 picked_name: None,
                 drag_pending: false,
+                drag_spot: None,
                 drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
@@ -2159,7 +2317,8 @@ impl<M: ShmMapper> WindowServer<M> {
     }
 
     /// Hand application `app` the target `make` produces, waking it with a
-    /// [`WindowEvent::OpenRequested`].
+    /// [`WindowEvent::OpenRequested`] and what `activation` lets it bring
+    /// forward.
     ///
     /// `make` runs only once `app` is known to take the entry — reachable,
     /// with room, and woken — because a document entry is a delegation the
@@ -2185,6 +2344,7 @@ impl<M: ShmMapper> WindowServer<M> {
         &mut self,
         sink: &mut dyn EventSink,
         app: ProcId,
+        activation: Activation,
         make: impl FnOnce() -> Result<OpenEntry, Errno>,
     ) -> Result<(), Errno> {
         let endpoint = self.app_event_endpoint(app).ok_or(Errno::NotFound)?;
@@ -2219,15 +2379,28 @@ impl<M: ShmMapper> WindowServer<M> {
         // handle back when the same authority is granted to the same process
         // twice. Queueing it twice would therefore promise a second document
         // the first pull consumes, so an entry already waiting is the answer.
-        if let OpenEntry::Document { grant, .. } = entry {
-            if queue.iter().any(
+        let waiting = match entry {
+            OpenEntry::Document { grant, .. } => queue.iter().any(
                 |held| matches!(held, OpenEntry::Document { grant: held, .. } if *held == grant),
-            ) {
-                return Ok(());
+            ),
+            _ => false,
+        };
+        if !waiting {
+            queue.push_back(entry);
+        }
+        self.mint(app, activation);
+        Ok(())
+    }
+
+    fn mint(&mut self, app: ProcId, activation: Activation) {
+        match activation {
+            Activation::Granted { focus } => {
+                self.activations.insert(app, focus);
+            }
+            Activation::Withheld => {
+                self.activations.remove(&app);
             }
         }
-        queue.push_back(entry);
-        Ok(())
     }
 
     /// Whether `caller` is the attested owner of live window `window_id`.
@@ -2498,11 +2671,12 @@ impl<M: ShmMapper> WindowServer<M> {
         // A target queued for a client that has gone is reachable by
         // nothing; its delegation dies with the process it was minted to.
         self.open_targets.remove(&client);
+        self.activations.remove(&client);
     }
 
     /// Route one application-scoped event — an icon-bar click or menu
     /// outcome — to the application that declared the bar presence it
-    /// belongs to.
+    /// belongs to, with what `activation` lets it bring forward.
     ///
     /// The destination comes from the declaration the engine recorded, not
     /// from the event, so the session cannot address a bar event to a
@@ -2520,12 +2694,15 @@ impl<M: ShmMapper> WindowServer<M> {
         sink: &mut dyn EventSink,
         app: ProcId,
         event: &WindowEvent,
+        activation: Activation,
     ) -> Result<(), Errno> {
         if event.window_id().is_some() {
             return Err(Errno::OutOfRange);
         }
         let endpoint = *self.app_bars.get(&app).ok_or(Errno::NotFound)?;
-        sink.deliver(endpoint, event)
+        sink.deliver(endpoint, event)?;
+        self.mint(app, activation);
+        Ok(())
     }
 
     /// Conclude window `window_id`'s pending pick: the file the user chose,
@@ -2566,35 +2743,128 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
-    /// Conclude window `window_id`'s pending drag: dropped on `target`, or
-    /// on nothing that takes it.
+    /// Tell the owner of window `window_id`, whose drag is carried, where it
+    /// now is: `report` numbered `serial`, with `shift` held or not.
+    ///
+    /// A report over a window is addressed to that window, which must be the
+    /// owner's own and the point inside it; any other is addressed to the
+    /// window the drag began in. A desktop report holds `folder` for the
+    /// owner to read ([`WindowRequest::QueryDragSpot`]) before it is sent.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window, or no drag is carried from it.
+    /// * [`Errno::PermissionDenied`] — the window reported over is another
+    ///   owner's.
+    /// * [`Errno::OutOfRange`] — the point is outside that window.
+    /// * Any [`Errno`] the sink surfaces.
+    pub fn report_drag(
+        &mut self,
+        sink: &mut dyn EventSink,
+        window_id: u64,
+        serial: u32,
+        report: DragReport<'_>,
+        shift: bool,
+    ) -> Result<(), Errno> {
+        let source = self.windows.get(&window_id).ok_or(Errno::NotFound)?;
+        if !source.drag_pending {
+            return Err(Errno::NotFound);
+        }
+        let (owner, endpoint) = (source.owner, source.event_endpoint);
+        let (addressed, at) = match report {
+            DragReport::Window {
+                window_id: over,
+                x,
+                y,
+            } => {
+                let record = self.windows.get(&over).ok_or(Errno::NotFound)?;
+                if record.owner != owner {
+                    return Err(Errno::PermissionDenied);
+                }
+                if x >= record.surface.width_px || y >= record.surface.height_px {
+                    return Err(Errno::OutOfRange);
+                }
+                (over, DragAt::Window { x, y })
+            }
+            DragReport::Desktop { folder } => {
+                let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+                record.drag_spot = Some((serial, String::from(folder)));
+                (window_id, DragAt::Desktop)
+            }
+            DragReport::Nowhere => (window_id, DragAt::Nowhere),
+        };
+        sink.deliver(
+            endpoint,
+            &WindowEvent::DragOver {
+                window_id: addressed,
+                serial,
+                at,
+                shift,
+            },
+        )
+    }
+
+    /// Conclude window `window_id`'s pending drag where `ended` says.
     ///
     /// Delivers `DragEnded` and, once the sink accepted it, clears the pending
-    /// drag and holds the target for the owner's `TakeDropTarget` — the one way
-    /// a drag ends.
+    /// drag and holds an application target for the owner's `TakeDropTarget`
+    /// — the one way a drag ends. A drop on the desktop names the folder the
+    /// report numbered `serial` held, which stays for the owner to read.
     ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such window.
-    /// * [`Errno::OutOfRange`] — no drag is pending on it.
+    /// * [`Errno::OutOfRange`] — no drag is pending on it, a window drop names
+    ///   a window that is not the owner's, or a desktop drop names a report
+    ///   that held no folder.
     /// * Any [`Errno`] the sink surfaces; the conclusion is still owed.
     pub fn conclude_drag(
         &mut self,
         sink: &mut dyn EventSink,
         window_id: u64,
-        target: Option<&DropTarget>,
+        ended: DragConclusion,
     ) -> Result<(), Errno> {
-        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        let record = self.windows.get(&window_id).ok_or(Errno::NotFound)?;
         if !record.drag_pending {
             return Err(Errno::OutOfRange);
         }
-        let event = WindowEvent::DragEnded {
-            window_id,
-            dropped: target.is_some(),
+        let owner = record.owner;
+        let (site, target) = match ended {
+            DragConclusion::Nothing => (DropSite::Nothing, None),
+            DragConclusion::Application(target) => (DropSite::Application, Some(*target)),
+            DragConclusion::Window {
+                window_id: over,
+                x,
+                y,
+                operation,
+            } => {
+                if self.owner_of(over) != Some(owner) {
+                    return Err(Errno::OutOfRange);
+                }
+                (
+                    DropSite::Window {
+                        window_id: over,
+                        x,
+                        y,
+                        operation,
+                    },
+                    None,
+                )
+            }
+            DragConclusion::Desktop { serial, operation } => {
+                if !matches!(&record.drag_spot, Some((named, _)) if *named == serial) {
+                    return Err(Errno::OutOfRange);
+                }
+                (DropSite::Desktop { serial, operation }, None)
+            }
         };
-        sink.deliver(record.event_endpoint, &event)?;
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        sink.deliver(
+            record.event_endpoint,
+            &WindowEvent::DragEnded { window_id, site },
+        )?;
         record.drag_pending = false;
-        record.drop_target = target.copied();
+        record.drop_target = target;
         Ok(())
     }
 
@@ -2642,6 +2912,7 @@ impl<M: ShmMapper> WindowServer<M> {
             event,
             WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
+                | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
         ) {
             return Err(Errno::OutOfRange);
@@ -2685,8 +2956,66 @@ impl<M: ShmMapper> WindowServer<M> {
                 record.menu_open = None;
             }
         }
+        if matches!(*event, WindowEvent::Focus { focused: true, .. }) {
+            self.activations.clear();
+        }
         Ok(())
     }
+
+    /// Raise and focus `caller`'s own window `window_id` on its request:
+    /// under an activation minted while the keyboard was where it still is,
+    /// which the request spends, or while one of the caller's windows already
+    /// holds the keyboard.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a window the caller does not own,
+    /// [`Errno::PermissionDenied`] for a caller with neither a live activation
+    /// nor the keyboard, and the host's refusal to raise.
+    fn activate(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+    ) -> Result<(), Errno> {
+        if !self.owns(caller, window_id) {
+            return Err(Errno::NotFound);
+        }
+        let focused = host.focused_window();
+        let activated = self
+            .activations
+            .remove(&caller)
+            .is_some_and(|minted| minted == focused);
+        let working = focused.is_some_and(|focused| self.owns(caller, focused));
+        if !(activated || working) {
+            host.raise_refused(caller, window_id);
+            return Err(Errno::PermissionDenied);
+        }
+        host.raise_requested(window_id)
+    }
+}
+
+/// The resize a decoded [`WindowRequest::Resize`] asks for, or `None` for any
+/// other request.
+fn resize_request(request: &WindowRequest) -> Option<ResizeSpec> {
+    let WindowRequest::Resize {
+        window_id,
+        shm_handle,
+        frame_count,
+        width_px,
+        height_px,
+        stride_bytes,
+        format,
+    } = *request
+    else {
+        return None;
+    };
+    Some(ResizeSpec {
+        window_id,
+        shm_handle,
+        frame_count,
+        surface: surface_of(width_px, height_px, stride_bytes, format),
+    })
 }
 
 /// The window and granted region a decoded [`WindowRequest::RenderPreview`]

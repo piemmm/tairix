@@ -1,5 +1,5 @@
-//! The sandboxed image-rendering service: icon rasterisation, desktop
-//! wallpaper placement, and document viewing.
+//! The sandboxed image-rendering service: icon rasterisation, thumbnails,
+//! desktop wallpaper placement, and document viewing.
 //!
 //! An application bundle's icon artwork (SVG or PNG bytes shipped inside
 //! the bundle by whoever authored it, not by the system), a desktop
@@ -46,6 +46,16 @@
 //! ratio and centred, with fully transparent padding on the shorter axis,
 //! through the crate's one shared resampler (`tairix_raster::resample`) —
 //! never a second, private scaling implementation.
+//!
+//! # Drawing a picture file as its own content
+//!
+//! A thumbnail is the document uploaded last, drawn fitted inside a square.
+//! Its peak decode is forecast from the header and held to
+//! [`MAX_THUMBNAIL_PEAK_BYTES`] before any pixel buffer exists, it decodes
+//! straight to the size the square needs (`tairix_image::decode_fitted`), and
+//! it is centred on transparent padding without being enlarged, so what it
+//! shows of a small file is the file. The worker lets the document go once it
+//! is drawn.
 //!
 //! # Producing wallpaper pixels
 //!
@@ -172,6 +182,18 @@ const OP_RASTERISE: u8 = 1;
 /// reported it wanted.
 const OP_FONTS_SUPPLY: u8 = 12;
 
+/// Thumbnail opcode: the uploaded document drawn as its own content.
+const OP_THUMBNAIL: u8 = 19;
+
+/// Largest decode, in bytes, a thumbnail may cost at its peak.
+///
+/// A fixed containment bound, not a capacity: a thumbnail is decoration made
+/// for every picture on screen, so its decode is held to what one tile is
+/// worth rather than to what the viewer must open. The forecast is read from
+/// the header before a pixel buffer exists, so a picture past it costs only
+/// its header.
+pub const MAX_THUMBNAIL_PEAK_BYTES: u64 = 32 << 20;
+
 /// Reply tag shared by every refusal this service returns, whatever the
 /// request opcode: an error code byte follows.
 pub(crate) const REPLY_ERROR: u8 = 0;
@@ -189,6 +211,7 @@ const REFUSAL_MALFORMED_REQUEST: u8 = 1;
 const REFUSAL_UNSUPPORTED_FORMAT: u8 = 2;
 const REFUSAL_MALFORMED_IMAGE: u8 = 3;
 const REFUSAL_UNRENDERABLE: u8 = 4;
+const REFUSAL_TOO_LARGE: u8 = 5;
 
 /// Why the service refused an icon-rasterisation request, carried typed
 /// over the wire.
@@ -206,6 +229,8 @@ pub enum IconRefusal {
     /// so the picture is sound but this machine cannot produce it right now.
     /// The caller falls back to its own built-in glyph either way.
     Unrenderable,
+    /// A thumbnail's picture is past what a thumbnail may cost to decode.
+    TooLarge,
 }
 
 impl IconRefusal {
@@ -215,6 +240,7 @@ impl IconRefusal {
             Self::UnsupportedFormat => REFUSAL_UNSUPPORTED_FORMAT,
             Self::MalformedImage => REFUSAL_MALFORMED_IMAGE,
             Self::Unrenderable => REFUSAL_UNRENDERABLE,
+            Self::TooLarge => REFUSAL_TOO_LARGE,
         }
     }
 
@@ -224,6 +250,7 @@ impl IconRefusal {
             REFUSAL_UNSUPPORTED_FORMAT => Some(Self::UnsupportedFormat),
             REFUSAL_MALFORMED_IMAGE => Some(Self::MalformedImage),
             REFUSAL_UNRENDERABLE => Some(Self::Unrenderable),
+            REFUSAL_TOO_LARGE => Some(Self::TooLarge),
             _ => None,
         }
     }
@@ -238,6 +265,7 @@ impl core::fmt::Display for IconRefusal {
             Self::Unrenderable => {
                 f.write_str("icon decoded but could not be rasterised at the requested size")
             }
+            Self::TooLarge => f.write_str("picture too large to draw as a thumbnail"),
         }
     }
 }
@@ -314,6 +342,10 @@ impl Service for ImageRenderService {
                 Ok(reply) => reply,
                 Err(refusal) => encode_error(refusal.to_wire()),
             },
+            Some(OP_THUMBNAIL) => match self.handle_thumbnail(request) {
+                Ok(reply) => reply,
+                Err(refusal) => encode_error(refusal.to_wire()),
+            },
             Some(
                 OP_WALLPAPER_PREPARE | OP_WALLPAPER_BAND | OP_WALLPAPER_RELEASE | OP_WALLPAPER_PLAN,
             ) => match self.dispatch_wallpaper(request) {
@@ -373,6 +405,65 @@ fn dispatch_icon(request: &[u8], fonts: &FontTable) -> Result<Vec<u8>, IconRefus
             Ok(w.finish())
         }
         Rasterised::FontsNeeded(wants) => Ok(encode_fonts_needed(&wants)),
+    }
+}
+
+impl ImageRenderService {
+    /// `OP_THUMBNAIL`: draw the document uploaded last as its own content,
+    /// fitted inside a `side` square, and let it go.
+    ///
+    /// The decode is forecast from the header and held to
+    /// [`MAX_THUMBNAIL_PEAK_BYTES`] before a pixel buffer exists, and decodes
+    /// straight to the size the square needs, so a large photograph costs what
+    /// its tile does. The source is held to what the viewer opens, so a file the
+    /// viewer reads has a thumbnail unless only its decode is too dear.
+    fn handle_thumbnail(&mut self, request: &[u8]) -> Result<Vec<u8>, IconRefusal> {
+        let mut r = Reader::new(request);
+        let (Ok(OP_THUMBNAIL), Ok(side), Ok(named)) = (r.u8(), r.u32(), r.u8()) else {
+            return Err(IconRefusal::MalformedRequest);
+        };
+        if side == 0 || side > MAX_ICON_SIDE || !r.is_exhausted() {
+            return Err(IconRefusal::MalformedRequest);
+        }
+        let named = match named {
+            0 => None,
+            raw => Some(
+                ViewFormat::from_wire(raw)
+                    .and_then(ViewFormat::raster)
+                    .ok_or(IconRefusal::UnsupportedFormat)?,
+            ),
+        };
+        // Taken, so the file does not outlive the one picture it was sent for.
+        let bytes = self
+            .document
+            .take()
+            .filter(Document::is_complete)
+            .ok_or(IconRefusal::MalformedRequest)?
+            .into_bytes();
+        let format = named
+            .or_else(|| tairix_image::sniff(&bytes))
+            .ok_or(IconRefusal::UnsupportedFormat)?;
+        let (limits, fit) = (view_limits(), FitBox::new(side, side));
+        let refused = |err: DecodeError| match DecodeVerdict::of(&err) {
+            DecodeVerdict::Unsupported => IconRefusal::UnsupportedFormat,
+            DecodeVerdict::Damaged => IconRefusal::MalformedImage,
+            DecodeVerdict::TooLarge => IconRefusal::TooLarge,
+            DecodeVerdict::OutOfMemory => IconRefusal::Unrenderable,
+        };
+        let peak =
+            tairix_image::decode_peak_bytes_as(format, &bytes, &limits, fit).map_err(refused)?;
+        if peak > MAX_THUMBNAIL_PEAK_BYTES {
+            return Err(IconRefusal::TooLarge);
+        }
+        let image =
+            tairix_image::decode_fitted_as(format, &bytes, &limits, fit).map_err(refused)?;
+        drop(bytes);
+        let rgba = letterbox(image.width(), image.height(), image.pixels(), side)?;
+        let mut w = Writer::with_capacity(5 + 4 + rgba.len());
+        w.u8(REPLY_PIXELS);
+        w.u32(side);
+        w.bytes(&rgba);
+        Ok(w.finish())
     }
 }
 
@@ -491,8 +582,32 @@ fn rasterise_png(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
 /// scaling implementation, so a downscale blends (never nearest-neighbour)
 /// exactly as the wallpaper path's resampling does.
 fn scale_to_square(src_w: u32, src_h: u32, src: &[u8], side: u32) -> Result<Vec<u8>, IconRefusal> {
-    let mut out = vec![0u8; pixel_buffer_len(side, side)];
+    place_in_square(src_w, src_h, src, side, fit_within(src_w, src_h, side))
+}
+
+/// [`scale_to_square`], except that a picture smaller than the square is
+/// drawn at its own size rather than blurred up to fill it: what a thumbnail
+/// shows of a small file is the file.
+fn letterbox(src_w: u32, src_h: u32, src: &[u8], side: u32) -> Result<Vec<u8>, IconRefusal> {
     let (fit_w, fit_h) = fit_within(src_w, src_h, side);
+    let fit = if fit_w > src_w || fit_h > src_h {
+        (src_w, src_h)
+    } else {
+        (fit_w, fit_h)
+    };
+    place_in_square(src_w, src_h, src, side, fit)
+}
+
+/// Resample straight-alpha RGBA8 `src` (`src_w`×`src_h`) to `fit` and centre
+/// it in a `side`×`side` buffer of transparent padding.
+fn place_in_square(
+    src_w: u32,
+    src_h: u32,
+    src: &[u8],
+    side: u32,
+    (fit_w, fit_h): (u32, u32),
+) -> Result<Vec<u8>, IconRefusal> {
+    let mut out = vec![0u8; pixel_buffer_len(side, side)];
     let x0 = (side - fit_w) / 2;
     let y0 = (side - fit_h) / 2;
     let image = Rgba8Image::new(src_w, src_h, src).map_err(|_| IconRefusal::Unrenderable)?;
@@ -635,6 +750,77 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
             })?;
         decode_icon_reply(&reply, side)
     })
+}
+
+/// Draw the document already uploaded to the worker as its own content, fitted
+/// inside a `side`-pixel square of straight-alpha RGBA8 and centred on it.
+///
+/// `format` names the format to read it as, for one that carries no
+/// signature; `None` reads the document's own. The worker lets the document go
+/// once it is drawn, so each thumbnail uploads its own.
+///
+/// # Errors
+///
+/// [`IconRasterFailure`]: the sandbox failed, the worker refused (no document,
+/// an unrecognised or damaged picture, one too dear to decode), or the reply
+/// could not be believed.
+pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    side: u32,
+    format: Option<ViewFormat>,
+) -> Result<Vec<u8>, IconRasterFailure> {
+    if side == 0 || side > MAX_ICON_SIDE {
+        return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
+    }
+    let mut w = Writer::new();
+    w.u8(OP_THUMBNAIL);
+    w.u32(side);
+    w.u8(format.map_or(0, ViewFormat::to_wire));
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&request)
+            .map_err(IconRasterFailure::Sandbox)?;
+        decode_icon_reply(&reply, side)
+    })
+}
+
+/// Why a picture file could not be drawn as its own content.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ThumbnailFailure {
+    /// Streaming the file to the worker failed.
+    Upload(UploadFailure<()>),
+    /// The worker would not draw it.
+    Render(IconRasterFailure),
+}
+
+/// Stream `document` to the worker and draw it as its own content at `side`
+/// pixels, its format read as `reading` says: the whole of what a thumbnail
+/// costs a program, so every program that draws one draws it the same way.
+///
+/// # Errors
+///
+/// [`ThumbnailFailure`]: the upload or the render failed.
+pub fn thumbnail<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    side: u32,
+    reading: tairix_icon::Reading,
+    document: &mut dyn tairix_icon::ArtworkDocument,
+) -> Result<Vec<u8>, ThumbnailFailure> {
+    let length = usize::try_from(document.stamp().size).map_err(|_| {
+        ThumbnailFailure::Upload(UploadFailure::Document(DocumentFailure::Refused(
+            DocumentRefusal::TooLarge,
+        )))
+    })?;
+    upload_document(sandbox, length, |offset, into| {
+        document.read_at(offset, into).ok_or(())
+    })
+    .map_err(ThumbnailFailure::Upload)?;
+    let format = match reading {
+        tairix_icon::Reading::Signature => None,
+        tairix_icon::Reading::Sprite => Some(ViewFormat::Sprite),
+    };
+    render_thumbnail(sandbox, side, format).map_err(ThumbnailFailure::Render)
 }
 
 /// Send `payload` to the worker, supplying glyph geometry once if the

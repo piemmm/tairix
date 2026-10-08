@@ -1396,6 +1396,7 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. } => Acted::Idle,
         }

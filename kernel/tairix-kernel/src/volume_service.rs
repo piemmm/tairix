@@ -81,9 +81,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching,
+    NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -268,8 +268,9 @@ impl FilesystemRead for UnavailableFs {
         &mut self,
         _dir: NodeId,
         _cursor: u64,
-        _name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        _visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         Err(DriverError::DeviceFault)
     }
 

@@ -42,8 +42,13 @@ reach it.
 
 The optional `directory` operand is the location to open — the desktop
 opens a folder by launching the file manager with that folder's path.
-With no operand the window opens at the launching user's home directory
-(`HOME`), and at the root view when `HOME` is unset or cannot be listed.
+With no operand the window opens among the launching user's own files
+(`$HOME/UserFiles`), then at their home when that cannot be listed, and at
+the root view when `HOME` is unset or neither can be listed; each refusal
+is stated with the place tried next. A request for a folder a window
+already shows brings that window forward instead of opening a second
+(`WindowRequest::ActivateWindow`, under the activation the user's gesture
+handed this process).
 The grammar is the one every command app uses: `-h`, `-?`, and `--help`
 win wherever they appear and print the bundle's own short help through
 the shared help engine; `--` ends the options; an unknown option or a
@@ -67,8 +72,9 @@ before any syscall:
   error stream.
 
 A refused or unlistable location **degrades, it does not exit**: the
-reason is stated on `stderr` and the window opens at the home directory
-instead (then the root view), so a bad argument never leaves the user
+reason is stated on `stderr` and the window opens where a bare open would
+instead (the user's own files, their home, then the root view), so a bad
+argument never leaves the user
 with no window. Only a command line the program cannot act on at all —
 an unknown option, a second operand, non-UTF-8 argv — is a refusal, and
 it exits `2` after stating the reason and the usage banner.
@@ -114,7 +120,15 @@ bundle by spawning the bundle's own `Run` through the ordinary signed
 app-load gate (asynchronously, with the launched child reaped on the
 wait-set's any-child member so it is never left a zombie; a refusal stated
 fail-loud on `stderr`), `Backspace` goes up); `F2` renames the selected item,
-`Ctrl+Shift+N` makes a new folder, `Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut, copy,
+a drag of selected entries carries them to another of its windows, onto the
+desktop, or (one file) onto an application's icon-bar slot — copy by default,
+move with `Shift`, the pointer badged with which, the folder it would land in
+lit — and drops through the paste machinery,
+a drag across the listing's ground draws a band that selects what it covers
+and scrolls the listing when held at an end (`Escape` takes it back),
+`Ctrl+Shift+N` makes a new folder (the context menu's New ▸ also makes a
+blank document of each type an installed editor writes),
+`Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut, copy,
 and paste the selection (a same-volume move is one `fs_rename`, a
 cross-volume move copies-then-deletes, a copy streams in bounded chunks),
 `Delete` removes it after a modal confirmation, and `Alt+Enter` shows its
@@ -143,7 +157,7 @@ band: the user's own places above, every mounted volume below, with the
 listing and its scrollbar gutter inset beside it. A place name too long for
 the rail ends in the shared ellipsis, so hidden text is never silent. The
 row order is fixed, so the rail never reshuffles under the user: Home,
-Desktop, Documents, `Apps`, `System`, a drawn separation, then the volumes
+Desktop, UserFiles, `Apps`, `System`, a drawn separation, then the volumes
 sorted by label. A rail longer than the window scrolls, with a bar of its own,
 so a machine with many volumes reaches every one of them.
 
@@ -235,17 +249,18 @@ reserves, so a hundred-entry directory costs one read and one decode per
 *visible kind*; nothing pre-warms an icon for an entry scrolled out of
 view.
 
-The decode is also never **inside** the paint. A tile that misses records
-the decode on the shared deferred-decode desk
+The decode is also never **inside** the paint, nor on the event loop. A tile
+that misses records the decode on the shared deferred-decode desk
 (`tairix_icon::ArtworkDesk`, the same policy the desktop session's worker
-thread drives) and draws its built-in glyph; the event loop drains queued
-input, runs **one** recorded decode, and repaints when the desk runs dry
-— so a folder of picture-bearing bundles neither freezes the first frame
-nor stalls a scroll, and a key or a click waits at most one decode. The
-repaint is one whole-window pass per batch rather than one per icon,
-because a present is a round trip through the compositor and far dearer
-than the decode that produced a single tile. The whole model is
-`src/icons.rs`, host-tested there.
+thread drives) and draws its built-in glyph; the app's reader thread decodes
+it in the sandbox and wakes the loop once its batch drains — so a folder of
+picture-bearing bundles neither freezes the first frame nor stalls a scroll,
+and a key or a click waits on no decode. The repaint is one whole-window pass
+per batch rather than one per icon, because a present is a round trip through
+the compositor and far dearer than the decode that produced a single tile. A
+picture file's own content is decoded last of all, after the icons and the
+folder cues, and shown as it lands. The paint side is `src/icons.rs`,
+host-tested there.
 
 The cache is built through the one shared
 `tairix_icon::artwork_cache` constructor with the app's real seat, frame

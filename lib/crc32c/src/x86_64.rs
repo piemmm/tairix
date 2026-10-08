@@ -15,20 +15,21 @@
 
 use core::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
 
-/// Compute the CRC-32C of `data` using the SSE4.2 `crc32` instruction.
+/// Advance the raw CRC-32C register `state` over `data` using the SSE4.2
+/// `crc32` instruction, inverting neither side.
 ///
 /// Safe wrapper: the unsafe intrinsic call is sound because
 /// `crc32c_sse42_unchecked` is only invoked here, and this whole candidate
 /// is compiled and selected only when SSE4.2 is present (the caller in
 /// `lib/cpuops` gates on the feature bit).
 #[must_use]
-pub fn crc32c_sse42(data: &[u8]) -> u32 {
+pub fn crc32c_sse42(state: u32, data: &[u8]) -> u32 {
     // SAFETY: `crc32c_sse42_unchecked` requires the SSE4.2 feature. This
     // candidate is registered with `requires: &[CpuFeature::Sse42]`, so the
     // `lib/cpuops` selector only ever hands its function pointer to a consumer
     // after confirming the bit is set in the delivered `CpuFeatureSet`; a core
     // without SSE4.2 filters it out and runs the portable baseline instead.
-    unsafe { crc32c_sse42_unchecked(data) }
+    unsafe { crc32c_sse42_unchecked(state, data) }
 }
 
 /// The `#[target_feature]` core.
@@ -44,8 +45,8 @@ pub fn crc32c_sse42(data: &[u8]) -> u32 {
 // exact, not a lossy truncation.
 #[allow(clippy::cast_possible_truncation)]
 #[target_feature(enable = "sse4.2")]
-unsafe fn crc32c_sse42_unchecked(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu64;
+unsafe fn crc32c_sse42_unchecked(state: u32, data: &[u8]) -> u32 {
+    let mut crc = u64::from(state);
     let (chunks, remainder) = data.as_chunks::<8>();
     for chunk in chunks {
         // The bytes are folded low-address-first to match the reflected
@@ -63,5 +64,5 @@ unsafe fn crc32c_sse42_unchecked(data: &[u8]) -> u32 {
     for &byte in remainder {
         crc = _mm_crc32_u8(crc, byte);
     }
-    !crc
+    crc
 }

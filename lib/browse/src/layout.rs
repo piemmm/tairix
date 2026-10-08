@@ -209,6 +209,138 @@ impl ListView {
         let index = usize::try_from(down / self.row_height).ok()?;
         (index < self.entry_count).then_some(index)
     }
+
+    /// The rows any part of which lies within `band`, a rectangle in layout
+    /// coordinates.
+    #[must_use]
+    pub(crate) fn band_cells(&self, band: Rect) -> BandCells {
+        let area = self.list_area();
+        let rows = if overlaps(band.left(), band.width, area.left(), area.width) {
+            let (from, extent) = along(band.top(), band.height, area.top());
+            GridRun::fixed(self.entry_count, self.row_height, 0).shown(from, extent)
+        } else {
+            0..0
+        };
+        BandCells::new(rows, 0..1, 1, self.entry_count)
+    }
+}
+
+/// The span `[lo, lo + len)` measured from `origin`, cut at `origin`: where it
+/// starts and how far it reaches past `origin`.
+fn along(lo: i32, len: u32, origin: i32) -> (u64, u64) {
+    let start = i64::from(lo) - i64::from(origin);
+    let end = start.saturating_add(i64::from(len));
+    let from = start.max(0);
+    let extent = end.saturating_sub(from).max(0);
+    (
+        u64::try_from(from).unwrap_or(0),
+        u64::try_from(extent).unwrap_or(0),
+    )
+}
+
+/// Whether `[lo, lo + len)` and `[other, other + other_len)` share a pixel.
+fn overlaps(lo: i32, len: u32, other: i32, other_len: u32) -> bool {
+    let (start, end) = (i64::from(lo), i64::from(lo) + i64::from(len));
+    let (other_start, other_end) = (i64::from(other), i64::from(other) + i64::from(other_len));
+    start < other_end && other_start < end
+}
+
+/// The entries a band touches: every slot of every line it reaches.
+///
+/// A list has one slot per line. Membership, and the difference between two
+/// bands, are arithmetic over the two ranges, so neither walks the listing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BandCells {
+    lines: Range<usize>,
+    slots: Range<usize>,
+    per_line: usize,
+    count: usize,
+}
+
+impl BandCells {
+    /// The cells of `lines` × `slots` in a layout of `per_line` slots a line
+    /// holding `count` entries.
+    fn new(lines: Range<usize>, slots: Range<usize>, per_line: usize, count: usize) -> Self {
+        if lines.is_empty() || slots.is_empty() {
+            return Self {
+                per_line,
+                count,
+                ..Self::default()
+            };
+        }
+        Self {
+            lines,
+            slots,
+            per_line,
+            count,
+        }
+    }
+
+    /// Whether the band touches the entry at `index`.
+    #[must_use]
+    pub(crate) fn contains(&self, index: usize) -> bool {
+        self.per_line != 0
+            && index < self.count
+            && self.lines.contains(&(index / self.per_line))
+            && self.slots.contains(&(index % self.per_line))
+    }
+
+    /// Every entry the band touches, line by line.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        cells(
+            self.lines.clone(),
+            self.slots.clone(),
+            self.per_line,
+            self.count,
+        )
+    }
+
+    /// Visit every entry `self` touches and `other` does not.
+    ///
+    /// Two bands over one layout differ only along their edges, so only those
+    /// cells are visited; bands over different layouts are compared entry by
+    /// entry.
+    pub(crate) fn each_not_in(&self, other: &Self, mut visit: impl FnMut(usize)) {
+        if self.per_line != other.per_line || self.count != other.count {
+            self.iter()
+                .filter(|index| !other.contains(*index))
+                .for_each(visit);
+            return;
+        }
+        let (before, after) = outside(&self.lines, &other.lines);
+        for lines in [before, after] {
+            cells(lines, self.slots.clone(), self.per_line, self.count).for_each(&mut visit);
+        }
+        let shared = self.lines.start.max(other.lines.start)..self.lines.end.min(other.lines.end);
+        let (left, right) = outside(&self.slots, &other.slots);
+        for slots in [left, right] {
+            cells(shared.clone(), slots, self.per_line, self.count).for_each(&mut visit);
+        }
+    }
+}
+
+/// The parts of `range` before and after `cut`.
+fn outside(range: &Range<usize>, cut: &Range<usize>) -> (Range<usize>, Range<usize>) {
+    let before_end = range.end.min(cut.start).max(range.start);
+    let after_start = range.start.max(cut.end).min(range.end);
+    (range.start..before_end, after_start..range.end)
+}
+
+/// The entries at `lines` × `slots` of a layout of `per_line` slots a line
+/// holding `count` entries, line by line.
+fn cells(
+    lines: Range<usize>,
+    slots: Range<usize>,
+    per_line: usize,
+    count: usize,
+) -> impl Iterator<Item = usize> {
+    lines.flat_map(move |line| {
+        let first = line.checked_mul(per_line);
+        slots
+            .clone()
+            .filter_map(move |slot| first?.checked_add(slot))
+            .filter(move |index| *index < count)
+    })
 }
 
 /// `viewport` less its top `header` pixels: where a view's items scroll.
@@ -594,6 +726,42 @@ impl GridView {
         let index = line.checked_mul(slots.count())?.checked_add(slot)?;
         (index < self.entry_count).then_some(index)
     }
+
+    /// The tiles any part of which lies within `band`, a rectangle in layout
+    /// coordinates. A band lying only in a margin or a gap touches none.
+    #[must_use]
+    pub(crate) fn band_cells(&self, band: Rect) -> BandCells {
+        let area = self.tile_area();
+        let (x_from, x_extent) = along(band.left(), band.width, area.left());
+        let down = along(band.top(), band.height, area.top());
+        // The trailing-edge column measures across inward from its frame's
+        // right edge, exactly as it lays its tiles out.
+        let across = if self.flow.anchors_to_the_trailing_edge() {
+            let frame = u64::from(self.frame_width().unwrap_or(0));
+            let end = frame.saturating_sub(x_from);
+            let start = frame.saturating_sub(x_from.saturating_add(x_extent));
+            (start, end - start)
+        } else {
+            (x_from, x_extent)
+        };
+        let (line_span, slot_span) = if self.flow.wraps_down_a_column() {
+            (across, down)
+        } else {
+            (down, across)
+        };
+        BandCells::new(
+            self.line_run().shown(line_span.0, line_span.1),
+            self.slot_run().shown(slot_span.0, slot_span.1),
+            self.cells_per_line(),
+            self.entry_count,
+        )
+    }
+
+    /// Whether a growing offset moves the view toward the viewport's leading
+    /// edge rather than away from it: the trailing column scrolls inward.
+    const fn scrolls_toward_the_leading_edge(&self) -> bool {
+        self.flow.anchors_to_the_trailing_edge()
+    }
 }
 
 /// One of the two item-view geometries, chosen by the browser's [`ViewMode`].
@@ -677,6 +845,36 @@ impl ViewLayout {
         match self {
             Self::List(v) => v.visible_range(offset),
             Self::Grid(v) => v.visible_range(offset),
+        }
+    }
+
+    /// The entries any part of which lies within `band`, a rectangle in
+    /// layout coordinates.
+    #[must_use]
+    pub(crate) fn band_cells(&self, band: Rect) -> BandCells {
+        match self {
+            Self::List(v) => v.band_cells(band),
+            Self::Grid(v) => v.band_cells(band),
+        }
+    }
+
+    /// The axis the active view scrolls along.
+    #[must_use]
+    pub(crate) fn axis(&self) -> ScrollOrientation {
+        match self {
+            Self::List(_) => ScrollOrientation::Vertical,
+            Self::Grid(v) => v.axis(),
+        }
+    }
+
+    /// Whether a growing offset brings into view what lies toward the
+    /// viewport's leading edge — true only of the trailing column, which
+    /// scrolls inward.
+    #[must_use]
+    pub(crate) fn scrolls_toward_the_leading_edge(&self) -> bool {
+        match self {
+            Self::List(_) => false,
+            Self::Grid(v) => v.scrolls_toward_the_leading_edge(),
         }
     }
 }

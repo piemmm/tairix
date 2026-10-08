@@ -28,8 +28,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeInfo,
-    NodeKind, NodeTimes,
+    DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId,
+    NodeInfo, NodeKind, NodeTimes,
 };
 use tairix_abi::driver::DriverError;
 use tairix_abi::fs::{
@@ -39,9 +39,9 @@ use tairix_abi::fs::{
 use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
 use tairix_kernel_sec::{GroupId, UserId};
-use tairix_util::secret::Wiped;
 use zeroize::Zeroize;
 
+use super::listing::{DirPosition, ListEnd};
 use super::path::{parse_link_target, TargetStep, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
 use super::perm::{Access, Credentials, Metadata};
 use super::VfsError;
@@ -140,6 +140,44 @@ pub struct DelegatedEntry {
     pub info: NodeInfo,
     /// The child's name (a single component, never `.`/`..`).
     pub name: String,
+}
+
+/// One entry a listing batch hands over, borrowed from the driver for the
+/// visit.
+#[derive(Debug)]
+pub struct DelegatedRef<'a> {
+    /// The driver's node number for the child.
+    pub node: u64,
+    /// The child's structural metadata, as the listing driver read it.
+    pub info: NodeInfo,
+    /// The child's name (a single component, never `.`/`..`).
+    pub name: &'a str,
+}
+
+impl DelegatedRef<'_> {
+    /// This entry, owning its name, for a caller that keeps it past the visit.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OutOfMemory`] when the name cannot be held.
+    pub fn owned(&self) -> Result<DelegatedEntry, VfsError> {
+        let mut name = String::new();
+        name.try_reserve_exact(self.name.len())
+            .map_err(|_| VfsError::OutOfMemory)?;
+        name.push_str(self.name);
+        Ok(DelegatedEntry {
+            node: self.node,
+            info: self.info,
+            name,
+        })
+    }
+}
+
+/// The name a driver listed, if it is a single valid component.
+fn component_name(name: &[u8]) -> Option<&str> {
+    core::str::from_utf8(name)
+        .ok()
+        .filter(|name| !name.is_empty() && name.len() <= MAX_COMPONENT_LEN)
 }
 
 /// A name is decrypted user data: wiped before its allocation is released, as
@@ -1186,79 +1224,92 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         self.fs.read_at(node, offset, buf).map_err(map_driver_error)
     }
 
-    /// List the entries of the directory at `components`, in the driver's
-    /// stable on-disk order, each with the driver's node number and the
-    /// structural [`NodeInfo`] (which carries the node's kind, name count,
-    /// sizes, and timestamps) the driver reports for it.
+    /// Hand `each` the entries of the directory at `components` from `at`
+    /// on, in the driver's stable on-disk order, moving `at` past each one it
+    /// takes, until it answers [`DirVisit::Stop`] or the directory ends.
     ///
-    /// The kind, sizes, and identity come from the listing driver itself, so
-    /// a caller never has to re-resolve each child by path — a child whose
-    /// *path* is shadowed by another mount would otherwise be judged against
-    /// the wrong volume, and on an uncached, authenticated volume every such
-    /// re-resolution is a fresh full walk.
+    /// Each entry carries the driver's node number and the structural
+    /// [`NodeInfo`] the listing driver read, so a caller never re-resolves a
+    /// child by path — a child whose *path* another mount shadows would
+    /// otherwise be judged against the wrong volume.
+    ///
+    /// The position fixes the directory's node on the first batch; finding
+    /// another node at the path later refuses the batch before an entry is
+    /// handed over. Answers how the batch ended.
     ///
     /// # Errors
     ///
     /// * [`VfsError::NotADirectory`] if `components` names a file.
     /// * [`VfsError::PermissionDenied`] if the node's metadata denies read.
-    /// * [`VfsError::NotFound`] or [`VfsError::Io`] (the latter also for a
-    ///   directory entry whose on-disk name is not valid UTF-8, or for a
-    ///   driver cursor that fails to advance).
-    /// * [`VfsError::OutOfMemory`] if the listing cannot be held.
-    ///
-    /// Each entry is handed to `each` as it is read, and what it answers is
-    /// what the listing holds, so a caller that keeps another form of the
-    /// entries never holds two whole copies of the directory.
-    pub fn list<T>(
+    /// * [`VfsError::Stale`] if the path no longer names the position's
+    ///   directory.
+    /// * [`VfsError::NotFound`] or [`VfsError::Io`] (the latter also for an
+    ///   entry whose name is empty, over-long or not UTF-8, and for a driver
+    ///   cursor that fails to advance).
+    pub fn list_from(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
         final_link: FinalLink,
-        mut each: impl FnMut(DelegatedEntry) -> T,
-    ) -> Result<Vec<T>, VfsError> {
+        at: &mut DirPosition,
+        each: &mut dyn FnMut(&DelegatedRef<'_>) -> DirVisit,
+    ) -> Result<ListEnd, VfsError> {
         let node = self.listable(cred, components, final_link)?;
-
-        let mut entries = Vec::new();
-        // Each name read lands here first; it is user data, wiped however the
-        // listing ends.
-        let mut name_buf = Wiped::<MAX_COMPONENT_LEN>::new();
-        let mut cursor: u64 = 0;
-        while let Some(entry) = self
-            .fs
-            .read_dir(node, cursor, &mut name_buf[..])
-            .map_err(map_driver_error)?
-        {
-            // A cursor that does not move cannot make progress; fail the
-            // listing closed rather than loop on a corrupt directory.
-            if entry.next_cursor == cursor {
-                return Err(VfsError::Io);
-            }
-            let name =
-                core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            let mut owned = String::new();
-            owned
-                .try_reserve_exact(name.len())
-                .map_err(|_| VfsError::OutOfMemory)?;
-            owned.push_str(name);
-            entries.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
-            entries.push(each(DelegatedEntry {
-                node: entry.node.raw(),
-                info: entry.info,
-                name: owned,
-            }));
-            cursor = entry.next_cursor;
+        if at.dir.is_some_and(|bound| bound != node.raw()) {
+            return Err(VfsError::Stale);
         }
-        Ok(entries)
+        at.dir = Some(node.raw());
+        let start = at.cursor;
+        let resume = at.after.clone();
+        let mut end = ListEnd::Exhausted;
+        let mut took = false;
+        let mut failed = None;
+        self.fs
+            .read_dir(node, start, resume.get(), &mut |entry, name| {
+                // A malformed name fails the batch closed rather than being
+                // listed around.
+                let Some(name) = component_name(name) else {
+                    failed = Some(VfsError::Io);
+                    return DirVisit::Stop;
+                };
+                let listed = DelegatedRef {
+                    node: entry.node.raw(),
+                    info: entry.info,
+                    name,
+                };
+                if each(&listed) == DirVisit::Stop {
+                    end = ListEnd::Stopped;
+                    return DirVisit::Stop;
+                }
+                took = true;
+                at.cursor = entry.next_cursor;
+                if let Err(err) = at.after.set(name.as_bytes()) {
+                    failed = Some(err);
+                    return DirVisit::Stop;
+                }
+                DirVisit::Take
+            })
+            .map_err(map_driver_error)?;
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        // A cursor that does not move would hand the next batch the same
+        // entries for ever.
+        if took && at.cursor == start {
+            return Err(VfsError::Io);
+        }
+        Ok(end)
     }
 
-    /// For each of `names`, the entry [`list`](Self::list) would report for
-    /// it, or [`None`] where the directory holds no such name — under the
-    /// same authorisation, with one lookup per name rather than a read of
-    /// every entry. Returns the directory's own node with them.
+    /// For each of `names`, the entry [`list_from`](Self::list_from) would
+    /// hand over for it, or [`None`] where the directory holds no such name —
+    /// under the same authorisation, with one lookup per name rather than a
+    /// read of every entry. Returns the directory's own node with them.
     ///
     /// # Errors
     ///
-    /// As [`list`](Self::list).
+    /// As [`list_from`](Self::list_from), save [`VfsError::Stale`], which only
+    /// a position can be.
     pub fn lookup_entries(
         &mut self,
         cred: &Credentials<'_>,
@@ -1291,7 +1342,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     }
 
     /// The directory at `components`, once the caller is authorised to list
-    /// it: the one check [`list`](Self::list) and
+    /// it: the one check [`list_from`](Self::list_from) and
     /// [`lookup_entries`](Self::lookup_entries) share.
     fn listable(
         &mut self,
@@ -1584,6 +1635,9 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// (empty) directory — the atomic `rmdir` posture, decided in the same
     /// locked walk that removes the entry, never by a caller-side stat.
     ///
+    /// Returns the removed node when it was a directory, so the caller can
+    /// retire the listings bound to it.
+    ///
     /// # Errors
     ///
     /// * [`VfsError::InvalidPath`] if `components` is empty.
@@ -1601,21 +1655,23 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         cred: &Credentials<'_>,
         components: &[String],
         dir_only: bool,
-    ) -> Result<(), VfsError> {
+    ) -> Result<Option<NodeId>, VfsError> {
         let place = self.place_for_write(cred, components, FinalLink::Keep)?;
         // Checked here so the walk's own NotFound and NotEmpty are answered
         // without a driver round trip; the driver still checks, and its
         // refusal carries the same class.
         let (node, info, meta) = place.found.ok_or(VfsError::NotFound)?;
         Self::authorize_name_mutation(cred, Some(&meta))?;
-        if info.kind == NodeKind::Directory {
-            let mut name_buf = Wiped::<MAX_COMPONENT_LEN>::new();
-            if self
-                .fs
-                .read_dir(node, 0, &mut name_buf[..])
-                .map_err(map_driver_error)?
-                .is_some()
-            {
+        let directory = info.kind == NodeKind::Directory;
+        if directory {
+            let mut occupied = false;
+            self.fs
+                .read_dir(node, 0, &[], &mut |_, _| {
+                    occupied = true;
+                    DirVisit::Stop
+                })
+                .map_err(map_driver_error)?;
+            if occupied {
                 return Err(VfsError::NotEmpty);
             }
         } else if dir_only {
@@ -1623,7 +1679,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         }
         self.fs
             .remove(place.parent, place.name.as_bytes())
-            .map_err(map_driver_error)
+            .map_err(map_driver_error)?;
+        Ok(directory.then_some(node))
     }
 
     /// Move the leaf at `src_components` to `dst_components` within the same
@@ -1642,6 +1699,9 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// POSIX authorises nothing against the moved node. The structural move — the existence, kind-compatibility, empty-target, and
     /// directory-into-its-own-subtree checks — is performed by the driver.
     ///
+    /// Returns the directory the move replaced at the destination, if it
+    /// replaced one, so the caller can retire the listings bound to it.
+    ///
     /// # Errors
     ///
     /// * [`VfsError::InvalidPath`] if either path is empty (names the mount
@@ -1659,10 +1719,10 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         cred: &Credentials<'_>,
         src_components: &[String],
         dst_components: &[String],
-    ) -> Result<(), VfsError> {
+    ) -> Result<Option<NodeId>, VfsError> {
         let src = self.place_for_write(cred, src_components, FinalLink::Keep)?;
         let dst = self.place_for_write(cred, dst_components, FinalLink::Keep)?;
-        let (_, src_info, src_meta) = src.found.ok_or(VfsError::NotFound)?;
+        let (src_node, src_info, src_meta) = src.found.ok_or(VfsError::NotFound)?;
         // Both ends move a gated name: the source loses it and a replaced
         // destination is destroyed by it.
         Self::authorize_name_mutation(cred, Some(&src_meta))?;
@@ -1673,6 +1733,10 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         if src.parent != dst.parent && src_info.kind == NodeKind::Directory {
             src_meta.authorize(cred, Access::Write)?;
         }
+        // A move onto its own name destroys nothing.
+        let replaced = dst.found.as_ref().and_then(|&(node, ref info, _)| {
+            (info.kind == NodeKind::Directory && node != src_node).then_some(node)
+        });
 
         self.fs
             .rename(
@@ -1681,7 +1745,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
                 dst.parent,
                 dst.name.as_bytes(),
             )
-            .map_err(map_driver_error)
+            .map_err(map_driver_error)?;
+        Ok(replaced)
     }
 }
 

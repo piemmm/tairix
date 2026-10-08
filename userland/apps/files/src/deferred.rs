@@ -8,21 +8,10 @@
 //! which on a slow or contended device is not a frame but a visible stall.
 //!
 //! So they run on a worker, and the loop learns an answer landed through the
-//! wait-set it already parks in. The listing and scan policies are the shared
-//! ones ([`tairix_browse::ListingDesk`] and `tairix_util::defer::JobDesk`, the
-//! latter linked into the target build alone); what is here is the one policy
-//! neither covers.
-//!
-//! # The folder-occupancy probe
-//!
-//! A folder draws an empty/non-empty cue, and the only way to know which is to
-//! read the folder. The renderer asks for the cue of every folder it draws, on
-//! every frame, so the ask must cost nothing: [`Probes`] answers what it
-//! already knows and *records* the rest, which is what lets a paint resolve
-//! occupancy while performing no I/O at all.
-//!
-//! The recorded set is drained as one batch rather than one probe per wake: a
-//! screenful of folders would otherwise be a screenful of repaints.
+//! wait-set it already parks in. The listing, probe and scan policies are the
+//! shared ones ([`tairix_browse::ListingDesk`], [`tairix_browse::Probes`] and
+//! `tairix_util::defer::JobDesk`, the last linked into the target build
+//! alone); what is here is the one policy none covers.
 //!
 //! # The Properties read
 //!
@@ -33,12 +22,11 @@
 //! displace another's; a re-read of the same window supersedes its own
 //! outstanding one, since only the latest answer describes the node now.
 
-use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::{EntryKind, Probe, Properties};
+use tairix_browse::{EntryKind, Properties};
 
 /// One browser window's directory-listing consumer.
 ///
@@ -77,179 +65,6 @@ impl FilesClient {
     }
 }
 
-/// What the folder cues have asked for and what has come back.
-///
-/// Deliberately free of locks, threads, and syscalls: the embedder supplies the
-/// exclusion and the blocking, so every rule here is a host test.
-#[derive(Debug, Default)]
-pub struct Probes {
-    /// Folders asked about and not yet probed, in the order asked. A batch is
-    /// taken from here whole.
-    wanted: Vec<Vec<String>>,
-    /// Folders being probed right now, so a re-ask during the probe records no
-    /// second one.
-    probing: Vec<Vec<String>>,
-    /// Answers waiting to be drawn, each served once — the renderer latches it
-    /// onto the entry, so a later ask is a genuinely fresh question.
-    answers: Vec<(Vec<String>, bool)>,
-    /// Folders that changed while being probed: their answers describe them
-    /// as they were and are dropped on delivery.
-    superseded: Vec<Vec<String>>,
-    /// Whether a batch has been delivered since the embedder last asked. The
-    /// loop consumes it and resolves the cues, which is what turns a worker's
-    /// answer into pixels: without it the answers sit here until some
-    /// unrelated repaint happens to latch them.
-    landed: bool,
-    /// Set once the embedder is tearing down, so nothing further is recorded.
-    stopping: bool,
-}
-
-impl Probes {
-    /// A desk with nothing asked for and nothing answered.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            wanted: Vec::new(),
-            probing: Vec::new(),
-            answers: Vec::new(),
-            superseded: Vec::new(),
-            landed: false,
-            stopping: false,
-        }
-    }
-
-    /// Answer the cue for `components`, recording the probe if this desk has
-    /// neither run it nor been asked for it already.
-    ///
-    /// [`Probe::Ready`] hands the answer *over* — the renderer latches it onto
-    /// the entry — so the slot goes with it. Everything else is
-    /// [`Probe::Pending`], which leaves the folder drawn without its cue until
-    /// the answer arrives.
-    ///
-    /// A stopping desk records nothing: no worker is left to answer it.
-    ///
-    /// The `bool` is whether this ask *recorded* a new probe, so the embedder
-    /// wakes a worker for a folder it has not seen rather than once per paint.
-    pub fn ask(&mut self, components: &[String]) -> (Probe, bool) {
-        if let Some(index) = self
-            .answers
-            .iter()
-            .position(|(path, _)| path.as_slice() == components)
-        {
-            let (_, occupied) = self.answers.remove(index);
-            return (Probe::Ready(occupied), false);
-        }
-        if self.stopping {
-            return (Probe::Pending, false);
-        }
-        // A folder that changed while being probed is asked again: the probe
-        // under way describes it as it was.
-        let superseded = self
-            .superseded
-            .iter()
-            .any(|path| path.as_slice() == components);
-        let known = self.wanted.iter().any(|path| path.as_slice() == components)
-            || (!superseded
-                && self
-                    .probing
-                    .iter()
-                    .any(|path| path.as_slice() == components));
-        if !known {
-            self.wanted.push(components.to_vec());
-        }
-        (Probe::Pending, !known)
-    }
-
-    /// Whether any folder has been asked about and not yet probed.
-    #[must_use]
-    pub fn has_work(&self) -> bool {
-        !self.stopping && !self.wanted.is_empty()
-    }
-
-    /// The folders called `names` in the directory at `dir` changed: an answer
-    /// held or being probed for one describes it as it was, so it is dropped
-    /// and the folder is asked afresh. One pass over what is held, however
-    /// many folders changed.
-    pub fn invalidate(&mut self, dir: &[String], names: &BTreeSet<&str>) {
-        let changed = |path: &[String]| {
-            path.split_last()
-                .is_some_and(|(name, parent)| parent == dir && names.contains(name.as_str()))
-        };
-        self.answers.retain(|(path, _)| !changed(path));
-        for path in &self.probing {
-            if changed(path) && !self.superseded.contains(path) {
-                self.superseded.push(path.clone());
-            }
-        }
-    }
-
-    /// Take every outstanding probe as one batch, or `None` when there is
-    /// nothing to do.
-    ///
-    /// A batch rather than one probe at a time because the answers are drawn
-    /// together: a screenful of folders answered one wake at a time would be a
-    /// screenful of repaints for one screenful of cues.
-    pub fn next_batch(&mut self) -> Option<Vec<Vec<String>>> {
-        if self.stopping || self.wanted.is_empty() {
-            return None;
-        }
-        let batch = core::mem::take(&mut self.wanted);
-        self.probing.clone_from(&batch);
-        Some(batch)
-    }
-
-    /// Record a batch's answers, answering whether any is worth a repaint.
-    ///
-    /// The batch *replaces* whatever was held rather than adding to it, which
-    /// is what bounds this desk to one screenful. A paint asks about the whole
-    /// visible range and consumes every answer it wanted, so anything still
-    /// held when the next batch lands is for a folder scrolled out of view —
-    /// and keeping those would grow the set once per folder the user ever
-    /// scrolled past, which on a directory of a hundred thousand entries is a
-    /// capacity nothing bounds. A folder that scrolls back into view is simply
-    /// asked again.
-    pub fn deliver(&mut self, mut answers: Vec<(Vec<String>, bool)>) -> bool {
-        self.probing.clear();
-        let superseded = core::mem::take(&mut self.superseded);
-        answers.retain(|(path, _)| !superseded.contains(path));
-        if self.stopping || answers.is_empty() {
-            self.answers.clear();
-            return false;
-        }
-        self.answers = answers;
-        self.landed = true;
-        true
-    }
-
-    /// Whether a batch has been delivered since this was last asked, clearing
-    /// the record.
-    ///
-    /// The embedder resolves the visible cues on a `true` and presents the
-    /// windows whose icons moved, so the answer a worker produced is drawn on
-    /// the next turn of the loop rather than whenever some other gesture
-    /// happens to repaint.
-    pub fn take_landed(&mut self) -> bool {
-        core::mem::take(&mut self.landed)
-    }
-
-    /// Stop recording, so a parked worker leaves and no further cue is asked
-    /// for.
-    pub fn stop(&mut self) {
-        self.stopping = true;
-        self.wanted.clear();
-        self.answers.clear();
-        // Nothing is left to draw, so a delivery's unconsumed repaint dies
-        // with the answers it would have shown.
-        self.landed = false;
-    }
-
-    /// Whether the embedder has asked workers to leave.
-    #[must_use]
-    pub const fn stopping(&self) -> bool {
-        self.stopping
-    }
-}
-
 /// One Properties window's read: the node to describe and which window asked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PropertyJob {
@@ -265,8 +80,8 @@ pub struct PropertyJob {
 
 /// What the Properties windows have asked to be read and what has come back.
 ///
-/// Like [`Probes`], free of locks, threads, and syscalls: the embedder
-/// supplies the exclusion and the blocking, so every rule here is a host test.
+/// Free of locks, threads, and syscalls: the embedder supplies the exclusion
+/// and the blocking, so every rule here is a host test.
 #[derive(Debug, Default)]
 pub struct PropertyReads {
     /// Reads asked for and not yet started, in the order asked.

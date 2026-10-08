@@ -17,7 +17,8 @@ and weight, converted to physical pixels through the one shared DPI scale
 (`tairix_font::BitmapFont::for_role`, see
 [Theming](../desktop/theming.md#typography)). Interface text resolves
 `TextRole::Body`; window furniture (`TitleBar`, `WindowFrame`) resolves
-`TextRole::WindowTitle`.
+`TextRole::WindowTitle`; an icon tile's name, and a `TableRow` given it with
+`with_text_role`, resolves `TextRole::ItemLabel`.
 
 An application therefore *cannot* substitute a face of its own, so a menu,
 button, or dialog reads as the desktop's own furniture wherever it is drawn:
@@ -827,7 +828,8 @@ same pair — one query and one parameter:
 
 - `icon_side(bounds, scale, theme, …) -> u32` reports the exact pixel side
   the control's icon slot will be drawn into, and `0` when the geometry leaves
-  room for none. An owner asks its cache for artwork at precisely that size
+  room for none (an icon tile answers through its `TileLayout`, a `TableRow`
+  through the face its text is set in). An owner asks its cache for artwork at precisely that size
   rather than guessing one and rescaling at draw time. A control that gives
   its whole face to an icon sizes it off the **plate** — the smaller plate
   dimension, less its border and a twelfth of the plate on each side, so the
@@ -882,8 +884,10 @@ group of state and actions it owns.
 
 Only state paints anything behind the picture, and each state uses the mark the
 language already owns for it: the shared pointer wash for hover and press, the
-selection fill for a selected tile, the shared focus ring for the keyboard, and
-the shape-coded Signal Bead for a denied or unhealthy item. Nothing a tile draws
+selection fill for a selected tile, the shared focus ring for the keyboard, the
+shape-coded Signal Bead for a denied or unhealthy item, and for a **drop
+target** — where a carried drag would land — the hover wash and an accent
+outline (`paint_drop_target`), the one drop look a table row wears too. Nothing a tile draws
 escapes its bounds, so a view may lay tiles edge to edge — and bound the whole
 grid's paint to the area it owns — without a tile bleeding onto its neighbour.
 
@@ -939,14 +943,21 @@ selection, because a half-arrived plate under inverted ink is exactly the
 contrast that policy exists to guarantee — and a reduced-motion theme reports a
 zero duration, which settles the change immediately with no second code path.
 
-The name wraps rather than being cut. `paint_label` lays it out over as many
-whole lines as the band under the picture holds, each centred in the band's
+A tile's geometry is its `TileLayout`, which the owner states: how many whole
+name lines the band under the picture holds. The band sits half an inset below
+the picture and half an inset above the tile's foot, and the picture takes the
+height that leaves, capped by the width — so a cell sized with
+`TileLayout::height_for(side, …)` draws exactly that picture, and a tile is only
+as tall as what it holds. `icon_side`, `label_lines` and `label_rect` read the
+one geometry the render lays out to, so an owner never re-derives it: the file
+manager states one line, the login chooser three, so a two-word display name is
+not elided.
+
+The name is set in `TextRole::ItemLabel` and wraps rather than being cut.
+`paint_label` lays it out over the stated lines, each centred in the band's
 column, and elides the last with the shared ellipsis when the name runs past
 them; a band with no room for one whole line draws nothing rather than clipping
-a glyph. `IconTile::label_lines` reports that budget from the same geometry the
-render lays out to, so an owner sizing its tiles — the login chooser sizing an
-account tile so a two-word display name is not elided — asks the tile instead of
-re-deriving its label layout.
+a glyph.
 
 `IconTile::with_label_shadow` draws that name, the eliding ellipsis included,
 through `lib/font`'s one soft shadow, every line's shadow laid before any

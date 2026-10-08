@@ -9,12 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# The production `RtLinkReader`: the `fs_readlink` + resolving `fs_stat` pair a
-# listed symbolic link needs, written once here so the file manager, the
-# desktop, the trusted picker, and the wallpaper catalog share one
-# implementation rather than four copies of the same two calls (the charter
-# forbids that duplication). Enabled only by a freestanding `Run` binary; host
-# tooling builds the engine without it and injects its own reader.
+# The production `RtLinkReader` and folder probe: the `fs_readlink` + resolving
+# `fs_stat` pair a listed symbolic link needs and the one-batch directory read a
+# folder cue needs, written once here so every surface that lists a directory
+# shares one implementation rather than a copy each (the charter forbids that
+# duplication). Enabled only by a freestanding `Run` binary; host tooling builds
+# the engine without it and injects its own.
 rt = ["dep:tairix-rt"]
 
 [dependencies]

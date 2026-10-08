@@ -121,8 +121,9 @@ mod program {
     };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
-        DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent,
-        WindowRegion, WindowSizeState, WindowSizing,
+        DocumentName, DragAt, DragItems, DropOperation, DropSite, HandOverDocument,
+        HandOverOutcome, MenuOutcome, PointerAction, WindowEvent, WindowRegion, WindowSizeState,
+        WindowSizing,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, SpawnAttach,
@@ -131,29 +132,32 @@ mod program {
     };
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::document;
+    use tairix_browse::marquee::{self, report_band};
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
-        draw_progress_dialog, draw_properties_window, draw_rename_field, manager_tool_at,
-        open_with_action_at, open_with_reveal, open_with_row_at, open_with_scroll_pointer,
-        open_with_scroll_wheel, properties_reveal, properties_scroll_pointer,
-        properties_scroll_wheel, render_into, scroll_pointer, scroll_wheel, AttrAction, Identity,
-        OpenWithAction, OwnerField, PermsCursor, PropertiesControls, PropertiesFrame,
-        PropertiesTab, PropertiesTarget, PropertiesView, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        draw_progress_dialog, draw_properties_window, draw_rename_field, drop_folder_at,
+        manager_tool_at, open_with_action_at, open_with_reveal, open_with_row_at,
+        open_with_scroll_pointer, open_with_scroll_wheel, properties_reveal,
+        properties_scroll_pointer, properties_scroll_wheel, render_into, scroll_pointer,
+        scroll_wheel, AttrAction, Frame, Identity, OpenWithAction, OwnerField, PermsCursor,
+        PropertiesControls, PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView,
+        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        applications_for, association_from_manifest, browser_floor, context_choice_from_item,
-        context_menu, empty_trash_plan, fitted_sizing, manager_opening, paste_strategy, plan_paste,
-        quick_applications, suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy,
-        validate_new_name, win_floor_width, Activation, AppAssociation, Attribute, Attributes,
-        Browser, BundleIntent, Clipboard, ClipboardOp, ContextChoice, ContextCommand,
-        ContextMenuModel, ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
-        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing,
-        ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
-        OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe, ProgressModel,
-        ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn, Took,
-        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
-        WatchUpdate, WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS,
-        MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
+        applications_for, association_from_manifest, blank_documents, browser_floor,
+        context_choice_from_item, context_menu, drop_operation, empty_trash_plan, fitted_sizing,
+        manager_opening, paste_strategy, plan_paste, quick_applications, trash_dest_path,
+        trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation, AppAssociation,
+        Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
+        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
+        CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
+        DirectorySource, Entry, EntryKind, Listing, ListingDesk, ListingJob, ManagerChrome,
+        ManagerTool, ManagerToolModel, Marquee, NewEntry, OpenWithCandidate, OpenWithChooser,
+        OwnerChange, PasteItem, PasteStrategy, Places, Probe, Probes, ProgressModel, ProgressOp,
+        Properties, RenameError, RowList, RtLinkReader, ScrollColumn, Took, ToolbarBand,
+        ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId, WatchUpdate,
+        WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE,
+        MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -181,8 +185,11 @@ mod program {
     use crate::appbar;
     use crate::chrome::{Accelerator, Chrome};
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
-    use crate::deferred::{FilesClient, FilesClients, Probes, PropertyJob, PropertyReads};
-    use crate::gesture::{self, bundle_intent, AfterHandoff, DragArm, PrimaryPress};
+    use crate::deferred::{FilesClient, FilesClients, PropertyJob, PropertyReads};
+    use crate::gesture::{
+        self, bundle_intent, press_step, AfterHandoff, DragArm, PressHit, PressHold, PressInput,
+        PressStep, PrimaryPress, SelectHow, SelectKeys,
+    };
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
@@ -556,6 +563,18 @@ mod program {
                 WindowKind::Properties(_) => None,
             }
         }
+
+        /// Whether this is a listing of `location`, or one already on its way
+        /// there.
+        fn shows(&self, location: &[String]) -> bool {
+            match &self.kind {
+                WindowKind::Browser(win) => {
+                    win.browser.components() == location
+                        || win.browser.listing_target() == Some(location)
+                }
+                WindowKind::Properties(_) => false,
+            }
+        }
     }
 
     impl BrowserWindow {
@@ -579,10 +598,36 @@ mod program {
                 || self.overlays.rename.is_some()
                 || self.overlays.drag.is_some()
                 || self.overlays.carrying.is_some()
+                || matches!(self.overlays.sweep, Some(Sweep::Live(_)))
         }
 
-        /// Open the rename New Folder asked for once the listing shows the
-        /// folder, answering whether it opened. A focus moved elsewhere, a
+        /// Step the listing under a held band if a step is due, answering what
+        /// it repainted.
+        fn step_band(&mut self, canvas: Canvas<'_>, now: u64, damage: &mut Region) -> Repaint {
+            let Some(Sweep::Live(band)) = self.overlays.sweep.as_mut() else {
+                return Repaint::Nothing;
+            };
+            let frame = Frame {
+                scale: canvas.scale,
+                theme: canvas.theme(),
+                viewport: canvas.viewport(&self.places),
+                toolbar: canvas.chrome.toolbar,
+            };
+            let mark = ViewMark::of(&self.browser, frame);
+            let moved = band.step(&mut self.browser, frame, now);
+            Repaint::reported_if(moved && mark.report(&self.browser, frame, damage))
+        }
+
+        /// When the band held over this window next steps the listing.
+        fn band_due(&self) -> Option<u64> {
+            match &self.overlays.sweep {
+                Some(Sweep::Live(band)) => band.due(),
+                _ => None,
+            }
+        }
+
+        /// Open the rename New ▸ asked for once the listing shows the new
+        /// entry, answering whether it opened. A focus moved elsewhere, a
         /// navigation away, or a gesture holding the listing lets it go.
         fn rename_arrived(&mut self, canvas: Canvas<'_>) -> bool {
             let Some((dir, name)) = self.overlays.rename_on_arrival.as_ref() else {
@@ -593,7 +638,7 @@ mod program {
             }
             let arrived = self.browser.focus_pending().is_none()
                 && self.browser.components() == dir.as_slice()
-                && self.browser.selected_name() == Some(name.as_str())
+                && self.browser.chosen_name() == Some(name.as_str())
                 && !self.listing_is_held();
             self.overlays.rename_on_arrival = None;
             arrived
@@ -667,20 +712,7 @@ mod program {
         ) -> Repaint {
             let viewport = canvas.viewport(&self.places);
             let (scale, theme, toolbar) = (canvas.scale, canvas.theme(), canvas.chrome.toolbar);
-            let folders: alloc::collections::BTreeSet<&str> = changes
-                .iter()
-                .filter_map(|change| match change {
-                    tairix_browse::EntryChange::Upsert(entry) if entry.is_directory() => {
-                        Some(entry.name())
-                    }
-                    _ => None,
-                })
-                .collect();
-            let cued = !folders.is_empty();
-            if cued {
-                reads.invalidate_probes(self.browser.components(), &folders);
-            }
-            drop(folders);
+            let cued = reads.invalidate_probes(self.browser.components(), &changes);
             let tools = manager_tool_model(&self.browser);
             let before = tairix_browse::render::shown_listing(
                 &self.browser,
@@ -764,6 +796,8 @@ mod program {
         /// The applications the "Open With…" submenu offered, in the order its
         /// ids number them.
         candidates: Vec<OpenWithCandidate>,
+        /// The documents New ▸ offered, in the order its ids number them.
+        documents: Vec<BlankDocument>,
     }
 
     /// Paint `win`'s current state and present it.
@@ -1271,6 +1305,23 @@ mod program {
             BarRouted::Ends(code) => return Some(code),
             BarRouted::NotMine => {}
         }
+        // Where a drag is, and where it ended, may name a window other than the
+        // one it began in, so both are answered where every window is.
+        if matches!(
+            event,
+            WindowEvent::DragOver { .. } | WindowEvent::DragEnded { .. }
+        ) {
+            route_drag(
+                windows,
+                client,
+                grounds,
+                icons,
+                launcher,
+                desktop.scale(),
+                event,
+            );
+            return None;
+        }
         let window_id = event.window_id()?;
         let addressed: Vec<(u64, Option<u64>)> = windows
             .iter()
@@ -1351,6 +1402,274 @@ mod program {
             can_chown,
             event,
         )
+    }
+
+    /// Answer the desktop's report of where this app's drag is, or act on
+    /// where it ended.
+    ///
+    /// A report is answered with what a drop there would do — the one drop
+    /// policy over the folder the point names — and the folder tile under the
+    /// pointer is lit while the answer accepts it. A drop on one of this app's
+    /// windows or on the desktop runs as a paste into that folder, in the
+    /// window dropped on (or, on the desktop, the window the drag began in);
+    /// a drop on an application opens the one file for it, exactly as its
+    /// "Open With" row would.
+    fn route_drag(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        grounds: Grounds<'_>,
+        icons: &RefCell<IconPipeline>,
+        launcher: &RefCell<Launcher>,
+        scale: Scale,
+        event: &WindowEvent,
+    ) {
+        let Some(source) = windows.iter_mut().position(|win| {
+            win.browser()
+                .is_some_and(|state| state.overlays.carrying.is_some())
+        }) else {
+            return;
+        };
+        let source_id = windows[source].pane.id();
+        let theme = grounds.popups;
+        match *event {
+            WindowEvent::DragOver {
+                window_id,
+                serial,
+                at,
+                shift,
+            } => {
+                let (folder, tile) = match at {
+                    DragAt::Window { x, y } => windows
+                        .iter_mut()
+                        .find(|win| win.pane.id() == window_id)
+                        .and_then(|win| window_drop_folder(win, x, y, scale, theme))
+                        .map_or((None, None), |(folder, tile)| {
+                            (Some(folder), tile.map(|tile| (window_id, tile)))
+                        }),
+                    DragAt::Desktop => (desktop_drop_folder(client, source_id, serial), None),
+                    DragAt::Nowhere => (None, None),
+                };
+                let verdict = windows[source]
+                    .browser()
+                    .and_then(|state| state.overlays.carrying.as_ref())
+                    .zip(folder)
+                    .and_then(|(carrying, folder)| {
+                        drop_operation(&carrying.sources, &folder, shift)
+                    })
+                    .map(|op| match op {
+                        ClipboardOp::Copy => DropOperation::Copy,
+                        ClipboardOp::Cut => DropOperation::Move,
+                    });
+                light_drop_tile(windows, client, (grounds, icons, scale), verdict.and(tile));
+                // A drag that ended after this report was sent answers
+                // nothing; its end is already on its way.
+                match client.drag_verdict(source_id, serial, verdict) {
+                    Ok(()) | Err(Errno::NotFound) => {}
+                    Err(err) => {
+                        report_error(&alloc::format!("the drag's answer was refused ({err})"));
+                    }
+                }
+            }
+            WindowEvent::DragEnded { site, .. } => {
+                let carrying = windows[source]
+                    .browser()
+                    .and_then(|state| state.overlays.carrying.take());
+                light_drop_tile(windows, client, (grounds, icons, scale), None);
+                let Some(carrying) = carrying else {
+                    return;
+                };
+                match site {
+                    DropSite::Nothing => {}
+                    DropSite::Application => {
+                        open_dropped_file(client, launcher, source_id, carrying.file);
+                    }
+                    DropSite::Window {
+                        window_id,
+                        x,
+                        y,
+                        operation,
+                    } => {
+                        let Some(target) =
+                            windows.iter().position(|win| win.pane.id() == window_id)
+                        else {
+                            report_error("the window dropped on has closed; nothing was moved");
+                            return;
+                        };
+                        let Some((folder, _)) =
+                            window_drop_folder(&mut windows[target], x, y, scale, theme)
+                        else {
+                            report_error("nothing there takes a drop; nothing was moved");
+                            return;
+                        };
+                        begin_drop(&mut windows[target], carrying.sources, &folder, operation);
+                    }
+                    DropSite::Desktop { serial, operation } => {
+                        let Some(folder) = desktop_drop_folder(client, source_id, serial) else {
+                            report_error(
+                                "the desktop folder dropped on is gone; nothing was moved",
+                            );
+                            return;
+                        };
+                        begin_drop(&mut windows[source], carrying.sources, &folder, operation);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The folder a drop at window-local `(x, y)` in `win` lands in, and the
+    /// listed folder that stands for it ([`drop_folder_at`]).
+    fn window_drop_folder(
+        win: &mut OpenWindow,
+        x: u32,
+        y: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(Vec<String>, Option<usize>)> {
+        let mode = *win.pane.mode();
+        let state = win.browser()?;
+        let canvas = Canvas {
+            theme,
+            mode: &mode,
+            scale,
+            chrome: state.chrome,
+        };
+        drop_folder_at(
+            &state.browser,
+            scale,
+            theme,
+            canvas.viewport(&state.places),
+            canvas.chrome.toolbar,
+            pointer_point(x, y),
+        )
+    }
+
+    /// The desktop folder the drag report numbered `serial` named, read from
+    /// the session; `None` once the session has named another.
+    fn desktop_drop_folder(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        source_id: u64,
+        serial: u32,
+    ) -> Option<Vec<String>> {
+        let path = client.drag_spot(source_id, serial).ok()?;
+        tairix_browse::vfs::components_from_absolute_path(&path).ok()
+    }
+
+    /// Light `tile` — a window and a listed entry — as where the drag would
+    /// drop, and put out whatever was lit before, repainting only the tiles
+    /// that changed.
+    fn light_drop_tile(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (grounds, icons, scale): (Grounds<'_>, &RefCell<IconPipeline>, Scale),
+        tile: Option<(u64, usize)>,
+    ) {
+        for win in windows.iter_mut() {
+            let id = win.pane.id();
+            let mode = *win.pane.mode();
+            let Some(state) = win.browser() else {
+                continue;
+            };
+            let lit = tile.and_then(|(window, index)| (window == id).then_some(index));
+            let was = state.browser.set_drop_mark(lit);
+            if was == lit {
+                continue;
+            }
+            let canvas = Canvas {
+                theme: grounds.popups,
+                mode: &mode,
+                scale,
+                chrome: state.chrome,
+            };
+            let viewport = canvas.viewport(&state.places);
+            let mut damage = Region::new();
+            for index in [was, lit].into_iter().flatten() {
+                if let Some(rect) = tairix_browse::render::entry_rect(
+                    &state.browser,
+                    scale,
+                    canvas.theme(),
+                    viewport,
+                    canvas.chrome.toolbar,
+                    index,
+                ) {
+                    damage.add(rect);
+                }
+            }
+            if present_window(
+                win,
+                client,
+                grounds,
+                icons,
+                scale,
+                Repaint::Reported,
+                &damage,
+            )
+            .is_err()
+            {
+                report_error("a window could not show where the drag would drop");
+            }
+        }
+    }
+
+    /// Open the one file a drag carried for the application it was dropped
+    /// on, exactly as its "Open With" row would.
+    fn open_dropped_file(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        launcher: &RefCell<Launcher>,
+        source_id: u64,
+        file: Option<PendingChooser>,
+    ) {
+        let Some(file) = file else {
+            return;
+        };
+        let target = match client.take_drop_target(source_id) {
+            Ok(target) => target,
+            Err(err) => {
+                report_error(&alloc::format!("the drop was lost ({err})"));
+                return;
+            }
+        };
+        let Some(bundle) = tairix_appstore::bundle_of_entry(target.run_path.as_str()) else {
+            report_error("the drop names no application");
+            return;
+        };
+        launcher.borrow_mut().launch_viewer(
+            client,
+            bundle,
+            target.writes_documents,
+            &file.path,
+            &file.name,
+        );
+    }
+
+    /// Run a drop of `sources` into `folder` in `win`, as the paste the
+    /// pointer showed: a copy, or a move. The drop policy is asked again
+    /// first, so a drop the folder no longer allows moves nothing.
+    fn begin_drop(
+        win: &mut OpenWindow,
+        sources: Vec<Vec<String>>,
+        folder: &[String],
+        operation: DropOperation,
+    ) {
+        let op = match operation {
+            DropOperation::Copy => ClipboardOp::Copy,
+            DropOperation::Move => ClipboardOp::Cut,
+        };
+        if drop_operation(&sources, folder, op == ClipboardOp::Cut) != Some(op) {
+            report_error("that folder no longer takes the drop; nothing was moved");
+            return;
+        }
+        let Some(state) = win.browser() else {
+            return;
+        };
+        if state.overlays.operation.is_some() {
+            report_error("that window is busy with another operation; nothing was moved");
+            return;
+        }
+        if let Some(clipboard) = Clipboard::new(op, sources) {
+            start_paste(&clipboard, folder, &mut state.overlays.operation);
+        }
     }
 
     /// Route one event delivered to a window's own held popup — the
@@ -1646,8 +1965,13 @@ mod program {
         }
     }
 
-    /// Open one more window at `location` (the user's home when `None`),
-    /// stating why when it cannot be opened.
+    /// Show `location` (the user's own files when `None`): bring forward the
+    /// window already showing it, else open one more, stating why when it
+    /// cannot be opened.
+    ///
+    /// A request arrives from the user — the slot, its menu, a folder opened
+    /// on the desktop — so the session handed this process the activation a
+    /// raise needs. A refused raise still shows the folder, in a new window.
     ///
     /// The window cap is this process's own resource bound, not a policy about
     /// how many folders a user may look at, so reaching it is stated rather
@@ -1664,6 +1988,24 @@ mod program {
         event_endpoint: u64,
         location: Option<alloc::vec::Vec<String>>,
     ) {
+        let wanted = location.clone().or_else(|| {
+            home_components().map(|home| {
+                let [files, _] = tairix_browse::bare_open_places(&home);
+                files
+            })
+        });
+        if let Some(open) = wanted
+            .as_deref()
+            .and_then(|wanted| windows.iter().find(|win| win.shows(wanted)))
+        {
+            match client.activate_window(open.pane.id()) {
+                Ok(()) => return,
+                Err(err) => report_error(&alloc::format!(
+                    "the window showing that folder could not be brought forward ({err:?}); \
+                     opening another"
+                )),
+            }
+        }
         // No count of its own: a window's mapped frame region is bounded by
         // the session's per-client frame budget and by this process's own
         // address-space limit, both derived from the machine and both refusing
@@ -2172,6 +2514,11 @@ mod program {
         fn read(&mut self, path: &str) -> Option<alloc::vec::Vec<u8>> {
             tairix_rt::read_path_to_end(path.as_bytes(), MAX_ARTWORK_BYTES).ok()
         }
+
+        fn open(&mut self, path: &str) -> Option<Box<dyn tairix_icon::ArtworkDocument + '_>> {
+            tairix_icon::RtDocument::open(path)
+                .map(|document| Box::new(document) as Box<dyn tairix_icon::ArtworkDocument>)
+        }
     }
 
     /// The grid's [`ArtworkRasteriser`]: the decode runs in a
@@ -2198,6 +2545,15 @@ mod program {
             )
             .ok()
         }
+
+        fn thumbnail(
+            &mut self,
+            side: u32,
+            reading: tairix_icon::Reading,
+            document: &mut dyn tairix_icon::ArtworkDocument,
+        ) -> Option<alloc::vec::Vec<u8>> {
+            tairix_sandbox::imagerender::thumbnail(&mut self.sandbox, side, reading, document).ok()
+        }
     }
 
     /// Everything the file manager reads off its event loop, and the one worker
@@ -2206,8 +2562,8 @@ mod program {
     ///
     /// One worker serves them in one stated order, [`Reads::next_read`]'s: a
     /// document opened, a listing navigated to, a shown folder's changes, a
-    /// Properties read, icon artwork, folder cues, the bundle scan, the places
-    /// rail. Nothing starves: each set is finite, refilled only by the user
+    /// Properties read, icon artwork, folder cues, thumbnails, the bundle scan,
+    /// the places rail. Nothing starves: each set is finite, refilled only by the user
     /// asking again or, for a folder's changes, by a watch the kernel paces to
     /// one report a window per latency.
     struct Reads {
@@ -2391,7 +2747,10 @@ mod program {
                         self.work.lock().artwork.deliver(&job, artwork).wake()
                     }
                     Read::Probe(batch) => {
-                        let answers = probe_batch(&batch);
+                        let answers = tairix_browse::vfs::probe_batch(
+                            batch,
+                            tairix_browse::vfs::probe_directory,
+                        );
                         self.work.lock().probes.deliver(answers)
                     }
                     Read::Properties(job) => {
@@ -2440,6 +2799,11 @@ mod program {
             if let Some(batch) = work.probes.next_batch() {
                 return Some(Read::Probe(batch));
             }
+            // A picture file's own content last of the decoration: its class
+            // picture already stands in, and it costs a whole file's read.
+            if let Some(job) = work.artwork.next_thumbnail() {
+                return Some(Read::Artwork(job));
+            }
             if work.bundles.next_job().is_some() {
                 return Some(Read::Bundles);
             }
@@ -2486,6 +2850,9 @@ mod program {
         fn refresh(&self, client: FilesClient, components: &[String]) -> Result<Listing, Errno> {
             self.ask(client, components, |work| {
                 work.listings.refresh(client, components);
+                // The folder may just have changed, so what was probed of its
+                // folders may have too.
+                work.probes.invalidate_listing(components);
                 Ok(Listing::Pending)
             })
         }
@@ -2540,10 +2907,14 @@ mod program {
             self.work.lock().watches.unwatch(client)
         }
 
-        /// The folders `names` in `dir` changed, so an answer about one is
-        /// stale.
-        fn invalidate_probes(&self, dir: &[String], names: &alloc::collections::BTreeSet<&str>) {
-            self.work.lock().probes.invalidate(dir, names);
+        /// The folders among `changes` in `dir` changed, so an answer about one
+        /// is stale. Whether any was a folder, which owes the cues a resolve.
+        fn invalidate_probes(
+            &self,
+            dir: &[String],
+            changes: &[tairix_browse::EntryChange],
+        ) -> bool {
+            self.work.lock().probes.invalidate(dir, changes)
         }
 
         /// Put `client`'s listing request to the desk through `record`, waking
@@ -2645,16 +3016,21 @@ mod program {
             !self.work.lock().artwork.take_landed().is_empty()
         }
 
+        /// Withdraw the thumbnails no window asked for in the pass just drawn
+        /// over every window.
+        fn sweep_thumbnails(&self) {
+            self.work.lock().artwork.sweep_thumbnails();
+        }
+
         /// Answer the folder cue for `components`, recording the probe if this
         /// desk does not already hold the answer.
         ///
         /// This is called from *inside a paint*, so it must never read: an
         /// unknown cue is [`Probe::Pending`], the folder draws without it, and
-        /// the answer is drawn a frame later. A desk with no worker records
-        /// nothing and every folder simply draws plain — a cue is decoration,
-        /// and exercising the user's directory-read authority on the calling
-        /// thread to draw one is exactly what this avoids.
-        fn probe(&self, components: &[String]) -> Probe {
+        /// the answer is drawn a frame later. A desk with no worker answers
+        /// that it does not probe, so every folder draws plain: a cue is
+        /// decoration, not worth a directory read on the loop.
+        fn probe(&self, components: &[String]) -> Result<Probe, Errno> {
             let (answer, recorded) = self.work.lock().probes.ask(components);
             // Only a folder this desk had not seen is worth a wake. Waking on
             // every ask would mean one `futex_wake` per folder per frame, for
@@ -2703,6 +3079,14 @@ mod program {
         /// leaves every folder showing the cue it had before the probe.
         fn take_probes_landed(&self) -> bool {
             self.work.lock().probes.take_landed()
+        }
+
+        /// Drop the probes no window asked for in the pass just resolved over
+        /// every window, waking a worker if a batch is left for it.
+        fn sweep_probes(&self) {
+            if self.work.lock().probes.sweep() {
+                self.signal.notify_one();
+            }
         }
 
         /// Ask for the program stores to be walked, answering with what they
@@ -2891,7 +3275,7 @@ mod program {
         }
 
         fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
-            Ok(self.0.probe(components))
+            self.0.probe(components)
         }
     }
 
@@ -2955,29 +3339,6 @@ mod program {
                 })
                 .collect(),
         )
-    }
-
-    /// Probe every folder in `batch`, answering only for those the probe
-    /// decided.
-    ///
-    /// A folder the user may not read, or that has gone, contributes no answer
-    /// rather than a guess: it draws plain, exactly as a refused probe always
-    /// has.
-    fn probe_batch(batch: &[Vec<String>]) -> Vec<(Vec<String>, bool)> {
-        let mut answers = Vec::new();
-        for folder in batch {
-            let Ok(path) = tairix_browse::vfs::absolute_path(folder) else {
-                continue;
-            };
-            let mut buf = [0u8; tairix_browse::vfs::PROBE_BUF_LEN];
-            let occupied = match probe_directory(&path, &mut buf) {
-                Ok(0) => false,
-                Ok(_) | Err(Errno::BufferTooSmall) => true,
-                Err(_) => continue,
-            };
-            answers.push((folder.clone(), occupied));
-        }
-        answers
     }
 
     /// Adopt the desktop the session published, if the park said it moved,
@@ -3126,6 +3487,9 @@ mod program {
         /// Where a places read the mount notice asked for lands when no worker
         /// was there to read it.
         places_read: &'a PlacesRead,
+        /// When a band held over a window next steps its listing: the one
+        /// deadline the park keeps for the loop.
+        band_due: &'a Cell<Option<u64>>,
     }
 
     /// Places read on the loop's own thread because no worker was there to
@@ -3146,11 +3510,18 @@ mod program {
             // the rate limiter is holding back only ever *tightens* the park
             // to the moment it may be sent; with nothing pending the park
             // stays indefinite.
-            let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
+            let band_due = self.band_due.get();
+            let loop_ns = band_due.map_or(u64::MAX, |due| {
+                tairix_window::park::remaining_ns(due, tairix_rt::clock_get())
+            });
+            let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(loop_ns);
             let Some(wake) = app::park_for(self.set, timeout_ns)? else {
-                // No member woke. The held-back report is the only bounded
-                // wait here, so the deadline means exactly that it is due.
+                // No member woke, so one of the two deadlines is due: the
+                // held-back report, or a band's step, which is the loop's.
                 tairix_rt::cachereport::publish_if_due();
+                if band_due.is_some_and(|due| tairix_rt::clock_get() >= due) {
+                    return Ok(Parked::Interrupted);
+                }
                 return Ok(Parked::Served);
             };
             match wake {
@@ -3410,8 +3781,8 @@ mod program {
     struct Overlays {
         /// The in-place rename editor, when open (`F2`).
         rename: Option<TextField>,
-        /// The folder New Folder made and the directory it made it in, whose
-        /// rename opens once a listing there shows it.
+        /// The entry New ▸ made and the directory it made it in, whose rename
+        /// opens once a listing there shows it.
         rename_on_arrival: Option<(Vec<String>, String)>,
         /// The delete-confirmation dialog, when open (`Delete`).
         delete: Option<DeleteConfirm>,
@@ -3441,17 +3812,105 @@ mod program {
         /// lands on chrome rather than an item, so a click through the toolbar
         /// or the places rail never pairs across it.
         double_click: DoubleClickTracker,
-        /// A primary press on a file that may yet become a drag.
-        drag: Option<ArmedDrag>,
-        /// The file this window handed the desktop to carry, until its drag
-        /// ends.
-        carrying: Option<PendingChooser>,
+        /// A primary press on a selected entry that may yet become a drag.
+        drag: Option<DragArm>,
+        /// What this window handed the desktop to carry, until its drag ends.
+        carrying: Option<Carrying>,
+        /// The entry a press inside a multi-selection landed on, selected alone
+        /// if the press is released without becoming a drag.
+        collapse_on_release: Option<usize>,
+        /// A press on the listing's ground, and the band a drag from it draws.
+        sweep: Option<Sweep>,
     }
 
-    /// A press armed to become a drag: where it landed, and the file.
-    struct ArmedDrag {
-        arm: DragArm,
-        file: PendingChooser,
+    /// A press on the listing's ground: armed until the pointer travels, then
+    /// a band.
+    enum Sweep {
+        /// Pressed here.
+        Armed(DragArm),
+        /// The band being dragged.
+        Live(Band),
+    }
+
+    /// How often the listing steps under a held band: a frame at sixty hertz.
+    const BAND_STEP_NS: u64 = 16_666_667;
+
+    /// A band, and the clock pacing the listing as it scrolls under it.
+    struct Band {
+        marquee: Marquee,
+        /// When the listing last stepped, while the band is held where it
+        /// scrolls.
+        stepped_at: Option<u64>,
+        /// Travel short of a whole pixel, in pixel-nanoseconds.
+        carry: i128,
+    }
+
+    impl Band {
+        /// Start or stop the clock as the head enters or leaves the strip where
+        /// the listing scrolls.
+        fn pace<S: DirectorySource>(&mut self, browser: &Browser<S>, frame: Frame<'_>, now: u64) {
+            if marquee::autoscroll(browser, frame, &self.marquee) == 0 {
+                self.stepped_at = None;
+                self.carry = 0;
+            } else if self.stepped_at.is_none() {
+                self.stepped_at = Some(now);
+            }
+        }
+
+        /// When the next step is due, while the listing scrolls.
+        fn due(&self) -> Option<u64> {
+            self.stepped_at.map(|at| at.saturating_add(BAND_STEP_NS))
+        }
+
+        /// Scroll the listing by the travel `now` owes and grow the band to
+        /// where its head lies, answering whether the listing moved. The travel
+        /// is the elapsed time at the band's speed, so a late wake loses none.
+        fn step<S: DirectorySource>(
+            &mut self,
+            browser: &mut Browser<S>,
+            frame: Frame<'_>,
+            now: u64,
+        ) -> bool {
+            let Some(since) = self
+                .stepped_at
+                .filter(|at| now >= at.saturating_add(BAND_STEP_NS))
+            else {
+                return false;
+            };
+            let speed = marquee::autoscroll(browser, frame, &self.marquee);
+            self.carry += i128::from(speed) * i128::from(now - since);
+            let whole = self.carry / 1_000_000_000;
+            self.carry -= whole * 1_000_000_000;
+            self.stepped_at = Some(now);
+            let moved = i64::try_from(whole).is_ok_and(|delta| {
+                delta != 0 && marquee::step(browser, frame, &mut self.marquee, delta)
+            });
+            self.pace(browser, frame, now);
+            moved
+        }
+    }
+
+    /// What a window handed the desktop to carry.
+    struct Carrying {
+        /// Every dragged entry's absolute path, in listing order.
+        sources: Vec<Vec<String>>,
+        /// The one file a drop on an application opens, when the drag is one
+        /// file.
+        file: Option<PendingChooser>,
+    }
+
+    impl Carrying {
+        /// The selection as a drag, and what the desktop is told of it; `None`
+        /// with nothing selected.
+        fn of<S: DirectorySource>(browser: &Browser<S>) -> Option<(Self, DragItems)> {
+            let first = browser.selection().iter().next()?;
+            let name = DocumentName::new(browser.entries().get(first)?.name()).ok()?;
+            let sources = browser.selected_component_paths();
+            let file = open_with_target(browser);
+            let count = u32::try_from(sources.len()).ok()?;
+            let items = DragItems::new(name, count, file.is_some()).ok()?;
+            Some((Self { sources, file }, items))
+        }
     }
 
     /// The "Open With…" chooser and the popup window it is drawn in.
@@ -3650,6 +4109,17 @@ mod program {
                         &mut pipeline.source(),
                     );
                 }
+                if let Some(Sweep::Live(band)) = overlays.sweep.as_ref() {
+                    let frame = Frame {
+                        scale,
+                        theme,
+                        viewport,
+                        toolbar,
+                    };
+                    if let Some(shown) = marquee::band(browser, frame, &band.marquee) {
+                        marquee::draw(surface, shown, scale, theme);
+                    }
+                }
                 // In rename mode, overlay the inline editor on the selected
                 // item's *name* through the shared geometry the views draw it
                 // at, so the field covers what is being edited and not the
@@ -3720,12 +4190,6 @@ mod program {
         if let WindowEvent::CloseRequested { .. } = event {
             return (Repaint::Nothing, true);
         }
-        // A drop is honoured whatever the window is doing.
-        if let WindowEvent::DragEnded { window_id, dropped } = *event {
-            drag_ended(overlays.carrying.take(), window_id, dropped, acts);
-            return (Repaint::Nothing, false);
-        }
-
         // The one answer the desktop owes an open. An id that names anything
         // else answers a gesture already settled, so acting on it would run a
         // stale command.
@@ -3754,6 +4218,13 @@ mod program {
         // which could land on the chooser's Open button and launch something
         // the user never picked.
         //
+        if overlays.drag.is_some()
+            && press_step(PressHold::Armed, PressInput::of(event)) == PressStep::EndAndRoute
+        {
+            overlays.drag = None;
+            overlays.collapse_on_release = None;
+        }
+
         // The delete-confirmation dialog owns the window while it is up, so
         // every event goes to it and none navigates the view behind it.
         if overlays.delete.is_some() {
@@ -3783,6 +4254,19 @@ mod program {
             return (whole_if(changed), close);
         }
 
+        // A band holds the pointer from its press to its release, wherever the
+        // pointer goes, so it is served before the rail could claim a motion.
+        let frame = Frame {
+            scale,
+            theme,
+            viewport,
+            toolbar,
+        };
+        let ended = match apply_band_event(browser, overlays, frame, event, damage) {
+            BandRouting::Taken(repaint, close) => return (repaint, close),
+            BandRouting::Passed(ended) => ended,
+        };
+
         // The rail owns the window's leading edge: its hover highlight tracks
         // every motion that reaches here, and it consumes the presses and keys
         // that belong to it. Whatever it does not consume routes to the view,
@@ -3796,7 +4280,8 @@ mod program {
             ))
         } else {
             Repaint::Nothing
-        };
+        }
+        .merged(ended);
         if canvas.chrome.rail {
             if let Some(outcome) = sidebar::apply_event(
                 browser, places, scale, theme, window, toolbar, *pointer, event, damage,
@@ -3927,6 +4412,16 @@ mod program {
                     (*dx, *dy),
                     damage,
                 );
+                if let Some(Sweep::Live(band)) = overlays.sweep.as_mut() {
+                    let frame = Frame {
+                        scale,
+                        theme,
+                        viewport,
+                        toolbar,
+                    };
+                    let head = band.marquee.head();
+                    marquee::sweep(browser, frame, &mut band.marquee, head);
+                }
                 (Repaint::reported_if(moved), false)
             }
             // A pointer event the desktop routed into this window's local
@@ -3993,6 +4488,8 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            // A drag's reports are answered where every window is.
+            | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }
@@ -4002,38 +4499,6 @@ mod program {
             | WindowEvent::OpenRequested
             => (Repaint::Nothing, false),
         }
-    }
-
-    /// The drag window `window_id` handed the desktop, carrying `carried`,
-    /// ended: dropped on an application, the file is opened for it exactly as
-    /// its "Open With" row would.
-    fn drag_ended(
-        carried: Option<PendingChooser>,
-        window_id: u64,
-        dropped: bool,
-        acts: &mut Acts<'_>,
-    ) {
-        let (true, Some(file)) = (dropped, carried) else {
-            return;
-        };
-        let target = match acts.menu.client.take_drop_target(window_id) {
-            Ok(target) => target,
-            Err(err) => {
-                report_error(&alloc::format!("the drop was lost ({err})"));
-                return;
-            }
-        };
-        let Some(bundle) = tairix_appstore::bundle_of_entry(target.run_path.as_str()) else {
-            report_error("the drop names no application");
-            return;
-        };
-        acts.launcher.borrow_mut().launch_viewer(
-            acts.menu.client,
-            bundle,
-            target.writes_documents,
-            &file.path,
-            &file.name,
-        );
     }
 
     /// The conclusion of a router that answers `(changed, close)` and cannot
@@ -4096,6 +4561,122 @@ mod program {
     ///
     /// `viewport` is the rail-inset content area; the toolbar band spans the
     /// whole window, which [`apply_primary_press`] reads from `canvas`.
+    /// What routing a band made of one event.
+    enum BandRouting {
+        /// The band took it.
+        Taken(Repaint, bool),
+        /// Route it on, owing what ending the band repainted.
+        Passed(Repaint),
+    }
+
+    /// Route an event to the band a press on the listing's ground armed, as
+    /// [`press_step`] decides.
+    fn apply_band_event<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        frame: Frame<'_>,
+        event: &WindowEvent,
+        damage: &mut Region,
+    ) -> BandRouting {
+        let hold = match overlays.sweep {
+            None => return BandRouting::Passed(Repaint::Nothing),
+            Some(Sweep::Armed(_)) => PressHold::Armed,
+            Some(Sweep::Live(_)) => PressHold::Dragging,
+        };
+        match press_step(hold, PressInput::of(event)) {
+            PressStep::Grow => match (event, overlays.sweep.as_mut()) {
+                (WindowEvent::Pointer { x, y, .. }, Some(sweep)) => BandRouting::Taken(
+                    grow_band(browser, sweep, frame, pointer_point(*x, *y), damage),
+                    false,
+                ),
+                _ => BandRouting::Passed(Repaint::Nothing),
+            },
+            PressStep::End => BandRouting::Taken(end_band(browser, overlays, frame, damage), false),
+            PressStep::EndAndRoute => {
+                BandRouting::Passed(end_band(browser, overlays, frame, damage))
+            }
+            PressStep::Cancel => {
+                BandRouting::Taken(cancel_band(browser, overlays, frame, damage), false)
+            }
+            PressStep::Hold => BandRouting::Taken(Repaint::Nothing, false),
+            PressStep::Route => BandRouting::Passed(Repaint::Nothing),
+        }
+    }
+
+    /// End the band, keeping what it selected.
+    fn end_band<S: DirectorySource>(
+        browser: &Browser<S>,
+        overlays: &mut Overlays,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> Repaint {
+        match overlays.sweep.take() {
+            Some(Sweep::Live(band)) => {
+                report_band(
+                    marquee::band(browser, frame, &band.marquee),
+                    None,
+                    frame.scale,
+                    damage,
+                );
+                Repaint::Reported
+            }
+            Some(Sweep::Armed(_)) | None => Repaint::Nothing,
+        }
+    }
+
+    /// Take back what the band selected, and end it.
+    fn cancel_band<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> Repaint {
+        let Some(Sweep::Live(band)) = overlays.sweep.take() else {
+            return Repaint::Nothing;
+        };
+        let mark = ViewMark::of(browser, frame);
+        let shown = marquee::band(browser, frame, &band.marquee);
+        marquee::cancel(browser, band.marquee);
+        report_band(shown, None, frame.scale, damage);
+        mark.report(browser, frame, damage);
+        Repaint::Reported
+    }
+
+    /// Move the band's head to `point` — beginning the band once an armed
+    /// press has travelled — and report what it repainted.
+    fn grow_band<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        sweep: &mut Sweep,
+        frame: Frame<'_>,
+        point: Point,
+        damage: &mut Region,
+    ) -> Repaint {
+        if let Sweep::Armed(arm) = *sweep {
+            if !arm.travelled(point, frame.scale) {
+                return Repaint::Nothing;
+            }
+            let Some(marquee) = marquee::begin(browser, frame, arm.at) else {
+                return Repaint::Nothing;
+            };
+            *sweep = Sweep::Live(Band {
+                marquee,
+                stepped_at: None,
+                carry: 0,
+            });
+        }
+        let Sweep::Live(band) = sweep else {
+            return Repaint::Nothing;
+        };
+        let mark = ViewMark::of(browser, frame);
+        let before = marquee::band(browser, frame, &band.marquee);
+        marquee::sweep(browser, frame, &mut band.marquee, point);
+        let after = marquee::band(browser, frame, &band.marquee);
+        report_band(before, after, frame.scale, damage);
+        let marked = mark.report(browser, frame, damage);
+        band.pace(browser, frame, tairix_rt::clock_get());
+        Repaint::reported_if(before != after || marked)
+    }
+
     fn apply_pointer<S: DirectorySource>(
         win: &mut WindowState<'_, S>,
         acts: &mut Acts<'_>,
@@ -4121,8 +4702,14 @@ mod program {
             return (Repaint::Nothing, false);
         };
         let point = pointer_point(*x, *y);
+        let frame = Frame {
+            scale,
+            theme,
+            viewport,
+            toolbar,
+        };
         let mut scrolled = None;
-        let mark = ViewMark::of(browser);
+        let mark = ViewMark::of(browser, frame);
         for input in pointer_input_events(*action, point) {
             if let Some(repaint) = scroll_pointer(
                 browser, scale, theme, viewport, toolbar, point, &input, damage,
@@ -4134,28 +4721,30 @@ mod program {
             // The bar reported its own drawn state; an offset it actually
             // moved draws every entry somewhere new besides. A sample that
             // changed neither repaints nothing.
-            let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
+            let moved = mark.report(browser, frame, damage);
             return (Repaint::reported_if(repaint || moved), false);
         }
         if *action == PointerAction::Moved {
-            let travelled = overlays
-                .drag
-                .take_if(|armed| armed.arm.travelled(point, scale));
-            if let Some(armed) = travelled {
+            let travelled = overlays.drag.take_if(|arm| arm.travelled(point, scale));
+            if let Some((carrying, items)) = travelled.and_then(|_| Carrying::of(browser)) {
                 // A drag the desktop will not carry stays the press it was.
-                if acts
-                    .menu
-                    .client
-                    .begin_drag(acts.menu.window, &armed.file.name)
-                    .is_ok()
-                {
-                    overlays.carrying = Some(armed.file);
+                if acts.menu.client.begin_drag(acts.menu.window, items).is_ok() {
+                    overlays.carrying = Some(carrying);
+                    overlays.collapse_on_release = None;
                 }
             }
             return (Repaint::Nothing, false);
         }
         if matches!(action, PointerAction::Released(_)) {
             overlays.drag = None;
+            if let Some(index) = overlays.collapse_on_release.take() {
+                let mark = ViewMark::of(browser, frame);
+                let collapsed = browser.select(index).is_ok();
+                return (
+                    Repaint::reported_if(collapsed && mark.report(browser, frame, damage)),
+                    false,
+                );
+            }
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
             let hit = tairix_browse::render::entry_index_at(
@@ -4248,11 +4837,17 @@ mod program {
         damage: &mut Region,
         step: fn(&mut Browser<S>),
     ) -> (Repaint, bool) {
-        let mark = ViewMark::of(browser);
+        let frame = Frame {
+            scale,
+            theme,
+            viewport,
+            toolbar,
+        };
+        let mark = ViewMark::of(browser, frame);
         step(browser);
         tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
         (
-            Repaint::reported_if(mark.report(browser, scale, theme, viewport, toolbar, damage)),
+            Repaint::reported_if(mark.report(browser, frame, damage)),
             false,
         )
     }
@@ -4797,10 +5392,28 @@ mod program {
         }
     }
 
-    /// Begin a paste of the held `clipboard` into the current directory as an
-    /// interleaved [`Operation`], under the user's own identity (no new
-    /// capability, no ambient authority — every step is the ordinary
-    /// permission-checked write the user could perform themselves).
+    /// Paste the held `clipboard` into the current directory ([`start_paste`]).
+    /// A `Cut` is consumed by initiating the paste (its sources are being
+    /// moved); a `Copy` keeps the clipboard for another paste.
+    fn run_paste<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        clipboard: &mut Option<Clipboard>,
+        operation: &mut Option<Operation>,
+    ) -> (bool, bool) {
+        let Some(clip) = clipboard.as_ref() else {
+            return (false, false);
+        };
+        let started = start_paste(clip, browser.components(), operation);
+        if started && clip.op() == ClipboardOp::Cut {
+            *clipboard = None;
+        }
+        (started, false)
+    }
+
+    /// Begin pasting `clip` into the folder `target` as an interleaved
+    /// [`Operation`], under the user's own identity (no new capability, no
+    /// ambient authority — every step is the ordinary permission-checked write
+    /// the user could perform themselves), answering whether it began.
     ///
     /// The plan is validated first ([`plan_paste`]): pasting a folder into
     /// itself is refused outright (`WouldRecurse`) and nothing is enqueued. The
@@ -4813,48 +5426,25 @@ mod program {
     /// cross-volume move is copy-then-delete, a copy always streams — and the
     /// run is fail closed: the first refused operation stops the paste, states
     /// the reason on `stderr` (fail loud), and leaves whatever already landed
-    /// in place rather than a fabricated success. A `Cut` is consumed by
-    /// initiating the paste (its sources are being moved); a `Copy` keeps the
-    /// clipboard for another paste.
-    fn run_paste<S: DirectorySource>(
-        browser: &mut Browser<S>,
-        clipboard: &mut Option<Clipboard>,
-        operation: &mut Option<Operation>,
-    ) -> (bool, bool) {
-        let Some(clip) = clipboard.as_ref() else {
-            return (false, false);
-        };
-        let target = browser.components().to_vec();
-        let plan = match plan_paste(clip, &target) {
+    /// in place rather than a fabricated success.
+    fn start_paste(clip: &Clipboard, target: &[String], operation: &mut Option<Operation>) -> bool {
+        let plan = match plan_paste(clip, target) {
             Ok(plan) => plan,
             Err(err) => {
                 report_error(err.to_string().as_str());
-                return (false, false);
+                return false;
             }
         };
-        // The destination directory's volume decides same- vs cross-volume for
-        // every item (a move within a volume is one rename).
-        let Some(dest_stat) = stat_node(&target) else {
+        let Some(dest_stat) = stat_node(target) else {
             report_error("paste stopped: the destination folder could not be read");
-            return (false, false);
+            return false;
         };
         let dest_vol = VolumeId::new(dest_stat.id.volume);
-        let op = plan.op();
-        // Hand the plan to the interleaved operation runner: the event loop
-        // carries it out a bounded chunk at a time, showing progress and
-        // honouring a mid-run cancel, so a large copy never freezes the window.
-        // The view is re-listed when the operation finishes.
         *operation = Some(Operation {
-            job: Job::Paste(Paste::new(op, dest_vol, plan.items().to_vec())),
+            job: Job::Paste(Paste::new(plan.op(), dest_vol, plan.items().to_vec())),
             progress: ProgressModel::new(ProgressOp::Copy),
         });
-        // A cut is consumed by initiating the paste — its sources are being
-        // moved, so re-pasting the same cut elsewhere would name items that are
-        // gone; a copy is kept so it can be pasted again.
-        if op == ClipboardOp::Cut {
-            *clipboard = None;
-        }
-        (true, false)
+        true
     }
 
     /// Move a same-volume item with a single `fs_rename` from its source to its
@@ -5443,12 +6033,39 @@ mod program {
                 browser, overlays, scale, theme, viewport, toolbar, tool,
             ));
         }
+        let frame = Frame {
+            scale,
+            theme,
+            viewport,
+            toolbar,
+        };
         let hit =
             tairix_browse::render::entry_index_at(browser, scale, theme, viewport, toolbar, point);
+        let place = match hit {
+            Some(index) => PressHit::Item(index),
+            None if tairix_browse::render::listing_area(
+                browser, scale, theme, viewport, toolbar,
+            )
+            .contains(point) =>
+            {
+                PressHit::Empty
+            }
+            None => PressHit::Chrome,
+        };
+        let keys = SelectKeys {
+            toggle: modifiers.ctrl,
+            extend: modifiers.shift,
+        };
+        let in_selection =
+            hit.is_some_and(|index| browser.is_selected(index) && browser.selection().len() > 1);
+        overlays.collapse_on_release = None;
+        overlays.sweep = None;
         match gesture::primary_press(
             &mut overlays.double_click,
             tairix_rt::clock_get(),
-            hit,
+            place,
+            keys,
+            in_selection,
             double_click,
         ) {
             PrimaryPress::Activate { index } => {
@@ -5465,17 +6082,34 @@ mod program {
                     AfterHandoff::Keep,
                 ))
             }
-            // Selecting moves the highlight between two entries and nothing
-            // else, so the round reports exactly those two.
-            PrimaryPress::Select { index } => {
-                let mark = ViewMark::of(browser);
-                let selected = browser.select(index).is_ok();
-                let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
-                overlays.drag = open_with_target(browser).map(|file| ArmedDrag {
-                    arm: DragArm { at: point },
-                    file,
-                });
-                (Repaint::reported_if(selected && moved), false)
+            // A selection change repaints only the shown entries whose mark
+            // changed, so the round reports exactly those.
+            PrimaryPress::Select { index, how } => {
+                let mark = ViewMark::of(browser, frame);
+                let applied = match how {
+                    SelectHow::Single => browser.select(index),
+                    SelectHow::Toggle => browser.toggle_selection(index),
+                    SelectHow::Extend => browser.extend_selection_to(index),
+                    SelectHow::Hold => {
+                        overlays.collapse_on_release = Some(index);
+                        Ok(())
+                    }
+                };
+                let moved = mark.report(browser, frame, damage);
+                overlays.drag = browser.is_selected(index).then_some(DragArm { at: point });
+                (Repaint::reported_if(applied.is_ok() && moved), false)
+            }
+            PrimaryPress::Empty { keep } => {
+                let mark = ViewMark::of(browser, frame);
+                if !keep {
+                    browser.clear_selection();
+                }
+                overlays.drag = None;
+                overlays.sweep = Some(Sweep::Armed(DragArm { at: point }));
+                (
+                    Repaint::reported_if(mark.report(browser, frame, damage)),
+                    false,
+                )
             }
             PrimaryPress::Chrome => whole(apply_chrome_press(browser, canvas, viewport, point)),
         }
@@ -5532,9 +6166,10 @@ mod program {
     /// `point`, on the item `index` the caller's hit-test resolved (`None` for
     /// empty space or the chrome).
     ///
-    /// The item is selected first so the menu's commands act on what was
-    /// clicked; a right-click on nothing clears the selection so the menu
-    /// offers only the directory-scoped Paste. The rows are the shared
+    /// An item outside the selection is selected first so the menu's commands
+    /// act on what was clicked, while one inside it keeps the whole selection;
+    /// a right-click on nothing clears the selection so the menu offers only
+    /// the directory-scoped verbs. The rows are the shared
     /// [`context_menu`] declaration over the [`ContextMenuModel`] with this
     /// app's own held-clipboard state, so an inapplicable command is declared
     /// disabled with its reason rather than left out.
@@ -5558,7 +6193,13 @@ mod program {
         index: Option<usize>,
     ) -> (bool, bool) {
         overlays.double_click.reset();
+        overlays.collapse_on_release = None;
+        overlays.drag = None;
+        overlays.sweep = None;
         match index {
+            // A right-click inside the selection keeps it, so the menu's set
+            // verbs act on everything the user had chosen.
+            Some(index) if browser.is_selected(index) => {}
             Some(index) => {
                 let _ = browser.select(index);
             }
@@ -5577,12 +6218,14 @@ mod program {
             .map(|file| applications_for(&file.name, held.as_deref().unwrap_or_default()))
             .unwrap_or_default();
         let quick = quick_applications(&ranked);
+        let documents = blank_documents(held.as_deref().unwrap_or_default());
         let rows = match context_menu(
             model,
             MANAGER_MENU_TITLE,
             ContextQuick {
                 name: browser.chosen_entry().map_or("", Entry::name),
                 candidates: &quick,
+                documents: &documents,
             },
         ) {
             Ok(rows) => rows,
@@ -5607,6 +6250,7 @@ mod program {
                     open_id,
                     target,
                     candidates,
+                    documents,
                 });
             }
             Err(err) => report_error(&alloc::format!("menu refused ({err}); not shown")),
@@ -5651,7 +6295,7 @@ mod program {
             return None;
         }
         let name = entry.name().to_string();
-        let Some(Ok(path)) = browser.selected_target_path() else {
+        let Some(Ok(path)) = browser.chosen_target_path() else {
             return None;
         };
         Some(PendingChooser { path, name })
@@ -5684,6 +6328,28 @@ mod program {
                 Some(ContextChoice::OpenWithCandidate(index)) => {
                     launch_candidate(gesture, index, acts.launcher, acts.menu.client)
                 }
+                Some(ContextChoice::NewFolder) => begin_new_entry(
+                    browser,
+                    overlays,
+                    NewEntry::Folder,
+                    scale,
+                    theme,
+                    viewport,
+                    toolbar,
+                ),
+                // A document the menu never offered makes nothing.
+                Some(ContextChoice::NewDocument(index)) => match gesture.documents.get(index) {
+                    Some(document) => begin_new_entry(
+                        browser,
+                        overlays,
+                        NewEntry::Document(*document),
+                        scale,
+                        theme,
+                        viewport,
+                        toolbar,
+                    ),
+                    None => (false, false),
+                },
                 // A commit answers `Entered`, so a *chosen* row that reads
                 // back as one is an answer this menu never declared that way
                 // (fail closed — an outcome is never guessed at).
@@ -6252,9 +6918,15 @@ mod program {
         tool: ManagerTool,
     ) -> (bool, bool) {
         match tool {
-            ManagerTool::NewFolder => {
-                begin_new_folder(browser, overlays, scale, theme, viewport, toolbar)
-            }
+            ManagerTool::NewFolder => begin_new_entry(
+                browser,
+                overlays,
+                NewEntry::Folder,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            ),
             ManagerTool::Trash => go_to_trash(browser, scale, theme, viewport, toolbar),
             ManagerTool::EmptyTrash => begin_empty_trash(browser, &mut overlays.delete),
         }
@@ -6383,35 +7055,41 @@ mod program {
         }
     }
 
-    /// Create a new folder in the current directory and open the inline rename
-    /// on it, so the user names it immediately (the standard new-folder flow).
+    /// Create `entry` in the current directory under the first free name of its
+    /// kind and open the inline rename on it, so the user names it at once.
     ///
-    /// The placeholder name is disambiguated against the current listing
-    /// ([`suggest_new_dir_name`]) and the create is an ordinary
-    /// permission-checked `fs_mkdir` under the user's own identity — no new
-    /// capability; the per-inode owner/mode/ACL model gates it. The engine
-    /// validates before the syscall and is transactional: a refused create
-    /// leaves the listing exactly as it was and states its reason on `stderr`
-    /// (an honest answer, never a crash or a fabricated folder). The rename
-    /// editor opens on the new folder once the listing shows it — at once when
-    /// it already does, else when the read it is waiting on lands.
-    fn begin_new_folder<S: DirectorySource>(
+    /// A folder is an `fs_mkdir`; a document is an empty file created
+    /// exclusively, so an existing file is never truncated. Either is an
+    /// ordinary permission-checked call under the user's own identity, and a
+    /// refusal is stated on `stderr` with the listing unchanged. The rename
+    /// opens once the listing shows the entry — at once when it already does,
+    /// else when the read it is waiting on lands.
+    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, and what to make.
+    fn begin_new_entry<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
+        entry: NewEntry,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
         toolbar: ToolbarBand,
     ) -> (bool, bool) {
-        let name = suggest_new_dir_name(browser.entries());
-        match browser.create_directory(&name, |path| {
-            let ret = tairix_rt::fs_mkdir(path.as_bytes());
-            if ret == 0 {
-                Ok(())
-            } else {
-                Err(Errno::from_syscall(ret))
+        let name = entry.suggest_name(browser.entries());
+        let made = browser.create_entry(&name, |path| match entry {
+            NewEntry::Folder => match tairix_rt::fs_mkdir(path.as_bytes()) {
+                0 => Ok(()),
+                ret => Err(Errno::from_syscall(ret)),
+            },
+            NewEntry::Document(_) => {
+                let create = OpenFlags::WRITE
+                    .union(OpenFlags::CREATE)
+                    .union(OpenFlags::EXCLUSIVE);
+                tairix_rt::File::open(path.as_bytes(), create)
+                    .map(drop)
+                    .map_err(Errno::from_syscall)
             }
-        }) {
+        });
+        match made {
             Ok(()) if browser.focus_pending().is_some() => {
                 overlays.rename_on_arrival = Some((browser.components().to_vec(), name));
                 (false, false)
@@ -6425,8 +7103,7 @@ mod program {
                 toolbar,
             ),
             Err(err) => {
-                let msg = err.message();
-                app::report(APP_NAME, msg);
+                app::report(APP_NAME, err.message());
                 (false, false)
             }
         }
@@ -6470,7 +7147,7 @@ mod program {
         };
         let kind = entry.kind();
         let target = entry.target().map(String::from);
-        let Some(Ok(path)) = browser.selected_target_path() else {
+        let Some(Ok(path)) = browser.chosen_target_path() else {
             report_error("that item's location could not be resolved; no window opened");
             return (false, false);
         };
@@ -7214,7 +7891,7 @@ mod program {
                 (true, false)
             }
             Some(TextAction::Edited) => {
-                let current = browser.selected_name().map(ToString::to_string);
+                let current = browser.chosen_name().map(ToString::to_string);
                 if let (Some(field), Some(current)) = (rename.as_mut(), current) {
                     let text = field.text().to_string();
                     let message = match validate_new_name(&text, &current, browser.entries()) {
@@ -7319,6 +7996,8 @@ mod program {
             double_click: DoubleClickTracker::new(),
             drag: None,
             carrying: None,
+            collapse_on_release: None,
+            sweep: None,
         }
     }
 
@@ -7349,17 +8028,6 @@ mod program {
         tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)
     }
 
-    /// The live folder-occupancy probe: open the directory, read at most one
-    /// packed record, close it. The browser only asks "is there a first
-    /// child?", so this never grows the buffer and never transfers a listing
-    /// — a directory of a hundred thousand entries costs what an empty one
-    /// does. It runs under the launching user's own identity, so a directory
-    /// the user may not read simply refuses.
-    fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
-        let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
-        dir.read(buf).map_err(Errno::from_syscall)
-    }
-
     /// A directory source that reads on the calling thread. Named so a fresh
     /// one can be built per attempt: opening consumes its source, so a refused
     /// attempt cannot hand the same one to the next.
@@ -7373,9 +8041,13 @@ mod program {
     >;
 
     /// One live source over [`list_directory`], the shared production link
-    /// reader, and [`probe_directory`].
+    /// reader, and the shared production probe.
     fn live_source() -> LiveSource {
-        VfsDirectorySource::probing(list_directory, RtLinkReader, probe_directory)
+        VfsDirectorySource::probing(
+            list_directory,
+            RtLinkReader,
+            tairix_browse::vfs::probe_directory,
+        )
     }
 
     /// Open the manager's browser at the first location that actually lists,
@@ -7404,12 +8076,13 @@ mod program {
     }
 
     /// The first location that actually lists: the one the command line named,
-    /// then the launching user's home, then the root view.
+    /// then the launching user's own files and their home
+    /// ([`tairix_browse::bare_open_places`]), then the root view.
     ///
     /// Degrades rather than dies — a location that cannot be listed is stated
-    /// on `stderr` and the next one tried, so a caller naming a folder that is
-    /// gone, is not a directory, or that this user may not read still gets a
-    /// usable window. `None` only when even the root view cannot be listed,
+    /// on `stderr` with the place tried next, so a caller naming a folder that
+    /// is gone, is not a directory, or that this user may not read still gets
+    /// a usable window. `None` only when even the root view cannot be listed,
     /// which `main` exits fail-loud on.
     ///
     /// This reads on the calling thread, and is the one read that does: the
@@ -7419,19 +8092,24 @@ mod program {
     /// read comes before any window exists; a later window's is taken on the
     /// loop, which `plans/OPEN-DEFECTS.md` D454 records.
     fn first_listable(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
-        if let Some(components) = location {
-            match Browser::open_at(live_source(), components.clone()) {
-                Ok(browser) => return Some(browser),
-                Err(_) => report_error(&unlistable_reason(&components)),
-            }
-        }
+        let mut candidates: alloc::vec::Vec<alloc::vec::Vec<String>> =
+            location.into_iter().collect();
         if let Some(home) = home_components() {
-            match Browser::open_at(live_source(), home) {
+            candidates.extend(tairix_browse::bare_open_places(&home));
+        }
+        candidates.push(alloc::vec::Vec::new());
+        candidates.dedup();
+        for (at, place) in candidates.iter().enumerate() {
+            match Browser::open_at(live_source(), place.clone()) {
                 Ok(browser) => return Some(browser),
-                Err(_) => report_error("could not list the home directory; opening the root view"),
+                Err(_) => {
+                    if let Some(next) = candidates.get(at + 1) {
+                        report_error(&unlistable_reason(place, next));
+                    }
+                }
             }
         }
-        Browser::open_root(live_source()).ok()
+        None
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
@@ -7635,6 +8313,7 @@ mod program {
         // channel ends the app fail-loud; a clean close ends it at zero.
         let desktop_moved = Cell::new(false);
         let places_read: PlacesRead = RefCell::new(None);
+        let band_due = Cell::new(None);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
@@ -7643,6 +8322,7 @@ mod program {
             reads: &reads,
             desktop_moved: &desktop_moved,
             places_read: &places_read,
+            band_due: &band_due,
         });
         loop {
             // Report what the icon cache holds at the head of the turn: this
@@ -7803,6 +8483,48 @@ mod program {
                         {
                             return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                         }
+                        continue;
+                    }
+                    // A band held where its listing scrolls steps it once a
+                    // frame, ahead of the reader's work, so the scroll keeps
+                    // its pace.
+                    let now = tairix_rt::clock_get();
+                    let mut stepped = false;
+                    for win in &mut windows {
+                        let mode = *win.pane.mode();
+                        let mut damage = Region::new();
+                        let repaint = match win.browser() {
+                            Some(state) => state.step_band(
+                                Canvas {
+                                    theme: themes.active(),
+                                    mode: &mode,
+                                    scale: desktop.scale(),
+                                    chrome: state.chrome,
+                                },
+                                now,
+                                &mut damage,
+                            ),
+                            None => Repaint::Nothing,
+                        };
+                        if repaint == Repaint::Nothing {
+                            continue;
+                        }
+                        stepped = true;
+                        if present_window(
+                            win,
+                            &mut client,
+                            themes.grounds(MANAGER_WINDOW_GROUND),
+                            &icons,
+                            desktop.scale(),
+                            repaint,
+                            &damage,
+                        )
+                        .is_err()
+                        {
+                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+                        }
+                    }
+                    if stepped {
                         continue;
                     }
                     // A mount-table change the reader has answered: the rail
@@ -8050,6 +8772,9 @@ mod program {
                                 );
                             }
                         }
+                        // Every window just asked about the folders it shows, so
+                        // one none of them asked about has left the screen.
+                        reads.sweep_probes();
                         // A batch that answered nothing this window is showing
                         // costs no frame, and the turn carries on to the park.
                         if shown {
@@ -8078,8 +8803,20 @@ mod program {
                                 );
                             }
                         }
+                        // Every window was just drawn whole, so a thumbnail
+                        // none of them asked for is no longer on screen.
+                        reads.sweep_thumbnails();
                         continue;
                     }
+                    band_due.set(
+                        windows
+                            .iter()
+                            .filter_map(|win| match &win.kind {
+                                WindowKind::Browser(state) => state.band_due(),
+                                WindowKind::Properties(_) => None,
+                            })
+                            .min(),
+                    );
                     events.wait(&mut client)
                 }
                 Err(err) => Err(err),

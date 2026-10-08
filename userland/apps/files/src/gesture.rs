@@ -12,10 +12,15 @@
 //! function of the press and the remembered one, so it lives here and is
 //! covered by the tests beside it.
 //!
-//! # The three gestures
+//! # The gestures
 //!
 //! | gesture | what it does |
 //! |---|---|
+//! | click | select the item alone; inside a multi-selection, on release |
+//! | ctrl-click | add the item to the selection, or take it out |
+//! | shift-click | select the run from the anchor to the item |
+//! | click on the listing's ground | clear the selection, unless ctrl or shift is held |
+//! | drag on the listing's ground | draw a band selecting what it covers; escape takes it back ([`press_step`]) |
 //! | double-click | activate: descend, run a bundle, or open a file |
 //! | shift-double-click | list a bundle's contents instead of running it |
 //! | right-click | ask the desktop for the context menu on the item |
@@ -31,7 +36,9 @@
 //! ([`DoubleClickTracker`]) — keyed on the button as well as the item, so a
 //! left press and a right press are never mistaken for one gesture.
 
+use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
 use tairix_abi::time::Duration64;
+use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::BundleIntent;
 use tairix_geometry::{Point, Scale};
 use tairix_input::{ClickKind, DoubleClickTracker, PointerButton};
@@ -92,6 +99,32 @@ pub enum AfterHandoff {
     CloseWindow,
 }
 
+/// Where a primary press landed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PressHit {
+    /// On the listed item at this index.
+    Item(usize),
+    /// On the listing's own ground, between or past its items.
+    Empty,
+    /// On the chrome around the listing: the toolbar, a gutter.
+    Chrome,
+}
+
+/// How a lone press on an item changes the selection.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SelectHow {
+    /// Select the item alone.
+    Single,
+    /// `Ctrl`: add the item to the selection, or take it out.
+    Toggle,
+    /// `Shift`: select the run from the selection's anchor to the item.
+    Extend,
+    /// The item is already one of several selected: keep them all, so a drag
+    /// carries the whole selection, and select the item alone only if the
+    /// press is released without dragging.
+    Hold,
+}
+
 /// What a primary press on the listing resolved to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PrimaryPress {
@@ -101,18 +134,35 @@ pub enum PrimaryPress {
         /// The item the pair landed on.
         index: usize,
     },
-    /// A lone press on the item at `index`: select it and nothing more.
+    /// A lone press on the item at `index`, changing the selection `how`.
     Select {
         /// The item the press landed on.
         index: usize,
+        /// What the press does to the selection.
+        how: SelectHow,
     },
-    /// The press landed on no item, so it belongs to the chrome behind the
-    /// listing.
+    /// A press on the listing's ground: the selection is cleared unless a
+    /// modifier asks to `keep` it, and a drag from here draws a marquee.
+    Empty {
+        /// Whether `Ctrl` or `Shift` was held, adding to the selection.
+        keep: bool,
+    },
+    /// The press landed on the chrome around the listing.
     Chrome,
 }
 
-/// Decide what a primary press at monotonic time `now_ns` means, given the item
-/// `index` the hit-test resolved (`None` for the chrome).
+/// The selection keys held with a press.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct SelectKeys {
+    /// `Ctrl` toggles one item.
+    pub toggle: bool,
+    /// `Shift` extends from the anchor.
+    pub extend: bool,
+}
+
+/// Decide what a primary press at monotonic time `now_ns` means, given where
+/// the hit-test put it, the selection keys held, and whether the item pressed
+/// is already one of several selected (`in_selection`).
 ///
 /// A press that resolves to no item cannot begin a pair, so it resets
 /// `tracker`: a click *through* the chrome and back onto the same item is never
@@ -120,28 +170,257 @@ pub enum PrimaryPress {
 pub fn primary_press(
     tracker: &mut DoubleClickTracker,
     now_ns: u64,
-    index: Option<usize>,
+    hit: PressHit,
+    keys: SelectKeys,
+    in_selection: bool,
     interval: Duration64,
 ) -> PrimaryPress {
-    let Some(index) = index else {
-        tracker.reset();
-        return PrimaryPress::Chrome;
+    let index = match hit {
+        PressHit::Item(index) => index,
+        PressHit::Empty => {
+            tracker.reset();
+            return PrimaryPress::Empty {
+                keep: keys.toggle || keys.extend,
+            };
+        }
+        PressHit::Chrome => {
+            tracker.reset();
+            return PrimaryPress::Chrome;
+        }
     };
     let subject = u64::try_from(index).unwrap_or(u64::MAX);
     match tracker.register(now_ns, subject, PointerButton::Primary, interval) {
         ClickKind::Double => PrimaryPress::Activate { index },
-        ClickKind::Single => PrimaryPress::Select { index },
+        ClickKind::Single => PrimaryPress::Select {
+            index,
+            how: if keys.toggle {
+                SelectHow::Toggle
+            } else if keys.extend {
+                SelectHow::Extend
+            } else if in_selection {
+                SelectHow::Hold
+            } else {
+                SelectHow::Single
+            },
+        },
+    }
+}
+
+/// How far a held primary press has got.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PressHold {
+    /// Pressed, and not yet travelled past the slop.
+    Armed,
+    /// Travelled: a band being dragged out.
+    Dragging,
+}
+
+/// What a window event is to a held press.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PressInput {
+    /// The pointer moved.
+    Moved,
+    /// The primary button went down.
+    PrimaryPressed,
+    /// The primary button came up.
+    PrimaryReleased,
+    /// Another button went down.
+    OtherPressed,
+    /// Any other pointer event: another button up, or the wheel.
+    OtherPointer,
+    /// `Escape` went down.
+    Escape,
+    /// Any other key event.
+    Key,
+    /// The window lost the keyboard.
+    Unfocused,
+    /// Anything else.
+    Other,
+}
+
+impl PressInput {
+    /// What `event` is to a held press.
+    #[must_use]
+    pub const fn of(event: &WindowEvent) -> Self {
+        match *event {
+            WindowEvent::Pointer { action, .. } => match action {
+                PointerAction::Moved => Self::Moved,
+                PointerAction::Pressed(PointerButtonCode::Primary) => Self::PrimaryPressed,
+                PointerAction::Released(PointerButtonCode::Primary) => Self::PrimaryReleased,
+                PointerAction::Pressed(_) => Self::OtherPressed,
+                PointerAction::Released(_) => Self::OtherPointer,
+            },
+            WindowEvent::Scrolled { .. } | WindowEvent::Pinch { .. } => Self::OtherPointer,
+            WindowEvent::Key {
+                key:
+                    KeyInput::Pressed {
+                        key: KeyValue::Named(NamedKeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => Self::Escape,
+            WindowEvent::Key { .. } => Self::Key,
+            WindowEvent::Focus { focused: false, .. } => Self::Unfocused,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// What a held press does with an event.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PressStep {
+    /// Follow the pointer: a band grows, and an arm begins once it travels.
+    Grow,
+    /// End, keeping what it selected.
+    End,
+    /// End, keeping what it selected, and route the event as though nothing
+    /// were held.
+    EndAndRoute,
+    /// Take back what it selected, and end.
+    Cancel,
+    /// Swallow the event.
+    Hold,
+    /// Not the press's: route it.
+    Route,
+}
+
+/// What a press at `hold` does with `input`: a band on the listing's ground,
+/// or a press on a selected item that may yet become a drag.
+///
+/// A dragging band holds every pointer event and key until its release, so
+/// nothing can navigate, open a dialog over it, or change the selection it is
+/// diffing. A primary press while it drags proves the release that would have
+/// ended it went elsewhere, so it ends the band and is routed as the press it
+/// is. An arm has changed nothing yet, so a key, another button, a second
+/// press, or the window losing the keyboard lets it go: a menu or dialog that
+/// took its release never leaves it to begin on the next hover.
+#[must_use]
+pub const fn press_step(hold: PressHold, input: PressInput) -> PressStep {
+    match (hold, input) {
+        (_, PressInput::Moved) => PressStep::Grow,
+        (_, PressInput::PrimaryReleased) => PressStep::End,
+        (PressHold::Dragging, PressInput::Escape) => PressStep::Cancel,
+        (
+            PressHold::Dragging,
+            PressInput::OtherPressed | PressInput::OtherPointer | PressInput::Key,
+        ) => PressStep::Hold,
+        (_, PressInput::PrimaryPressed | PressInput::Unfocused)
+        | (PressHold::Armed, PressInput::OtherPressed | PressInput::Escape | PressInput::Key) => {
+            PressStep::EndAndRoute
+        }
+        (PressHold::Armed, PressInput::OtherPointer) | (_, PressInput::Other) => PressStep::Route,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bundle_intent, primary_press, DragArm, PrimaryPress, DRAG_SLOP};
+    use super::{
+        bundle_intent, press_step, primary_press as press_with, DragArm, PressHit, PressHold,
+        PressInput, PressStep, PrimaryPress, SelectHow, SelectKeys, DRAG_SLOP,
+    };
+    use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent};
     use tairix_geometry::{Point, Scale};
 
     use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
+    use tairix_abi::time::Duration64;
     use tairix_browse::BundleIntent;
     use tairix_input::DoubleClickTracker;
+
+    /// A press with no selection keys held, on an item not already among
+    /// several selected (`None` is the chrome).
+    fn primary_press(
+        tracker: &mut DoubleClickTracker,
+        now_ns: u64,
+        index: Option<usize>,
+        interval: Duration64,
+    ) -> PrimaryPress {
+        let hit = index.map_or(PressHit::Chrome, PressHit::Item);
+        press_with(tracker, now_ns, hit, SelectKeys::default(), false, interval)
+    }
+
+    const fn single(index: usize) -> PrimaryPress {
+        PrimaryPress::Select {
+            index,
+            how: SelectHow::Single,
+        }
+    }
+
+    #[test]
+    fn a_press_on_the_listings_ground_clears_unless_a_key_keeps_the_selection() {
+        let mut tracker = DoubleClickTracker::new();
+        let keys = |toggle, extend| SelectKeys { toggle, extend };
+        for (held, keep) in [
+            (keys(false, false), false),
+            (keys(true, false), true),
+            (keys(false, true), true),
+        ] {
+            assert_eq!(
+                press_with(
+                    &mut tracker,
+                    0,
+                    PressHit::Empty,
+                    held,
+                    false,
+                    DOUBLE_CLICK_DEFAULT
+                ),
+                PrimaryPress::Empty { keep }
+            );
+        }
+    }
+
+    #[test]
+    fn the_selection_keys_toggle_or_extend_and_a_press_inside_several_holds_them() {
+        let mut tracker = DoubleClickTracker::new();
+        let mut once = |keys, in_selection| {
+            tracker.reset();
+            press_with(
+                &mut tracker,
+                0,
+                PressHit::Item(3),
+                keys,
+                in_selection,
+                DOUBLE_CLICK_DEFAULT,
+            )
+        };
+        let how = |press| match press {
+            PrimaryPress::Select { how, .. } => how,
+            other => panic!("not a select: {other:?}"),
+        };
+        let ctrl = SelectKeys {
+            toggle: true,
+            extend: false,
+        };
+        let shift = SelectKeys {
+            toggle: false,
+            extend: true,
+        };
+        assert_eq!(how(once(ctrl, true)), SelectHow::Toggle);
+        assert_eq!(how(once(shift, false)), SelectHow::Extend);
+        assert_eq!(how(once(SelectKeys::default(), true)), SelectHow::Hold);
+        assert_eq!(how(once(SelectKeys::default(), false)), SelectHow::Single);
+    }
+
+    #[test]
+    fn a_press_on_the_ground_breaks_a_half_finished_pair() {
+        let mut tracker = DoubleClickTracker::new();
+        assert_eq!(
+            primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
+            single(2)
+        );
+        press_with(
+            &mut tracker,
+            1,
+            PressHit::Empty,
+            SelectKeys::default(),
+            false,
+            DOUBLE_CLICK_DEFAULT,
+        );
+        assert_eq!(
+            primary_press(&mut tracker, 2, Some(2), DOUBLE_CLICK_DEFAULT),
+            single(2)
+        );
+    }
 
     #[test]
     fn a_press_is_a_drag_only_once_it_travels_past_the_slop() {
@@ -169,7 +448,7 @@ mod tests {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(
             primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
-            PrimaryPress::Select { index: 2 }
+            single(2)
         );
         assert_eq!(
             primary_press(&mut tracker, 1_000, Some(2), DOUBLE_CLICK_DEFAULT),
@@ -182,7 +461,7 @@ mod tests {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(
             primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
-            PrimaryPress::Select { index: 2 }
+            single(2)
         );
         assert_eq!(
             primary_press(&mut tracker, 1, None, DOUBLE_CLICK_DEFAULT),
@@ -191,7 +470,7 @@ mod tests {
         // Back on the same item, the run has been broken: a fresh single.
         assert_eq!(
             primary_press(&mut tracker, 2, Some(2), DOUBLE_CLICK_DEFAULT),
-            PrimaryPress::Select { index: 2 }
+            single(2)
         );
     }
 
@@ -200,7 +479,7 @@ mod tests {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(
             primary_press(&mut tracker, 0, Some(2), DOUBLE_CLICK_DEFAULT),
-            PrimaryPress::Select { index: 2 }
+            single(2)
         );
         // A right press asks the desktop for the menu and resets the tracker,
         // exactly as the app's own secondary-press path does, so the click after it
@@ -208,7 +487,7 @@ mod tests {
         tracker.reset();
         assert_eq!(
             primary_press(&mut tracker, 1, Some(2), DOUBLE_CLICK_DEFAULT),
-            PrimaryPress::Select { index: 2 }
+            single(2)
         );
     }
 
@@ -218,13 +497,10 @@ mod tests {
     fn a_press_pairs_under_the_interval_the_desktop_publishes() {
         let mut tracker = DoubleClickTracker::new();
         let short = tairix_abi::time::Duration64::from_millis(200);
-        assert_eq!(
-            primary_press(&mut tracker, 0, Some(2), short),
-            PrimaryPress::Select { index: 2 }
-        );
+        assert_eq!(primary_press(&mut tracker, 0, Some(2), short), single(2));
         assert_eq!(
             primary_press(&mut tracker, 300_000_000, Some(2), short),
-            PrimaryPress::Select { index: 2 },
+            single(2),
             "300 ms is past a 200 ms interval"
         );
     }
@@ -233,5 +509,114 @@ mod tests {
     fn shift_asks_for_the_bundles_contents_and_nothing_else_does() {
         assert_eq!(bundle_intent(true), BundleIntent::Browse);
         assert_eq!(bundle_intent(false), BundleIntent::Launch);
+    }
+
+    fn pointer(action: PointerAction) -> WindowEvent {
+        WindowEvent::Pointer {
+            window_id: 1,
+            x: 5,
+            y: 5,
+            action,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn key(key: KeyValue) -> WindowEvent {
+        WindowEvent::Key {
+            window_id: 1,
+            key: KeyInput::Pressed {
+                key,
+                modifiers: Modifiers::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_held_press_reads_each_event_by_what_it_is() {
+        use PointerButtonCode::{Primary, Secondary};
+        let cases = [
+            (pointer(PointerAction::Moved), PressInput::Moved),
+            (
+                pointer(PointerAction::Pressed(Primary)),
+                PressInput::PrimaryPressed,
+            ),
+            (
+                pointer(PointerAction::Released(Primary)),
+                PressInput::PrimaryReleased,
+            ),
+            (
+                pointer(PointerAction::Pressed(Secondary)),
+                PressInput::OtherPressed,
+            ),
+            (
+                pointer(PointerAction::Released(Secondary)),
+                PressInput::OtherPointer,
+            ),
+            (
+                key(KeyValue::Named(NamedKeyCode::Escape)),
+                PressInput::Escape,
+            ),
+            (key(KeyValue::Named(NamedKeyCode::Delete)), PressInput::Key),
+            (key(KeyValue::Char('a')), PressInput::Key),
+            (
+                WindowEvent::Focus {
+                    window_id: 1,
+                    focused: false,
+                },
+                PressInput::Unfocused,
+            ),
+            (
+                WindowEvent::Focus {
+                    window_id: 1,
+                    focused: true,
+                },
+                PressInput::Other,
+            ),
+        ];
+        for (event, input) in cases {
+            assert_eq!(PressInput::of(&event), input, "{event:?}");
+        }
+    }
+
+    /// A dragging band holds every key and pointer event to its release, so no
+    /// key can navigate or open a dialog under it; a primary press proves its
+    /// release was lost and ends it, routed as the press it is.
+    #[test]
+    fn a_dragging_band_holds_the_window_until_its_release() {
+        let live = |input| press_step(PressHold::Dragging, input);
+        assert_eq!(live(PressInput::Moved), PressStep::Grow);
+        assert_eq!(live(PressInput::PrimaryReleased), PressStep::End);
+        assert_eq!(live(PressInput::Escape), PressStep::Cancel);
+        for held in [
+            PressInput::Key,
+            PressInput::OtherPressed,
+            PressInput::OtherPointer,
+        ] {
+            assert_eq!(live(held), PressStep::Hold, "{held:?}");
+        }
+        assert_eq!(live(PressInput::PrimaryPressed), PressStep::EndAndRoute);
+        assert_eq!(live(PressInput::Unfocused), PressStep::EndAndRoute);
+        assert_eq!(live(PressInput::Other), PressStep::Route);
+    }
+
+    /// An arm has changed nothing, so a right-click, a key, a second press, or
+    /// the window losing the keyboard drops it and is routed as usual: a menu
+    /// or dialog opened from it never leaves it to begin on the next hover.
+    #[test]
+    fn an_arm_lets_go_of_anything_but_its_own_drag() {
+        let armed = |input| press_step(PressHold::Armed, input);
+        assert_eq!(armed(PressInput::Moved), PressStep::Grow);
+        assert_eq!(armed(PressInput::PrimaryReleased), PressStep::End);
+        for dropped in [
+            PressInput::OtherPressed,
+            PressInput::Escape,
+            PressInput::Key,
+            PressInput::PrimaryPressed,
+            PressInput::Unfocused,
+        ] {
+            assert_eq!(armed(dropped), PressStep::EndAndRoute, "{dropped:?}");
+        }
+        assert_eq!(armed(PressInput::OtherPointer), PressStep::Route);
+        assert_eq!(armed(PressInput::Other), PressStep::Route);
     }
 }

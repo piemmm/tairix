@@ -66,11 +66,13 @@ order a typed key after a pointer click, so two guest click-throughs cannot be
 driven. Both product halves are landed and host-tested; only the guest witness
 is missing.
 
-**FM15** — a press on a file that travels past `DRAG_SLOP` hands the session
-the drag (`BeginDrag`, the file's name only); dropped on a slot that claims
-the file, the manager takes the chosen application (`TakeDropTarget`) and opens
-the file for it exactly as its "Open With" does, so no path and no authority
-crosses to the desktop. Every document open — activation, "Open With", a drop —
+**FM15** — a press on a selected entry that travels past `DRAG_SLOP` hands the
+session the drag (`BeginDrag`: the first item's name, the count, and whether it
+is one openable file); dropped on a slot that claims the file, the manager
+takes the chosen application (`TakeDropTarget`) and opens the file for it
+exactly as its "Open With" does, so no path and no authority crosses to the
+desktop. Drops onto its own windows and the desktop are
+`plans/FILES-INTERACTION.md` FI9. Every document open — activation, "Open With", a drop —
 runs on the reader worker (`Reads`), FIFO: resolving the application waits
 for the bundle scan when it has not landed, and the `fs_open` of the document
 never runs on the loop that owes the window a frame. A document is opened
@@ -429,8 +431,8 @@ manager window through that item's own context-menu *Open* row
 (`reconstruct_manager_item_menu`, which composes the session's chain from the
 rows this app declares). D98 remains the block on FM9-a's remaining halves, and
 it is a block on *keys*, not on reaching the window.
-Landed: the trusted picker opens at the user's home (`Browser::open_at` over
-the session's `HOME`, falling back to `/`), and the CU6 one-shot delegation
+Landed: the trusted picker opens at the user's `UserFiles` (`Browser::open_at`
+over the session's `HOME`, climbing from a refused start), and the CU6 one-shot delegation
 that hands the picked file to the viewer is host-tested end to end (mint, the
 D92 instance gate, one-shot redemption, the grantor-identity re-check, the
 extent ceiling). **The guest run now exists**:
@@ -504,8 +506,8 @@ Sort) and their actions already exist, so it needs no speculative surface. The
 Open/Rename/Cut/Copy/Paste/Properties verbs; `OpenWith` **now re-joins**
 `CONTEXT_COMMANDS` with FM6b's chooser verb (enabled only for a regular file),
 and **Delete** joined it with FM9-c's confirm-and-remove verb (enabled on any
-selection). New Folder stays off this menu — it is a *write* toolbar tool, not
-a menu command shared with the read-only picker.
+selection). New ▸ (Folder and the blank documents, `plans/FILES-INTERACTION.md`
+FI10) is a submenu of it; the read-only picker opens no write menu.
 
 FM6 is split (§2.19) the same way: **FM6a** (the engine `activate` dispatch-by-kind
 decision — descend / launch a bundle / open a file, host-proven), and
@@ -771,7 +773,7 @@ truncated label, with hover/press/selection/focus/bead marks and nothing at all
 behind a resting tile, and `render`'s grid tile sets its kind from the registry
 — so the FM2b grid tile is complete. The tile takes the owner-supplied artwork
 seam: `render`'s trailing `&mut dyn tairix_icon::IconArtwork` is asked for each
-tile's kind at exactly the side `IconTile::icon_side` reserves, and the tile
+tile's kind at exactly the side its `TileLayout` reserves, and the tile
 blits what it returns or draws the built-in glyph, so real icon artwork lands
 without a second draw path.
 
@@ -820,24 +822,27 @@ Docs: `docs/src/desktop/apps.md`,
 
 #### Folder occupancy — an empty folder is not a full one
 
-A folder that holds something draws `IconKind::FolderFilled` (a new
-built-in glyph plus the `folder-filled.svg` class master); an empty one keeps
-`Folder`. A directory's `size` is `0` and no VFS surface reports a child count,
-so occupancy is a separate read, and only a *known* answer changes the icon:
+A folder that holds something draws a picture of what it holds — the folder
+composite of its `FolderSample` (`plans/FILES-INTERACTION.md` FI11), or
+`IconKind::FolderFilled` where that will not draw; an empty one keeps `Folder`.
+A directory's `size` is `0` and no VFS surface reports a child count, so
+occupancy is a separate read, and only a *known* answer changes the icon:
 
-- `Entry::occupancy()` is `Unprobed` / `Empty` / `NonEmpty` / `Indeterminate`
-  (refused or failed). Only `NonEmpty` fills the folder, so an unprobed or
-  unreadable one is the plain icon — fail closed, never a guess (§5.4).
+- `Entry::occupancy()` is `Unprobed` / `Empty` / `NonEmpty(sample)` /
+  `Indeterminate` (refused or failed). Only `NonEmpty` changes the picture, so
+  an unprobed or unreadable folder is the plain icon — fail closed, never a
+  guess (§5.4).
 - `DirectorySource::has_children` is the probe; `VfsDirectorySource` answers it
-  by opening the directory, reading **one** maximal record, and closing —
-  never a listing, never a walk, so the cost does not grow with the child
-  count. The kernel packs a whole listing or refuses, so `BufferTooSmall` also
-  means occupied.
-- `Browser::resolve_occupancy(range)` answers only the caller's indices, and
-  only where an entry still needs one. The app passes `render::visible_range`,
-  the one definition of what is on screen, so a 100 000-entry directory probes
-  a screenful (§26). A refusal is recorded, never retried; a fresh listing
-  resets every answer, so a refresh re-probes.
+  by opening the directory, reading **one** `PROBE_BUF_LEN` batch, and closing
+  — never a listing, never a walk. A batch costs the kernel what its buffer
+  holds, so the cost does not grow with the child count.
+- `Browser::resolve_occupancy(range)` — the shared `resolve_occupancy` the
+  desktop resolves its icons through too — answers only the caller's indices,
+  and only where an entry still needs one. The app passes
+  `render::visible_range`, the one definition of what is on screen, so a
+  100 000-entry directory probes a screenful (§26). A refusal is recorded,
+  never retried; a fresh listing resets every answer, so a refresh re-probes.
+  The deferred probe desk both share is `lib/browse` `Probes`.
 - The trait's default answers `NotImplemented` (read as `Indeterminate`). The
   trusted picker takes that default deliberately: the cue adds nothing to
   choosing a file, so it exercises no directory-read authority it does not
@@ -963,14 +968,14 @@ the write tools in their own toolbar group after the read-only commands, and
 `render::manager_tool_at` is the mirror hit-test (a read-only command's
 position is unchanged whether or not tools follow, so `toolbar_command_at`
 needs no `tools` argument). The `files.app` `Run` binary routes a toolbar click
-(and the `Ctrl+Shift+N` keyboard equivalent) to `begin_new_folder`, which names
-a non-clashing placeholder (`mkdir::suggest_new_dir_name`), creates it through
-`Browser::create_directory` over the `fs_mkdir` seam under the user's own
+(and the `Ctrl+Shift+N` keyboard equivalent) to `begin_new_entry`, which names
+a non-clashing placeholder (`NewEntry::suggest_name`), creates it through
+`Browser::create_entry` over the `fs_mkdir` seam under the user's own
 identity (**no new capability**), and opens the inline rename on the new folder;
 a refused create states its reason on `stderr` and leaves the listing put
 (§2.24, §5.4). Host-tested in `lib/browse` (`manager_tool_at` resolves New
 Folder and stays disjoint from the read-only commands, the empty-`tools` picker
-never resolves a write tool, and `suggest_new_dir_name` disambiguation) and
+never resolves a write tool, and `NewEntry::suggest_name` disambiguation) and
 `lib/icon` (the `NewFolder` glyph). Docs: `docs/src/desktop/apps.md`,
 `lib/browse`/`lib/icon` README + rustdoc.
 
@@ -1044,7 +1049,7 @@ binary supplies the inline text editor and the `fs_rename` seam.
   over the selected item's **name** (via `render::selection_name_rect`, which
   reads the drawn controls' own geometry — the list row's name-cell text span
   through `TableRow::cell_text_rect`, the grid tile's label band through
-  `IconTile::label_rect`), pre-filled and bounded by `FS_NAME_MAX`; keys route
+  `TileLayout::label_rect`), pre-filled and bounded by `FS_NAME_MAX`; keys route
   to the editor, edits live-validate (a clash/bad char shows in the field),
   `Enter` commits and `Escape` cancels. The window-channel wire key is mapped
   onto the `lib/input` vocabulary locally. The same rename is reachable without
@@ -1192,7 +1197,7 @@ program stores on every right-click). `OpenWith` is a row of
 `chrome::CONTEXT_COMMANDS`, enabled only for a regular file — a directory
 descends and a bundle launches itself, so neither has an application to pick, and
 each says so. Choosing it concludes the chain; the app then resolves the file's
-absolute path (the shared `selected_target_path`), enumerates the full
+absolute path (the shared `chosen_target_path`), enumerates the full
 `applications_for` candidate list over `RtBundleSource`, and — when at least one
 application claims the type — opens an `open_with::OpenWithChooser` in its own
 popup window, opening with the identity band that names the file, then one
@@ -1279,22 +1284,22 @@ message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
 **The pure new-folder model** (§2.19 — host-proven ahead of the drawn
 New Folder tool, exactly as the paste-execution model landed ahead of the app
-verbs): the `lib/browse::mkdir` module (`MkdirError` + `validate_new_dir_name`)
-plus `Browser::create_directory`. `validate_new_dir_name` spells the typed name
+verbs): the `lib/browse::create` module (`CreateError` + `validate_new_entry_name`)
+plus `Browser::create_entry`. `validate_new_entry_name` spells the typed name
 through the one shared `lib/path::validate_file_name` rule and refuses a name a
-sibling already carries (`Clash`), both before any syscall. `create_directory`
+sibling already carries (`Clash`), both before any syscall. `create_entry`
 spells the new folder's absolute path through the one shared
 `Browser::spell_child` helper the launch/open targets also use (de-duplicated
 from the two former private copies, §2.2), applies it through an injected
 `fs_mkdir` seam under the user's own identity (**no new capability**), then
 re-lists and follows the selection onto the new folder ready for the inline
 rename — transactional and fail closed, a VFS refusal leaving the listing put
-and surfacing as `MkdirError::Refused` (§2.24, §5.4). The read-only picker
+and surfacing as `CreateError::Refused` (§2.24, §5.4). The read-only picker
 composes the same `Browser` and never calls it. Host-tested in `lib/browse`
 (commit creates + selects the new folder, each invalid-name class refused
 before any syscall, clash refused, VFS refusal surfaced leaving the listing
 put, create in an empty directory needs no selection, failed post-create
-re-list surfaced, `validate_new_dir_name` purity, every `MkdirError` message
+re-list surfaced, `validate_new_entry_name` purity, every `CreateError` message
 non-empty). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
 **The pure delete model** (§2.19 — host-proven ahead of the app verb,
@@ -1549,7 +1554,7 @@ cursor lands on (`render::properties_reveal`) move the window's one
 lands only on what the scroll shows. The attribute rows scroll in the band
 above the `key = value` editor, which stays put. `files.app` opens one with
 `Alt+Enter` or the context menu's *Properties* row: the node is resolved from
-the listing that named it (`Browser::selected_target_path`), the window is
+the listing that named it (`Browser::chosen_target_path`), the window is
 appended once the round's borrow of its own window has ended, and the **read
 leaves the loop** — one `fs_stat` plus one `fs_attr_get` per attribute key is a
 stall, not a frame (§28.1). `render::PropertiesFrame` is what the window draws:

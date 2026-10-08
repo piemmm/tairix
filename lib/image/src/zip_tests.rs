@@ -137,3 +137,24 @@ fn damage_encryption_and_lies_are_refused() {
         Some(ZipError::Malformed)
     );
 }
+
+/// A head holds an entry's opening bytes, stored or deflated, fewer where the
+/// entry is shorter, and nothing for a name the archive does not hold.
+#[test]
+fn a_head_reads_an_entrys_opening_bytes_however_it_is_stored() {
+    let data: Vec<u8> = (0..100u8).collect();
+    let mut zip = Writer::new();
+    zip.store("stored", &data).expect("room");
+    zip.store_deflated("packed", &data).expect("room");
+    zip.store("short", b"abc").expect("room");
+    let bytes = zip.finish().expect("room");
+    let archive = Archive::open(&bytes).expect("readable");
+    let mut head = [0u8; 10];
+    for name in ["stored", "packed"] {
+        assert_eq!(archive.head(name, &mut head), Ok(Some(10)), "{name}");
+        assert_eq!(head, data[..10], "{name}");
+    }
+    assert_eq!(archive.head("short", &mut head), Ok(Some(3)));
+    assert_eq!(&head[..3], b"abc");
+    assert_eq!(archive.head("absent", &mut head), Ok(None));
+}

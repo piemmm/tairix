@@ -6,12 +6,11 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_controls::IconTile;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::FALLBACK_MONOGRAM;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 
-use crate::chooser::{AccountTile, Chooser, Step, OTHER_LABEL};
+use crate::chooser::{AccountTile, Chooser, Step, ACCOUNT_TILE, OTHER_LABEL};
 use crate::surface::{
     AuthSurface, Backdrop, EventContext, Verdict, CHOOSE_HINT, HINT, NAME_HINT, NAME_REQUIRED,
 };
@@ -44,10 +43,27 @@ fn an_account_tile_holds_a_two_word_name_at_every_density() {
     for percent in [100, 200] {
         let scale = Scale::from_percent(percent).expect("a supported density");
         let tile = grid(&["ann"]).tile_rect(0, SCREEN, scale).expect("a tile");
-        assert!(
-            IconTile::label_lines(tile, scale, &theme) >= 3,
+        assert_eq!(
+            ACCOUNT_TILE.label_lines(tile, scale, &theme),
+            3,
             "at {percent}% a tile holds {} label lines",
-            IconTile::label_lines(tile, scale, &theme)
+            ACCOUNT_TILE.label_lines(tile, scale, &theme)
+        );
+    }
+}
+
+/// The disc keeps its side as the tile changed to seat three name lines: an
+/// 80-pixel disc at the reference density, twice that at a doubled one.
+#[test]
+fn an_account_tile_seats_its_disc_at_every_density() {
+    let theme = theme();
+    for (percent, side) in [(100, 80), (200, 160)] {
+        let scale = Scale::from_percent(percent).expect("a supported density");
+        let tile = grid(&["ann"]).tile_rect(0, SCREEN, scale).expect("a tile");
+        assert_eq!(
+            ACCOUNT_TILE.icon_side(tile, scale, &theme),
+            side,
+            "at {percent}%"
         );
     }
 }

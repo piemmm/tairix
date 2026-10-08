@@ -344,9 +344,9 @@ struct ActivePick<S: DirectorySource> {
     waiting: Option<Waiting>,
     /// Whether [`PICKER_SHOWN`] has been announced for this pick.
     shown: bool,
-    /// The folder shown went from its path: if reading it again fails, the
-    /// pick climbs to the nearest folder still there rather than showing it
-    /// as it was.
+    /// The folder shown went from its path, or is the pick's start still
+    /// being read: if reading it fails, the pick climbs to the nearest folder
+    /// still there rather than showing it as it was.
     lost: bool,
     /// The folder's watch asked for a re-read while another listing was in
     /// flight: owed once that listing is refused, since it answers for the
@@ -370,10 +370,9 @@ impl<S: DirectorySource> ActivePick<S> {
 pub struct SessionPicker<S: DirectorySource, F: FnMut() -> S> {
     source: F,
     /// Root-first components of the directory each pick opens at — the
-    /// user's home in production, so the picker starts among the user's own
-    /// files rather than at the storage-forest root. Empty means the root
-    /// `/`, which is also the fallback when the start directory cannot be
-    /// listed.
+    /// user's `UserFiles` in production, so the picker starts among the
+    /// user's own files rather than at the storage-forest root. Empty means
+    /// the root `/`.
     start: Vec<String>,
     active: Option<ActivePick<S>>,
     /// The serial the last open asked for.
@@ -392,10 +391,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     }
 
     /// Open each pick at the directory named by root-first `start` instead of
-    /// the root — the session points its picker at the logged-in user's home
-    /// so the user lands among their own files. A start directory that cannot
-    /// be listed when a pick begins falls back to the root rather than
-    /// refusing the pick (see [`begin`](PickerSlot::begin)).
+    /// the root — the session points its picker at the logged-in user's
+    /// `UserFiles` so the user lands among their own files. A start that
+    /// cannot be listed climbs to the nearest folder above it that can, and
+    /// only a refusal of the root itself refuses the pick (see
+    /// [`begin`](PickerSlot::begin)).
     #[must_use]
     pub fn starting_at(mut self, start: Vec<String>) -> Self {
         self.start = start;
@@ -1126,18 +1126,17 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         if self.active.is_some() {
             return Err(Errno::AlreadyExists);
         }
-        // List the start directory under the session's own authority before
-        // any UI state exists. The picker opens at the user's home; a home
-        // that cannot be listed (missing, or its capability refused) falls
-        // back to the root rather than refusing the pick, so the user can
-        // still choose a file. Only when the root itself cannot be listed is
-        // the whole pick refused (fail closed, nothing half-open).
-        let browser = match Browser::open_at((self.source)(), self.start.clone()) {
-            Ok(browser) => browser,
-            Err(_) if !self.start.is_empty() => Browser::open_root((self.source)())
-                .map_err(|err| err.source_errno().unwrap_or(Errno::PermissionDenied))?,
-            Err(err) => {
-                return Err(err.source_errno().unwrap_or(Errno::PermissionDenied));
+        // Listed under the session's authority before any UI state exists, so
+        // a refused root refuses the pick with nothing half-open.
+        let mut at = self.start.clone();
+        let browser = loop {
+            match Browser::open_at((self.source)(), at.clone()) {
+                Ok(browser) => break browser,
+                Err(err) => {
+                    if at.pop().is_none() {
+                        return Err(err.source_errno().unwrap_or(Errno::PermissionDenied));
+                    }
+                }
             }
         };
         let save = match purpose {
@@ -1171,6 +1170,7 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         // control cancels the pick exactly as Escape does. Fixed-size,
         // because the shared browser view renders at one geometry.
         shell.decorate_window(compositor, wm, &titled, false);
+        let lost = browser.is_listing();
         self.active = Some(ActivePick {
             for_window,
             wm,
@@ -1178,7 +1178,7 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             save,
             waiting: None,
             shown: false,
-            lost: false,
+            lost,
             reread_owed: false,
         });
         Ok(())

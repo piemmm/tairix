@@ -49,7 +49,7 @@ use tairix_abi::font_ipc::{
     FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN,
 };
 use tairix_abi::fs::{
-    DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX,
+    DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, OpenFlags,
 };
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::net::{
@@ -103,15 +103,16 @@ use tairix_abi::users_admin::{
 };
 use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
-    decode_drop_target_reply, decode_hand_over_reply, decode_menu_text_reply,
-    decode_minted_id_reply, decode_notify_sources_reply, decode_open_target_reply,
-    decode_picked_name_reply, decode_wallpapers_reply, encode_drop_target_reply,
-    encode_picked_name_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry,
-    AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
-    AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape,
-    DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewOutcome,
-    PreviewSubject, SaveEndings, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    WindowSizing, WindowTitle,
+    decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
+    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
+    decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
+    encode_drag_spot_reply, encode_drop_target_reply, encode_picked_name_reply, AppBar,
+    AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem,
+    AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
+    AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
+    DropOperation, DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose,
+    PreviewOutcome, PreviewSubject, SaveEndings, TooltipText, WindowEvent, WindowRegion,
+    WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -770,6 +771,12 @@ fn exercise_window_ipc(bytes: &[u8]) {
         let len = encode_drop_target_reply(&mut frame, Ok(&target));
         assert_eq!(&frame[..len], bytes);
     }
+    // So does a drag spot.
+    if let Ok(folder) = decode_drag_spot_reply(bytes) {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_DRAG_SPOT_REPLY_MAX];
+        let len = encode_drag_spot_reply(&mut frame, Ok(folder));
+        assert_eq!(&frame[..len], bytes);
+    }
     // A picked name re-encodes to exactly the frame it was read from.
     if let Ok(name) = decode_picked_name_reply(bytes) {
         let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_PICKED_NAME_REPLY_MAX];
@@ -1128,7 +1135,7 @@ fn exercise_fs(bytes: &[u8]) {
         // The reported consumed length is exactly the record's encoded size,
         // so a reader walking a packed stream advances correctly.
         assert_eq!(consumed, entry.encoded_len());
-        let mut buf = [0u8; DirEntry::HEADER_LEN + FS_NAME_MAX];
+        let mut buf = [0u8; DirEntry::MAX_LEN];
         let written = entry
             .encode_into(&mut buf)
             .expect("an accepted DirEntry must re-encode");
@@ -1994,9 +2001,23 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::TakePickedName { window_id: 3 },
         WindowRequest::BeginDrag {
             window_id: 3,
-            name: DocumentName::new("notes.txt").expect("a valid name"),
+            items: DragItems::new(
+                DocumentName::new("notes.txt").expect("a valid name"),
+                2,
+                false
+            )
+            .expect("two items"),
         },
         WindowRequest::TakeDropTarget { window_id: 3 },
+        WindowRequest::DragVerdict {
+            window_id: 3,
+            serial: 9,
+            verdict: Some(DropOperation::Copy),
+        },
+        WindowRequest::QueryDragSpot {
+            window_id: 3,
+            serial: 9,
+        },
         WindowRequest::OpenMenu {
             window_id: 3,
             anchor: WindowRegion::new(-12, 40, 96, 20).expect("a representable anchor"),
@@ -2181,6 +2202,23 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         }
         .to_le_bytes(),
         WindowEvent::OpenRequested.to_le_bytes(),
+        WindowEvent::DragOver {
+            window_id: 3,
+            serial: 5,
+            at: DragAt::Window { x: 10, y: 20 },
+            shift: true,
+        }
+        .to_le_bytes(),
+        WindowEvent::DragEnded {
+            window_id: 3,
+            site: DropSite::Window {
+                window_id: 4,
+                x: 1,
+                y: 2,
+                operation: DropOperation::Move,
+            },
+        }
+        .to_le_bytes(),
         WindowEvent::PreviewRendered {
             window_id: 3,
             subject: PreviewSubject::Screensaver(ScreensaverKind::Clock),

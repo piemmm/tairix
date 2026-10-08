@@ -844,7 +844,7 @@ fn a_row_draws_its_icon_whether_or_not_a_cache_answers() {
     let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     let info = sb.list_info(&layout, Scale::ONE, &theme);
     let item = info.item_rect(0);
-    let side = tairix_controls::TableRow::icon_side(item, Scale::ONE, &theme);
+    let side = sb.tasks.entries[0].row.icon_side(item, Scale::ONE, &theme);
     assert!(side > 0, "the row reserves a slot for its icon");
     let gutter = Rect::new(item.left(), item.top(), side, item.height);
     assert!(has_ink(&surface, gutter), "the icon slot draws something");
@@ -880,7 +880,9 @@ fn every_drawn_row_asks_the_cache_for_its_own_picture() {
 
     let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     let info = sb.list_info(&layout, Scale::ONE, &theme);
-    let side = tairix_controls::TableRow::icon_side(info.item_rect(0), Scale::ONE, &theme);
+    let side = sb.tasks.entries[0]
+        .row
+        .icon_side(info.item_rect(0), Scale::ONE, &theme);
     assert!(
         artwork.asked.contains(&(IconKind::AppBundle, side)),
         "the row must ask for its own picture at the side it draws at: {:?}",

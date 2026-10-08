@@ -279,12 +279,20 @@ pub struct DirEntry {
     /// entry — a listing consumer (`ls -lt`, a file manager) reads them
     /// from [`NodeInfo::times`] rather than re-`stat`ing each child.
     pub info: NodeInfo,
-    /// Number of name bytes written into the caller's buffer.
-    pub name_len: usize,
     /// Opaque cursor resuming iteration at the entry *after* this one:
-    /// pass it back to [`FilesystemRead::read_dir`] to continue the
-    /// listing in O(1), never by rescanning from the start.
+    /// pass it back to [`FilesystemRead::read_dir`], with this entry's name,
+    /// to continue the listing without rescanning from the start.
     pub next_cursor: u64,
+}
+
+/// What a [`FilesystemRead::read_dir`] visitor does with the entry it is
+/// handed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DirVisit {
+    /// Take this entry and hand over the next.
+    Take,
+    /// Leave this entry unread and end the call: the listing resumes at it.
+    Stop,
 }
 
 /// Read-only structural access to a mounted filesystem.
@@ -373,38 +381,45 @@ pub trait FilesystemRead {
         Err(DriverError::Unsupported)
     }
 
-    /// Yield the next child of directory `dir` at or after `cursor`,
-    /// writing the child's name into `name_out`.
+    /// Hand `visit` the children of directory `dir` in order, from `cursor`
+    /// on, each with its name, until it answers [`DirVisit::Stop`] or the
+    /// directory ends.
     ///
     /// `cursor` is an **opaque resume token** (the `getdents` `d_off`
-    /// model): `0` starts the listing, and each returned entry carries
-    /// the [`DirEntry::next_cursor`] that continues it in O(1) — a full
-    /// listing therefore costs one bounded scan of the directory, never a
-    /// quadratic rescan from the start per entry. Tokens are meaningful
-    /// only for the directory that produced them, while it is unmodified;
-    /// after a mutation a retained token remains *safe* (bounded,
-    /// fail-closed, no panic) but the remainder of that listing is
-    /// unspecified — the caller restarts from `0` for a coherent view.
-    /// An arbitrary value that was never returned is handled the same
-    /// way: bounds-checked, yielding `Ok(None)`, a valid tail, or
-    /// [`DriverError::DeviceFault`], never undefined behaviour.
+    /// model): `0` starts the listing, and each entry carries the
+    /// [`DirEntry::next_cursor`] that resumes after it. `after` is the name of
+    /// the entry that cursor came from, empty at the start; a format whose
+    /// entries move when others are added or removed resumes from it rather
+    /// than from a position. One call reads each directory block it crosses
+    /// once, however many entries the block holds.
     ///
-    /// Iteration order is the implementation's stable on-disk order.
-    /// Returns `Ok(None)` once the listing is exhausted, which is how a
-    /// caller detects the end of the directory.
+    /// A listing may span calls between which the directory changes, and it
+    /// keeps the POSIX stream contract across them: an entry present for the
+    /// whole listing is handed over exactly once, while one added or removed
+    /// meanwhile may or may not be. Every format's tokens must uphold it.
+    ///
+    /// A token, whether stale or never returned, is confined to `dir`: it is
+    /// bounds-checked against that directory and never reads outside it — an
+    /// out-of-range one simply ends the listing, never undefined behaviour.
+    /// A corrupt directory still ends: no sequence of tokens revisits a
+    /// position.
+    ///
+    /// Iteration order is the implementation's stable on-disk order. Entries
+    /// handed over before an error were read; the caller decides whether a
+    /// partial batch is usable.
     ///
     /// # Errors
     ///
     /// * [`DriverError::Unsupported`] if `dir` is not a directory.
-    /// * [`DriverError::BufferTooSmall`] if the child's name does not
-    ///   fit in `name_out`.
-    /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
+    /// * [`DriverError::DeviceFault`] on an unrecoverable block read or a
+    ///   malformed directory.
     fn read_dir(
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError>;
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError>;
 }
 
 /// The host's write-back timer, as a driver that defers durability sees it.
@@ -1132,8 +1147,62 @@ pub trait FilesystemStats {
     fn stats(&mut self) -> Result<VolumeStats, DriverError>;
 }
 
+/// Listing fixtures for a filesystem driver's tests, so no driver's suite
+/// carries its own walk of the [`FilesystemRead::read_dir`] visitor.
+#[cfg(feature = "test-util")]
+pub mod listing {
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+
+    use super::{DirEntry, DirVisit, FilesystemRead, NodeId};
+    use crate::DriverError;
+
+    /// Every entry of `dir` from `cursor` on, read in one call, with its
+    /// name. `after` is the name `cursor` came from, empty at the start.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the driver's `read_dir` refuses with.
+    pub fn listed<F: FilesystemRead + ?Sized>(
+        fs: &mut F,
+        dir: NodeId,
+        cursor: u64,
+        after: &[u8],
+    ) -> Result<Vec<(DirEntry, Vec<u8>)>, DriverError> {
+        let mut out = Vec::new();
+        fs.read_dir(dir, cursor, after, &mut |entry, name| {
+            out.push((*entry, name.to_vec()));
+            DirVisit::Take
+        })?;
+        Ok(out)
+    }
+
+    /// The first entry of `dir` from `cursor` on, with its name. The call
+    /// stops at it, so it is the only entry the driver reads.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the driver's `read_dir` refuses with.
+    pub fn first_listed<F: FilesystemRead + ?Sized>(
+        fs: &mut F,
+        dir: NodeId,
+        cursor: u64,
+        after: &[u8],
+    ) -> Result<Option<(DirEntry, Vec<u8>)>, DriverError> {
+        let mut first = None;
+        fs.read_dir(dir, cursor, after, &mut |entry, name| {
+            first = Some((*entry, name.to_vec()));
+            DirVisit::Stop
+        })?;
+        Ok(first)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+
     use super::*;
     use crate::driver::DriverHandle;
 
@@ -1295,19 +1364,16 @@ mod tests {
             &mut self,
             dir: NodeId,
             cursor: u64,
-            name_out: &mut [u8],
-        ) -> Result<Option<DirEntry>, DriverError> {
+            _after: &[u8],
+            visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+        ) -> Result<(), DriverError> {
             if dir != ROOT {
                 return Err(DriverError::Unsupported);
             }
             if cursor != 0 {
-                return Ok(None);
+                return Ok(());
             }
-            if name_out.len() < FILE_NAME.len() {
-                return Err(DriverError::BufferTooSmall);
-            }
-            name_out[..FILE_NAME.len()].copy_from_slice(FILE_NAME);
-            Ok(Some(DirEntry {
+            let entry = DirEntry {
                 node: FILE,
                 info: NodeInfo {
                     kind: NodeKind::RegularFile,
@@ -1316,9 +1382,10 @@ mod tests {
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),
                 },
-                name_len: FILE_NAME.len(),
                 next_cursor: 1,
-            }))
+            };
+            visit(&entry, FILE_NAME);
+            Ok(())
         }
     }
 
@@ -1342,24 +1409,26 @@ mod tests {
     #[test]
     fn mock_read_fs_dir_iteration_terminates() {
         let mut fs = MockReadFs;
-        let mut name = [0u8; 16];
-        let first = fs.read_dir(ROOT, 0, &mut name).expect("entry 0");
-        let entry = first.expect("one entry");
+        let mut seen = alloc::vec::Vec::new();
+        fs.read_dir(ROOT, 0, &[], &mut |entry, name| {
+            seen.push((*entry, name.to_vec()));
+            DirVisit::Take
+        })
+        .expect("lists");
+        let [(entry, name)] = seen.as_slice() else {
+            panic!("one entry, not {}", seen.len());
+        };
         assert_eq!(entry.node, FILE);
         assert_eq!(entry.info.kind, NodeKind::RegularFile);
         assert_eq!(entry.info.size, FILE_BODY.len() as u64);
-        assert_eq!(&name[..entry.name_len], FILE_NAME);
-        assert_eq!(fs.read_dir(ROOT, entry.next_cursor, &mut name), Ok(None));
-    }
-
-    #[test]
-    fn mock_read_fs_rejects_small_dir_buffer() {
-        let mut fs = MockReadFs;
-        let mut tiny = [0u8; 2];
-        assert_eq!(
-            fs.read_dir(ROOT, 0, &mut tiny),
-            Err(DriverError::BufferTooSmall)
-        );
+        assert_eq!(name.as_slice(), FILE_NAME);
+        let mut more = 0;
+        fs.read_dir(ROOT, entry.next_cursor, FILE_NAME, &mut |_, _| {
+            more += 1;
+            DirVisit::Take
+        })
+        .expect("lists");
+        assert_eq!(more, 0, "the listing ended");
     }
 
     #[test]

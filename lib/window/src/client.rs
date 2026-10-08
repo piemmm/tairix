@@ -24,14 +24,15 @@ use tairix_abi::input::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
-    decode_drop_target_reply, decode_hand_over_reply, decode_menu_text_reply,
-    decode_minted_id_reply, decode_notify_sources_reply, decode_open_target_reply,
-    decode_picked_name_reply, decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu,
-    BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget,
-    HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget, PickPurpose,
-    PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX,
+    decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
+    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
+    decode_open_target_reply, decode_picked_name_reply, decode_terrain_reply,
+    decode_wallpapers_reply, AppBar, AppMenu, BundleRunPath, ClipboardHeld, ClipboardKind,
+    CursorShape, DragItems, DropOperation, DropTarget, HandOverDocument, HandOverOutcome,
+    LayerDepth, NameList, OpenTarget, PickPurpose, PointerAction, PreviewSubject, TerrainPlate,
+    TooltipText, WallpaperPage, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
     WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
     WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
     WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
@@ -88,7 +89,10 @@ const PULL_REPLY_MAX: usize = {
             WINDOW_WALLPAPERS_REPLY_MAX,
             wider(
                 WINDOW_CLIPBOARD_REPLY_LEN,
-                wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX),
+                wider(
+                    WINDOW_PICKED_NAME_REPLY_MAX,
+                    wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
+                ),
             ),
         ),
     )
@@ -971,19 +975,54 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&WindowRequest::PickFile { window_id, purpose })
     }
 
-    /// Hand the session the drag the user began on the file `name` in window
-    /// `window_id`, while the press that began it is still held. It ends with
-    /// one [`WindowEvent::DragEnded`].
+    /// Hand the session the drag the user began on `items` in window
+    /// `window_id`, while the press that began it is still held. It is
+    /// reported as it moves ([`WindowEvent::DragOver`]) and ends with one
+    /// [`WindowEvent::DragEnded`].
     ///
     /// # Errors
     ///
-    /// A name the channel cannot carry, the session's refusal to take the
-    /// gesture, a transport failure, or a corrupt status frame.
+    /// The session's refusal to take the gesture, a transport failure, or a
+    /// corrupt status frame.
     ///
+    /// [`WindowEvent::DragOver`]: tairix_abi::window_ipc::WindowEvent::DragOver
     /// [`WindowEvent::DragEnded`]: tairix_abi::window_ipc::WindowEvent::DragEnded
-    pub fn begin_drag(&mut self, window_id: u64, name: &str) -> Result<(), Errno> {
-        let name = DocumentName::new(name)?;
-        self.status_call(&WindowRequest::BeginDrag { window_id, name })
+    pub fn begin_drag(&mut self, window_id: u64, items: DragItems) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::BeginDrag { window_id, items })
+    }
+
+    /// Answer the drag report numbered `serial` for the drag window
+    /// `window_id` began: what a drop there would do, or `None` to refuse it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when no drag is carried from the window, the
+    /// session's refusal, a transport failure, or a corrupt status frame.
+    pub fn drag_verdict(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::DragVerdict {
+            window_id,
+            serial,
+            verdict,
+        })
+    }
+
+    /// The desktop folder the drag report numbered `serial` named, for the
+    /// drag window `window_id` began.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] once the session has named another, a transport
+    /// failure, or a corrupt reply.
+    pub fn drag_spot(&mut self, window_id: u64, serial: u32) -> Result<String, Errno> {
+        let folder = decode_drag_spot_reply(
+            self.pull(&WindowRequest::QueryDragSpot { window_id, serial })?,
+        )?;
+        Ok(String::from(folder))
     }
 
     /// The application window `window_id`'s drag was dropped on, once its
@@ -1338,6 +1377,18 @@ impl<T: WindowTransport> WindowClient<T> {
     /// The session's refusal: `NotFound` for a window not this client's.
     pub fn set_cursor(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
         self.status_call(&WindowRequest::SetCursor { window_id, shape })
+    }
+
+    /// Raise this client's own window `window_id` and give it the keyboard,
+    /// under an activation the session handed this client or while one of its
+    /// windows already holds the keyboard.
+    ///
+    /// # Errors
+    ///
+    /// `PermissionDenied` with neither an activation nor the keyboard, and
+    /// `NotFound` for a window not this client's.
+    pub fn activate_window(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::ActivateWindow { window_id })
     }
 
     /// Put the first `len` bytes of the region `shm_handle`, granted to the

@@ -24,7 +24,7 @@
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeKind,
+    DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeKind,
 };
 use tairix_abi::DriverError;
 use tairix_drv_fs_adfs::{Adfs, AdfsVariant};
@@ -107,7 +107,6 @@ impl Block for MemBlock {
 /// `Result`, never panic, for any device contents; the visit and depth
 /// budgets stop a fuzzed image driving the walk forever.
 fn walk(fs: &mut Adfs<MemBlock>) {
-    let mut name = [0u8; 256];
     let mut stack = vec![(fs.root(), 0u32)];
     let mut visits = 0u32;
     while let Some((dir, depth)) = stack.pop() {
@@ -115,25 +114,22 @@ fn walk(fs: &mut Adfs<MemBlock>) {
         if visits > 1024 {
             break;
         }
-        let mut cursor = 0u64;
-        let mut steps = 0u32;
-        while let Ok(Some(entry)) = fs.read_dir(dir, cursor, &mut name) {
-            let len = entry.name_len.min(name.len());
-            let _ = fs.lookup(dir, &name[..len]);
+        // A fuzzed image may describe any directory; the entry budget bounds
+        // one listing however it is shaped.
+        let mut entries = Vec::new();
+        let _ = fs.read_dir(dir, 0, &[], &mut |entry, name| {
+            if entries.len() > 16_384 {
+                return DirVisit::Stop;
+            }
+            entries.push((*entry, name.to_vec()));
+            DirVisit::Take
+        });
+        for (entry, name) in entries {
+            let _ = fs.lookup(dir, &name);
             let _ = fs.node_info(entry.node);
             let _ = fs.get_attr(entry.node, b"acorn.attr", &mut [0u8; 16]);
             if matches!(entry.info.kind, NodeKind::Directory) && depth < 8 {
                 stack.push((entry.node, depth + 1));
-            }
-            // A fuzzed image may hand back any cursor; a non-advancing
-            // one would loop forever, and the step budget bounds the rest.
-            if entry.next_cursor == cursor {
-                break;
-            }
-            cursor = entry.next_cursor;
-            steps += 1;
-            if steps > 16_384 {
-                break;
             }
         }
     }

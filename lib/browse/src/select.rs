@@ -96,6 +96,23 @@ impl Selection {
         self.anchor = Some(index);
     }
 
+    /// Add `index`, answering whether it was absent. Into a selection with no
+    /// anchor it becomes the anchor.
+    pub fn insert(&mut self, index: usize) -> bool {
+        self.anchor.get_or_insert(index);
+        self.indices.insert(index)
+    }
+
+    /// Take `index` out, answering whether it was present. An anchor taken out
+    /// passes to the first member still selected.
+    pub fn remove(&mut self, index: usize) -> bool {
+        let removed = self.indices.remove(&index);
+        if self.anchor == Some(index) {
+            self.anchor = self.indices.first().copied();
+        }
+        removed
+    }
+
     /// Select the contiguous range between the current anchor and `index`
     /// (inclusive), replacing any previous selection — a `Shift`-click. The
     /// anchor is left unchanged, so successive `Shift`-clicks all grow from the

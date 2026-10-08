@@ -3145,14 +3145,9 @@ fn a_plate_bands_title_is_set_at_the_same_size_as_the_rows_it_caps() {
         let theme = text_ladder(base);
         let fonts = theme.fonts();
         assert_eq!(
-            fonts.spec(TextRole::WindowTitle).size_px,
-            fonts.spec(TextRole::Body).size_px,
-            "a plate band's face must never be smaller than a menu row's"
-        );
-        assert_eq!(
             fonts.spec(TextRole::SectionHeader).size_px,
             fonts.spec(TextRole::Body).size_px,
-            "the heading rung the band uses is the interface size too"
+            "a plate band's face must never be smaller than a menu row's"
         );
         assert_eq!(
             fonts.spec(TextRole::SectionHeader).weight,

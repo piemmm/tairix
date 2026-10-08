@@ -1366,12 +1366,13 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_READDIR,
         name: "fs_readdir",
-        arg_count: 3,
+        arg_count: 4,
         args: [
+            // The directory handle, the batch buffer, then a `ReaddirFrom`.
             AbiType::U32,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -2201,7 +2202,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         arg_count: 5,
         args: [
             // Path bytes, the index to yield, then the caller's key-out
-            // buffer (the fs_readdir one-entry-per-call iteration shape).
+            // buffer: one key per call.
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::U64,

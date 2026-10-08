@@ -858,6 +858,23 @@ impl Inflater {
     }
 }
 
+/// Decompress the opening `dst.len()` bytes of the DEFLATE stream in `src`,
+/// answering how many it holds — fewer only where the stream ends sooner. No
+/// more of `src` is decoded than those bytes need, so a header costs the
+/// header rather than the stream.
+///
+/// # Errors
+///
+/// See [`Error`]: a refusal in the part decoded, or [`Error::UnexpectedEof`]
+/// where `src` ends before either the stream or `dst` does.
+pub fn inflate_prefix(src: &[u8], dst: &mut [u8]) -> Result<usize, Error> {
+    let progress = Core::default().run(src, dst, None)?;
+    if progress.produced < dst.len() && !progress.finished {
+        return Err(Error::UnexpectedEof);
+    }
+    Ok(progress.produced)
+}
+
 /// Decompress the DEFLATE stream in `src` into `dst`, returning `(bytes
 /// produced, bytes of `src` consumed)`.
 ///

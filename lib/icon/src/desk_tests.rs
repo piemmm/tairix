@@ -582,3 +582,98 @@ fn a_teardown_drops_the_unreported_batch() {
     desk.stop();
     assert!(desk.take_landed().is_empty());
 }
+
+fn thumbnail(name: &str) -> ArtworkKey {
+    ArtworkKey::Thumbnail(crate::Thumbnail {
+        path: alloc::format!("/Users/ann/UserFiles/Pictures/{name}"),
+        size: 1,
+        modified: tairix_abi::time::Time64::UNIX_EPOCH,
+        id: tairix_abi::fs::FileId {
+            volume: [1; 16],
+            node: 1,
+        },
+        reading: crate::Reading::Signature,
+    })
+}
+
+/// A sweep withdraws every thumbnail no surface asked for since the last one,
+/// so a picture scrolled out of view is never decoded; one still asked for
+/// stays queued.
+#[test]
+fn a_sweep_withdraws_the_thumbnails_no_surface_asked_for() {
+    let mut desk = ArtworkDesk::new();
+    let (shown, scrolled) = (thumbnail("shown.png"), thumbnail("scrolled.png"));
+    desk.want(&scrolled, 64);
+    desk.want(&shown, 64);
+    desk.sweep_thumbnails();
+    assert!(is_pending(&desk.collect(&shown, 64)));
+    desk.sweep_thumbnails();
+    assert_eq!(
+        desk.next_thumbnail().map(|job| job.key),
+        Some(shown.clone())
+    );
+    assert_eq!(desk.next_thumbnail(), None, "the unasked one was withdrawn");
+    assert!(is_pending(&desk.collect(&scrolled, 64)));
+    assert_eq!(
+        desk.next_thumbnail().map(|job| job.key),
+        Some(scrolled),
+        "asked again, it is queued again"
+    );
+}
+
+/// A thumbnail produced and never collected goes at the next sweep, its
+/// pixels wiped, rather than held for the session; one in production is left
+/// to land.
+#[test]
+fn an_uncollected_thumbnail_goes_at_the_next_sweep() {
+    let mut desk = ArtworkDesk::new();
+    let (landed, running) = (thumbnail("landed.png"), thumbnail("running.png"));
+    desk.want(&landed, 64);
+    desk.want(&running, 64);
+    desk.sweep_thumbnails();
+    let first = desk.next_thumbnail().expect("queued");
+    let second = desk.next_thumbnail().expect("queued");
+    assert!(desk.deliver(&first, Some(picture(64))).kept());
+    desk.sweep_thumbnails();
+    assert!(
+        is_pending(&desk.collect(&landed, 64)),
+        "the picture went with the sweep"
+    );
+    assert!(
+        desk.deliver(&second, Some(picture(64))).kept(),
+        "landed after all"
+    );
+}
+
+/// Icons are never swept: their decode is cheap and every surface shares it.
+#[test]
+fn a_sweep_leaves_icons_alone() {
+    let mut desk = ArtworkDesk::new();
+    desk.want(&asset("/System/Graphics/Icons/file.png"), 32);
+    desk.sweep_thumbnails();
+    desk.sweep_thumbnails();
+    assert_eq!(
+        desk.next_job(),
+        Some(job("/System/Graphics/Icons/file.png", 32))
+    );
+}
+
+/// Past the bound the longest-waiting thumbnail is withdrawn, so scrolling
+/// between two sweeps cannot queue without limit.
+#[test]
+fn the_thumbnails_waiting_are_bounded() {
+    let mut desk = ArtworkDesk::new();
+    for n in 0..=MAX_WANTED_THUMBNAILS {
+        desk.want(&thumbnail(&alloc::format!("{n}.png")), 64);
+    }
+    assert_eq!(
+        desk.next_thumbnail().map(|job| job.key),
+        Some(thumbnail("1.png")),
+        "the first was withdrawn"
+    );
+    let mut queued = 1;
+    while desk.next_thumbnail().is_some() {
+        queued += 1;
+    }
+    assert_eq!(queued, MAX_WANTED_THUMBNAILS);
+}

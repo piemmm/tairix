@@ -17,6 +17,7 @@ use crate::test_sink::TestSink;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 
 use tairix_abi::driver::DriverHandle;
 use tairix_caps::CapabilitySet;
@@ -69,10 +70,11 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         self.calls += 1;
-        self.inner.read_dir(dir, cursor, name_out)
+        self.inner.read_dir(dir, cursor, after, visit)
     }
 }
 
@@ -436,25 +438,13 @@ fn create_invalidates_directory_listings() {
     let dir = dir_of(&mut cache);
 
     // Warm the listing.
-    let mut names = Vec::new();
-    let mut cursor = 0;
-    let mut name_buf = [0u8; 64];
-    while let Some(entry) = cache.read_dir(dir, cursor, &mut name_buf).expect("lists") {
-        names.push(name_buf[..entry.name_len].to_vec());
-        cursor = entry.next_cursor;
-    }
-    assert_eq!(names, vec![b"file.txt".to_vec()]);
+    assert_eq!(names_of(&mut cache, dir), vec![b"file.txt".to_vec()]);
 
     cache
         .create(dir, b"second.txt", NodeKind::RegularFile)
         .expect("creates");
 
-    let mut fresh = Vec::new();
-    let mut cursor = 0;
-    while let Some(entry) = cache.read_dir(dir, cursor, &mut name_buf).expect("lists") {
-        fresh.push(name_buf[..entry.name_len].to_vec());
-        cursor = entry.next_cursor;
-    }
+    let fresh = names_of(&mut cache, dir);
     assert_eq!(
         fresh.len(),
         2,
@@ -735,9 +725,7 @@ fn readdir_populates_child_stat_records() {
     let mut cache = fixture(b"payload");
     let dir = dir_of(&mut cache);
 
-    let mut name_buf = [0u8; 64];
-    let entry = cache
-        .read_dir(dir, 0, &mut name_buf)
+    let (entry, _) = first_listed(&mut cache, dir, 0, &[])
         .expect("lists")
         .expect("one entry");
 
@@ -748,22 +736,39 @@ fn readdir_populates_child_stat_records() {
     assert_eq!(calls(&cache), calls_before);
 }
 
+/// A listing read again is served from the cache, which asks the driver
+/// only where its run of held entries ends.
 #[test]
-fn cached_dirent_reports_buffer_too_small_like_the_driver() {
+fn a_warm_listing_is_served_from_the_cache() {
     let mut cache = fixture(b"x");
     let dir = dir_of(&mut cache);
-
-    let mut name_buf = [0u8; 64];
-    cache
-        .read_dir(dir, 0, &mut name_buf)
-        .expect("warm")
-        .expect("entry");
-
-    let mut tiny = [0u8; 2];
+    let first = listed(&mut cache, dir, 0, &[]).expect("lists");
+    let calls_before = calls(&cache);
+    assert_eq!(listed(&mut cache, dir, 0, &[]).expect("lists"), first);
     assert_eq!(
-        cache.read_dir(dir, 0, &mut tiny).unwrap_err(),
-        DriverError::BufferTooSmall
+        calls(&cache) - calls_before,
+        1,
+        "one driver call, past the last held entry"
     );
+}
+
+/// A batch stopped part-way and resumed from its cursor lists the rest once,
+/// whether the cache or the driver serves it.
+#[test]
+fn a_listing_resumed_by_cursor_lists_the_rest_once() {
+    let mut cache = fixture(b"x");
+    let dir = dir_of(&mut cache);
+    cache
+        .create(dir, b"second.txt", NodeKind::RegularFile)
+        .expect("creates");
+    let (first, name) = first_listed(&mut cache, dir, 0, &[])
+        .expect("lists")
+        .expect("an entry");
+    for _ in 0..2 {
+        let rest = listed(&mut cache, dir, first.next_cursor, &name).expect("lists");
+        assert_eq!(rest.len(), 1, "the one entry after the first");
+        assert_ne!(rest[0].1, name);
+    }
 }
 
 #[test]
@@ -1200,4 +1205,13 @@ fn the_counting_shim_forwards_every_facet_method_it_claims() {
     conformance::assert_write_forwards(&mut counting);
     conformance::assert_security_forwards(&mut counting);
     conformance::assert_stats_forwards(&mut counting);
+}
+
+/// The names `dir` lists, in order.
+fn names_of<F: FilesystemRead>(cache: &mut F, dir: NodeId) -> Vec<Vec<u8>> {
+    listed(cache, dir, 0, &[])
+        .expect("lists")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect()
 }

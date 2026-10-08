@@ -66,3 +66,5 @@ workspace = true
 # the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
 # never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The shared driver listing fixtures (`listing::listed`, `first_listed`).
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = ["test-util"] }

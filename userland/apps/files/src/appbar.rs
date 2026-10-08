@@ -25,7 +25,7 @@
 //! not the user's to quit — and instead lists the places the browser's own
 //! rail lists: the user's home and folders, the machine's roots, then whatever
 //! is mounted right now. Choosing one opens a window there, and a primary
-//! click on the slot opens one at the user's home
+//! click on the slot opens one among the user's own files
 //! ([`DESKTOP_SLOT_CLICK`]).
 //!
 //! # The row cap is a display cap, and it is stated
@@ -45,10 +45,10 @@ use tairix_browse::{PlaceKind, Places};
 
 /// What a primary click on the component's slot does.
 ///
-/// Every click opens a window at the user's home rather than raising one of
-/// the windows already open. A component may hold no window at all, so there
-/// is often nothing to raise; and when there is, "another window, where I
-/// keep my things" is the readier thing to offer.
+/// Every click asks for a window among the user's own files rather than
+/// raising whichever window is most recent. A component may hold no window at
+/// all, so there is often nothing to raise; when one already shows those
+/// files, it is the one brought forward.
 pub const DESKTOP_SLOT_CLICK: AppBarClick = AppBarClick::Open;
 
 /// What a primary click on an ordinary file manager's slot does.

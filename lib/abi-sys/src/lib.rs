@@ -2746,22 +2746,30 @@ pub extern "C" fn sys_fs_write(fd: u32, offset: u64, buf: *mut c_void, len: usiz
     }
 }
 
-/// `fs_readdir`: list the entries of open directory `fd` into `buf` as a
-/// packed stream of [`tairix_abi::DirEntry`] records
-/// (`SyscallNumber::FS_READDIR`). Returns the number of bytes written, or a
-/// `TAIRIX_E_*` code reinterpreted into the result.
+/// `fs_readdir`: read the next batch of open directory `fd`'s entries into
+/// `buf` as packed [`tairix_abi::DirEntry`] records
+/// (`SyscallNumber::FS_READDIR`), from where its open description's listing
+/// stands, or its first entry when `from` is `TAIRIX_READDIR_FROM_START`.
+/// Returns the bytes written, `0` at the end, or a `TAIRIX_E_*` code
+/// reinterpreted into the result.
 ///
-/// A buffer too small to hold the whole listing fails closed with
-/// `TAIRIX_E_BUFFER_TOO_SMALL` (the listing is never truncated); the caller
-/// grows `buf` and retries.
+/// `TAIRIX_E_BUFFER_TOO_SMALL` means the next record alone does not fit, and
+/// leaves the position where it was.
 #[must_use]
 #[export_name = "tairix_sys_fs_readdir"]
-pub extern "C" fn sys_fs_readdir(fd: u32, buf: *mut c_void, len: usize) -> u64 {
-    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+pub extern "C" fn sys_fs_readdir(fd: u32, buf: *mut c_void, len: usize, from: u32) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)` and `from`.
     unsafe {
         raw_syscall(
             NUM_FS_READDIR,
-            [u64::from(fd), ptr_arg(buf), len as u64, 0, 0, 0],
+            [
+                u64::from(fd),
+                ptr_arg(buf),
+                len as u64,
+                u64::from(from),
+                0,
+                0,
+            ],
         )
     }
 }
@@ -3593,7 +3601,7 @@ mod tests {
         (NUM_FS_CLOSE, "fs_close", 1),
         (NUM_FS_READ, "fs_read", 4),
         (NUM_FS_WRITE, "fs_write", 4),
-        (NUM_FS_READDIR, "fs_readdir", 3),
+        (NUM_FS_READDIR, "fs_readdir", 4),
         (NUM_FS_WATCH, "fs_watch", 2),
         (NUM_FS_WATCH_READ, "fs_watch_read", 3),
         (NUM_FS_STAT, "fs_stat", 3),
@@ -4827,17 +4835,18 @@ mod tests {
     }
 
     #[test]
-    fn fs_readdir_marshals_fd_pointer_and_len() {
+    fn fs_readdir_marshals_fd_pointer_len_and_start() {
         let mut buffer = [0u8; 64];
         let ptr = buffer.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(48, || {
-            assert_eq!(sys_fs_readdir(0x104, ptr, 64), 48);
+            assert_eq!(sys_fs_readdir(0x104, ptr, 64, 1), 48);
         });
         assert_eq!(number, NUM_FS_READDIR);
         assert_eq!(args[0], 0x104);
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], 64);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[3], 1);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

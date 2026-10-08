@@ -38,9 +38,9 @@
 //! There are deliberately two outcomes:
 //!
 //! * A **malformed or out-of-bounds location** ([`Start::refused`]) is a
-//!   refusal the program states and recovers from: the window still opens, at
-//!   the launching user's home. A bad argument never leaves the user with no
-//!   window.
+//!   refusal the program states and recovers from: the window still opens,
+//!   among the launching user's own files. A bad argument never leaves the
+//!   user with no window.
 //! * A **command line the program cannot act on at all** ([`UsageError`]) — an
 //!   unrecognised option, or a second operand — is refused outright, as in
 //!   every other command app: guessing which of two operands was meant would
@@ -96,7 +96,7 @@ pub struct Start {
     /// Which of the two things this process is.
     pub role: Role,
     /// The accepted starting location as root-first path components, or
-    /// `None` to open at the launching user's home — either because the
+    /// `None` to open among the launching user's own files — either because the
     /// command line named no location, or because the one it named was
     /// refused. Always `None` in the [`Role::Desktop`] role, which opens no
     /// window until one is asked for.
@@ -154,7 +154,7 @@ impl fmt::Display for UsageError {
 ///   when it starts with a dash.
 /// * one optional operand — the directory to open at. It is validated here
 ///   and, when it does not survive, reported through [`Start::refused`] with
-///   the window still opening at the launching user's home.
+///   the window still opening among the launching user's own files.
 ///
 /// # Errors
 ///
@@ -201,8 +201,8 @@ pub fn parse(args: &[&str]) -> Result<Command, UsageError> {
     Ok(Command::Open(start_at(operand)))
 }
 
-/// The starting location `operand` names, or the home directory with the
-/// reason it was refused.
+/// The starting location `operand` names, or none with the reason it was
+/// refused.
 ///
 /// Separate from [`parse`] so the validation of the location — the part that
 /// treats the argument as hostile — is one function with one job.
@@ -244,7 +244,7 @@ fn start_at(operand: Option<&str>) -> Start {
 pub fn location_components(spelling: &str) -> Result<Vec<String>, String> {
     if spelling.len() > FS_PATH_MAX {
         return Err(format!(
-            "starting location refused (longer than {FS_PATH_MAX} bytes); opening the home directory instead"
+            "starting location refused (longer than {FS_PATH_MAX} bytes); {FALLBACK}"
         ));
     }
     if !spelling.starts_with('/') {
@@ -277,20 +277,28 @@ fn malformed_detail(spelling: &str) -> String {
 /// escape sequence in a hostile argument is escaped rather than replayed at
 /// whatever terminal reads the error stream.
 fn refused(spelling: &str, detail: &str) -> String {
-    format!("starting location {spelling:?} refused ({detail}); opening the home directory instead")
+    format!("starting location {spelling:?} refused ({detail}); {FALLBACK}")
 }
 
-/// The sentence to state when an accepted starting location turns out not to
-/// be listable — a directory that does not exist, is not a directory, or that
-/// the launching user may not read.
+/// Where a window whose named location was refused opens: where a bare open
+/// would ([`tairix_browse::bare_open_places`]).
+const FALLBACK: &str = "opening your own files instead";
+
+/// The sentence to state when a location a window was to open at turns out
+/// not to be listable — a directory that does not exist, is not a directory,
+/// or that the launching user may not read — naming the place tried `instead`.
 ///
 /// It lives here, with the rest of the command line's vocabulary, so the
 /// wording of every "we are opening somewhere else" message is decided in one
 /// place and can be read by a test.
 #[must_use]
-pub fn unlistable_reason(location: &[String]) -> String {
-    let spelling = absolute_path(location).unwrap_or_else(|_| String::from("/"));
-    format!("could not list {spelling}; opening the home directory instead")
+pub fn unlistable_reason(location: &[String], instead: &[String]) -> String {
+    let spell = |path: &[String]| absolute_path(path).unwrap_or_else(|_| String::from("/"));
+    format!(
+        "could not list {}; opening {} instead",
+        spell(location),
+        spell(instead)
+    )
 }
 
 #[cfg(test)]

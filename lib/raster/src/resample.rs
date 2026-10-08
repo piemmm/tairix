@@ -68,6 +68,12 @@
 //!   one filter pass, where routing it through the straight-alpha entry point
 //!   would copy and convert the whole frame twice over.
 //!
+//! # Streaming a reduction
+//!
+//! [`RowReducer`] is the reducing arm fed its source a row at a time, so a
+//! decoder reduces a picture it never holds; the sums of a source row reach
+//! at most two destination rows, which is what bounds it.
+//!
 //! # Windows
 //!
 //! [`resample_window`] produces an arbitrary *rectangle* of the
@@ -158,6 +164,9 @@ pub enum ResampleError {
     /// The destination's byte count does not fit `usize` on this target, so
     /// no buffer could ever describe it.
     DestinationTooLarge,
+    /// A [`RowReducer`] was asked for a destination larger than its source
+    /// on an axis; it only reduces.
+    Enlarging,
     /// A buffer this resample needs — the destination, or one of the
     /// filter's working buffers — was refused by the allocator. Unlike every
     /// other variant this is a property of the machine, not of the request,
@@ -1242,6 +1251,308 @@ fn pixel_offset(x: u32, y: u32, width: u32) -> Option<usize> {
         .checked_mul(u64::from(width))?
         .checked_add(u64::from(x))?;
     usize::try_from(index.checked_mul(CHANNELS_U64)?).ok()
+}
+
+/// The order a decoder produces an image's rows in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RowOrder {
+    /// The top row first.
+    TopDown,
+    /// The bottom row first, as a bottom-up bitmap stores them.
+    BottomUp,
+}
+
+/// A reduction fed its straight-alpha RGBA8 source a row at a time, in the
+/// order a decoder produces the rows, so the image being reduced is never
+/// held: the working memory is the destination and two rows of sums.
+///
+/// It is the area-average arm of [`resample`] — the same plans, the same
+/// filter, the same write-out — so a picture reduced as it streams is
+/// byte-for-byte the picture [`resample`] makes of it whole. A source row
+/// reaches at most two destination rows when no axis is enlarged, which is
+/// what bounds the sums.
+pub struct RowReducer {
+    columns: Axis,
+    rows: Axis,
+    order: RowOrder,
+    source_width: u32,
+    source_height: u32,
+    dest_width: u32,
+    dest_height: u32,
+    /// Source rows fed so far.
+    fed: u32,
+    /// The destination row the reduction finishes next.
+    pending: u32,
+    filtered: Vec<i32>,
+    /// The sums of the destination rows in flight, indexed by row parity.
+    sums: [Vec<i64>; 2],
+    copy: bool,
+    out: Vec<u8>,
+}
+
+impl RowReducer {
+    /// A reduction of a `source_width`×`source_height` image to
+    /// `dest_width`×`dest_height`, its rows to be fed in `order`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ResampleError::SourceRegionOutOfBounds`] — a zero-sided source.
+    /// - [`ResampleError::EmptyDestination`] — a zero-sided destination.
+    /// - [`ResampleError::Enlarging`] — a destination larger than the source
+    ///   on either axis.
+    /// - [`ResampleError::DestinationTooLarge`] /
+    ///   [`ResampleError::OutOfMemory`] — a destination or working buffer
+    ///   that cannot be held.
+    pub fn new(
+        source: (u32, u32),
+        dest: (u32, u32),
+        order: RowOrder,
+    ) -> Result<Self, ResampleError> {
+        let (source_width, source_height) = source;
+        let (dest_width, dest_height) = dest;
+        if source_width == 0 || source_height == 0 {
+            return Err(ResampleError::SourceRegionOutOfBounds);
+        }
+        if dest_width == 0 || dest_height == 0 {
+            return Err(ResampleError::EmptyDestination);
+        }
+        if dest_width > source_width || dest_height > source_height {
+            return Err(ResampleError::Enlarging);
+        }
+        let len = pixel_bytes(dest_width, dest_height).ok_or(ResampleError::DestinationTooLarge)?;
+        let out = fallible::filled(len, 0u8).ok_or(ResampleError::OutOfMemory)?;
+        let mut work = PlanWork::EMPTY;
+        let mut columns = Axis::EMPTY;
+        let mut rows = Axis::EMPTY;
+        if !columns.plan(&mut work, 0, source_width, dest_width, 0, dest_width)
+            || !rows.plan(&mut work, 0, source_height, dest_height, 0, dest_height)
+        {
+            return Err(ResampleError::OutOfMemory);
+        }
+        let copy = columns.is_identity() && rows.is_identity();
+        let width = samples_per_row(dest_width);
+        let (filtered, sums) = if copy {
+            (Vec::new(), [Vec::new(), Vec::new()])
+        } else {
+            (
+                fallible::filled(width, 0i32).ok_or(ResampleError::OutOfMemory)?,
+                [
+                    fallible::filled(width, 0i64).ok_or(ResampleError::OutOfMemory)?,
+                    fallible::filled(width, 0i64).ok_or(ResampleError::OutOfMemory)?,
+                ],
+            )
+        };
+        Ok(Self {
+            columns,
+            rows,
+            order,
+            source_width,
+            source_height,
+            dest_width,
+            dest_height,
+            fed: 0,
+            pending: match order {
+                RowOrder::TopDown => 0,
+                RowOrder::BottomUp => dest_height - 1,
+            },
+            filtered,
+            sums,
+            copy,
+            out,
+        })
+    }
+
+    /// Feed the next source row: `source_width * 4` straight-alpha bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`ResampleError::SourceSizeMismatch`] for a row of the wrong length or
+    /// one past the source's last; nothing is fed.
+    pub fn push_row(&mut self, row: &[u8]) -> Result<(), ResampleError> {
+        if self.fed >= self.source_height || Some(row.len()) != pixel_bytes(self.source_width, 1) {
+            return Err(ResampleError::SourceSizeMismatch);
+        }
+        let y = match self.order {
+            RowOrder::TopDown => self.fed,
+            RowOrder::BottomUp => self.source_height - 1 - self.fed,
+        };
+        self.fed += 1;
+        if self.copy {
+            self.copy_row(y, row);
+            return Ok(());
+        }
+        let source = SingleRow {
+            width: self.source_width,
+            y,
+            pixels: row,
+        };
+        filter_row(&source, &self.columns, y, &mut self.filtered);
+        let neighbour = match self.order {
+            RowOrder::TopDown => self.pending.checked_add(1),
+            RowOrder::BottomUp => self.pending.checked_sub(1),
+        };
+        for dest_row in [Some(self.pending), neighbour].into_iter().flatten() {
+            let weight: i64 = self
+                .rows
+                .taps_of(dest_row as usize)
+                .iter()
+                .filter(|tap| tap.source == y)
+                .map(|tap| i64::from(tap.weight))
+                .sum();
+            if weight == 0 {
+                continue;
+            }
+            let sums = &mut self.sums[dest_row as usize % 2];
+            for (slot, &value) in sums.iter_mut().zip(&self.filtered) {
+                *slot += weight * i64::from(value);
+            }
+        }
+        while self.pending_complete(y) {
+            self.emit_pending();
+        }
+        Ok(())
+    }
+
+    /// The reduced image, once every source row has been fed.
+    ///
+    /// # Errors
+    ///
+    /// [`ResampleError::SourceSizeMismatch`] when rows are still unfed.
+    pub fn finish(self) -> Result<Vec<u8>, ResampleError> {
+        if self.fed != self.source_height {
+            return Err(ResampleError::SourceSizeMismatch);
+        }
+        Ok(self.out)
+    }
+
+    /// The destination's size.
+    #[must_use]
+    pub const fn dest_size(&self) -> (u32, u32) {
+        (self.dest_width, self.dest_height)
+    }
+
+    /// An upper bound of the bytes a reduction of `source` to `dest` holds at
+    /// once, the destination included, so a decoder can account for it
+    /// before it allocates.
+    #[must_use]
+    pub fn peak_bytes(source: (u32, u32), dest: (u32, u32)) -> u64 {
+        let ((source_width, source_height), (dest_width, dest_height)) = (source, dest);
+        let taps = |extent: u32, dest: u32| {
+            let width = if extent > dest {
+                area_taps(extent, dest)
+            } else {
+                CUBIC_TAPS
+            };
+            u64::from(dest).saturating_mul(width as u64)
+        };
+        let columns = taps(source_width, dest_width);
+        let rows = taps(source_height, dest_height);
+        let samples = u64::from(dest_width).saturating_mul(CHANNELS_U64);
+        // One planning buffer serves both axes, so growing it for the second
+        // holds the first's beside it for a moment.
+        let planning = (u64::from(dest_width) + u64::from(dest_height))
+            .saturating_mul(size_of::<i64>() as u64)
+            .saturating_add(
+                columns
+                    .saturating_add(rows)
+                    .saturating_mul(size_of::<i32>() as u64),
+            );
+        [
+            u64::from(dest_width)
+                .saturating_mul(u64::from(dest_height))
+                .saturating_mul(CHANNELS_U64),
+            samples.saturating_mul(size_of::<i32>() as u64),
+            samples.saturating_mul(2 * size_of::<i64>() as u64),
+            columns
+                .saturating_add(rows)
+                .saturating_mul(size_of::<Tap>() as u64),
+            planning,
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+
+    /// Whether every source row the pending destination row reads has been
+    /// fed, the last of them being `y`.
+    fn pending_complete(&self, y: u32) -> bool {
+        if self.pending >= self.dest_height {
+            return false;
+        }
+        let mut sources = self
+            .rows
+            .taps_of(self.pending as usize)
+            .iter()
+            .filter(|tap| tap.weight != 0)
+            .map(|tap| tap.source);
+        match self.order {
+            RowOrder::TopDown => sources.all(|source| source <= y),
+            RowOrder::BottomUp => sources.all(|source| source >= y),
+        }
+    }
+
+    /// Write the pending destination row out and move to the next.
+    fn emit_pending(&mut self) {
+        let dest_row = self.pending;
+        let sums = &mut self.sums[dest_row as usize % 2];
+        if let Some(start) = pixel_offset(0, dest_row, self.dest_width) {
+            let len = samples_per_row(self.dest_width);
+            if let Some(bytes) = self.out.get_mut(start..start + len) {
+                let (quads, _tail) = bytes.as_chunks_mut::<CHANNELS>();
+                write_row::<Straight>(sums, quads);
+            }
+        }
+        sums.fill(0);
+        self.pending = match self.order {
+            RowOrder::TopDown => dest_row + 1,
+            // Past the top row the pending row is the height, which no
+            // destination row is.
+            RowOrder::BottomUp => dest_row.checked_sub(1).unwrap_or(self.dest_height),
+        };
+    }
+
+    /// An identity reduction copies each row into place, as [`resample`]
+    /// does for a 1:1 plan.
+    fn copy_row(&mut self, y: u32, row: &[u8]) {
+        if let Some(start) = pixel_offset(0, y, self.dest_width) {
+            if let Some(slot) = self.out.get_mut(start..start + row.len()) {
+                slot.copy_from_slice(row);
+            }
+        }
+    }
+}
+
+/// Reduction state carries no image content worth showing.
+impl core::fmt::Debug for RowReducer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RowReducer")
+            .field("source", &(self.source_width, self.source_height))
+            .field("dest", &(self.dest_width, self.dest_height))
+            .field("fed", &self.fed)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One fed row, standing as the only row of its source the filter reads.
+struct SingleRow<'a> {
+    width: u32,
+    y: u32,
+    pixels: &'a [u8],
+}
+
+impl Rows for SingleRow<'_> {
+    type Space = Straight;
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.y + 1
+    }
+
+    fn row(&self, y: u32) -> Option<&[[u8; CHANNELS]]> {
+        (y == self.y).then_some(self.pixels.as_chunks::<CHANNELS>().0)
+    }
 }
 
 #[cfg(test)]

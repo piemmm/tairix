@@ -594,6 +594,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. }

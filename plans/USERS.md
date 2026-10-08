@@ -157,8 +157,11 @@ no-login service account.
     allocate from the user band.
   - The **shape of a home** is policy too, held here once as
     `HOME_MODE` (`0o700`) and `HOME_SUBDIRS` (`Applications`, `Commands`,
-    `Desktop`, `Documents`, `Library`, `Settings` — `AGENTS.md` §16.3). Every route
-    that lays a home down reads it: `provision_home`
+    `Desktop`, `Library`, `Settings`, `UserFiles` — `AGENTS.md` §16.3), with
+    `UserFiles` holding `tairix_abi::home::USER_FILES_SUBDIRS` (`Documents`,
+    `Music`, `Pictures`, `Videos`). The names live in `lib/abi::home`. Every
+    route that lays a home down takes the one walk
+    (`tairix_users::provision_home_shape`): `provision_home`
     (`kernel/tairix-kernel/src/user_admin_backing.rs`), the image
     builder's seeded home, and the QEMU users-root fixture. The
     directories are created **with the account**, because the per-user

@@ -48,10 +48,11 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
 use crate::frames::{Animation, FrameSource};
-use crate::{DecodeError, DecodeLimits, RasterImage, MAX_ANIMATION_FRAMES, RGBA_BYTES};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, MAX_ANIMATION_FRAMES, RGBA_BYTES};
 
 /// The form identifiers a WEBP file opens with, four bytes apart.
 pub(crate) const RIFF_MAGIC: [u8; 4] = *b"RIFF";
@@ -193,9 +194,48 @@ impl<'a> Picture<'a> {
         let (width, height) = self.bitstream.geometry()?;
         let mut image = self.bitstream.decode(limits)?;
         if let Some(chunk) = self.alpha {
-            apply_alpha(&mut image, chunk, width, height)?;
+            let mut alphas = AlphaRows::open(chunk, width, height)?;
+            let line = (width as usize).max(1) * RGBA_BYTES;
+            for pixels in image.pixels_mut().chunks_exact_mut(line) {
+                set_alpha(pixels, alphas.next_row()?);
+            }
         }
         Ok(image)
+    }
+
+    /// Hand the picture's RGBA8 rows to `row` top first, its alpha plane,
+    /// where it has one, applied to each.
+    fn stream_rows(
+        self,
+        limits: &DecodeLimits,
+        mut row: impl FnMut(&[u8]) -> Result<(), DecodeError>,
+    ) -> Result<(), DecodeError> {
+        let (width, height) = self.bitstream.geometry()?;
+        let mut rows = self
+            .alpha
+            .map(|chunk| AlphaRows::open(chunk, width, height))
+            .transpose()?;
+        let held_len = if rows.is_some() {
+            width as usize * RGBA_BYTES
+        } else {
+            0
+        };
+        let mut held = fallible::filled(held_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+        let mut with_alpha = |line: &[u8]| -> Result<(), DecodeError> {
+            let Some(alphas) = rows.as_mut() else {
+                return row(line);
+            };
+            let alphas = alphas.next_row()?;
+            held.get_mut(..line.len())
+                .ok_or(DecodeError::WebpAlphaGeometryMismatch)?
+                .copy_from_slice(line);
+            set_alpha(&mut held, alphas);
+            row(&held)
+        };
+        match self.bitstream {
+            Bitstream::Lossy(bytes) => crate::vp8::decode_rows(bytes, limits, &mut with_alpha),
+            Bitstream::Lossless(bytes) => crate::vp8l::decode_rows(bytes, limits, &mut with_alpha),
+        }
     }
 }
 
@@ -458,99 +498,133 @@ fn layout(bytes: &[u8]) -> Result<Layout<'_>, DecodeError> {
     })
 }
 
-/// Undo the row filtering an alpha plane declares, in place.
-fn unfilter(plane: &mut [u8], width: usize, height: usize, method: u8) {
-    for row in 0..height {
-        let start = row * width;
-        // The first row has no row above it, so every method predicts along
-        // it; later rows predict from the row above as the method says.
-        let vertical = method == 2 && row > 0;
-        let gradient = method == 3 && row > 0;
-        let mut left = if row == 0 {
+/// Undo the filtering an alpha chunk declares on one `row`, given the
+/// unfiltered row `above` it. The first row has none, so every method
+/// predicts along it; later rows predict from the one above as it says.
+fn unfilter_row(row: &mut [u8], above: Option<&[u8]>, method: u8) {
+    let vertical = method == 2 && above.is_some();
+    let gradient = method == 3 && above.is_some();
+    let mut left = above.and_then(|above| above.first().copied()).unwrap_or(0);
+    let mut above_left = left;
+    for (column, sample) in row.iter_mut().enumerate() {
+        let up = above
+            .and_then(|above| above.get(column).copied())
+            .unwrap_or(0);
+        let predicted = if vertical {
+            up
+        } else if gradient {
+            let value = i32::from(left) + i32::from(up) - i32::from(above_left);
+            u8::try_from(value.clamp(0, 255)).unwrap_or(0)
+        } else if method == 0 {
             0
         } else {
-            plane.get(start - width).copied().unwrap_or(0)
+            left
         };
-        let mut above_left = left;
-        for column in 0..width {
-            let at = start + column;
-            let above = if row == 0 {
-                0
-            } else {
-                plane.get(at - width).copied().unwrap_or(0)
-            };
-            let predicted = if vertical {
-                above
-            } else if gradient {
-                let value = i32::from(left) + i32::from(above) - i32::from(above_left);
-                u8::try_from(value.clamp(0, 255)).unwrap_or(0)
-            } else if method == 0 {
-                0
-            } else {
-                left
-            };
-            let Some(sample) = plane.get_mut(at) else {
-                continue;
-            };
-            *sample = sample.wrapping_add(predicted);
-            above_left = above;
-            left = *sample;
-        }
+        *sample = sample.wrapping_add(predicted);
+        above_left = up;
+        left = *sample;
     }
 }
 
-/// Decode an alpha chunk and write its plane into `image`'s alpha channel.
-fn apply_alpha(
-    image: &mut RasterImage,
-    chunk: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<(), DecodeError> {
-    let declaration = *chunk.first().ok_or(DecodeError::WebpTruncated)?;
-    let method = declaration & ALPHA_METHOD;
-    let filter = (declaration >> 2) & 0x03;
-    let preprocessing = (declaration >> 4) & 0x03;
-    // The pre-processing field is informative — it says what an encoder did,
-    // not what a decoder must undo — so it is validated and then not acted
-    // on: smoothing the stored values would invent pixels.
-    if method > 1 || preprocessing > 1 || declaration >> 6 != 0 {
-        return Err(DecodeError::WebpUnsupportedAlpha);
+/// Where an alpha chunk's samples are read from.
+enum AlphaSamples<'a> {
+    /// Uncompressed, in place.
+    Raw(&'a [u8]),
+    /// Its lossless stream's decoded pixels.
+    Words(Vec<u32>),
+}
+
+/// An alpha chunk's samples a row at a time, each unfiltered against the one
+/// above as it is reached, so the plane is never held a second time.
+struct AlphaRows<'a> {
+    samples: AlphaSamples<'a>,
+    width: usize,
+    filter: u8,
+    next: usize,
+    above: Vec<u8>,
+    current: Vec<u8>,
+}
+
+impl<'a> AlphaRows<'a> {
+    /// The rows of `chunk`, the alpha of a `width`×`height` picture.
+    fn open(chunk: &'a [u8], width: u32, height: u32) -> Result<Self, DecodeError> {
+        let declaration = *chunk.first().ok_or(DecodeError::WebpTruncated)?;
+        let method = declaration & ALPHA_METHOD;
+        let filter = (declaration >> 2) & 0x03;
+        let preprocessing = (declaration >> 4) & 0x03;
+        // The pre-processing field is informative — it says what an encoder
+        // did, not what a decoder must undo — so it is validated and then not
+        // acted on: smoothing the stored values would invent pixels.
+        if method > 1 || preprocessing > 1 || declaration >> 6 != 0 {
+            return Err(DecodeError::WebpUnsupportedAlpha);
+        }
+        let body = chunk
+            .get(ALPHA_HEADER..)
+            .ok_or(DecodeError::WebpTruncated)?;
+        let count = usize::try_from(u64::from(width) * u64::from(height))
+            .map_err(|_| DecodeError::OutOfMemory)?;
+        let samples = if method == 0 {
+            AlphaSamples::Raw(
+                body.get(..count)
+                    .ok_or(DecodeError::WebpAlphaGeometryMismatch)?,
+            )
+        } else {
+            let words = crate::vp8l::decode_alpha(body, width, height)?;
+            if words.len() != count {
+                return Err(DecodeError::WebpAlphaGeometryMismatch);
+            }
+            AlphaSamples::Words(words)
+        };
+        let width = width as usize;
+        Ok(Self {
+            samples,
+            width,
+            filter,
+            next: 0,
+            above: fallible::filled(width, 0u8).ok_or(DecodeError::OutOfMemory)?,
+            current: fallible::filled(width, 0u8).ok_or(DecodeError::OutOfMemory)?,
+        })
     }
-    let body = chunk
-        .get(ALPHA_HEADER..)
-        .ok_or(DecodeError::WebpTruncated)?;
-    let count = usize::try_from(u64::from(width) * u64::from(height))
-        .map_err(|_| DecodeError::OutOfMemory)?;
-    let mut plane = if method == 0 {
-        let raw = body
-            .get(..count)
+
+    /// The next row's samples, unfiltered.
+    fn next_row(&mut self) -> Result<&[u8], DecodeError> {
+        let start = self
+            .next
+            .checked_mul(self.width)
             .ok_or(DecodeError::WebpAlphaGeometryMismatch)?;
-        fallible::collected(count, raw.iter().copied()).ok_or(DecodeError::OutOfMemory)?
-    } else {
-        crate::vp8l::decode_alpha(body, width, height)?
-    };
-    if plane.len() != count {
-        return Err(DecodeError::WebpAlphaGeometryMismatch);
+        let end = start + self.width;
+        core::mem::swap(&mut self.above, &mut self.current);
+        match &self.samples {
+            AlphaSamples::Raw(raw) => self.current.copy_from_slice(
+                raw.get(start..end)
+                    .ok_or(DecodeError::WebpAlphaGeometryMismatch)?,
+            ),
+            AlphaSamples::Words(words) => {
+                let words = words
+                    .get(start..end)
+                    .ok_or(DecodeError::WebpAlphaGeometryMismatch)?;
+                for (sample, &word) in self.current.iter_mut().zip(words) {
+                    *sample = crate::vp8l::alpha_sample(word);
+                }
+            }
+        }
+        let above = (self.next > 0).then_some(&self.above[..]);
+        unfilter_row(&mut self.current, above, self.filter);
+        self.next += 1;
+        Ok(&self.current)
     }
-    unfilter(
-        &mut plane,
-        usize::try_from(width).unwrap_or(0),
-        usize::try_from(height).unwrap_or(0),
-        filter,
-    );
-    let pixels = image.pixels_mut();
-    if pixels.len() != count * RGBA_BYTES {
-        return Err(DecodeError::WebpAlphaGeometryMismatch);
-    }
+}
+
+/// Write `alphas` into the alpha channel of the RGBA8 `pixels`.
+fn set_alpha(pixels: &mut [u8], alphas: &[u8]) {
     for (pixel, &alpha) in pixels
         .as_chunks_mut::<RGBA_BYTES>()
         .0
         .iter_mut()
-        .zip(&plane)
+        .zip(alphas)
     {
         pixel[3] = alpha;
     }
-    Ok(())
 }
 
 /// Read the canvas a file declares, decoding no pixels.
@@ -634,7 +708,13 @@ fn picture_peak(picture: Picture<'_>, (width, height): (u32, u32)) -> u64 {
         Bitstream::Lossless(stream) => crate::vp8l::peak_ceiling(width, height, stream.len())
             .saturating_add(pixels * RGBA_BYTES as u64),
     };
-    let alpha = picture.alpha.map_or(0, |chunk| {
+    image.saturating_add(alpha_peak(picture.alpha, width, height))
+}
+
+/// What reading an alpha chunk a row at a time holds: its lossless stream's
+/// working set where it is one, and the row and the row above it.
+fn alpha_peak(chunk: Option<&[u8]>, width: u32, height: u32) -> u64 {
+    chunk.map_or(0, |chunk| {
         let lossless = chunk
             .first()
             .is_some_and(|declaration| declaration & ALPHA_METHOD == ALPHA_LOSSLESS);
@@ -643,9 +723,8 @@ fn picture_peak(picture: Picture<'_>, (width, height): (u32, u32)) -> u64 {
         } else {
             0
         };
-        pixels.saturating_add(decoded)
-    });
-    image.saturating_add(alpha)
+        decoded.saturating_add(2 * u64::from(width))
+    })
 }
 
 /// Refuse a picture whose own geometry differs from the rectangle the
@@ -685,6 +764,82 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
             Ok(RasterImage::from_parts(canvas.0, canvas.1, pixels))
         }
     }
+}
+
+/// Decode a WEBP file's picture no smaller than it must be to cover `fit`: a
+/// still picture's rows streamed through a reduction, so the picture is never
+/// held, and an animation's first composited frame reduced. A box that does
+/// not reduce the picture is [`decode`]. It admits what [`decode`] admits.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let Layout::Still { canvas, picture } = layout(bytes)? else {
+        return crate::reduce_held(decode(bytes, limits)?, fit);
+    };
+    let geometry = picture.bitstream.geometry()?;
+    if let Some(canvas) = canvas {
+        check_canvas(geometry, canvas)?;
+    }
+    limits.check(geometry.0, geometry.1)?;
+    let target = fit.reduction(geometry.0, geometry.1);
+    if target == geometry {
+        return picture.decode(limits);
+    }
+    let mut stream =
+        RowReducer::new(geometry, target, RowOrder::TopDown).map_err(crate::reduction_refused)?;
+    picture.stream_rows(limits, |line| {
+        stream.push_row(line).map_err(crate::reduction_refused)
+    })?;
+    let pixels = stream.finish().map_err(crate::reduction_refused)?;
+    Ok(RasterImage::from_parts(target.0, target.1, pixels))
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once: [`peak_bytes`] where the box does not reduce the picture, or an
+/// animation's and its reduction; a reduced still picture's bitstream working
+/// set, the row it converts and its alpha plane, and the reduction they are
+/// fed into.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse before decoding.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let whole = peak_bytes(bytes, limits)?;
+    let Layout::Still { picture, .. } = layout(bytes)? else {
+        let canvas = probe(bytes)?;
+        let reduced = fit.reduction(canvas.0, canvas.1);
+        return Ok(whole.saturating_add(RowReducer::peak_bytes(canvas, reduced)));
+    };
+    let geometry = picture.bitstream.geometry()?;
+    let reduced = fit.reduction(geometry.0, geometry.1);
+    if reduced == geometry {
+        return Ok(whole);
+    }
+    let (width, height) = geometry;
+    let row = u64::from(width) * RGBA_BYTES as u64;
+    let image = match picture.bitstream {
+        Bitstream::Lossy(_) => crate::vp8::frame_peak_bytes(width),
+        Bitstream::Lossless(stream) => crate::vp8l::peak_ceiling(width, height, stream.len()),
+    };
+    // The alpha rows, and the row they are applied to.
+    let alpha = picture.alpha.map_or(0, |chunk| {
+        alpha_peak(Some(chunk), width, height).saturating_add(row)
+    });
+    Ok([
+        frame_list_bytes(bytes),
+        image,
+        row,
+        alpha,
+        RowReducer::peak_bytes(geometry, reduced),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add))
 }
 
 /// What [`open`] found: a still picture's geometry, or an animation ready to

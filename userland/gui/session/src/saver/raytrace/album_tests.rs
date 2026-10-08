@@ -89,17 +89,17 @@ fn a_picture_is_kept_in_the_homes_raytracing_pictures_named_for_when_it_was_fini
     .expect("kept");
     assert_eq!(
         kept,
-        "/Users/ada/Documents/Pictures/Raytracing/Meadow 2026-10-01 14.03.07.png"
+        "/Users/ada/UserFiles/Pictures/Raytracing/Meadow 2026-10-01 14.03.07.png"
     );
     assert_eq!(
         files.folders,
         [
-            "/Users/ada/Documents",
-            "/Users/ada/Documents/Pictures",
-            "/Users/ada/Documents/Pictures/Raytracing",
+            "/Users/ada/UserFiles",
+            "/Users/ada/UserFiles/Pictures",
+            "/Users/ada/UserFiles/Pictures/Raytracing",
         ]
     );
-    assert_eq!(FOLDERS, ["Documents", "Pictures", "Raytracing"]);
+    assert_eq!(FOLDERS, ["UserFiles", "Pictures", "Raytracing"]);
     let name = kept.rsplit('/').next().expect("a name");
     tairix_path::validate_file_name(name).expect("a name the filesystem takes");
 }
@@ -140,7 +140,7 @@ fn a_name_already_taken_takes_the_next_number_and_nothing_is_overwritten() {
             .expect("kept"),
         );
     }
-    let folder = "/Users/ada/Documents/Pictures/Raytracing";
+    let folder = "/Users/ada/UserFiles/Pictures/Raytracing";
     assert_eq!(
         kept,
         [
@@ -191,7 +191,7 @@ fn what_cannot_be_kept_says_why_and_writes_nothing() {
 
     let mut files = Table {
         refuse_folder: Some((
-            String::from("/Users/ada/Documents/Pictures"),
+            String::from("/Users/ada/UserFiles/Pictures"),
             Errno::PermissionDenied,
         )),
         ..Table::default()
@@ -199,7 +199,7 @@ fn what_cannot_be_kept_says_why_and_writes_nothing() {
     assert_eq!(
         keep(&mut files, Some("/Users/ada"), &picture, Some(FINISHED)),
         Err(Unkept::Folder(
-            String::from("/Users/ada/Documents/Pictures"),
+            String::from("/Users/ada/UserFiles/Pictures"),
             Errno::PermissionDenied
         ))
     );
@@ -231,7 +231,7 @@ fn a_folder_with_every_name_taken_refuses_the_picture() {
     assert_eq!(
         keep(&mut files, Some("/Users/ada"), &picture, Some(FINISHED)),
         Err(Unkept::Crowded(String::from(
-            "/Users/ada/Documents/Pictures/Raytracing"
+            "/Users/ada/UserFiles/Pictures/Raytracing"
         )))
     );
 }

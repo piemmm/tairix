@@ -7,7 +7,9 @@
 
 use alloc::vec::Vec;
 
-use tairix_browse::render::{entry_rect, item_area, render_into, scrollbar_bounds, ManagerChrome};
+use tairix_browse::render::{
+    entry_rect, item_area, render_into, scrollbar_bounds, Frame, ManagerChrome,
+};
 use tairix_browse::{Browser, DirectorySource, ToolbarBand};
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -71,23 +73,24 @@ fn round<S: DirectorySource>(
     browser: &mut Browser<S>,
     act: impl FnOnce(&mut Browser<S>),
 ) -> (bool, Region) {
-    let mark = ViewMark::of(browser);
+    let theme = Theme::dark();
+    let frame = Frame {
+        scale: Scale::ONE,
+        theme: &theme,
+        viewport: WINDOW,
+        toolbar: BAND,
+    };
+    let mark = ViewMark::of(browser, frame);
     let mut damage = damage::sink();
     act(browser);
-    let moved = mark.report(
-        browser,
-        Scale::ONE,
-        &Theme::dark(),
-        WINDOW,
-        BAND,
-        &mut damage,
-    );
+    let moved = mark.report(browser, frame, &mut damage);
     (moved, damage)
 }
 
 #[test]
 fn a_focus_move_reports_the_entry_it_left_and_the_entry_it_reached() {
     let mut browser = browser();
+    browser.select(0).expect("the first entry");
     let (first, second) = (rect_of(&browser, 0), rect_of(&browser, 1));
 
     let (moved, damage) = round(&mut browser, Browser::select_next);
@@ -102,11 +105,34 @@ fn a_focus_move_reports_the_entry_it_left_and_the_entry_it_reached() {
 #[test]
 fn a_focus_that_cannot_move_reports_nothing() {
     let mut browser = browser();
+    browser.select(0).expect("the first entry");
 
     let (moved, damage) = round(&mut browser, Browser::select_previous);
 
     assert!(!moved, "the focus was already on the first entry");
     assert!(damage.is_empty());
+}
+
+/// A selection the focus did not move — a `Ctrl`-click, a cleared selection —
+/// still repaints exactly the entries whose mark changed.
+#[test]
+fn a_selection_change_reports_only_the_entries_it_marked_or_cleared() {
+    let mut browser = browser();
+    browser.select(0).expect("the first entry");
+    let (moved, damage) = round(&mut browser, |browser| {
+        browser.toggle_selection(3).expect("a fourth");
+    });
+    assert!(moved);
+    let mut want = damage::sink();
+    want.add(rect_of(&browser, 3));
+    assert_eq!(damage.rects(), want.rects());
+
+    let (moved, damage) = round(&mut browser, Browser::clear_selection);
+    assert!(moved);
+    let mut want = damage::sink();
+    want.add(rect_of(&browser, 0));
+    want.add(rect_of(&browser, 3));
+    assert_eq!(damage.rects(), want.rects());
 }
 
 #[test]
@@ -135,6 +161,9 @@ fn every_pixel_a_walk_moves_lies_inside_what_it_reported() {
         |browser| browser.set_scroll_offset(4),
         Browser::select_next,
         |browser| browser.set_scroll_offset(0),
+        |browser| browser.toggle_selection(2).expect("a third"),
+        Browser::select_all,
+        Browser::clear_selection,
     ];
 
     let mut moved_any = false;

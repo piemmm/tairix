@@ -51,7 +51,7 @@
 //! both-copies-bad sweep runs in either mode.
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
+use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
     EntropySource, RescueSink, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
@@ -216,7 +216,6 @@ impl Block for MemBlock {
 /// contents. The traversal is bounded by a hard
 /// visit budget and a depth cap so a fuzzed image cannot drive it forever.
 fn walk_directories(fs: &mut ARXFS<MemBlock>) {
-    let mut name = [0u8; 256];
     let mut stack = vec![(fs.root(), 0u32)];
     let mut visits = 0u32;
     while let Some((dir, depth)) = stack.pop() {
@@ -224,12 +223,19 @@ fn walk_directories(fs: &mut ARXFS<MemBlock>) {
         if visits > 4096 {
             break;
         }
-        let mut cursor = 0u64;
-        let mut steps = 0u32;
+        // A fuzzed image may describe any directory; the entry budget bounds
+        // one listing however it is shaped.
+        let mut entries = Vec::new();
+        let _ = fs.read_dir(dir, 0, &[], &mut |entry, name| {
+            if entries.len() > 65_536 {
+                return DirVisit::Stop;
+            }
+            entries.push((*entry, name.to_vec()));
+            DirVisit::Take
+        });
         let mut target = [0u8; 4096];
-        while let Ok(Some(entry)) = fs.read_dir(dir, cursor, &mut name) {
-            let len = entry.name_len.min(name.len());
-            let _ = fs.lookup(dir, &name[..len]);
+        for (entry, name) in entries {
+            let _ = fs.lookup(dir, &name);
             match entry.info.kind {
                 NodeKind::Directory if depth < 8 => stack.push((entry.node, depth + 1)),
                 // Drive the link decode path: a fuzzed inode may claim any
@@ -239,16 +245,6 @@ fn walk_directories(fs: &mut ARXFS<MemBlock>) {
                     let _ = fs.read_link(entry.node, &mut target);
                 }
                 NodeKind::Directory | NodeKind::RegularFile => {}
-            }
-            // A fuzzed image may hand back any cursor; a non-advancing one
-            // would loop forever, and the step budget bounds the rest.
-            if entry.next_cursor == cursor {
-                break;
-            }
-            cursor = entry.next_cursor;
-            steps += 1;
-            if steps > 65_536 {
-                break;
             }
         }
     }

@@ -1,5 +1,4 @@
-//! ext4 read-only driver unit tests against a hand-built in-memory
-//! image.
+//! ext4 driver unit tests against a hand-built in-memory image.
 //!
 //! The image is a specification-shaped ext4 volume held in a fixed
 //! array (the crate is `no_std`, so the tests stay allocation-free),
@@ -21,6 +20,7 @@ use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::DriverKind;
 
 const FS_BLOCK: usize = 1024;
@@ -456,37 +456,59 @@ fn root_is_a_directory() {
 fn root_lists_its_entries_in_on_disk_order() {
     let mut fs = mount();
     let root = fs.root();
-    let mut name = [0u8; 32];
-
-    let e0 = fs.read_dir(root, 0, &mut name).expect("ok").expect("entry");
-    assert_eq!(&name[..e0.name_len], b"hello.txt");
-    assert_eq!(e0.info.kind, NodeKind::RegularFile);
-
-    let e1 = fs
-        .read_dir(root, e0.next_cursor, &mut name)
-        .expect("ok")
-        .expect("entry");
-    assert_eq!(&name[..e1.name_len], b"classic.bin");
-    assert_eq!(e1.info.kind, NodeKind::RegularFile);
-
-    let e2 = fs
-        .read_dir(root, e1.next_cursor, &mut name)
-        .expect("ok")
-        .expect("entry");
-    assert_eq!(&name[..e2.name_len], b"sub");
-    assert_eq!(e2.info.kind, NodeKind::Directory);
-
+    let entries = listed(&mut fs, root, 0, &[]).expect("lists");
+    let names: Vec<&[u8]> = entries.iter().map(|(_, name)| name.as_slice()).collect();
     // `.` and `..` are not surfaced, and iteration terminates.
-    assert_eq!(fs.read_dir(root, e2.next_cursor, &mut name), Ok(None));
+    assert_eq!(names, [&b"hello.txt"[..], b"classic.bin", b"sub"]);
+    let kinds: Vec<NodeKind> = entries.iter().map(|(entry, _)| entry.info.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            NodeKind::RegularFile,
+            NodeKind::RegularFile,
+            NodeKind::Directory
+        ]
+    );
+
+    // Resuming from each entry's cursor walks the same listing one entry at
+    // a time.
+    let mut chained = Vec::new();
+    let mut cursor = 0;
+    while let Some((entry, name)) = first_listed(&mut fs, root, cursor, &[]).expect("lists") {
+        chained.push(name);
+        cursor = entry.next_cursor;
+    }
+    assert_eq!(chained, names);
 }
 
+/// Entries present throughout a listing are listed exactly once across
+/// calls, while the directory has a name removed (its record folds into its
+/// neighbour) and another added (it splits a record's slack).
 #[test]
-fn read_dir_rejects_a_too_small_name_buffer() {
+fn a_listing_resumed_across_changes_lists_each_lasting_entry_once() {
     let mut fs = mount();
-    let mut tiny = [0u8; 4];
-    assert_eq!(
-        fs.read_dir(fs.root(), 0, &mut tiny),
-        Err(DriverError::BufferTooSmall)
+    let root = fs.root();
+    let (first, name) = first_listed(&mut fs, root, 0, &[])
+        .expect("lists")
+        .expect("an entry");
+    assert_eq!(name, b"hello.txt");
+    fs.remove(root, b"classic.bin").expect("remove");
+    fs.create(root, b"late.dat", NodeKind::RegularFile)
+        .expect("create");
+    let rest: Vec<Vec<u8>> = listed(&mut fs, root, first.next_cursor, &name)
+        .expect("lists")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        rest.iter().any(|name| name == b"sub"),
+        "a lasting entry is listed"
+    );
+    assert!(
+        !rest
+            .iter()
+            .any(|name| name == b"hello.txt" || name == b"classic.bin"),
+        "nothing already listed or removed comes back: {rest:?}"
     );
 }
 
@@ -683,17 +705,12 @@ fn create_then_appears_in_directory_listing() {
     let root = fs.root();
     fs.create(root, b"zeta.dat", NodeKind::RegularFile)
         .expect("create");
-    let mut name = [0u8; 32];
-    let mut found = false;
-    let mut cursor = 0;
-    while let Some(entry) = fs.read_dir(root, cursor, &mut name).expect("read_dir") {
-        if &name[..entry.name_len] == b"zeta.dat" {
-            assert_eq!(entry.info.kind, NodeKind::RegularFile);
-            found = true;
-        }
-        cursor = entry.next_cursor;
-    }
-    assert!(found, "the created file is listed");
+    let entries = listed(&mut fs, root, 0, &[]).expect("read_dir");
+    let (entry, _) = entries
+        .iter()
+        .find(|(_, name)| name == b"zeta.dat")
+        .expect("the created file is listed");
+    assert_eq!(entry.info.kind, NodeKind::RegularFile);
 }
 
 #[test]
@@ -905,8 +922,7 @@ fn create_a_directory_with_dot_and_dotdot() {
     assert_eq!(fs.node_info(dir).expect("info").kind, NodeKind::Directory);
 
     // A fresh directory lists no children (`.`/`..` are skipped).
-    let mut name = [0u8; 32];
-    assert_eq!(fs.read_dir(dir, 0, &mut name), Ok(None));
+    assert_eq!(listed(&mut fs, dir, 0, &[]), Ok(Vec::new()));
 
     // It accepts a child, which then resolves and lists.
     let child = fs
@@ -1296,7 +1312,7 @@ fn security_decodes_an_inline_posix_acl_from_the_inode_body() {
 
 /// The fixed volume identity the formatter tests stamp (tests need a
 /// deterministic value; production callers mint one from the kernel RNG).
-const TEST_UUID: [u8; 16] = [
+pub(crate) const TEST_UUID: [u8; 16] = [
     0xB7, 0xF2, 0xE4, 0xE6, 0x8D, 0x7A, 0x4E, 0xF8, 0xA1, 0x3E, 0xD3, 0xB8, 0x4D, 0x4E, 0x80, 0x01,
 ];
 
@@ -1314,21 +1330,33 @@ const FMT_SECTOR: usize = 512;
 
 /// 8 MiB in 512-byte sectors: a single block group at the 1024-byte
 /// filesystem block size the formatter picks for sub-64-MiB volumes.
-const ONE_GROUP_SECTORS: u64 = (8 * 1024 * 1024 / FMT_SECTOR) as u64;
+pub(crate) const ONE_GROUP_SECTORS: u64 = (8 * 1024 * 1024 / FMT_SECTOR) as u64;
 
 /// 16 MiB in 512-byte sectors: two block groups at the 1024-byte block
 /// size (`blocks_per_group = 8 * 1024 = 8192` blocks = 8 MiB each).
 const TWO_GROUP_SECTORS: u64 = (16 * 1024 * 1024 / FMT_SECTOR) as u64;
 
+/// The real `mke2fs` volume carrying `metadata_csum`, whose superblock hashes
+/// names as signed bytes under a random seed.
+const META_CSUM: &[u8] = include_bytes!("../tests/fixtures/metadata_csum.img");
+
+/// The checksummed `mke2fs` volume.
+pub(crate) fn checksummed() -> Ext4<SizedBlock> {
+    Ext4::open(SizedBlock {
+        data: META_CSUM.to_vec(),
+    })
+    .expect("mount")
+}
+
 /// A zero-initialised, `Vec`-backed [`Block`] device of a configurable
 /// size, for exercising [`Ext4::format`] on volumes larger than the
 /// fixed read fixture.
-struct SizedBlock {
-    data: Vec<u8>,
+pub(crate) struct SizedBlock {
+    pub(crate) data: Vec<u8>,
 }
 
 impl SizedBlock {
-    fn new(sectors: u64) -> Self {
+    pub(crate) fn new(sectors: u64) -> Self {
         let len = usize::try_from(sectors).expect("fits") * FMT_SECTOR;
         Self {
             data: vec![0u8; len],
@@ -1445,8 +1473,7 @@ fn format_produces_a_mountable_empty_volume() {
     assert_eq!(fs.node_info(root).expect("info").kind, NodeKind::Directory);
     // A freshly formatted root has no children (only `.`/`..`, which the
     // reader does not surface).
-    let mut name = [0u8; 64];
-    assert_eq!(fs.read_dir(root, 0, &mut name), Ok(None));
+    assert_eq!(listed(&mut fs, root, 0, &[]), Ok(Vec::new()));
 }
 
 #[test]
@@ -2080,4 +2107,216 @@ fn ext4_reads_link_counts_but_authors_no_second_name() {
     assert_eq!(fs.link(root, b"alias", file), Err(DriverError::Unsupported));
     assert_eq!(fs.lookup(root, b"alias"), Err(DriverError::NotFound));
     assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
+}
+
+/// A [`SizedBlock`] whose writes into `failing` sectors fail while armed.
+struct FailingWrites {
+    inner: SizedBlock,
+    failing: Option<core::ops::Range<u64>>,
+}
+
+impl Block for FailingWrites {
+    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+        self.inner.geometry()
+    }
+
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.inner.read_blocks(lba, buf)
+    }
+
+    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let sectors = (buf.len() / FMT_SECTOR) as u64;
+        if self
+            .failing
+            .as_ref()
+            .is_some_and(|range| lba < range.end && range.start < lba + sectors)
+        {
+            return Err(DriverError::DeviceFault);
+        }
+        self.inner.write_blocks(lba, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), DriverError> {
+        self.inner.flush()
+    }
+}
+
+/// The physical block holding logical block 0 of directory `dir`.
+fn first_dir_block<B: Block>(fs: &mut Ext4<B>, dir: NodeId) -> u64 {
+    let inode = fs
+        .read_inode(node_inode(dir).expect("inode"))
+        .expect("read");
+    fs.map_block(&inode, 0).expect("map").expect("mapped")
+}
+
+/// A linear directory block changed under its checksum is refused, whether it
+/// is searched or listed, rather than read past.
+#[test]
+fn a_directory_block_failing_its_checksum_is_refused() {
+    let mut fs = checksummed();
+    let root = fs.root();
+    let found = fs.lookup(root, b"lost+found").expect("lookup");
+    let phys = first_dir_block(&mut fs, root);
+    let mut data = vec![0u8; fs.layout.block_size as usize];
+    fs.read_fs_block(phys, &mut data).expect("read");
+    data[0] ^= 1;
+    fs.write_fs_block(phys, &data).expect("write");
+    assert_eq!(
+        fs.lookup(root, b"lost+found"),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        fs.read_dir(root, 0, &[], &mut |_, _| DirVisit::Take),
+        Err(DriverError::DeviceFault)
+    );
+    data[0] ^= 1;
+    fs.write_fs_block(phys, &data).expect("restore");
+    assert_eq!(fs.lookup(root, b"lost+found"), Ok(found));
+}
+
+/// A remove whose directory write fails leaves the name and the inode it
+/// names both in place: the name goes first, so a failure can never leave it
+/// naming a freed inode the next create would reuse.
+#[test]
+fn a_failed_remove_leaves_the_name_and_its_inode() {
+    let fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let mut fs = Ext4::open(FailingWrites {
+        inner: fs.into_block(),
+        failing: None,
+    })
+    .expect("mount");
+    let root = fs.root();
+    let victim = fs
+        .create(root, b"victim", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"victim", 0, b"still here")
+        .expect("write");
+    let before = fs.stats().expect("stats");
+    let block = first_dir_block(&mut fs, root);
+    let per_block = u64::from(fs.layout.block_size) / FMT_SECTOR as u64;
+    fs.block.failing = Some(block * per_block..(block + 1) * per_block);
+    assert_eq!(fs.remove(root, b"victim"), Err(DriverError::DeviceFault));
+    fs.block.failing = None;
+    assert_eq!(fs.stats().expect("stats"), before, "nothing was freed");
+    assert_eq!(fs.lookup(root, b"victim"), Ok(victim));
+    let mut buf = [0u8; 16];
+    let read = fs.read_at(victim, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..read], b"still here");
+}
+
+/// A create that finds no room for its name — the directory needs a block
+/// and none is free — gives its inode back.
+#[test]
+fn a_create_that_cannot_place_its_name_gives_its_inode_back() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    let mut long = [b'f'; 200];
+    for n in 0..4u8 {
+        long[0] = b'a' + n;
+        fs.create(root, &long, NodeKind::RegularFile)
+            .expect("fits in block 0");
+    }
+    while fs.alloc_block().is_ok() {}
+    let before = fs.stats().expect("stats");
+    long[0] = b'z';
+    assert_eq!(
+        fs.create(root, &long, NodeKind::RegularFile),
+        Err(DriverError::NoSpace)
+    );
+    assert_eq!(fs.stats().expect("stats"), before, "the inode went back");
+    assert_eq!(fs.lookup(root, &long), Err(DriverError::NotFound));
+}
+
+/// A moved entry is listed as the kind its inode is: a symbolic link stays
+/// one, not a regular file.
+#[test]
+fn a_renamed_symlink_keeps_its_entry_type() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    let link = fs
+        .create(root, b"link", NodeKind::RegularFile)
+        .expect("create");
+    let ino = node_inode(link).expect("inode");
+    let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+    fs.read_inode_raw(ino, &mut raw).expect("raw");
+    put_le16(&mut raw, 0, S_IFLNK | 0o777);
+    put_le32(&mut raw, 0x04, 4);
+    raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + 4].copy_from_slice(b"dest");
+    fs.write_inode_raw(ino, &mut raw).expect("raw");
+    let dir = fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    fs.rename(root, b"link", dir, b"moved").expect("rename");
+    let mut block = [0u8; MAX_BLOCK_SIZE as usize];
+    let phys = first_dir_block(&mut fs, dir);
+    fs.read_fs_block(phys, &mut block).expect("read");
+    let bs = fs.layout.block_size as usize;
+    let found = fs
+        .locate(&block[..bs], b"moved")
+        .expect("parse")
+        .expect("listed");
+    assert_eq!(block[found.at + 7], 7, "a symbolic link's entry type");
+    let mut out = [0u8; 8];
+    let moved = fs.lookup(dir, b"moved").expect("found");
+    assert_eq!(fs.read_link(moved, &mut out), Ok(4));
+}
+
+/// Without `largedir` a directory's size is its low word: a stray high word
+/// neither stretches its scans nor moves where its next block goes.
+#[test]
+fn a_directory_size_ignores_its_high_word_without_largedir() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    let dir = fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    let ino = node_inode(dir).expect("inode");
+    let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+    fs.read_inode_raw(ino, &mut raw).expect("raw");
+    put_le32(&mut raw, 0x6C, 0x8000);
+    fs.write_inode_raw(ino, &mut raw).expect("raw");
+    assert_eq!(
+        fs.read_inode(ino).expect("inode").size,
+        u64::from(fs.layout.block_size)
+    );
+    let mut long = [b'f'; 200];
+    for n in 0..8u8 {
+        long[0] = b'a' + n;
+        fs.create(dir, &long, NodeKind::RegularFile)
+            .expect("a second block appended");
+    }
+    let inode = fs.read_inode(ino).expect("inode");
+    assert_eq!(inode.size, 2 * u64::from(fs.layout.block_size));
+    assert_eq!(listed(&mut fs, dir, 0, &[]).expect("list").len(), 8);
+}
+
+/// A group's bitmaps are one block each, so a superblock claiming more
+/// blocks or inodes per group than a block has bits names bitmaps no read
+/// stays inside: the volume is refused rather than indexed past them.
+#[test]
+fn a_volume_whose_groups_outgrow_their_bitmaps_is_refused() {
+    for field in [0x20usize, 0x28] {
+        let mut img = build_image();
+        let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
+        set_le32(&mut img, sb + field, u32c(8 * FS_BLOCK + 1));
+        assert_eq!(
+            Ext4::open(MockBlock { data: img }).err(),
+            Some(DriverError::BadMagic),
+            "superblock field {field:#x}"
+        );
+    }
+}
+
+/// A free count already at its ceiling is damage: freeing into it is refused
+/// before the bitmap changes, so the block is still allocated afterwards.
+#[test]
+fn a_free_count_at_its_ceiling_is_refused_before_anything_is_written() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let block = fs.alloc_block().expect("a block");
+    let mut desc = fs.read_group_desc(0).expect("descriptor");
+    let free = le16(&desc, 0x0C);
+    put_le16(&mut desc, 0x0C, u16::MAX);
+    fs.write_group_desc(0, &mut desc).expect("descriptor");
+    assert_eq!(fs.free_block(block), Err(DriverError::DeviceFault));
+    put_le16(&mut desc, 0x0C, free);
+    fs.write_group_desc(0, &mut desc).expect("descriptor");
+    let before = fs.stats().expect("stats").free_blocks;
+    fs.free_block(block).expect("still allocated, so freed now");
+    assert_eq!(fs.stats().expect("stats").free_blocks, before + 1);
 }

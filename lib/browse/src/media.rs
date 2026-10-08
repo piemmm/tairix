@@ -6,7 +6,8 @@
 //! With…" association vocabulary a bundle declares in its `AppInfo`
 //! ([`MediaType::as_str`] / [`MediaType::from_media_str`]), so the icon a name
 //! gets and the applications offered for it can never drift apart: they read
-//! the same closed table.
+//! the same closed table. It also says which types New ▸ can make
+//! ([`BlankDocument`]).
 //!
 //! This is the one classifier the windowed file manager and the trusted file
 //! picker share (`plans/NEW-FILEMANAGER.md`), so the two can never disagree
@@ -47,10 +48,11 @@
 
 use alloc::string::String;
 
+use tairix_abi::fs::FileKind;
 use tairix_abi::SYSTEM_SERVICE_STORE;
-use tairix_icon::{IconKind, IconRequest};
+use tairix_icon::{FolderSample, IconKind, IconRequest, Reading, ICON_KINDS};
 
-use crate::entry::{Entry, EntryKind, Occupancy};
+use crate::entry::{Entry, EntryKind};
 
 /// A content type TAIRiX recognises, named by its media type.
 ///
@@ -141,6 +143,28 @@ pub enum MediaType {
     Archive7z,
     /// A RAR archive (`application/vnd.rar`).
     ArchiveRar,
+    /// An MPEG audio file — MP3 (`audio/mpeg`).
+    AudioMpeg,
+    /// A FLAC audio file (`audio/flac`).
+    AudioFlac,
+    /// An Ogg audio file — Vorbis or Opus (`audio/ogg`).
+    AudioOgg,
+    /// A WAVE audio file (`audio/wav`).
+    AudioWav,
+    /// An AAC audio stream (`audio/aac`).
+    AudioAac,
+    /// An MPEG-4 audio file (`audio/mp4`).
+    AudioMp4,
+    /// An MPEG-4 video (`video/mp4`).
+    VideoMp4,
+    /// A `WebM` video (`video/webm`).
+    VideoWebm,
+    /// A Matroska video (`video/x-matroska`).
+    VideoMatroska,
+    /// A `QuickTime` video (`video/quicktime`).
+    VideoQuicktime,
+    /// An AVI video (`video/x-msvideo`).
+    VideoAvi,
     /// Any content of no recognised type (`application/octet-stream`).
     ApplicationOctetStream,
 }
@@ -190,6 +214,17 @@ impl MediaType {
             Self::ArchiveZstd => "application/zstd",
             Self::Archive7z => "application/x-7z-compressed",
             Self::ArchiveRar => "application/vnd.rar",
+            Self::AudioMpeg => "audio/mpeg",
+            Self::AudioFlac => "audio/flac",
+            Self::AudioOgg => "audio/ogg",
+            Self::AudioWav => "audio/wav",
+            Self::AudioAac => "audio/aac",
+            Self::AudioMp4 => "audio/mp4",
+            Self::VideoMp4 => "video/mp4",
+            Self::VideoWebm => "video/webm",
+            Self::VideoMatroska => "video/x-matroska",
+            Self::VideoQuicktime => "video/quicktime",
+            Self::VideoAvi => "video/x-msvideo",
             Self::ApplicationOctetStream => "application/octet-stream",
         }
     }
@@ -263,6 +298,17 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar
+            | Self::AudioMpeg
+            | Self::AudioFlac
+            | Self::AudioOgg
+            | Self::AudioWav
+            | Self::AudioAac
+            | Self::AudioMp4
+            | Self::VideoMp4
+            | Self::VideoWebm
+            | Self::VideoMatroska
+            | Self::VideoQuicktime
+            | Self::VideoAvi
             | Self::ApplicationOctetStream => None,
         }
     }
@@ -279,6 +325,24 @@ impl MediaType {
     /// application whose manifest declares the type that disappeared would
     /// silently stop matching its own files.
     ///
+    /// How a thumbnail of a file of this type reads its format, or `None` for
+    /// a type the shared raster decoders do not read (`lib/image`).
+    #[must_use]
+    pub const fn thumbnail(self) -> Option<Reading> {
+        match self {
+            Self::ImagePng
+            | Self::ImageJpeg
+            | Self::ImageGif
+            | Self::ImageBmp
+            | Self::ImageIcon
+            | Self::ImageWebp
+            | Self::ImageTiff
+            | Self::ImageOpenRaster => Some(Reading::Signature),
+            Self::ImageSprite => Some(Reading::Sprite),
+            _ => None,
+        }
+    }
+
     /// A fine-grained kind shares its broad family's glyph when the system
     /// ships no distinct raster artwork for it, so the returned kind is always
     /// drawable (`lib/icon`).
@@ -323,15 +387,249 @@ impl MediaType {
             | Self::ArchiveZstd
             | Self::Archive7z
             | Self::ArchiveRar => IconKind::Archive,
+            Self::AudioMpeg
+            | Self::AudioFlac
+            | Self::AudioOgg
+            | Self::AudioWav
+            | Self::AudioAac
+            | Self::AudioMp4 => IconKind::Audio,
+            Self::VideoMp4
+            | Self::VideoWebm
+            | Self::VideoMatroska
+            | Self::VideoQuicktime
+            | Self::VideoAvi => IconKind::Video,
             Self::ApplicationOctetStream => IconKind::File,
+        }
+    }
+
+    /// What a new, empty document of this type is called, or `None` when an
+    /// empty file is not a complete document of it.
+    #[must_use]
+    pub const fn blank_noun(self) -> Option<&'static str> {
+        match self {
+            Self::TextPlain => Some("Text Document"),
+            Self::TextMarkdown => Some("Markdown Document"),
+            Self::TextCsv => Some("CSV Document"),
+            Self::Yaml => Some("YAML Document"),
+            Self::Toml => Some("TOML Document"),
+            Self::TextCss => Some("Style Sheet"),
+            Self::TextJavaScript => Some("JavaScript File"),
+            Self::TextRust => Some("Rust Source File"),
+            Self::TextJava => Some("Java Source File"),
+            Self::TextPython => Some("Python Script"),
+            Self::ShellScript => Some("Shell Script"),
+            // JSON needs a value, XML a root element, HTML a doctype and a
+            // title, and ISO C a declaration; every binary format needs its
+            // header.
+            Self::Json
+            | Self::Xml
+            | Self::TextHtml
+            | Self::TextC
+            | Self::InodeDirectory
+            | Self::TairixApp
+            | Self::TairixService
+            | Self::TairixRxe
+            | Self::Wasm
+            | Self::Elf
+            | Self::Pdf
+            | Self::ImagePng
+            | Self::ImageJpeg
+            | Self::ImageGif
+            | Self::ImageSvg
+            | Self::ImageSprite
+            | Self::ImageBmp
+            | Self::ImageIcon
+            | Self::ImageWebp
+            | Self::ImageTiff
+            | Self::ImageOpenRaster
+            | Self::ArchiveZip
+            | Self::ArchiveTar
+            | Self::ArchiveGzip
+            | Self::ArchiveXz
+            | Self::ArchiveBzip2
+            | Self::ArchiveZstd
+            | Self::Archive7z
+            | Self::ArchiveRar
+            | Self::AudioMpeg
+            | Self::AudioFlac
+            | Self::AudioOgg
+            | Self::AudioWav
+            | Self::AudioAac
+            | Self::AudioMp4
+            | Self::VideoMp4
+            | Self::VideoWebm
+            | Self::VideoMatroska
+            | Self::VideoQuicktime
+            | Self::VideoAvi
+            | Self::ApplicationOctetStream => None,
         }
     }
 }
 
-/// Every [`MediaType`], for the spelling round-trip
-/// ([`from_media_str`](MediaType::from_media_str)). The order is irrelevant;
-/// the spellings are distinct, so at most one matches.
-const ALL: &[MediaType] = &[
+/// A family of file, as a folder's picture of what it holds shows one: the
+/// broad kinds things are filed by.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Family {
+    /// Images.
+    Picture,
+    /// Text, source code and structured text.
+    Text,
+    /// Paged documents.
+    Document,
+    /// Sound.
+    Audio,
+    /// Video.
+    Video,
+    /// Archives.
+    Archive,
+    /// Programs: bundles and executables.
+    Program,
+}
+
+impl Family {
+    /// Every family.
+    const COUNT: usize = 7;
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+impl MediaType {
+    /// The family a file of this type belongs to, or `None` for one a
+    /// folder's picture shows no card for: a directory, or content of no
+    /// recognised type.
+    #[must_use]
+    pub const fn family(self) -> Option<Family> {
+        match self {
+            Self::ImagePng
+            | Self::ImageJpeg
+            | Self::ImageGif
+            | Self::ImageSvg
+            | Self::ImageSprite
+            | Self::ImageBmp
+            | Self::ImageIcon
+            | Self::ImageWebp
+            | Self::ImageTiff
+            | Self::ImageOpenRaster => Some(Family::Picture),
+            Self::TextPlain
+            | Self::TextMarkdown
+            | Self::TextCsv
+            | Self::Json
+            | Self::Yaml
+            | Self::Toml
+            | Self::Xml
+            | Self::TextHtml
+            | Self::TextCss
+            | Self::TextJavaScript
+            | Self::TextRust
+            | Self::TextJava
+            | Self::TextC
+            | Self::TextPython
+            | Self::ShellScript => Some(Family::Text),
+            Self::Pdf => Some(Family::Document),
+            Self::AudioMpeg
+            | Self::AudioFlac
+            | Self::AudioOgg
+            | Self::AudioWav
+            | Self::AudioAac
+            | Self::AudioMp4 => Some(Family::Audio),
+            Self::VideoMp4
+            | Self::VideoWebm
+            | Self::VideoMatroska
+            | Self::VideoQuicktime
+            | Self::VideoAvi => Some(Family::Video),
+            Self::ArchiveZip
+            | Self::ArchiveTar
+            | Self::ArchiveGzip
+            | Self::ArchiveXz
+            | Self::ArchiveBzip2
+            | Self::ArchiveZstd
+            | Self::Archive7z
+            | Self::ArchiveRar => Some(Family::Archive),
+            Self::TairixApp | Self::TairixService | Self::TairixRxe | Self::Wasm | Self::Elf => {
+                Some(Family::Program)
+            }
+            Self::InodeDirectory | Self::ApplicationOctetStream => None,
+        }
+    }
+}
+
+/// What a batch of `folder`'s entries shows of it: for each of the up to
+/// three families most frequent among them, the kind most frequent in that
+/// family, a tie in either going to whichever was seen first. Folders, links
+/// and files of no recognised type make no card.
+///
+/// Counted in tables over the closed families and kinds, so a sample costs no
+/// allocation however many entries the batch holds.
+pub fn folder_sample<'n>(
+    folder: &[String],
+    entries: impl IntoIterator<Item = (&'n str, FileKind)>,
+) -> FolderSample {
+    // A count and the first position it was seen at, so a larger count, then
+    // an earlier first sighting, wins.
+    #[derive(Copy, Clone, Default)]
+    struct Seen {
+        count: u32,
+        first: u32,
+    }
+    impl Seen {
+        fn note(&mut self, at: u32) {
+            if self.count == 0 {
+                self.first = at;
+            }
+            self.count += 1;
+        }
+        fn rank(self) -> (u32, core::cmp::Reverse<u32>) {
+            (self.count, core::cmp::Reverse(self.first))
+        }
+    }
+    let service_store = is_system_service_store(folder);
+    let mut families = [Seen::default(); Family::COUNT];
+    let mut kinds = [(Seen::default(), None::<Family>); ICON_KINDS.len()];
+    for (at, (name, kind)) in (0u32..).zip(entries) {
+        let media = media_for_named(
+            name,
+            EntryKind::for_listing(kind, name, None),
+            service_store,
+        );
+        let Some(family) = media.family() else {
+            continue;
+        };
+        families[family.index()].note(at);
+        let slot = &mut kinds[media.icon().index()];
+        slot.0.note(at);
+        slot.1 = Some(family);
+    }
+    let mut order = [
+        Family::Picture,
+        Family::Text,
+        Family::Document,
+        Family::Audio,
+        Family::Video,
+        Family::Archive,
+        Family::Program,
+    ];
+    order.sort_unstable_by_key(|family| core::cmp::Reverse(families[family.index()].rank()));
+    FolderSample::new(
+        order
+            .into_iter()
+            .filter(|family| families[family.index()].count > 0)
+            .filter_map(|family| {
+                ICON_KINDS
+                    .iter()
+                    .zip(&kinds)
+                    .filter(|(_, (seen, of))| *of == Some(family) && seen.count > 0)
+                    .max_by_key(|(_, (seen, _))| seen.rank())
+                    .map(|(kind, _)| *kind)
+            }),
+    )
+}
+
+/// Every [`MediaType`], in registry order: the spelling round-trip
+/// ([`from_media_str`](MediaType::from_media_str)) and the order New ▸ offers
+/// its documents in.
+pub(crate) const ALL: &[MediaType] = &[
     MediaType::InodeDirectory,
     MediaType::TairixApp,
     MediaType::TairixService,
@@ -372,6 +670,17 @@ const ALL: &[MediaType] = &[
     MediaType::ArchiveZstd,
     MediaType::Archive7z,
     MediaType::ArchiveRar,
+    MediaType::AudioMpeg,
+    MediaType::AudioFlac,
+    MediaType::AudioOgg,
+    MediaType::AudioWav,
+    MediaType::AudioAac,
+    MediaType::AudioMp4,
+    MediaType::VideoMp4,
+    MediaType::VideoWebm,
+    MediaType::VideoMatroska,
+    MediaType::VideoQuicktime,
+    MediaType::VideoAvi,
     MediaType::ApplicationOctetStream,
 ];
 
@@ -429,6 +738,17 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveZstd, &["zst"]),
     (MediaType::Archive7z, &["7z"]),
     (MediaType::ArchiveRar, &["rar"]),
+    (MediaType::AudioMpeg, &["mp3"]),
+    (MediaType::AudioFlac, &["flac"]),
+    (MediaType::AudioOgg, &["ogg", "oga", "opus"]),
+    (MediaType::AudioWav, &["wav"]),
+    (MediaType::AudioAac, &["aac"]),
+    (MediaType::AudioMp4, &["m4a"]),
+    (MediaType::VideoMp4, &["mp4", "m4v"]),
+    (MediaType::VideoWebm, &["webm"]),
+    (MediaType::VideoMatroska, &["mkv"]),
+    (MediaType::VideoQuicktime, &["mov"]),
+    (MediaType::VideoAvi, &["avi"]),
 ];
 
 /// RISC OS file types a name may carry after a comma — how a RISC OS file
@@ -554,6 +874,49 @@ pub fn name_endings(media: MediaType) -> impl Iterator<Item = (char, &'static st
     extensions.chain(filetype)
 }
 
+/// A document type New ▸ can make: an empty file is already a complete
+/// document of it, and an extension names it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BlankDocument {
+    media: MediaType,
+    noun: &'static str,
+    extension: &'static str,
+}
+
+impl BlankDocument {
+    /// `media` as a document New ▸ can make, or `None` when it is not one.
+    #[must_use]
+    pub fn of(media: MediaType) -> Option<Self> {
+        let noun = media.blank_noun()?;
+        let extension = name_endings(media)
+            .find_map(|(separator, ending)| (separator == '.').then_some(ending))?;
+        Some(Self {
+            media,
+            noun,
+            extension,
+        })
+    }
+
+    /// The document's media type.
+    #[must_use]
+    pub const fn media(self) -> MediaType {
+        self.media
+    }
+
+    /// What one is called: the menu row's label, and the stem of a new one's
+    /// name.
+    #[must_use]
+    pub const fn noun(self) -> &'static str {
+        self.noun
+    }
+
+    /// The usual extension of its name, without the dot.
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        self.extension
+    }
+}
+
 /// The media type of a listed entry, given the components of the directory it
 /// was listed from.
 ///
@@ -603,43 +966,72 @@ pub fn media_for_named(name: &str, kind: EntryKind, service_store: bool) -> Medi
 /// answer never claims contents. Files and bundles take their
 /// [`media_for_entry`] glyph unchanged.
 ///
-/// This is the one place an entry becomes an icon: the grid tile and the list
-/// row both call it, so a row and a tile can never picture the same entry
-/// differently.
+/// This is the one place an entry becomes an icon: the grid tile, the list row
+/// and the desktop all reach it, so no two can picture one entry differently.
 #[must_use]
 pub fn icon_for_entry(entry: &Entry, parent: &[String]) -> IconKind {
-    if entry.is_directory() && matches!(entry.occupancy(), Occupancy::NonEmpty) {
+    icon_of(entry, media_for_entry(entry, parent))
+}
+
+/// `media`'s glyph for `entry`, refined by a plain directory's occupancy.
+fn icon_of(entry: &Entry, media: MediaType) -> IconKind {
+    if entry.is_directory() && entry.occupancy().pictured().is_some() {
         IconKind::FolderFilled
     } else {
-        media_for_entry(entry, parent).icon()
+        media.icon()
     }
 }
 
-/// The icon request for one listed entry drawn out of the directory `dir`.
+/// The icon one entry listed out of the directory `dir` (root-first `parent`)
+/// is drawn with, and the request its picture is asked for by.
 ///
-/// An application bundle names *itself* in the request, so the artwork layer
-/// can prefer the icon the bundle carries in its own `Resources/` over the
-/// generic artwork for its class; every other entry resolves by class alone.
-/// `scratch` is a buffer the caller reuses across the entries of one frame, so
-/// a grid of tiles spells its bundle paths without allocating one per tile.
+/// The request names the entry's own picture where it has one: an
+/// application bundle's own icon, an occupied folder's picture of what it
+/// holds, a picture file's own content. Each falls back to the icon's class
+/// picture where it will not serve. `scratch` is a buffer the caller reuses
+/// across the entries of one frame, so a grid spells its paths without
+/// allocating one per tile.
 ///
-/// Both surfaces that draw directory entries — the file manager's grid and the
-/// desktop's icons — build their request here, so an application cannot be
-/// pictured one way on the desktop and another in the manager.
+/// Both surfaces that draw entries as tiles — the file manager's grid and the
+/// desktop — ask here, so an entry cannot be pictured one way on the desktop
+/// and another in the manager.
 #[must_use]
-pub fn entry_icon_request<'a>(
+pub fn entry_icon<'a>(
     dir: &str,
+    parent: &[String],
     entry: &Entry,
-    kind: IconKind,
     scratch: &'a mut String,
-) -> IconRequest<'a> {
-    if !entry.is_bundle() {
-        return IconRequest::kind(kind);
+) -> (IconKind, IconRequest<'a>) {
+    let media = media_for_entry(entry, parent);
+    let kind = icon_of(entry, media);
+    if let (true, Some(sample)) = (entry.is_directory(), entry.occupancy().pictured()) {
+        return (kind, IconRequest::folder(sample));
+    }
+    // A link's listed size and time are its own, not its target's, so they
+    // cannot key the picture of what it points at; a listing naming no file
+    // gives an open nothing to be checked against.
+    let thumbnail = match entry.kind() {
+        EntryKind::File if !entry.id().is_none() => media.thumbnail(),
+        _ => None,
+    };
+    if thumbnail.is_none() && !entry.is_bundle() {
+        return (kind, IconRequest::kind(kind));
     }
     scratch.clear();
     scratch.push_str(dir);
     crate::vfs::push_child(scratch, entry.name());
-    IconRequest::bundle(kind, scratch)
+    let request = match thumbnail {
+        Some(reading) => IconRequest::thumbnail(
+            kind,
+            scratch,
+            entry.size(),
+            entry.modified(),
+            entry.id(),
+            reading,
+        ),
+        None => IconRequest::bundle(kind, scratch),
+    };
+    (kind, request)
 }
 
 /// Whether `parent`'s root-first components are exactly the system service

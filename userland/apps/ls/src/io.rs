@@ -90,8 +90,8 @@ pub struct Entry {
 ///
 /// The client first [`stat`](Listing::stat)s each operand to learn whether
 /// it is a directory, then — for directories — calls
-/// [`read_dir`](Listing::read_dir) once for the whole listing, mirroring
-/// the kernel's own one-shot `fs_readdir` contract. A row the listing shows
+/// [`read_dir`](Listing::read_dir) once for the whole listing. A row the
+/// listing shows
 /// as a link has its target read with [`read_link`](Listing::read_link),
 /// which is the only way to learn it: a link's content is a path, not bytes.
 pub trait Listing {

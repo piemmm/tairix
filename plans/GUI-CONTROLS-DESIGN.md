@@ -292,7 +292,7 @@ State composition is preferred over one enormous enum. A disabled destructive re
 | State field | Meaning |
 |---|---|
 | `FocusState` | Keyboard focus, active focus ring, focus field membership. |
-| `PointerState` | None, hover, pressed, drag source, drag target. |
+| `PointerState` | None, hover, pressed, drag source, drag target. A drag target takes the hover wash and an accent outline over whatever else it wears, the one drop look every collection control draws. |
 | `SelectionState` | Unselected, selected, mixed, current item. |
 | `ValidationState` | Valid, warning, invalid, pending verification. |
 | `AuthorityState` | Allowed, denied, needs confirmation, needs capability. |

@@ -41,10 +41,11 @@ use crate::damage;
 use crate::paint::{
     bead_band, dominant_color, draw_outline, foreground, grab_after, heavy_contrast,
     icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
-    paint_count_badge, paint_icon_slot, paint_row, paint_run, paint_surface_plate, plate_border,
-    plate_corner, pointer_activation, press_latch, rail_thickness, resolve_bead, role_font,
-    route_pointer, row_content_span, run_width, seam_thickness, seam_width, surface_rect, to_i32,
-    withheld, ChevronDir, ChromeLayer, PlateInterior, TextAlign, TextBlock, FULL_COLOUR,
+    paint_count_badge, paint_drop_target, paint_icon_slot, paint_row, paint_run,
+    paint_surface_plate, plate_border, plate_corner, pointer_activation, press_latch,
+    rail_thickness, resolve_bead, role_font, route_pointer, row_content_span, run_width,
+    seam_thickness, seam_width, surface_rect, to_i32, withheld, ChevronDir, ChromeLayer,
+    PlateInterior, TextAlign, TextBlock, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -600,6 +601,7 @@ pub struct TableRow {
     cells: Vec<TableCell>,
     role: ControlRole,
     state: ControlState,
+    text_role: TextRole,
     /// The last pointer position — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
     /// The press latch; the press *look* lives in `state.pointer`.
@@ -607,13 +609,15 @@ pub struct TableRow {
 }
 
 impl TableRow {
-    /// A neutral, enabled, unselected row over the given cells.
+    /// A neutral, enabled, unselected row over the given cells, set in
+    /// [`TextRole::Body`].
     #[must_use]
     pub fn new(cells: Vec<TableCell>) -> Self {
         Self {
             cells,
             role: ControlRole::Neutral,
             state: ControlState::idle(),
+            text_role: TextRole::Body,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
         }
@@ -623,6 +627,14 @@ impl TableRow {
     #[must_use]
     pub fn with_role(mut self, role: ControlRole) -> Self {
         self.role = role;
+        self
+    }
+
+    /// This row's cells set in `role` — a listing of item names, say, in
+    /// [`TextRole::ItemLabel`].
+    #[must_use]
+    pub fn with_text_role(mut self, role: TextRole) -> Self {
+        self.text_role = role;
         self
     }
 
@@ -698,22 +710,16 @@ impl TableRow {
     }
 
     /// The pixel side the row's leading identity icon paints at inside
-    /// `bounds`.
+    /// `bounds`: its text line, never taller than the row.
     ///
     /// An owner resolves its picture at this side, so what it caches is what
-    /// the row draws. An associated function because the slot is the row
-    /// height's, not any one row's content.
+    /// the row draws.
     #[must_use]
-    pub fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
-        let font = role_font(theme, scale, TextRole::Body);
-        // Sized purely off the text line and the row height; the scale and
-        // theme are accepted only so the query matches the shared
-        // collection-control shape.
-        let _ = scale;
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         let Some((_, _, _, h)) = surface_rect(bounds) else {
             return 0;
         };
-        TableCell::icon_side(font, h)
+        TableCell::icon_side(role_font(theme, scale, self.text_role), h)
     }
 
     /// Paint the row into `surface` at `bounds`, laying its cells out across
@@ -740,7 +746,7 @@ impl TableRow {
         if withheld(surface, bounds) {
             return;
         }
-        let font = role_font(theme, scale, TextRole::Body);
+        let font = role_font(theme, scale, self.text_role);
         let Some(rect) = surface_rect(bounds) else {
             return;
         };
@@ -835,7 +841,7 @@ impl TableRow {
         let context = CellContext {
             scale,
             theme,
-            font: role_font(theme, scale, TextRole::Body),
+            font: role_font(theme, scale, self.text_role),
             row_disposition: self.state.disposition(),
         };
         let (x, y) = column.surface_origin()?;
@@ -2126,10 +2132,12 @@ pub struct IconTile {
     state: ControlState,
     selection_fade: Option<u8>,
     label_shadow: Option<TextShadow>,
+    layout: TileLayout,
 }
 
 impl IconTile {
-    /// A resting, unselected tile drawing `icon` above `label`.
+    /// A resting, unselected tile drawing `icon` above `label`, one name line
+    /// under its picture.
     #[must_use]
     pub fn new(label: impl Into<String>, icon: IconKind) -> Self {
         Self {
@@ -2138,7 +2146,15 @@ impl IconTile {
             state: ControlState::idle(),
             selection_fade: None,
             label_shadow: None,
+            layout: TileLayout::new(1),
         }
+    }
+
+    /// This tile divided by `layout`.
+    #[must_use]
+    pub fn with_layout(mut self, layout: TileLayout) -> Self {
+        self.layout = layout;
+        self
     }
 
     /// This tile with the given composed state.
@@ -2184,25 +2200,12 @@ impl IconTile {
         self
     }
 
-    /// The pixel side of the square picture a tile occupying `bounds` draws.
-    ///
-    /// This is the render geometry itself, exposed so an owner rasterising
-    /// per-entry artwork produces it at exactly the size [`Self::render`] will
-    /// place it — the two can never disagree. It depends only on the tile's
-    /// bounds and the theme's metrics, never on which item the tile shows, so
-    /// an owner can size a whole row of artwork from one query. `0` when the
-    /// bounds are off-surface or leave no room for a picture.
-    #[must_use]
-    pub fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
-        Self::icon_slot(bounds, scale, theme).map_or(0, |(_, _, side)| side)
-    }
-
     /// Paint the tile into `surface` at `bounds` for the active theme.
     ///
     /// `artwork` is the item's own picture, pre-rasterised by the owner at
-    /// [`Self::icon_side`] through its cache; `None` falls back to the built-in
-    /// glyph for the tile's [`IconKind`], tinted like the label so the tile
-    /// reads as one unit. Artwork is decoded and rasterised long before it
+    /// [`TileLayout::icon_side`] through its cache; `None` falls back to the
+    /// built-in glyph for the tile's [`IconKind`], tinted like the label so the
+    /// tile reads as one unit. Artwork is decoded and rasterised long before it
     /// reaches this call — a control never parses image bytes.
     ///
     /// Nothing is drawn outside `bounds`, so a view whose viewport cuts a tile
@@ -2218,7 +2221,7 @@ impl IconTile {
         if withheld(surface, bounds) {
             return;
         }
-        let font = role_font(theme, scale, TextRole::Body);
+        let font = name_font(theme, scale);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -2227,7 +2230,7 @@ impl IconTile {
         }
         let ink = self.label_color(theme);
         self.paint_backdrop(surface, (x, y, w, h), scale, theme);
-        if let Some((ix, iy, side)) = Self::icon_slot(bounds, scale, theme) {
+        if let Some((ix, iy, side)) = self.layout.icon_slot(bounds, scale, theme) {
             paint_icon_slot(
                 surface,
                 (ix, iy, side),
@@ -2258,19 +2261,21 @@ impl IconTile {
         // tile that neither wears a mark nor is selected takes the shared
         // pointer wash, so the pointer never imitates selection and no wash
         // flashes under a mark that has begun arriving but has no strength
-        // yet. The drag states carry no wash of their own here, exactly as
-        // they carry no tint in the shared plate colours every other control
-        // paints through: the drag vocabulary is one decision for the whole
-        // control set, not one a tile invents for itself.
+        // yet. A drop target washes as a hover does and takes the shared
+        // drop-target outline every collection control draws.
         if self.state.pointer == PointerState::Pressed {
             fill_panel(surface, rect, scale, theme, palette.surface_pressed);
         } else {
             let marked = self.paint_selection(surface, rect, scale, theme);
-            if !marked && !self.wears_selection_mark() && self.state.pointer == PointerState::Hover
-            {
+            let washed = matches!(
+                self.state.pointer,
+                PointerState::Hover | PointerState::DragTarget
+            );
+            if !marked && !self.wears_selection_mark() && washed {
                 fill_panel(surface, rect, scale, theme, palette.surface_hover);
             }
         }
+        paint_drop_target(surface, rect, scale, theme, self.state);
         // The ring is what tells a focused tile from a hovered one; a selected
         // tile needs no second edge, and an outline drawn for however long its
         // mark takes to arrive would read as a border flickering under the
@@ -2316,44 +2321,6 @@ impl IconTile {
         true
     }
 
-    /// How many whole lines of its name a tile occupying `bounds` draws.
-    ///
-    /// This is the render geometry itself, exposed so an owner sizing its tiles
-    /// — a login chooser widening an account tile until a two-word display name
-    /// fits — asks the tile rather than re-deriving its label layout. `0` when
-    /// the tile is off-surface or its band cannot hold a whole line, which is
-    /// exactly when [`Self::render`] draws no name at all.
-    #[must_use]
-    pub fn label_lines(bounds: Rect, scale: Scale, theme: &Theme) -> usize {
-        Self::label_band(
-            bounds,
-            scale,
-            theme,
-            role_font(theme, scale, TextRole::Body),
-        )
-        .map_or(0, |band| band.lines)
-    }
-
-    /// The rectangle a tile occupying `bounds` draws its **name** in: the
-    /// column each line is centred in, from the first line's top down to the
-    /// last line the band holds. `None` when the tile draws no name at all.
-    ///
-    /// The drawn geometry itself, so an overlay laid over a tile's name — the
-    /// file manager's in-place rename field — lands on the label rather than
-    /// over the picture above it.
-    #[must_use]
-    pub fn label_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-        let font = role_font(theme, scale, TextRole::Body);
-        let band = Self::label_band(bounds, scale, theme, font)?;
-        let lines = u32::try_from(band.lines).unwrap_or(u32::MAX);
-        Some(Rect::new(
-            to_i32(band.left),
-            to_i32(band.top),
-            band.right.saturating_sub(band.left),
-            font.line_height().saturating_mul(lines),
-        ))
-    }
-
     /// Paint the tile's name under its picture: wrapped over as many whole
     /// lines as the band holds, each centred, the last elided when the name
     /// runs past them. A band with no room for a whole line draws nothing
@@ -2367,7 +2334,7 @@ impl IconTile {
         font: BitmapFont,
         color: Color,
     ) {
-        let Some(band) = Self::label_band(bounds, scale, theme, font) else {
+        let Some(band) = self.layout.label_band(bounds, scale, theme, font) else {
             return;
         };
         TextBlock {
@@ -2444,30 +2411,107 @@ impl IconTile {
         }
         foreground(theme, self.state.disposition())
     }
+}
 
-    /// The band a tile occupying `bounds` draws its name in: the column
-    /// `[left, right)` each line is centred in, the top of the first line, and
-    /// how many whole lines fit beneath the picture. `None` when the tile is
-    /// off-surface or the band cannot hold one whole line.
+/// How an [`IconTile`] divides its bounds: a square picture at the top, then a
+/// band of as many whole name lines as the owner states.
+///
+/// The band sits a half inset below the picture and a half inset above the
+/// tile's foot, and the picture takes the height that leaves, capped by the
+/// width — so a cell sized with [`height_for`](Self::height_for) draws exactly
+/// the picture it was sized for. The one statement of the tile's geometry: the
+/// side an owner rasterises artwork at, the band a rename field is laid over,
+/// and the pixels the tile paints all read it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TileLayout {
+    name_lines: u32,
+}
+
+impl TileLayout {
+    /// A layout reserving `name_lines` whole lines of name, at least one.
+    #[must_use]
+    pub const fn new(name_lines: u32) -> Self {
+        Self {
+            name_lines: if name_lines == 0 { 1 } else { name_lines },
+        }
+    }
+
+    /// The tile height that seats a `side`-pixel picture above the name band.
+    #[must_use]
+    pub fn height_for(self, side: u32, scale: Scale, theme: &Theme) -> u32 {
+        let (pad, gap) = tile_insets(scale, theme);
+        pad.saturating_add(side)
+            .saturating_add(gap)
+            .saturating_add(self.band_height(scale, theme))
+            .saturating_add(gap)
+    }
+
+    /// The pixel side of the square picture a tile occupying `bounds` draws.
     ///
-    /// The one definition of that geometry, so the budget an owner reads
-    /// ([`Self::label_lines`]) is the budget [`Self::render`] lays out to.
+    /// Exposed so an owner rasterises per-entry artwork at exactly the size the
+    /// tile places it. It depends only on the bounds and the theme, never on
+    /// the item, so one query sizes a whole row of artwork. `0` when the bounds
+    /// are off-surface or leave no room for a picture.
+    #[must_use]
+    pub fn icon_side(self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        self.icon_slot(bounds, scale, theme)
+            .map_or(0, |(_, _, side)| side)
+    }
+
+    /// How many whole lines of its name a tile occupying `bounds` draws: the
+    /// stated count, fewer when the bounds cannot seat them, and `0` exactly
+    /// when the tile draws no name at all.
+    #[must_use]
+    pub fn label_lines(self, bounds: Rect, scale: Scale, theme: &Theme) -> usize {
+        self.label_band(bounds, scale, theme, name_font(theme, scale))
+            .map_or(0, |band| band.lines)
+    }
+
+    /// The rectangle a tile occupying `bounds` draws its **name** in: the
+    /// column each line is centred in, from the first line's top down to the
+    /// last line the band holds. `None` when the tile draws no name at all.
+    ///
+    /// So an overlay laid over a tile's name — the file manager's in-place
+    /// rename field — lands on the label rather than over the picture.
+    #[must_use]
+    pub fn label_rect(self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let font = name_font(theme, scale);
+        let band = self.label_band(bounds, scale, theme, font)?;
+        let lines = u32::try_from(band.lines).unwrap_or(u32::MAX);
+        Some(Rect::new(
+            to_i32(band.left),
+            to_i32(band.top),
+            band.right.saturating_sub(band.left),
+            font.line_height().saturating_mul(lines),
+        ))
+    }
+
+    fn band_height(self, scale: Scale, theme: &Theme) -> u32 {
+        name_font(theme, scale)
+            .line_height()
+            .saturating_mul(self.name_lines)
+    }
+
+    /// The band under the picture: its column `[left, right)`, the top of the
+    /// first line, and how many whole lines it holds. `None` when the tile is
+    /// off-surface or the band holds no whole line.
     fn label_band(
+        self,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
     ) -> Option<LabelBand> {
         let (x, y, w, h) = surface_rect(bounds)?;
-        let top = match Self::icon_slot(bounds, scale, theme) {
-            Some((_, iy, side)) => iy.saturating_add(side),
-            None => y,
+        let (pad, gap) = tile_insets(scale, theme);
+        let top = match self.icon_slot(bounds, scale, theme) {
+            Some((_, iy, side)) => iy.saturating_add(side).saturating_add(gap),
+            None => y.saturating_add(pad),
         };
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let left = x.saturating_add(pad);
         let right = x.saturating_add(w).saturating_sub(pad);
-        let top = top.saturating_add(pad);
-        let whole = y.saturating_add(h).saturating_sub(top) / font.line_height().max(1);
+        let band_end = y.saturating_add(h).saturating_sub(gap);
+        let whole = (band_end.saturating_sub(top) / font.line_height().max(1)).min(self.name_lines);
         let lines = usize::try_from(whole).unwrap_or(0);
         (right > left && lines > 0).then_some(LabelBand {
             left,
@@ -2477,19 +2521,18 @@ impl IconTile {
         })
     }
 
-    /// The square picture slot a tile occupying `bounds` reserves at the top of
-    /// its content: `(x, y, side)`, centred across the tile and capped so at
-    /// least the lower two-fifths of the tile stays for the label. `None` when
-    /// the tile is off-surface or leaves no room for a picture.
-    ///
-    /// The one definition of that geometry, so the side an owner rasterises
-    /// artwork at ([`Self::icon_side`]) is exactly the slot [`Self::render`]
-    /// paints it into.
-    fn icon_slot(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32)> {
+    /// The square picture slot: `(x, y, side)`, centred across the tile at its
+    /// top inset. `None` when the tile is off-surface or the band leaves no
+    /// room for a picture.
+    fn icon_slot(self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32)> {
         let (x, y, w, h) = surface_rect(bounds)?;
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let (_, _, avail_w, avail_h) = inset(x, y, w, h, pad)?;
-        let side = avail_w.min(avail_h.saturating_mul(3) / 5);
+        let (pad, gap) = tile_insets(scale, theme);
+        let avail_w = w.checked_sub(pad.saturating_mul(2))?;
+        let below = gap
+            .saturating_mul(2)
+            .saturating_add(self.band_height(scale, theme));
+        let avail_h = h.checked_sub(pad.saturating_add(below))?;
+        let side = avail_w.min(avail_h);
         if side == 0 {
             return None;
         }
@@ -2499,6 +2542,18 @@ impl IconTile {
             side,
         ))
     }
+}
+
+/// An icon tile's inset and the half inset that separates its name band from
+/// the picture above and the foot below.
+fn tile_insets(scale: Scale, theme: &Theme) -> (u32, u32) {
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    (pad, pad / 2)
+}
+
+/// The face an icon tile's name is set in.
+fn name_font(theme: &Theme, scale: Scale) -> BitmapFont {
+    role_font(theme, scale, TextRole::ItemLabel)
 }
 
 /// The band an [`IconTile`] draws its name in.

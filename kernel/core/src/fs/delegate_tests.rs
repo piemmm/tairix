@@ -11,7 +11,8 @@ use crate::fs::{
 };
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind, NodeTimes,
+    DirEntry, DirVisit, FilesystemRead, FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind,
+    NodeTimes,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_abi::fs::{OpenFlags, RealpathMode};
@@ -150,31 +151,27 @@ impl FilesystemRead for MockFs {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         let entries: &[(&[u8], u64)] = match dir.raw() {
             ROOT => &[(b"docs", DOCS), (b"kernel.img", KERNEL)],
             DOCS => &[(b"readme.txt", README)],
             KERNEL | README => return Err(DriverError::Unsupported),
             _ => return Err(DriverError::NotFound),
         };
-        let Ok(i) = usize::try_from(cursor) else {
-            return Ok(None);
-        };
-        let Some(&(name, node)) = entries.get(i) else {
-            return Ok(None);
-        };
-        if name_out.len() < name.len() {
-            return Err(DriverError::BufferTooSmall);
+        let from = usize::try_from(cursor).unwrap_or(usize::MAX);
+        for (at, &(name, node)) in entries.iter().enumerate().skip(from) {
+            let entry = DirEntry {
+                node: NodeId::from_raw(node),
+                info: self.node_info(NodeId::from_raw(node))?,
+                next_cursor: at as u64 + 1,
+            };
+            if visit(&entry, name) == DirVisit::Stop {
+                break;
+            }
         }
-        name_out[..name.len()].copy_from_slice(name);
-        let info = self.node_info(NodeId::from_raw(node))?;
-        Ok(Some(DirEntry {
-            node: NodeId::from_raw(node),
-            info,
-            name_len: name.len(),
-            next_cursor: cursor + 1,
-        }))
+        Ok(())
     }
 }
 
@@ -233,15 +230,13 @@ impl FilesystemRead for BadFs {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         if dir.raw() != ROOT || cursor != 0 {
-            return Ok(None);
+            return Ok(());
         }
-        // A name that is not valid UTF-8.
-        name_out[0] = 0xff;
-        name_out[1] = 0xff;
-        Ok(Some(DirEntry {
+        let entry = DirEntry {
             node: NodeId::from_raw(DOCS),
             info: NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -250,9 +245,11 @@ impl FilesystemRead for BadFs {
                 allocated: 0,
                 times: NodeTimes::default(),
             },
-            name_len: 2,
             next_cursor: 1,
-        }))
+        };
+        // A name that is not valid UTF-8.
+        visit(&entry, &[0xff, 0xff]);
+        Ok(())
     }
 }
 
@@ -372,12 +369,12 @@ fn delegated_list_of_mount_point_lists_driver_root() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = MockFs;
     let names = vfs
-        .list_via(
+        .list_all_via(
             &admin,
             &p("/Storage/usb0"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry,
+            usize::MAX,
         )
         .expect("list mount root");
     let kinds: Vec<(NodeKind, String)> = names
@@ -400,12 +397,12 @@ fn delegated_list_of_subdir() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = MockFs;
     let names = vfs
-        .list_via(
+        .list_all_via(
             &admin,
             &p("/Storage/usb0/docs"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry,
+            usize::MAX,
         )
         .expect("list subdir");
     let entries: Vec<(NodeKind, u64, Time64, String)> = names
@@ -479,12 +476,12 @@ fn delegated_list_of_file_is_not_a_directory() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = MockFs;
     assert_eq!(
-        vfs.list_via(
+        vfs.list_all_via(
             &admin,
             &p("/Storage/usb0/kernel.img"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry
+            usize::MAX
         ),
         Err(VfsError::NotADirectory)
     );
@@ -558,12 +555,12 @@ fn non_utf8_directory_name_surfaces_as_io() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = BadFs;
     assert_eq!(
-        vfs.list_via(
+        vfs.list_all_via(
             &admin,
             &p("/Storage/usb0"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry
+            usize::MAX
         ),
         Err(VfsError::Io)
     );
@@ -630,12 +627,12 @@ fn delegated_mkdir_then_create_inside() {
         .expect("write inside");
 
     let names = vfs
-        .list_via(
+        .list_all_via(
             &admin,
             &p("/Storage/usb0/sub"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry,
+            usize::MAX,
         )
         .expect("list");
     let kinds: Vec<(NodeKind, String)> = names
@@ -1126,17 +1123,13 @@ impl FilesystemRead for SecMockFs {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         if dir.raw() != ROOT || cursor != 0 {
-            return Ok(None);
+            return Ok(());
         }
-        let name = b"secret.txt";
-        if name_out.len() < name.len() {
-            return Err(DriverError::BufferTooSmall);
-        }
-        name_out[..name.len()].copy_from_slice(name);
-        Ok(Some(DirEntry {
+        let entry = DirEntry {
             node: NodeId::from_raw(SECRET_FILE),
             info: NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -1145,9 +1138,10 @@ impl FilesystemRead for SecMockFs {
                 allocated: SECRET_BODY.len() as u64,
                 times: NodeTimes::default(),
             },
-            name_len: name.len(),
             next_cursor: 1,
-        }))
+        };
+        visit(&entry, b"secret.txt");
+        Ok(())
     }
 }
 
@@ -1239,12 +1233,12 @@ fn secured_list_of_mount_root_lists_driver_root() {
     let mut fs = SecMockFs;
     // The driver root is 0o755, world-readable, so listing it is allowed.
     let names = vfs
-        .list_via_secured(
+        .list_all_via_secured(
             &admin,
             &p("/Storage/usb0"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry,
+            usize::MAX,
         )
         .expect("secured list");
     let kinds: Vec<(NodeKind, String)> = names
@@ -1480,13 +1474,13 @@ impl FilesystemRead for StuckCursorFs {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         if dir.raw() != ROOT {
             return Err(DriverError::NotFound);
         }
-        name_out[0] = b'x';
-        Ok(Some(DirEntry {
+        let entry = DirEntry {
             node: NodeId::from_raw(DOCS),
             info: NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -1495,9 +1489,10 @@ impl FilesystemRead for StuckCursorFs {
                 allocated: 0,
                 times: NodeTimes::default(),
             },
-            name_len: 1,
             next_cursor: cursor,
-        }))
+        };
+        visit(&entry, b"x");
+        Ok(())
     }
 }
 
@@ -1508,12 +1503,12 @@ fn a_listing_whose_cursor_never_advances_fails_closed() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = StuckCursorFs;
     assert_eq!(
-        vfs.list_via(
+        vfs.list_all_via(
             &admin,
             &p("/Storage/usb0"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry
+            usize::MAX
         ),
         Err(VfsError::Io)
     );
@@ -1831,9 +1826,10 @@ impl FilesystemRead for NoLinksFs {
         &mut self,
         _dir: NodeId,
         _cursor: u64,
-        _name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        Ok(None)
+        _after: &[u8],
+        _visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 
@@ -1948,11 +1944,11 @@ fn keeping_the_final_link_refuses_to_list_it_as_a_directory() {
     // A `NO_FOLLOW` descriptor names the link, and a link is not a
     // directory — so its target's entries are never listed in its place.
     assert_eq!(
-        vfs.list_via(&admin, &path, &mut fs, FinalLink::Keep, |entry| entry),
+        vfs.list_all_via(&admin, &path, &mut fs, FinalLink::Keep, usize::MAX),
         Err(VfsError::NotADirectory)
     );
     let entries = vfs
-        .list_via(&admin, &path, &mut fs, FinalLink::Follow, |entry| entry)
+        .list_all_via(&admin, &path, &mut fs, FinalLink::Follow, usize::MAX)
         .expect("following lists the target");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "leaf");
@@ -2534,9 +2530,10 @@ impl FilesystemRead for RefusingFs {
         &mut self,
         _dir: NodeId,
         _cursor: u64,
-        _out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        Ok(None)
+        _after: &[u8],
+        _visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 

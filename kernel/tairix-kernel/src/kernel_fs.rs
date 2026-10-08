@@ -20,9 +20,9 @@
 use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    VolumeStats, WritebackHost,
+    DirEntry, DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -77,10 +77,11 @@ impl FilesystemRead for Box<dyn KernelFs> {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        (**self).read_dir(dir, index, name_out)
+        cursor: u64,
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        (**self).read_dir(dir, cursor, after, visit)
     }
 }
 

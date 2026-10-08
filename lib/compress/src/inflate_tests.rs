@@ -13,7 +13,9 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{build_huffman, inflate_into, is_permitted_incomplete, Error, Inflater};
+use super::{
+    build_huffman, inflate_into, inflate_prefix, is_permitted_incomplete, Error, Inflater,
+};
 
 /// A minimal test-only bit writer, the encode-side mirror of [`super::BitReader`].
 struct BitWriter {
@@ -628,4 +630,24 @@ fn a_full_destination_suspends_rather_than_failing() {
         got.extend_from_slice(&out[..progress.produced]);
     }
     assert_eq!(got, plain);
+}
+
+/// A prefix holds the stream's opening bytes, decoding no further: a stream
+/// longer than the buffer fills it, one shorter answers its own length, and
+/// one cut off inside the prefix is refused.
+#[test]
+fn a_prefix_decodes_only_the_opening_bytes() {
+    let data: Vec<u8> = (0..200u8).collect();
+    let mut stream = vec![0x01, 200, 0, !200u8, 0xFF];
+    stream.extend_from_slice(&data);
+    let mut head = [0u8; 33];
+    assert_eq!(inflate_prefix(&stream, &mut head), Ok(33));
+    assert_eq!(head, data[..33]);
+    let mut wide = [0u8; 300];
+    assert_eq!(inflate_prefix(&stream, &mut wide), Ok(200));
+    assert_eq!(wide[..200], data[..]);
+    assert_eq!(
+        inflate_prefix(&stream[..20], &mut head),
+        Err(Error::UnexpectedEof)
+    );
 }

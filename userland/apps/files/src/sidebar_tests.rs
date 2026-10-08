@@ -262,7 +262,7 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     let mut places = places();
     places.set_focused(true);
 
-    // Down to Documents (Home, Desktop, Documents).
+    // Down to UserFiles (Home, Desktop, UserFiles).
     assert_eq!(
         route(&mut browser, &mut places, &named(NamedKeyCode::Down)),
         Some(super::SidebarOutcome::reported(true))
@@ -284,7 +284,7 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
         [
             "Users".to_string(),
             "ann".to_string(),
-            "Documents".to_string()
+            "UserFiles".to_string()
         ]
     );
 

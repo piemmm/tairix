@@ -1744,11 +1744,32 @@ pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, 
     surface.blit(to_i32(x), to_i32(y), &glyph);
 }
 
-/// Draw a hollow rectangular outline of `thickness` inside `(x, y, w, h)`.
-///
-/// The one focus-ring / cell-outline primitive shared by the row/tab families
-/// (a keyboard-focused row or tab draws this ring to read distinctly from a
-/// pointer hover, spec §15).
+/// Outline `rect` in the accent when `state` marks the control a drop target:
+/// where a carried drag would land, over whatever else the control wears.
+pub(crate) fn paint_drop_target(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    scale: Scale,
+    theme: &Theme,
+    state: ControlState,
+) {
+    if state.pointer != PointerState::DragTarget {
+        return;
+    }
+    let (x, y, w, h) = rect;
+    draw_outline(
+        surface,
+        x,
+        y,
+        w,
+        h,
+        plate_border(theme, scale).max(1),
+        Color::from(theme.palette().accent),
+    );
+}
+
+/// Draw a hollow rectangular outline of `thickness` inside `(x, y, w, h)`: the
+/// one focus-ring and cell-outline primitive the row and tab families share.
 pub(crate) fn draw_outline(
     surface: &mut Surface,
     x: u32,
@@ -2088,12 +2109,13 @@ pub(crate) fn paint_row(
         match state.pointer {
             PointerState::Pressed => palette.surface_pressed,
             _ if selected => palette.surface_raised,
-            PointerState::Hover => palette.surface_hover,
+            PointerState::Hover | PointerState::DragTarget => palette.surface_hover,
             _ => palette.surface,
         },
         layer,
     );
     surface.fill_rect(x, y, w, h, Color::from(fill));
+    paint_drop_target(surface, rect, scale, theme, state);
 
     // Leading rails: a *fixed* two-rail gutter is always reserved on the
     // leading edge so a row's content never shifts when its selection or

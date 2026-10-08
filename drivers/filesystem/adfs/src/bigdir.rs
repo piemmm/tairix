@@ -14,8 +14,8 @@
 //! a size-proportional buffer.
 
 use crate::dir::{
-    accumulate_bytes, accumulate_words, bcd_increment, fold_check, name_cmp, name_eq, Object,
-    MAX_NAME_LEN,
+    accumulate_bytes, accumulate_words, bcd_increment, entries_in_order, fold_check, name_cmp,
+    Object, MAX_NAME_LEN,
 };
 use crate::volume::{get_u32, put_u32};
 use tairix_abi::DriverError;
@@ -169,6 +169,9 @@ impl BigDir {
         if stored != 0 && stored != dir.check_byte(store)? {
             return Err(DriverError::BadMagic);
         }
+        if !entries_in_order(header.entries, |index| dir.entry(store, index))? {
+            return Err(DriverError::BadMagic);
+        }
         Ok(dir)
     }
 
@@ -236,7 +239,8 @@ impl BigDir {
         Ok(Some(object))
     }
 
-    /// Find the entry named `name`, returning its index and object.
+    /// Find the entry named `name`, returning its index and object, by
+    /// binary search on the order [`Self::load`] proved.
     ///
     /// # Errors
     ///
@@ -246,15 +250,34 @@ impl BigDir {
         store: &mut S,
         name: &[u8],
     ) -> Result<Option<(u32, Object)>, DriverError> {
-        for index in 0..self.header.entries {
-            let Some(object) = self.entry(store, index)? else {
-                break;
-            };
-            if name_eq(object.name(), name) {
-                return Ok(Some((index, object)));
+        let index = self.place_of(store, name)?;
+        let Some(prior) = index.checked_sub(1) else {
+            return Ok(None);
+        };
+        let object = self.entry(store, prior)?.ok_or(DriverError::BadMagic)?;
+        Ok(
+            (name_cmp(object.name(), name) == core::cmp::Ordering::Equal)
+                .then_some((prior, object)),
+        )
+    }
+
+    /// The index of the first entry that sorts after `name`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates decode errors from [`Self::entry`].
+    pub fn place_of<S: DirStore>(&self, store: &mut S, name: &[u8]) -> Result<u32, DriverError> {
+        let (mut low, mut high) = (0u32, self.header.entries);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let object = self.entry(store, mid)?.ok_or(DriverError::BadMagic)?;
+            if name_cmp(object.name(), name) == core::cmp::Ordering::Greater {
+                high = mid;
+            } else {
+                low = mid + 1;
             }
         }
-        Ok(None)
+        Ok(low)
     }
 
     /// Insert `object` in sorted position.
@@ -279,17 +302,7 @@ impl BigDir {
         if self.header.used_end() + grown > self.header.tail_offset() {
             return Err(DriverError::NoSpace);
         }
-        // Sorted position.
-        let mut index = 0u32;
-        while index < self.header.entries {
-            let Some(existing) = self.entry(store, index)? else {
-                break;
-            };
-            if name_cmp(object.name(), existing.name()) == core::cmp::Ordering::Less {
-                break;
-            }
-            index += 1;
-        }
+        let index = self.place_of(store, object.name())?;
         // Open a 28-byte gap at the insertion point (moves the later
         // entries and the whole heap up).
         let gap_at = self.header.entries_offset() + index * BIG_ENTRY_SIZE;

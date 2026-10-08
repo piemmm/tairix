@@ -12,7 +12,7 @@ what is built.
 ## What is built (S1 model core, S2 file operations, S3 tagging/batches/walks, S4 search/filter, S5 viewers, S9 disassembly viewer)
 
 - **The tree window.** A lazily populated directory tree: a directory is
-  read through one `fs_readdir` call when it is first shown or expanded —
+  read through one listing when it is first shown or expanded —
   never a whole-volume scan, so browsing costs the working set and a huge
   volume costs only the directories actually opened. Each row carries a
   box-drawing branch prefix (the ancestor `│` bars and this row's `├─`/`└─`

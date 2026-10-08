@@ -375,9 +375,11 @@ vertical edge and grows a new column inward as it fills, but both share one
 cell geometry and one hit-test (`lib/browse::layout`). It paints through the
 same public `grid_tile` /
 `grid_metrics` helpers and the shell's own icon-artwork lookup, so a folder
-shows the shipped folder artwork, a file its content-class artwork, and an
-application bundle the icon it carries in its own `Resources/`, falling back
-to built-in glyphs exactly as the file manager's grid does. Each icon is a
+shows the shipped folder artwork — the picture of what it holds once its probe
+has answered ([Folder occupancy](apps.md#folder-occupancy)) — a file its
+content-class artwork, and an application bundle the icon it carries in its own
+`Resources/`, falling back to built-in glyphs exactly as the file manager's grid
+does. Each icon is a
 shared `lib/controls` `IconTile` — the picture over its name with no plate of
 its own, so the icons sit on the wallpaper rather than in a row of boxes, and
 only a hovered, selected, or focused icon paints anything behind itself. A
@@ -1105,7 +1107,9 @@ screen. The window therefore opens **off screen and holding no pixels**
 `DesktopShell::open_unpresented_window`), and `ShellWindowHost::window_presented`
 maps it — show, raise, focus — on the never-presented → painted transition,
 *before* the frame is composed, so the `WINDOW_SHOWN` witness still follows
-pixels the display actually took. Its taskbar entry is added at open, so an
+pixels the display actually took. While the seat is held it is shown beneath
+the window holding the keyboard instead (`DesktopShell::map_window_behind`),
+which keeps it. Its taskbar entry is added at open, so an
 application slow to render is listed, retitleable and reachable while it gets
 ready; what it is not is visible.
 
@@ -1795,7 +1799,7 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   thread alone under `idle`, and paints on the same cadence. With `screensaver.raytrace.save` on, the engine
   keeps a copy of each picture as it traces it, and once the picture is whole
   and on screen the tracing thread writes it as a PNG into
-  `Documents/Pictures/Raytracing/` under the account's home, making the
+  `UserFiles/Pictures/Raytracing/` under the account's home, making the
   folders it needs, naming it for the setting and the moment it was finished
   (its scene's seed when the clock is not set), and taking the next number
   rather than writing over any picture already there, and a picture that
@@ -2211,7 +2215,7 @@ than from a fixed period — is where `plans/FIX-DISPLAY-ACCELERATION.md` takes
 this next. No display driver reports a refresh today, so a mode field for one
 would be an ABI with no producer.
 
-## Dragging a file onto an application
+## Carrying a drag
 
 A drag is the fourth thing that can hold the seat, after the menu chain, the
 lock and the prompts: the seat drain feeds it every pointer and key event
@@ -2220,18 +2224,42 @@ begins only from the window that holds the press — `DesktopShell::begin_drag`
 checks the router's own record of that press (`pressed_in`) — and takes the
 pointer from that window, which therefore never sees the release it lent.
 
-- **Only a name is carried.** A slot's application takes the file when the
-  bundle the desktop launched it from declares a type the name resolves to,
-  by the one matching rule "Open With" uses; the slot is asked once as the
-  pointer arrives on it, never per motion sample, and lit with its hover look
-  while it would take the drop.
-- **The plate is the tooltip plate's kind.** The name floats beside the
-  pointer in an input-transparent window raised above everything, so it can
-  never become what it is dropped on.
-- **Every way out is an answer.** The press coming up drops it; another button
-  or `Escape` ends it on nothing; the source window closing ends it with no one
-  to tell; the screen locking ends it on nothing rather than leaving it to
-  resume past the unlock.
+- **Only a name and a count are carried** (`DragItems`). Each motion asks the
+  session router which place the pointer is over (`drag_place`, which
+  allocates nothing): an icon-bar slot, one of the dragging application's
+  *own* windows (the window engine's attested ownership decides, so another
+  application's window is never described to it), the desktop — the folder
+  icon under the pointer, at the desktop listing's revision, or the Desktop
+  folder itself — or nothing. What is there — what a slot's application does
+  with the file, the folder a desktop drop lands in — is resolved
+  (`drag_surface`) only as the pointer arrives somewhere new.
+- **A slot takes one openable file.** Its application takes the file when the
+  bundle the desktop launched it from declares a type the name resolves to, by
+  the one matching rule "Open With" uses; the slot is lit with its hover look
+  while it would take the drop. A drag of several items, or of a folder, is
+  never offered to a slot.
+- **The application decides every folder drop.** Over its own windows or the
+  desktop the session sends one numbered report per input batch
+  (`WindowServer::report_drag`, `WindowEvent::DragOver`, with `Shift`) and
+  shows the application's answer (`DragVerdict`) on the pointer: the
+  `DragCopy` or `DragMove` cursor, or the plain arrow. Arriving somewhere new
+  shows the arrow until that place is answered, as does a change of `Shift`,
+  and an answer to a report made before either is not shown. Over the desktop the folder's path
+  is held for the report that named it (`QueryDragSpot`); it is the only path
+  that crosses, and it is the session's own, which confers nothing. The folder
+  icon a drop would land in is lit while the answer accepts it.
+- **The drop does what the pointer showed.** The press coming up concludes
+  with a `DropSite` — the application slot, a window and a point in it, or the
+  desktop folder, with the operation shown — and the application performs it
+  under its own authority. A place with no answer yet, or one refused, drops
+  nothing.
+- **The plate is the tooltip plate's kind.** The name — or "*n* items" —
+  floats beside the pointer in an input-transparent window raised above
+  everything, so it can never become what it is dropped on.
+- **Every way out is an answer.** Another button or `Escape` ends it on
+  nothing; the source window closing ends it with no one to tell; the screen
+  locking ends it on nothing rather than leaving it to resume past the
+  unlock; a window dropped on that closed meanwhile is a drop on nothing.
 
 ## Nothing the desktop reads or writes happens on the serve loop
 
@@ -2289,6 +2317,14 @@ asking again for a folder whose read is merely under way (`take`) joins it.
   trusted file picker each have their own slot, and the worker serves them
   round-robin, so a picker walking a deep tree can never hold the icon column's
   re-list behind it.
+- **The icon column's folder cues ride the same worker.** Its folders are
+  probed through the shared `Probes` desk, after the listings and watch drains
+  a user is waiting on. The serve loop resolves the shown cues
+  (`Desktop::resolve_occupancy`) when a listing, a reported change, a settings
+  change or a probe batch lands, so each lands as the cells whose picture
+  moved. A reported change to a folder, or a re-list, drops what was probed of
+  it. The picker does not probe, and with no worker no folder is probed: the
+  column draws plain folders rather than reading on the loop.
 - **The picker gains a real pending state.** `Browser` records the navigation
   and *moves nothing* — not the location, not the entries, not either history —
   until the listing arrives; `Browser::resume` commits it. A listing that is

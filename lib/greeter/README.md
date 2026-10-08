@@ -97,9 +97,10 @@ charter forbids.
 - **`Other…` is always there.** Always the last tile, present even with no
   accounts at all, leading to a typed login name so an unlisted account stays
   reachable.
-- **A tile is tall enough for the name on it.** Its height is sized from
-  `IconTile::label_lines` so the band under the disc holds three whole lines
-  at the reference density and at a doubled one. That is capacity, not layout:
+- **A tile is tall enough for the name on it.** Its layout (`ACCOUNT_TILE`)
+  states three whole name lines under the disc, and the tile is sized so the
+  disc keeps its side at the reference density and at a doubled one. That is
+  capacity, not layout:
   a one-word name still draws one line, but "System Administrator" wraps
   instead of being cut, and a face wider than the reference one has a line to
   fall onto rather than being broken mid-word.

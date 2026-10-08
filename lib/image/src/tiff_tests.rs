@@ -6,16 +6,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    decode, pages, probe, BYTE, COMPRESSION_ADOBE_DEFLATE, COMPRESSION_CCITT_RLE,
-    COMPRESSION_GROUP3, COMPRESSION_GROUP4, COMPRESSION_JPEG, COMPRESSION_LZW, COMPRESSION_NONE,
-    COMPRESSION_PACK_BITS, LONG, PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_MASK, PHOTOMETRIC_PALETTE,
-    PHOTOMETRIC_RGB, PHOTOMETRIC_SEPARATED, PHOTOMETRIC_WHITE_ZERO, PHOTOMETRIC_YCBCR, RATIONAL,
-    SHORT, TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_FILL_ORDER,
-    TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_JPEG_TABLES, TAG_NEW_SUBFILE_TYPE,
-    TAG_ORIENTATION, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR,
-    TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
-    TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_T4_OPTIONS, TAG_TILE_BYTE_COUNTS,
-    TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_SUBSAMPLING, UNDEFINED,
+    decode, fitted_peak_bytes, pages, probe, BYTE, COMPRESSION_ADOBE_DEFLATE,
+    COMPRESSION_CCITT_RLE, COMPRESSION_GROUP3, COMPRESSION_GROUP4, COMPRESSION_JPEG,
+    COMPRESSION_LZW, COMPRESSION_NONE, COMPRESSION_PACK_BITS, LONG, PHOTOMETRIC_BLACK_ZERO,
+    PHOTOMETRIC_MASK, PHOTOMETRIC_PALETTE, PHOTOMETRIC_RGB, PHOTOMETRIC_SEPARATED,
+    PHOTOMETRIC_WHITE_ZERO, PHOTOMETRIC_YCBCR, RATIONAL, SHORT, TAG_BITS_PER_SAMPLE,
+    TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_FILL_ORDER, TAG_IMAGE_LENGTH,
+    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_JPEG_TABLES, TAG_NEW_SUBFILE_TYPE, TAG_ORIENTATION,
+    TAG_PHOTOMETRIC, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_REFERENCE_BLACK_WHITE,
+    TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS,
+    TAG_STRIP_OFFSETS, TAG_T4_OPTIONS, TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS,
+    TAG_TILE_WIDTH, TAG_YCBCR_SUBSAMPLING, UNDEFINED,
 };
 use crate::{DecodeError, DecodeLimits, ImageFormat, RasterImage, Sequence, SequenceKind};
 
@@ -1614,4 +1615,172 @@ fn a_page_that_will_not_validate_refuses_the_document_for_editing() {
     let bad = grey(2, 1, vec![1, 2]).tag(TAG_BITS_PER_SAMPLE, SHORT, &[3]);
     let bytes = build(false, &[grey(2, 1, vec![1, 2]), bad]);
     assert!(crate::open_native(ImageFormat::Tiff, &bytes[..], &limits()).is_err());
+}
+
+/// What `bytes` decodes to, reduced to `size` by the shared resampler: what a
+/// fitted decode must produce byte for byte.
+fn reduced_whole(bytes: &[u8], size: (u32, u32)) -> Vec<u8> {
+    let whole = decode(bytes, &limits()).expect("decodes");
+    let source = tairix_raster::Rgba8Image::new(whole.width(), whole.height(), whole.pixels())
+        .expect("image");
+    tairix_raster::resample(&source, source.whole(), size.0, size.1).expect("resamples")
+}
+
+/// A `width`×`height` grey page in strips `rows` rows tall.
+fn striped(width: u32, height: u32, rows: u32) -> PageSpec {
+    let pixels: Vec<u8> = (0..width * height)
+        .map(|at| u8::try_from((at * 37) % 251).unwrap_or(0))
+        .collect();
+    let units = pixels
+        .chunks((width * rows) as usize)
+        .map(<[u8]>::to_vec)
+        .collect();
+    grey(width, height, Vec::new())
+        .tag(TAG_ROWS_PER_STRIP, LONG, &[rows])
+        .units(units)
+}
+
+/// A fitted decode streams strips, flipped pages bottom first, and bands of
+/// tiles, and holds a transposed page, into exactly the whole decode reduced.
+#[test]
+fn a_fitted_decode_is_the_whole_decode_reduced_however_the_page_is_stored() {
+    let fit = crate::FitBox::new(4, 4);
+    let mut cases: Vec<Vec<u8>> = (1..=8u32)
+        .map(|orientation| {
+            build(
+                false,
+                &[striped(11, 9, 3).tag(TAG_ORIENTATION, SHORT, &[orientation])],
+            )
+        })
+        .collect();
+    let tile: Vec<u8> = (0..16 * 16)
+        .map(|at| u8::try_from(at % 251).unwrap_or(0))
+        .collect();
+    let tiled = PageSpec::new()
+        .tag(TAG_IMAGE_WIDTH, LONG, &[20])
+        .tag(TAG_IMAGE_LENGTH, LONG, &[30])
+        .tag(TAG_BITS_PER_SAMPLE, SHORT, &[8])
+        .tag(TAG_COMPRESSION, SHORT, &[u32::from(COMPRESSION_NONE)])
+        .tag(TAG_PHOTOMETRIC, SHORT, &[u32::from(PHOTOMETRIC_BLACK_ZERO)])
+        .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[1])
+        .tag(TAG_TILE_WIDTH, LONG, &[16])
+        .tag(TAG_TILE_LENGTH, LONG, &[16])
+        .tiled()
+        .units(vec![tile.clone(), vec![9; 256], vec![3; 256], tile]);
+    cases.push(build(false, &[tiled]));
+    for bytes in cases {
+        let whole = decode(&bytes, &limits()).expect("decodes");
+        let size = fit.reduction(whole.width(), whole.height());
+        let fitted = crate::decode_fitted(&bytes, &limits(), fit).expect("decodes");
+        assert_eq!((fitted.width(), fitted.height()), size);
+        assert_eq!(fitted.pixels(), reduced_whole(&bytes, size).as_slice());
+    }
+}
+
+/// A reduced copy of the page, at its shape, that covers the box is read in
+/// its place, the smallest that does; a box no copy covers reads the page.
+#[test]
+fn a_fitted_decode_reads_the_smallest_reduced_copy_covering_its_box() {
+    let bytes = build(
+        false,
+        &[
+            grey(8, 6, vec![200; 48]),
+            grey(4, 3, vec![50; 12]).tag(TAG_NEW_SUBFILE_TYPE, LONG, &[1]),
+            grey(6, 6, vec![90; 36]).tag(TAG_NEW_SUBFILE_TYPE, LONG, &[1]),
+        ],
+    );
+    let small = crate::decode_fitted(&bytes, &limits(), crate::FitBox::new(2, 2)).expect("decodes");
+    assert_eq!(pixel(&small, 0, 0)[0], 50, "the reduced copy");
+    let large = crate::decode_fitted(&bytes, &limits(), crate::FitBox::new(6, 6)).expect("decodes");
+    assert_eq!(
+        pixel(&large, 0, 0)[0],
+        200,
+        "the page; the square copy is another shape"
+    );
+}
+
+/// A reduced copy stands in for its primary, so a fitted decode — and the
+/// forecast of one — refuses a primary a plain decode refuses: one past the
+/// caller's limits, or one stored in a coding no codec reads.
+#[test]
+fn a_fitted_decode_refuses_what_a_plain_decode_of_its_primary_refuses() {
+    let copy = || grey(4, 3, vec![50; 12]).tag(TAG_NEW_SUBFILE_TYPE, LONG, &[1]);
+    let fit = crate::FitBox::new(2, 2);
+    let wide = build(false, &[grey(64, 48, vec![200; 64 * 48]), copy()]);
+    let tight = DecodeLimits::new(32, 64, 1 << 20, 0);
+    assert_eq!(
+        decode(&wide, &tight).map(drop),
+        Err(DecodeError::WidthExceedsLimit)
+    );
+    assert_eq!(
+        crate::decode_fitted(&wide, &tight, fit).map(drop),
+        Err(DecodeError::WidthExceedsLimit)
+    );
+    assert_eq!(
+        fitted_peak_bytes(&wide, &tight, fit),
+        Err(DecodeError::WidthExceedsLimit)
+    );
+    let unread = build(
+        false,
+        &[
+            grey(8, 6, vec![200; 48]).tag(TAG_COMPRESSION, SHORT, &[99]),
+            copy(),
+        ],
+    );
+    assert_eq!(
+        decode(&unread, &limits()).map(drop),
+        Err(DecodeError::TiffUnsupportedCompression)
+    );
+    assert_eq!(
+        crate::decode_fitted(&unread, &limits(), fit).map(drop),
+        Err(DecodeError::TiffUnsupportedCompression)
+    );
+}
+
+/// A copy marked reduced but larger than its primary does not reduce it, so
+/// it is never read in the primary's place.
+#[test]
+fn a_reduced_copy_larger_than_its_primary_is_not_read_in_its_place() {
+    let bytes = build(
+        false,
+        &[
+            grey(4, 3, vec![200; 12]),
+            grey(8, 6, vec![50; 48]).tag(TAG_NEW_SUBFILE_TYPE, LONG, &[1]),
+        ],
+    );
+    let fitted =
+        crate::decode_fitted(&bytes, &limits(), crate::FitBox::new(4, 3)).expect("decodes");
+    assert_eq!(pixel(&fitted, 0, 0)[0], 200);
+}
+
+/// A band of tiles holds no more rows than the picture, so a tile the header
+/// says is far taller than the page costs a band the page's height.
+#[test]
+fn a_band_of_tiles_taller_than_the_page_holds_only_the_page() {
+    let tall = |length: u32| {
+        PageSpec::new()
+            .tag(TAG_IMAGE_WIDTH, LONG, &[32])
+            .tag(TAG_IMAGE_LENGTH, LONG, &[16])
+            .tag(TAG_BITS_PER_SAMPLE, SHORT, &[8])
+            .tag(TAG_COMPRESSION, SHORT, &[u32::from(COMPRESSION_NONE)])
+            .tag(TAG_PHOTOMETRIC, SHORT, &[u32::from(PHOTOMETRIC_BLACK_ZERO)])
+            .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[1])
+            .tag(TAG_TILE_WIDTH, LONG, &[16])
+            .tag(TAG_TILE_LENGTH, LONG, &[length])
+            .tiled()
+            .units(vec![vec![7; 16 * length as usize]; 2])
+    };
+    let fit = crate::FitBox::new(4, 2);
+    let (short, high) = (build(false, &[tall(16)]), build(false, &[tall(4096)]));
+    let tile_growth = 2 * 16 * (4096 - 16);
+    let forecast = |bytes: &[u8]| fitted_peak_bytes(bytes, &limits(), fit).expect("forecast");
+    assert!(
+        forecast(&high) <= forecast(&short) + tile_growth,
+        "{} > {} + the taller tile",
+        forecast(&high),
+        forecast(&short)
+    );
+    let size = fit.reduction(32, 16);
+    let fitted = crate::decode_fitted(&high, &limits(), fit).expect("decodes");
+    assert_eq!(fitted.pixels(), reduced_whole(&high, size).as_slice());
 }

@@ -17,7 +17,8 @@ use core::sync::atomic::AtomicU8;
 
 use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
+    DirVisit, FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind,
+    NodeSecurity,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::MountAvailability;
@@ -36,7 +37,7 @@ use crate::fs::test_volume::{
     caps, dir_driver, driver, identity_table, vfs, NullSink, MOUNT, MOUNT_MEDIUM, TEST_GID,
     TEST_UID,
 };
-use crate::fs::{FinalLink, Mode, MountBacking, Path, Vfs};
+use crate::fs::{FinalLink, Listing, Mode, MountBacking, Path, Vfs};
 
 /// The test principal that owns the mounted volume's files.
 /// Two rebased sub-mounts that share **one** backing driver (the
@@ -234,7 +235,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     let caps = caps();
 
     let entries = svc
-        .readdir(TEST_UID, &caps, "/Storage", FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, "/Storage", FinalLink::Follow, usize::MAX)
         .expect("listing succeeds");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert!(
@@ -261,10 +262,20 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
     assert_eq!(usb1.id, tairix_abi::FileId::NONE);
     assert_eq!(usb1.nlink, NodeInfo::SINGLE_NAME);
 
+    // Read one entry per batch through one listing, the merge resumes in
+    // both its parts and lists exactly what one whole read does.
+    assert_eq!(names_a_batch_at_a_time(&svc, "/Storage"), names);
+
     // The merged name is not a phantom: it resolves through to the mounted
     // volume's own content.
     let inside = svc
-        .readdir(TEST_UID, &caps, "/Storage/usb1", FinalLink::Follow)
+        .readdir_bounded(
+            TEST_UID,
+            &caps,
+            "/Storage/usb1",
+            FinalLink::Follow,
+            usize::MAX,
+        )
         .expect("child volume lists");
     assert!(inside.iter().any(|e| e.name == "note"), "{inside:?}");
 }
@@ -457,6 +468,220 @@ fn stat_reports_kind_size_and_attested_owner() {
     assert_eq!(st.mode, 0o644);
 }
 
+/// The names `path` lists, read one entry per batch through one listing.
+fn names_a_batch_at_a_time(svc: &dyn FilesystemService, path: &str) -> Vec<alloc::string::String> {
+    let mut at = Listing::default();
+    let mut names = Vec::new();
+    while !at.is_done() {
+        let mut took = false;
+        svc.readdir(
+            TEST_UID,
+            &caps(),
+            path,
+            FinalLink::Follow,
+            &mut at,
+            &mut |entry| {
+                if took {
+                    return DirVisit::Stop;
+                }
+                took = true;
+                names.push(alloc::string::String::from_utf8(entry.name.to_vec()).expect("utf8"));
+                DirVisit::Take
+            },
+        )
+        .expect("a batch");
+        assert!(
+            took || at.is_done(),
+            "a batch that takes nothing ends the listing"
+        );
+    }
+    names
+}
+
+/// A listing whose directory is renamed away and replaced between batches
+/// is refused rather than resumed inside the new one; restarting reads what
+/// the path names now.
+#[test]
+fn a_listing_whose_directory_is_replaced_between_batches_is_stale() {
+    let svc = ready_traversable();
+    let caps = caps();
+    let create = |name: &str| {
+        svc.open(
+            TEST_UID,
+            &caps,
+            &path(name),
+            OpenFlags::CREATE.union(OpenFlags::WRITE),
+        )
+        .expect("create");
+    };
+    svc.mkdir(TEST_UID, &caps, &path("d")).expect("mkdir");
+    create("d/a");
+    create("d/b");
+    let mut at = Listing::default();
+    svc.readdir(
+        TEST_UID,
+        &caps,
+        &path("d"),
+        FinalLink::Follow,
+        &mut at,
+        &mut |_| DirVisit::Stop,
+    )
+    .expect("the first batch fixes the listing to d");
+    svc.rename(TEST_UID, &caps, &path("d"), &path("old"))
+        .expect("rename away");
+    svc.mkdir(TEST_UID, &caps, &path("d")).expect("a new d");
+    create("d/c");
+    assert_eq!(
+        svc.readdir(
+            TEST_UID,
+            &caps,
+            &path("d"),
+            FinalLink::Follow,
+            &mut at,
+            &mut |_| { DirVisit::Take }
+        ),
+        Err(Errno::Stale)
+    );
+    at.restart();
+    let mut names = Vec::new();
+    svc.readdir(
+        TEST_UID,
+        &caps,
+        &path("d"),
+        FinalLink::Follow,
+        &mut at,
+        &mut |entry| {
+            names.push(entry.name.to_vec());
+            DirVisit::Take
+        },
+    )
+    .expect("a restart lists the new directory");
+    assert_eq!(names, [b"c".to_vec()]);
+}
+
+/// A directory removed between two batches leaves its listing stale however
+/// soon the volume gives its number to the next directory made at the path,
+/// as FAT gives its first cluster and ext4 its inode; and the registry keeps
+/// no record once the listing goes.
+#[test]
+fn a_listing_whose_directory_is_removed_and_its_number_reused_is_stale() {
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
+    cell.register(
+        handle,
+        dir_driver().with_reused_numbers(),
+        "vol",
+        "memfs",
+        [0u8; 16],
+        None,
+    )
+    .expect("register driver");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let caps = caps();
+    let create = |name: &str| {
+        svc.open(
+            TEST_UID,
+            &caps,
+            &path(name),
+            OpenFlags::CREATE.union(OpenFlags::WRITE),
+        )
+        .expect("create");
+    };
+    svc.mkdir(TEST_UID, &caps, &path("d")).expect("mkdir");
+    create("d/a");
+    create("d/b");
+    let old = svc
+        .stat(TEST_UID, &caps, &path("d"), FinalLink::Follow)
+        .expect("stat")
+        .id;
+    let mut at = Listing::default();
+    svc.readdir(
+        TEST_UID,
+        &caps,
+        &path("d"),
+        FinalLink::Follow,
+        &mut at,
+        &mut |_| DirVisit::Stop,
+    )
+    .expect("the first batch fixes the listing to d");
+    assert_eq!(cell.listings.len(), 1);
+    for name in ["d/a", "d/b"] {
+        svc.unlink(TEST_UID, &caps, &path(name), UnlinkFlags::empty())
+            .expect("unlink");
+    }
+    svc.unlink(TEST_UID, &caps, &path("d"), UnlinkFlags::DIRECTORY)
+        .expect("rmdir");
+    svc.mkdir(TEST_UID, &caps, &path("d")).expect("a new d");
+    create("d/c");
+    let new = svc
+        .stat(TEST_UID, &caps, &path("d"), FinalLink::Follow)
+        .expect("stat")
+        .id;
+    assert_eq!(new, old, "the new directory took the old one's number");
+    assert_eq!(
+        svc.readdir(
+            TEST_UID,
+            &caps,
+            &path("d"),
+            FinalLink::Follow,
+            &mut at,
+            &mut |_| DirVisit::Take
+        ),
+        Err(Errno::Stale)
+    );
+    drop(at);
+    assert_eq!(cell.listings.len(), 0, "no record outlives its listings");
+}
+
+/// Listing the mount points beneath a directory enters the driver with no
+/// guard held on the mount table: the table's lock prefers writers, so a
+/// guard held into a driver deadlocks the next mount against the listing.
+#[test]
+fn a_listing_holds_no_mount_table_guard_into_its_driver() {
+    let h_parent = DriverHandle::from_raw(9).expect("handle");
+    let h_usb = DriverHandle::from_raw(10).expect("handle");
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let parent = dir_driver().with_lookup_probe(Box::new(move || {
+        let vfs = cell.vfs().expect("installed");
+        assert!(
+            vfs.mounts_unlocked(),
+            "a mount-table guard was held into the driver"
+        );
+    }));
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    vfs.mounts_write()
+        .set_backing(
+            &Path::parse("/Storage").expect("path"),
+            MountBacking::new(h_parent, None),
+            Vec::new(),
+        )
+        .expect("back /Storage");
+    vfs.mounts_write()
+        .mount_with_template(
+            Path::parse("/Storage/usb1").expect("path"),
+            MountFlags::NOSUID,
+            MountBacking::new(h_usb, Some(BlkDeviceClass::Removable)),
+            crate::fs::perm::Metadata::new(
+                UserId(TEST_UID),
+                GroupId(TEST_GID),
+                Mode::from_bits(0o775),
+            ),
+        )
+        .expect("runtime mount");
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h_parent, parent, "root", "memfs", [0u8; 16], None)
+        .expect("register parent");
+    cell.register(h_usb, driver(), "usb1", "memfs", [0u8; 16], None)
+        .expect("register usb");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    assert_eq!(names_a_batch_at_a_time(&svc, "/Storage"), ["usb1"]);
+}
+
 #[test]
 fn mkdir_then_readdir_reports_each_entrys_kind() {
     let svc = ready();
@@ -471,7 +696,7 @@ fn mkdir_then_readdir_reports_each_entrys_kind() {
     .expect("create file");
 
     let mut entries = svc
-        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
         .expect("readdir");
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
@@ -506,7 +731,7 @@ fn readdir_reports_one_identity_for_two_names_of_one_node() {
     .expect("second name");
 
     let entries = svc
-        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
         .expect("readdir");
     let first = entries
         .iter()
@@ -545,7 +770,7 @@ fn readdir_reports_distinct_identities_for_distinct_nodes() {
         .expect("create");
     }
     let entries = svc
-        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
         .expect("readdir");
     let ids: Vec<tairix_abi::FileId> = entries.iter().map(|e| e.id).collect();
     assert_eq!(ids.len(), 2);
@@ -1076,7 +1301,7 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
 
     let caps = caps();
     let entries = svc
-        .readdir(TEST_UID, &caps, "/System", FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, "/System", FinalLink::Follow, usize::MAX)
         .expect("an ordinary user lists /System");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     for expected in ["Kernel", "Drivers", "Logs", "Settings"] {
@@ -1540,10 +1765,11 @@ impl FilesystemRead for NoAttrsFs {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        self.0.read_dir(dir, index, name_out)
+        cursor: u64,
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        self.0.read_dir(dir, cursor, after, visit)
     }
 }
 impl FilesystemWrite for NoAttrsFs {
@@ -1819,11 +2045,11 @@ fn readdir_under_keep_refuses_a_link_rather_than_listing_its_target() {
         .expect("create the link");
 
     let followed = svc
-        .readdir(TEST_UID, &caps, &link, FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, &link, FinalLink::Follow, usize::MAX)
         .expect("following lists the target");
     assert!(followed.iter().any(|e| e.name == "inside"), "{followed:?}");
     assert_eq!(
-        svc.readdir(TEST_UID, &caps, &link, FinalLink::Keep),
+        svc.readdir_bounded(TEST_UID, &caps, &link, FinalLink::Keep, usize::MAX),
         Err(Errno::NotADirectory)
     );
 }
@@ -1837,7 +2063,7 @@ fn readdir_reports_a_link_entry_as_a_link_never_as_its_target() {
         .expect("create the link");
 
     let mut entries = svc
-        .readdir(TEST_UID, &caps, MOUNT, FinalLink::Follow)
+        .readdir_bounded(TEST_UID, &caps, MOUNT, FinalLink::Follow, usize::MAX)
         .expect("readdir");
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let kinds: Vec<(FileKind, &str)> = entries.iter().map(|e| (e.kind, e.name.as_str())).collect();
@@ -2343,7 +2569,7 @@ mod watch {
         svc.mkdir(TEST_UID, &caps(), "/Storage/vol/d")
             .expect("mkdir");
         let listing = svc
-            .readdir(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .readdir_bounded(TEST_UID, &caps(), MOUNT, FinalLink::Follow, usize::MAX)
             .expect("lists");
         let names: [&[u8]; 3] = [b"a.txt", b"d", b"absent"];
         let found = svc

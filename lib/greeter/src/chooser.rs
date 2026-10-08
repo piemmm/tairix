@@ -5,7 +5,9 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_controls::{ControlState, FocusState, IconTile, PointerState, SelectionState};
+use tairix_controls::{
+    ControlState, FocusState, IconTile, PointerState, SelectionState, TileLayout,
+};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{monogram_disc, monogram_of, IconKind, IconPicture};
@@ -30,14 +32,16 @@ pub(crate) const OTHER_MONOGRAM: char = '\u{2026}';
 pub(crate) const TILE_WIDTH: u32 = 132;
 
 /// One tile's height in pixels at the reference density: the monogram disc
-/// and the name under it.
+/// and the [`ACCOUNT_TILE`] band under it, which seats an 80-pixel disc.
+pub(crate) const TILE_HEIGHT: u32 = 148;
+
+/// How an account tile divides itself: three whole name lines under the disc.
 ///
-/// Sized so the band under the disc holds three whole label lines at the
-/// reference density and at a doubled one, which is capacity rather than
-/// layout — a one-word name still draws one line. Two lines would leave a
-/// long single word (`Administrator`) with no room to fall past, so a face
-/// wider than the reference one would break it mid-word and elide it.
-pub(crate) const TILE_HEIGHT: u32 = 154;
+/// Capacity rather than layout — a one-word name still draws one line. Two
+/// lines would leave a long single word (`Administrator`) with no room to fall
+/// past, so a face wider than the reference one would break it mid-word and
+/// elide it.
+pub(crate) const ACCOUNT_TILE: TileLayout = TileLayout::new(3);
 
 /// The gap between tiles in pixels at the reference density.
 pub(crate) const TILE_GAP: u32 = 12;
@@ -553,7 +557,7 @@ impl Chooser {
         theme: &Theme,
     ) -> Option<Rect> {
         let bounds = self.tile_rect(slot, screen, scale)?;
-        let side = IconTile::icon_side(bounds, scale, theme);
+        let side = ACCOUNT_TILE.icon_side(bounds, scale, theme);
         if side == 0 {
             return None;
         }
@@ -621,6 +625,7 @@ impl Chooser {
             account.map_or(OTHER_LABEL, AccountTile::display_name),
             IconKind::Generic,
         )
+        .with_layout(ACCOUNT_TILE)
         .with_state(self.tile_state(slot))
         .with_selection_fade(self.selection_fade(slot));
         if let Some(shadow) = shadow {
@@ -629,7 +634,7 @@ impl Chooser {
         let (monogram, disc, ink) = self.slot_disc(slot, theme);
         let artwork = monogram_disc(
             monogram,
-            IconTile::icon_side(bounds, scale, theme),
+            ACCOUNT_TILE.icon_side(bounds, scale, theme),
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
             (disc, ink),
         );

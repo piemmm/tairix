@@ -68,10 +68,10 @@ use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
     InputMode, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
-    Origin, PeerWatchOp, PortWidth, PowerAction, ProcId, RandomFlags, ResourceLimit, SchedPriority,
-    Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
-    SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
+    Origin, PeerWatchOp, PortWidth, PowerAction, ProcId, RandomFlags, ReaddirFrom, ResourceLimit,
+    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags,
+    WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN,
+    READDIR_BATCH_MAX, SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -4910,23 +4910,21 @@ pub fn fs_write_all(fd: u32, offset: u64, data: &[u8]) -> Result<(), Errno> {
     io::Write::write_all(&mut PositionalIo::new(fd, offset), data).map_err(io::Error::as_errno)
 }
 
-/// Read the directory listing of the open directory descriptor `fd` into
-/// `buf` (`SyscallNumber::FS_READDIR`), returning the number of bytes the
-/// packed [`tairix_abi::DirEntry`] stream occupies.
-///
-/// The whole listing is delivered or none: a buffer smaller than the packed
-/// stream is refused with `BufferTooSmall` rather than truncated, so the
-/// caller grows `buf` and retries (the entry count is a discovered capacity,
-/// not a fixed ceiling). Walk the returned prefix with
-/// [`tairix_abi::DirEntry::decode`] — or use [`Dir::read`], which owns the
-/// buffer.
+/// Read the next batch of the open directory descriptor `fd`'s entries
+/// into `buf` (`SyscallNumber::FS_READDIR`), from where its open
+/// description's listing stands, or its first entry for
+/// [`ReaddirFrom::Start`]. Returns the bytes the packed
+/// [`tairix_abi::DirEntry`] records occupy, `0` at the end; walk them with
+/// [`tairix_abi::fs::DirEntries`], or let [`Dir::read_all`] read every batch.
 ///
 /// # Errors
 ///
 /// The raw negative kernel result (`-errno`): the descriptor is not the
-/// caller's, the node is not a directory the caller may list, `buf` is too
-/// small, or no filesystem is mounted (`NotImplemented`).
-pub fn fs_readdir(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
+/// caller's, the node is not a directory the caller may list, the next
+/// record alone does not fit `buf` (`BufferTooSmall`), the path now names
+/// another directory than the listing began on (`Stale`), or no filesystem
+/// is mounted (`NotImplemented`).
+pub fn fs_readdir(fd: u32, buf: &mut [u8], from: ReaddirFrom) -> Result<usize, i64> {
     let ptr = buf.as_mut_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
     // `(buf, len)` pair against the caller's address space before writing it.
@@ -4934,7 +4932,14 @@ pub fn fs_readdir(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
     let ret = unsafe {
         raw_syscall(
             NUM_FS_READDIR,
-            [u64::from(fd), ptr, buf.len() as u64, 0, 0, 0],
+            [
+                u64::from(fd),
+                ptr,
+                buf.len() as u64,
+                u64::from(from.as_u32()),
+                0,
+                0,
+            ],
         )
     };
     count_result(ret, buf.len())
@@ -6086,8 +6091,8 @@ fn positional_errno(err: io::Error) -> i64 {
 /// An open directory handle wrapping a [`File`] opened with
 /// [`OpenFlags::DIRECTORY`].
 ///
-/// [`Dir::read`] reads the packed [`tairix_abi::DirEntry`] stream into the
-/// caller's buffer; walk it with [`tairix_abi::DirEntry::decode`].
+/// [`Dir::read`] reads one batch of packed [`tairix_abi::DirEntry`] records
+/// into the caller's buffer, and [`Dir::read_all`] the whole listing.
 #[derive(Debug)]
 pub struct Dir {
     file: File,
@@ -6100,29 +6105,36 @@ impl Dir {
         self.file.fd()
     }
 
-    /// Read the whole directory listing into `buf` as a packed
-    /// [`tairix_abi::DirEntry`] stream, returning the number of bytes it
-    /// occupies.
+    /// Read the next batch of this directory's entries into `buf`, as
+    /// [`fs_readdir`] does, `0` at the end.
     ///
     /// # Errors
     ///
-    /// The raw negative kernel result (`-errno`) of the [`fs_readdir`]
-    /// syscall — in particular `BufferTooSmall` (encoded as `-errno`) when the
-    /// listing does not fit, so the caller grows `buf` and retries.
+    /// As [`fs_readdir`].
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, i64> {
-        fs_readdir(self.file.fd(), buf)
+        fs_readdir(self.file.fd(), buf, ReaddirFrom::Next)
     }
 
-    /// Read the whole listing, sized to its exact byte length — the growing
-    /// read [`read_dir_all`] makes, over this already-open directory.
+    /// Read the whole listing from its first entry, a batch at a time,
+    /// sized to its exact byte length.
     ///
     /// # Errors
     ///
-    /// The raw negative kernel result (`-errno`) of the failing `fs_readdir`.
+    /// The raw negative kernel result (`-errno`) of the failing
+    /// `fs_readdir`, or `-OutOfMemory` when the listing cannot be held.
     pub fn read_all(&self) -> Result<alloc::vec::Vec<u8>, i64> {
-        read_all_growing(DIR_STREAM_INITIAL, tairix_abi::fs::FS_IO_MAX, |buf| {
-            self.read(buf)
-        })
+        self.read_all_within(usize::MAX)
+    }
+
+    /// [`Self::read_all`], refused once the listing passes `max` bytes: the
+    /// bound a reader of an untrusted tree sets so a hostile directory cannot
+    /// make it hold more.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_all`], and `-LimitExceeded` past `max` bytes.
+    pub fn read_all_within(&self, max: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+        read_batches(max, |buf, from| fs_readdir(self.file.fd(), buf, from))
     }
 
     /// Arm a change watch on this directory ([`fs_watch`]): add it to a
@@ -6181,50 +6193,43 @@ pub fn open_dir(path: &[u8]) -> Result<Dir, i64> {
     Ok(Dir { file })
 }
 
-/// Initial byte size of the [`read_dir_all`] listing buffer: one page covers
-/// a typical directory, and `BufferTooSmall` grows it from there.
-const DIR_STREAM_INITIAL: usize = 4096;
-
-/// Fill a growing buffer from a `BufferTooSmall`-signalling reader.
+/// A whole listing read through `read`, a [`READDIR_BATCH_MAX`] batch at a
+/// time from the start, into one buffer sized to its exact length, refused
+/// once it passes `max` bytes.
 ///
-/// The one buffer-growth retry policy shared by every whole-transfer read
-/// (today [`read_dir_all`]): start at `initial` bytes, double towards the
-/// hard ceiling `max` each time `read` refuses with `BufferTooSmall`
-/// (encoded as `-errno`), and return the exact bytes of the first successful
-/// read. The policy is total: the buffer strictly grows on every retry and
-/// stops at `max`, so the loop always terminates — a refusal at the ceiling
-/// (or any other error) surfaces unchanged.
-///
-/// A reader that reports more bytes used than the buffer it was handed is
-/// refused with `OutOfRange` rather than trusted: the count shapes a slice
-/// the caller will parse, so it is validated like any other boundary input.
+/// A batch is filled until the next record does not fit, so one that leaves
+/// room for the longest record ended the listing, and no further call is
+/// spent learning so.
 ///
 /// # Errors
 ///
-/// The raw negative kernel result (`-errno`) of the failing `read`, or
-/// `-OutOfRange` for an over-reporting reader.
-pub fn read_all_growing(
-    initial: usize,
+/// The raw negative result of the failing `read`, `-OutOfRange` for a reader
+/// reporting more bytes than it was handed, `-LimitExceeded` past `max`, or
+/// `-OutOfMemory` when the listing cannot be held.
+pub fn read_batches(
     max: usize,
-    mut read: impl FnMut(&mut [u8]) -> Result<usize, i64>,
+    mut read: impl FnMut(&mut [u8], ReaddirFrom) -> Result<usize, i64>,
 ) -> Result<alloc::vec::Vec<u8>, i64> {
-    let too_small = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
-    let mut buf = alloc::vec![0u8; initial.min(max).max(1)];
+    let refusal = |errno: Errno| -i64::from(errno.as_i32());
+    let mut out = alloc::vec::Vec::new();
+    let mut from = ReaddirFrom::Start;
     loop {
-        match read(&mut buf) {
-            Ok(used) => {
-                if used > buf.len() {
-                    return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
-                }
-                buf.truncate(used);
-                return Ok(buf);
-            }
-            Err(ret) if ret == too_small && buf.len() < max => {
-                let next = buf.len().saturating_mul(2).min(max);
-                buf.resize(next, 0);
-            }
-            Err(ret) => return Err(ret),
+        let held = out.len();
+        out.try_reserve(READDIR_BATCH_MAX)
+            .map_err(|_| refusal(Errno::OutOfMemory))?;
+        out.resize(held + READDIR_BATCH_MAX, 0);
+        let used = read(&mut out[held..], from)?;
+        if used > READDIR_BATCH_MAX {
+            return Err(refusal(Errno::OutOfRange));
         }
+        out.truncate(held + used);
+        if out.len() > max {
+            return Err(refusal(Errno::LimitExceeded));
+        }
+        if used + tairix_abi::DirEntry::MAX_LEN <= READDIR_BATCH_MAX {
+            return Ok(out);
+        }
+        from = ReaddirFrom::Next;
     }
 }
 
@@ -6233,10 +6238,8 @@ pub fn read_all_growing(
 /// walk it with [`tairix_abi::fs::DirEntries`].
 ///
 /// The one directory-listing call every tool shares (`ls`, the filesystem
-/// browser): an [`open_dir`] resolve-and-authorise, then the
-/// [`read_all_growing`] retry policy against the kernel's own per-transfer
-/// staging cap ([`tairix_abi::fs::FS_IO_MAX`]), so no consumer re-derives
-/// the grow loop.
+/// browser): an [`open_dir`] resolve-and-authorise, then [`Dir::read_all`]'s
+/// batch loop, so no consumer re-derives it.
 ///
 /// # Errors
 ///
@@ -8493,17 +8496,18 @@ mod tests {
     }
 
     #[test]
-    fn fs_readdir_marshals_fd_pointer_and_len() {
+    fn fs_readdir_marshals_fd_pointer_len_and_start() {
         let mut buf = [0u8; 64];
         let ptr = buf.as_mut_ptr() as usize as u64;
         let (number, args) = capture(20, || {
-            assert_eq!(fs_readdir(6, &mut buf), Ok(20));
+            assert_eq!(fs_readdir(6, &mut buf, ReaddirFrom::Start), Ok(20));
         });
         assert_eq!(number, NUM_FS_READDIR);
         assert_eq!(args[0], 6);
         assert_eq!(args[1], ptr);
         assert_eq!(args[2], 64);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[3], u64::from(ReaddirFrom::Start.as_u32()));
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]
@@ -8537,7 +8541,7 @@ mod tests {
         let want = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (_, _) = capture(neg, || {
-            assert_eq!(fs_readdir(6, &mut buf), Err(want));
+            assert_eq!(fs_readdir(6, &mut buf, ReaddirFrom::Next), Err(want));
         });
     }
 
@@ -9151,75 +9155,84 @@ mod tests {
         assert_eq!(read_fd_to_end(3, 4096).err(), Some(want));
     }
 
-    #[test]
-    fn read_all_growing_returns_the_exact_bytes_of_a_first_fit() {
-        let got = read_all_growing(8, 64, |buf| {
-            buf[..3].copy_from_slice(b"abc");
-            Ok(3)
-        })
-        .expect("a fitting read succeeds");
-        assert_eq!(got, b"abc");
-    }
-
-    #[test]
-    fn read_all_growing_doubles_until_the_listing_fits() {
-        let too_small = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
-        let mut sizes = alloc::vec::Vec::new();
-        let got = read_all_growing(4, 64, |buf| {
-            sizes.push(buf.len());
-            if buf.len() < 10 {
-                return Err(too_small);
+    /// A reader serving `listing` in batches of whole records of at most
+    /// `batch` bytes, recording the starts it was asked for.
+    fn batch_reader<'a>(
+        listing: &'a [u8],
+        record: usize,
+        starts: &'a mut alloc::vec::Vec<ReaddirFrom>,
+    ) -> impl FnMut(&mut [u8], ReaddirFrom) -> Result<usize, i64> + 'a {
+        let mut at = 0usize;
+        move |buf, from| {
+            starts.push(from);
+            if from == ReaddirFrom::Start {
+                at = 0;
             }
-            buf[..10].copy_from_slice(b"0123456789");
-            Ok(10)
-        })
-        .expect("the grown read succeeds");
-        assert_eq!(got, b"0123456789");
-        assert_eq!(sizes, [4, 8, 16]);
+            let room = buf.len() / record * record;
+            let take = room.min(listing.len() - at);
+            buf[..take].copy_from_slice(&listing[at..at + take]);
+            at += take;
+            Ok(take)
+        }
     }
 
     #[test]
-    fn read_all_growing_gives_up_at_the_ceiling() {
-        let too_small = -i64::from(tairix_abi::Errno::BufferTooSmall.as_i32());
-        let mut calls = 0;
-        let got = read_all_growing(4, 16, |_| {
-            calls += 1;
-            Err(too_small)
-        });
-        // 4 → 8 → 16, then the refusal at the ceiling surfaces unchanged.
-        assert_eq!(got, Err(too_small));
-        assert_eq!(calls, 3);
+    fn read_batches_reads_a_short_listing_in_one_call() {
+        let mut starts = alloc::vec::Vec::new();
+        let got = read_batches(usize::MAX, batch_reader(b"abcdef", 3, &mut starts)).expect("lists");
+        assert_eq!(got, b"abcdef");
+        assert_eq!(
+            starts,
+            [ReaddirFrom::Start],
+            "room left over ends the listing"
+        );
     }
 
     #[test]
-    fn read_all_growing_surfaces_other_errors_unchanged() {
+    fn read_batches_joins_full_batches_until_one_leaves_room() {
+        let record = READDIR_BATCH_MAX / 4;
+        let listing: alloc::vec::Vec<u8> = (0..9 * record).map(|i| i.to_le_bytes()[0]).collect();
+        let mut starts = alloc::vec::Vec::new();
+        let got =
+            read_batches(usize::MAX, batch_reader(&listing, record, &mut starts)).expect("lists");
+        assert_eq!(got, listing);
+        assert_eq!(
+            starts,
+            [ReaddirFrom::Start, ReaddirFrom::Next, ReaddirFrom::Next],
+            "two full batches, then a partial one that ends it"
+        );
+    }
+
+    #[test]
+    fn read_batches_surfaces_a_refusal_unchanged() {
         let denied = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
-        let mut calls = 0;
-        let got = read_all_growing(4, 64, |_| {
-            calls += 1;
-            Err(denied)
-        });
-        assert_eq!(got, Err(denied));
-        assert_eq!(calls, 1);
+        assert_eq!(read_batches(usize::MAX, |_, _| Err(denied)), Err(denied));
     }
 
     #[test]
-    fn read_all_growing_refuses_an_over_reporting_reader() {
+    fn read_batches_refuses_an_over_reporting_reader() {
         let want = -i64::from(tairix_abi::Errno::OutOfRange.as_i32());
-        assert_eq!(read_all_growing(4, 64, |buf| Ok(buf.len() + 1)), Err(want));
+        assert_eq!(
+            read_batches(usize::MAX, |buf, _| Ok(buf.len() + 1)),
+            Err(want)
+        );
     }
 
     #[test]
-    fn read_all_growing_starts_no_smaller_than_one_byte() {
-        // A zero `initial` must not wedge the doubling; the reader still
-        // sees a real buffer.
-        let got = read_all_growing(0, 8, |buf| {
-            assert!(!buf.is_empty());
-            buf[0] = b'x';
-            Ok(1)
-        })
-        .expect("a fitting read succeeds");
-        assert_eq!(got, b"x");
+    fn read_batches_refuses_a_listing_past_its_bound() {
+        let record = READDIR_BATCH_MAX / 4;
+        let listing = alloc::vec![7u8; 9 * record];
+        let mut starts = alloc::vec::Vec::new();
+        let want = -i64::from(tairix_abi::Errno::LimitExceeded.as_i32());
+        assert_eq!(
+            read_batches(5 * record, batch_reader(&listing, record, &mut starts)),
+            Err(want)
+        );
+        assert_eq!(
+            starts.len(),
+            2,
+            "it stops at the batch that passes the bound"
+        );
     }
 
     #[test]

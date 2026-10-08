@@ -46,6 +46,14 @@ pub const FS_SYMLINK_MAX: usize = FS_PATH_MAX;
 /// never caps total file size, only one syscall's copy.
 pub const FS_IO_MAX: usize = 1 << 20;
 
+/// Most bytes of [`DirEntry`] records one `fs_readdir` call fills.
+///
+/// The batch is staged in kernel memory until the mount's lock is released,
+/// so this bounds what one listing call holds; a longer listing is more
+/// calls, never a larger one. It holds hundreds of records, so a batch still
+/// amortises its call.
+pub const READDIR_BATCH_MAX: usize = 1 << 16;
+
 /// The permission bits a [`fs_set_mode`](crate::SyscallNumber::FS_SET_MODE)
 /// word may carry: the owner/group/other `rwx` triads plus the
 /// setuid/setgid/sticky bits (`0o7777`).
@@ -801,6 +809,9 @@ impl<'a> DirEntry<'a> {
     /// `id.volume(16)` + `id.node(8)` + `nlink(4)`.
     pub const HEADER_LEN: usize = 60;
 
+    /// The longest record: the header and a name of [`FS_NAME_MAX`] bytes.
+    pub const MAX_LEN: usize = Self::HEADER_LEN + FS_NAME_MAX;
+
     /// The total encoded length of this entry (header plus name).
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
@@ -892,8 +903,8 @@ impl<'a> DirEntry<'a> {
     }
 }
 
-/// Iterator over a whole `fs_readdir` byte stream — the one shared walker
-/// every consumer of the stream uses (`ls`, the filesystem browser), so the
+/// Iterator over an `fs_readdir` byte stream — one batch, or a listing's
+/// batches laid end to end — and the one walker every consumer uses, so the
 /// advance-by-`consumed` bookkeeping is never re-derived per tool.
 ///
 /// Yields each decoded [`DirEntry`] in stream order. The first malformed
@@ -912,7 +923,7 @@ pub struct DirEntries<'a> {
 }
 
 impl<'a> DirEntries<'a> {
-    /// Walk `stream`, the exact bytes one `fs_readdir` transfer produced.
+    /// Walk `stream`, the bytes one or more `fs_readdir` batches produced.
     #[must_use]
     pub const fn new(stream: &'a [u8]) -> Self {
         Self { rest: stream }
@@ -940,6 +951,43 @@ impl<'a> Iterator for DirEntries<'a> {
 }
 
 impl core::iter::FusedIterator for DirEntries<'_> {}
+
+/// Where an [`fs_readdir`](crate::SyscallNumber::FS_READDIR) batch starts.
+///
+/// The listing position belongs to the open file description, so `Next`
+/// continues where the description's last batch stopped and `Start` restarts
+/// the listing in the same call.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ReaddirFrom {
+    /// After the last entry this description returned; the first batch of a
+    /// fresh description starts at the beginning.
+    #[default]
+    Next = 0,
+    /// At the directory's first entry, whatever the description read before.
+    Start = 1,
+}
+
+impl ReaddirFrom {
+    /// The start `raw` selects, rejecting any other value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `raw` is neither defined value.
+    pub const fn from_raw(raw: u32) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Next),
+            1 => Ok(Self::Start),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Raw value, as carried on the ABI.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
 
 /// The longest latency [`SyscallNumber::FS_WATCH`](crate::SyscallNumber::FS_WATCH)
 /// accepts: a watcher that wants changes less often than this wants a
@@ -992,7 +1040,7 @@ impl<'a> DirChange<'a> {
     const ABSENT_HEADER_LEN: usize = 3;
 
     /// The longest record: a present entry with the longest name.
-    pub const MAX_LEN: usize = 1 + DirEntry::HEADER_LEN + FS_NAME_MAX;
+    pub const MAX_LEN: usize = 1 + DirEntry::MAX_LEN;
 
     /// The encoded length of a record for `name`, present or absent.
     #[must_use]

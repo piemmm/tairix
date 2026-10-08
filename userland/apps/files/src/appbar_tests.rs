@@ -15,7 +15,7 @@ use tairix_browse::{Places, Volume};
 
 use super::{component_declaration, place_of, DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK};
 
-/// A home whose three derived places (Home, Desktop, Documents) join the two
+/// A home whose three derived places (Home, Desktop, `UserFiles`) join the two
 /// machine roots, so the fixed rail is five rows long.
 fn home() -> Vec<String> {
     alloc::vec!["Users".to_string(), "ada".to_string()]
@@ -119,7 +119,7 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
         alloc::vec![
             "Home".to_string(),
             "Desktop".to_string(),
-            "Documents".to_string(),
+            "UserFiles".to_string(),
             "Apps".to_string(),
             "System".to_string(),
         ]

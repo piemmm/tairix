@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="2" data-hotspot-y="2" data-outline-color="#ffffff" data-outline-width="2">
+  <title>Drag copy</title>
+  <polygon points="3,4 3,20 6.8,16.2 9.34,22.18 11.91,21.09 9.5,15.4 14.4,15.4" fill="#111114"/>
+  <path fill="#f0a500" d="M29 23 A6 6 0 1 1 17 23 A6 6 0 1 1 29 23 Z"/>
+  <path fill="#111114" d="M22 19 H24 V22 H27 V24 H24 V27 H22 V24 H19 V22 H22 Z"/>
+</svg>

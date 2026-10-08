@@ -80,6 +80,7 @@ use crate::sched::{
     level_of_priority, priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch,
 };
 use tairix_abi::cpufreq::CpuFreqLimits;
+use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
@@ -98,13 +99,14 @@ use tairix_abi::{
     DescriptorTable, DirChange, DirChangeBatch, DirWatchStatus, Errno, FdWire, FileId, FileStat,
     InputMode, IntrospectDomain, IrqHandle, LimitKind, LockConflict, LockFlags, LockMode,
     LockRange, MapFlags, OpenFlags, PeerWatchOp, PortName, PortWidth, PowerAction, ProcId,
-    ProcessStart, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach,
-    SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags,
-    WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
-    DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_PATH_MAX,
-    FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
-    PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
-    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    ProcessStart, RandomFlags, ReaddirFrom, ResourceLimit, SchedPriority, Signal, SignalIntakeOp,
+    SpawnAttach, SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags,
+    WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
+    CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX,
+    FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
+    READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -11525,7 +11527,9 @@ where
         fd: u32,
         buf: u64,
         len: usize,
+        from: u32,
     ) -> SyscallResult {
+        let from = ReaddirFrom::from_raw(from)?;
         let handle = self
             .aspaces
             .read()
@@ -11537,43 +11541,73 @@ where
         // operation for the descriptor's kind.
         let path = handle.own_path().ok_or(Errno::OutOfRange)?;
         let uid = caller.caps.owner().0;
-        // The secured VFS enforces that the path is a directory the caller
-        // may list; a non-directory fails closed there. A `NO_FOLLOW`
-        // descriptor names its final component itself, so a link is not a
-        // directory to it and the target is never listed in its place.
-        let entries = self.filesystem.readdir(
-            uid,
-            caller.caps.effective(),
-            path,
-            crate::fs::FinalLink::for_open(handle.flags),
-        )?;
-        // The whole listing or nothing: never truncate to fit an undersized
-        // buffer (the caller grows `buf` and retries).
-        let total = entries.iter().fold(0, |total: usize, e| {
-            total.saturating_add(e.wire().encoded_len())
-        });
-        if total > len {
+        // Batches on one description serialise here, so callers sharing it
+        // take distinct, consecutive batches.
+        let mut listing = handle.listing()?.lock();
+        // The batch moves a copy of the position, which the description keeps
+        // only once the records reach the caller: a failed call, a restart
+        // included, leaves the position where it was.
+        let mut at = if from == ReaddirFrom::Start {
+            crate::fs::Listing::default()
+        } else {
+            listing.clone()
+        };
+        // The names are decrypted user data, so the staging is wiped on drop;
+        // it is zeroed only as far as records fill it.
+        let mut out =
+            WipedBuf::with_capacity(len.min(READDIR_BATCH_MAX)).map_err(|_| Errno::OutOfMemory)?;
+        let mut unfit = false;
+        let mut malformed = None;
+        if !at.is_done() {
+            // The secured VFS enforces that the path is a directory the
+            // caller may list; a non-directory fails closed there. A
+            // `NO_FOLLOW` descriptor names its final component itself, so a
+            // link is not a directory to it and the target is never listed
+            // in its place.
+            self.filesystem.readdir(
+                uid,
+                caller.caps.effective(),
+                path,
+                crate::fs::FinalLink::for_open(handle.flags),
+                &mut at,
+                &mut |entry| {
+                    let taken = out.len();
+                    let Some(record) = out.extend_zeroed(entry.encoded_len()) else {
+                        unfit = taken == 0;
+                        return DirVisit::Stop;
+                    };
+                    match entry.encode_into(record) {
+                        Ok(_) => DirVisit::Take,
+                        // A name the driver reports that is empty or longer
+                        // than `FS_NAME_MAX` fails the whole call closed,
+                        // never a truncated record.
+                        Err(err) => {
+                            malformed = Some(err);
+                            DirVisit::Stop
+                        }
+                    }
+                },
+            )?;
+        }
+        if let Some(err) = malformed {
+            return Err(err);
+        }
+        // The next record alone does not fit: nothing was taken, so the
+        // position stays where it was.
+        if unfit {
             return Err(Errno::BufferTooSmall);
         }
-        if total == 0 {
-            return Ok(0);
+        if !out.is_empty() {
+            match self.with_caller_aspace(caller, |space, physmap| {
+                copy_out(space, physmap, VirtAddr::new(buf), &out)
+            }) {
+                Some(Ok(())) => {}
+                Some(Err(err)) => return Err(copy_fault_errno(err)),
+                None => return Err(Errno::BadAddress),
+            }
         }
-        // A name the driver reports that is empty or longer than
-        // `FS_NAME_MAX` fails the whole call closed, never a truncated record.
-        // The names are decrypted user data, so the staging is wiped on drop.
-        let mut out = WipedBuf::new(filled(total, 0u8).ok_or(Errno::OutOfMemory)?);
-        let mut at = 0;
-        for e in &entries {
-            let slot = out.get_mut(at..).ok_or(Errno::OutOfRange)?;
-            at += e.wire().encode_into(slot)?;
-        }
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(buf), &out)
-        }) {
-            Some(Ok(())) => Ok(out.len() as u64),
-            Some(Err(err)) => Err(copy_fault_errno(err)),
-            None => Err(Errno::BadAddress),
-        }
+        *listing = at;
+        Ok(out.len() as u64)
     }
 
     fn fs_watch(&self, caller: &CallerContext<'_>, fd: u32, latency_ns: u64) -> SyscallResult {
@@ -20230,8 +20264,10 @@ mod tests {
             caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             final_link: crate::fs::FinalLink,
-        ) -> Result<alloc::vec::Vec<crate::fs::ReaddirEntry>, Errno> {
-            self.inner.readdir(uid, caps, path, final_link)
+            at: &mut crate::fs::Listing,
+            each: &mut dyn FnMut(&tairix_abi::DirEntry<'_>) -> DirVisit,
+        ) -> Result<(), Errno> {
+            self.inner.readdir(uid, caps, path, final_link, at, each)
         }
 
         fn stat(
@@ -46056,11 +46092,14 @@ mod tests {
             _caps: &dyn tairix_abi::CapabilityQuery,
             path: &str,
             final_link: crate::fs::FinalLink,
-        ) -> Result<Vec<crate::fs::ReaddirEntry>, Errno> {
+            at: &mut crate::fs::Listing,
+            each: &mut dyn FnMut(&tairix_abi::DirEntry<'_>) -> DirVisit,
+        ) -> Result<(), Errno> {
             self.record(alloc::format!(
                 "readdir uid={uid} path={path} link={final_link:?}"
             ));
-            Ok(self.entries.clone())
+            crate::fs::listing::serve_fixed(&self.entries, at, each);
+            Ok(())
         }
 
         fn stat(
@@ -46778,7 +46817,6 @@ mod tests {
         assert_eq!(h.stream_write(&ctx, 4096, 0x1000, 2), Err(Errno::NotFound));
     }
 
-    /// `fs_readdir` packs the service's entries into the `DirEntry` stream;
     /// Two listing entries on one volume, each with a distinct node number
     /// and its own name count, so the packing test can compare what reached
     /// the caller against what the service reported.
@@ -46806,9 +46844,36 @@ mod tests {
         ]
     }
 
-    /// an undersized buffer fails closed without truncating.
+    /// `stream` is [`readdir_fixture`]'s two entries, packed whole with every
+    /// field the service reported. The identity and name count matter most:
+    /// without them a walk cannot tell a second name for one node from a
+    /// second node.
+    fn assert_packs_readdir_fixture(stream: &[u8]) {
+        let (first, used) = DirEntry::decode(stream).expect("first entry");
+        assert_eq!(first.kind, FileKind::Directory);
+        assert_eq!(first.size, 0);
+        assert_eq!(first.allocated, 4096);
+        assert_eq!(first.modified, Time64::from_secs(1_111));
+        assert_eq!(first.name, b"Logs");
+        let (second, _) = DirEntry::decode(&stream[used..]).expect("second entry");
+        assert_eq!(second.size, 17);
+        assert_eq!(second.allocated, 512);
+        assert_eq!(second.modified, Time64::from_secs(2_222));
+        assert_eq!(second.name, b"motd");
+        for (packed, source) in [first, second].iter().zip(readdir_fixture()) {
+            assert_eq!(packed.id, source.id);
+            assert_eq!(packed.nlink, source.nlink);
+        }
+    }
+
+    /// `fs_readdir` packs the service's entries into whole `DirEntry` records
+    /// a batch at a time from the description's position: a buffer one
+    /// record fits takes one and the next call continues, the end reads as
+    /// `0`, a buffer the next record does not fit fails closed without moving
+    /// the position, `ReaddirFrom::Start` restarts, and a failed call moves
+    /// nothing — a restart included — so a failed copy-out loses no entry.
     #[test]
-    fn fs_readdir_packs_entries_and_rejects_a_small_buffer() {
+    fn fs_readdir_reads_batches_from_the_description_position() {
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -46843,43 +46908,61 @@ mod tests {
                 .expect("open dir"),
         )
         .unwrap();
-        // Two records: (HEADER_LEN + 4) each.
-        let expected = 2 * (DirEntry::HEADER_LEN + 4);
-        let total = usize::try_from(
-            h.fs_readdir(&ctx, fd, 0x1000, expected + 24)
-                .expect("readdir"),
-        )
-        .unwrap();
-        assert_eq!(total, expected);
-        let stream = h
-            .with_caller_aspace(&ctx, |space, physmap| {
-                let mut buf = alloc::vec![0u8; total];
+        let next = ReaddirFrom::Next.as_u32();
+        let start = ReaddirFrom::Start.as_u32();
+        let read_back = |len: usize| {
+            h.with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = alloc::vec![0u8; len];
                 copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
                 buf
             })
-            .expect("caller space");
-        let (first, used) = DirEntry::decode(&stream).expect("first entry");
-        assert_eq!(first.kind, FileKind::Directory);
-        assert_eq!(first.size, 0);
-        assert_eq!(first.allocated, 4096);
-        assert_eq!(first.modified, Time64::from_secs(1_111));
-        assert_eq!(first.name, b"Logs");
-        let (second, _) = DirEntry::decode(&stream[used..]).expect("second entry");
-        assert_eq!(second.size, 17);
-        assert_eq!(second.allocated, 512);
-        assert_eq!(second.modified, Time64::from_secs(2_222));
-        assert_eq!(second.name, b"motd");
-        // The identity and name count reach the caller intact: without them a
-        // walk cannot tell a second name for one node from a second node.
-        for (packed, source) in [first, second].iter().zip(readdir_fixture()) {
-            assert_eq!(packed.id, source.id);
-            assert_eq!(packed.nlink, source.nlink);
-        }
-
-        // A buffer too small for the whole listing fails closed.
+            .expect("caller space")
+        };
+        // Each record is the header and a four-byte name.
+        let record = DirEntry::HEADER_LEN + 4;
         assert_eq!(
-            h.fs_readdir(&ctx, fd, 0x1000, 4),
-            Err(Errno::BufferTooSmall)
+            h.fs_readdir(&ctx, fd, 0x1000, record - 1, next),
+            Err(Errno::BufferTooSmall),
+            "the next record alone does not fit"
+        );
+        for name in [&b"Logs"[..], b"motd"] {
+            assert_eq!(
+                h.fs_readdir(&ctx, fd, 0x1000, record + 3, next),
+                Ok(record as u64)
+            );
+            let stream = read_back(record);
+            assert_eq!(DirEntry::decode(&stream).expect("an entry").0.name, name);
+        }
+        assert_eq!(h.fs_readdir(&ctx, fd, 0x1000, 4096, next), Ok(0), "the end");
+        assert_eq!(
+            h.fs_readdir(&ctx, fd, 0x1000, 4096, 2),
+            Err(Errno::OutOfRange),
+            "a reserved start is refused"
+        );
+
+        let total = usize::try_from(
+            h.fs_readdir(&ctx, fd, 0x1000, 2 * record + 24, start)
+                .expect("readdir"),
+        )
+        .unwrap();
+        assert_eq!(total, 2 * record);
+        assert_packs_readdir_fixture(&read_back(total));
+
+        assert!(h.fs_readdir(&ctx, fd, 0x40_0000, 4096, start).is_err());
+        assert_eq!(
+            h.fs_readdir(&ctx, fd, 0x1000, 4096, next),
+            Ok(0),
+            "a restart that failed moved nothing"
+        );
+        assert_eq!(
+            h.fs_readdir(&ctx, fd, 0x1000, record + 3, start),
+            Ok(record as u64)
+        );
+        assert!(h.fs_readdir(&ctx, fd, 0x40_0000, 4096, next).is_err());
+        assert_eq!(
+            h.fs_readdir(&ctx, fd, 0x1000, 4096, next),
+            Ok(record as u64),
+            "nothing was lost to the failed copy"
         );
     }
 
@@ -47012,8 +47095,8 @@ mod tests {
         h.fs_stat(&ctx, followed, 0x1000, FileStat::WIRE_LEN)
             .expect("stat the target");
         // Also the listing path: the same posture rides on the descriptor.
-        let _ = h.fs_readdir(&ctx, kept, 0x1000, 96);
-        let _ = h.fs_readdir(&ctx, followed, 0x1000, 96);
+        let _ = h.fs_readdir(&ctx, kept, 0x1000, 96, ReaddirFrom::Next.as_u32());
+        let _ = h.fs_readdir(&ctx, followed, 0x1000, 96, ReaddirFrom::Next.as_u32());
 
         let seen: Vec<String> = fs
             .calls()

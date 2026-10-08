@@ -1585,7 +1585,7 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   pace, grown at most twofold.
 - **Kept when asked.** `screensaver.raytrace.save` (off by default) has the
   engine copy each picture as it traces and the tracing thread write it,
-  once whole, as a PNG under `Documents/Pictures/Raytracing/` through the
+  once whole, as a PNG under `UserFiles/Pictures/Raytracing/` through the
   `Keeper` seam — named for its setting and when it was finished, never
   written over another, once per scene, and nothing kept with no tracing
   thread granted; a refusal says why on `stderr`.

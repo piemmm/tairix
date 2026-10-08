@@ -226,12 +226,11 @@ typedef struct tairix_node_info {
 
 /* One directory entry; `node` is a NodeId (uint64_t). The entry carries the
 * child's full tairix_node_info_t (including its timestamps) and the opaque
-* cursor that resumes the listing after it (pass it back to read_dir; 0
-* starts a listing). */
+* cursor that resumes the listing after it (pass it back to read_dir with
+* the entry's name; 0 starts a listing). */
 typedef struct tairix_dir_entry {
     uint64_t node;
     tairix_node_info_t info;
-    uintptr_t name_len;
     uint64_t next_cursor;
 } tairix_dir_entry_t;
 

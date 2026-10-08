@@ -194,6 +194,7 @@ plan's ledger. A `blocked` row names its blocker.
 | NEW-SWITCHBOARD | The Switchboard window (`plans/NEW-SWITCHBOARD.md`) | in progress |
 | NEW-DESKTOP-SETTINGS | The Settings application (`plans/NEW-DESKTOP-SETTINGS.md`) | in progress |
 | NEW-FILEMANAGER | The graphical file manager (`plans/NEW-FILEMANAGER.md`) | in progress |
+| FILES-INTERACTION | The file manager's selection, drag-and-drop, New ▸, one window per folder, folder cards and thumbnails (`plans/FILES-INTERACTION.md`) | done |
 | GUI-TERMINAL | `terminal.app` (`plans/GUI-TERMINAL.md`) | in progress |
 | PINBOARD | The wallpaper, the Desktop folder and the backdrop menu (`plans/PINBOARD.md`) | blocked: P9's picked-directory listing needs an ABI decision on `FilePicked` |
 | ICONS | Icon artwork tiers and the sandboxed decode cache (`plans/ICONS.md`) | in progress |
@@ -896,6 +897,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-07 — §16.3: `UserFiles` replaces `Documents` in the home.** At the
+  user's direction the user's own files live in one folder holding
+  `Documents`, `Music`, `Pictures` and `Videos`, where a bare file-manager
+  window and the trusted picker open.
 - **2026-10-03 — §10: the light theme is the default.** The desktop boots
   light at the user's direction; the dark theme stays switchable at runtime.
 - **2026-10-02 — §3: `lib/colour`.** The sRGB colour, its HSV and HSL

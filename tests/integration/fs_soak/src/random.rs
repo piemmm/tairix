@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
 use tairix_abi::DriverError;
 
+use crate::check::{ck, list_names, want_err};
 use crate::{RamBlock, SoakFs};
 use tairix_fuzzseed::Prng;
 
@@ -114,27 +115,6 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
-/// Map a driver error into a seed-tagged soak failure.
-fn ck<T>(r: Result<T, DriverError>, what: &str, seed: u64) -> Result<T, String> {
-    r.map_err(|e| format!("seed {seed:#x}: {what}: unexpected {e:?}"))
-}
-
-/// Assert an operation failed with exactly `want`.
-fn want_err(
-    got: Option<DriverError>,
-    want: DriverError,
-    what: &str,
-    seed: u64,
-) -> Result<(), String> {
-    match got {
-        Some(e) if e == want => Ok(()),
-        Some(e) => Err(format!(
-            "seed {seed:#x}: {what}: expected {want:?}, got {e:?}"
-        )),
-        None => Err(format!("seed {seed:#x}: {what}: expected {want:?}, got Ok")),
-    }
-}
-
 /// Resolve a directory path to its live [`NodeId`] by walking `lookup`
 /// from the root.
 fn resolve_dir<F: FilesystemRead>(fs: &mut F, path: &str, seed: u64) -> Result<NodeId, String> {
@@ -171,34 +151,6 @@ fn read_all<F: FilesystemRead>(
     }
     out.truncate(done);
     Ok(out)
-}
-
-/// Collect the entry names a directory lists, skipping the `.`/`..`
-/// self/parent links a driver may surface.
-fn list_names<F: FilesystemRead>(
-    fs: &mut F,
-    dir: NodeId,
-    seed: u64,
-) -> Result<Vec<Vec<u8>>, String> {
-    let mut names = Vec::new();
-    let mut cursor = 0u64;
-    let mut steps = 0u64;
-    let mut buf = [0u8; 256];
-    while let Some(entry) = ck(fs.read_dir(dir, cursor, &mut buf), "read_dir", seed)? {
-        let name = &buf[..entry.name_len];
-        if name != b"." && name != b".." {
-            names.push(name.to_vec());
-        }
-        if entry.next_cursor == cursor {
-            return Err(format!("seed {seed:#x}: read_dir cursor did not advance"));
-        }
-        cursor = entry.next_cursor;
-        steps += 1;
-        if steps > 10_000_000 {
-            return Err(format!("seed {seed:#x}: read_dir did not terminate"));
-        }
-    }
-    Ok(names)
 }
 
 /// A printable, model-unique leaf name from `[a-z0-9_]`. Uniqueness is

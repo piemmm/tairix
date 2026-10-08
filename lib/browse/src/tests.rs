@@ -37,6 +37,11 @@ use crate::source::{DirectorySource, Listing, Probe};
 /// hidden band has its own tests.
 const BAND: crate::ToolbarBand = crate::ToolbarBand::Shown;
 
+/// The entry the focus rests on, chosen or not.
+pub(crate) fn focused<S: DirectorySource>(browser: &Browser<S>) -> Option<&Entry> {
+    browser.focus_index().map(|index| &browser.entries()[index])
+}
+
 /// Paint `browser` into a freshly allocated `viewport`-sized surface.
 ///
 /// The renderer paints into a surface its caller owns and keeps for the life
@@ -120,7 +125,7 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
         [
             "Home",
             "Desktop",
-            "Documents",
+            "UserFiles",
             "Apps",
             "System",
             "Backup",
@@ -137,7 +142,7 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
     assert_eq!(places.rows()[0].components(), home().as_slice());
     assert_eq!(
         places.rows()[2].components(),
-        ["Users", "ann", "Documents"].map(String::from)
+        ["Users", "ann", "UserFiles"].map(String::from)
     );
     assert_eq!(places.rows()[3].components(), ["Apps"].map(String::from));
     // With no volumes there is nothing to separate.
@@ -145,6 +150,15 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
     // Without a home there is nothing for the three home rows to hang off, so
     // only the machine-wide roots remain — never a row navigating nowhere.
     assert_eq!(place_labels(&Places::new(&[], &[])), ["Apps", "System"]);
+}
+
+/// A bare open lands among the user's own files first and their home next;
+/// the root view is the caller's last resort.
+#[test]
+fn a_bare_open_tries_the_user_files_then_the_home() {
+    let [first, second] = crate::bare_open_places(&home());
+    assert_eq!(first, ["Users", "ann", "UserFiles"].map(String::from));
+    assert_eq!(second, home());
 }
 
 #[test]
@@ -203,7 +217,7 @@ fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
     );
     assert_eq!(
         place_labels(&places),
-        ["Home", "Desktop", "Documents", "Apps", "System", "Good"]
+        ["Home", "Desktop", "UserFiles", "Apps", "System", "Good"]
     );
     // The duplicate never displaced the fixed row it collided with.
     assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
@@ -991,7 +1005,7 @@ fn open_root_lists_the_four_top_level_directories() {
     // The source lists the four in insertion order; the browser shows them in
     // the shared default order (directories, then case-insensitive by name).
     assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
-    assert_eq!(browser.selected_index(), Some(0));
+    assert_eq!(browser.focus_index(), Some(0));
 }
 
 #[test]
@@ -1014,7 +1028,7 @@ fn open_at_starts_at_the_named_directory_with_working_climb() {
     assert!(!browser.is_root());
     assert_eq!(browser.path(), "/System");
     assert_eq!(names(&browser), ["Fonts", "Security", "Kernel"]);
-    assert_eq!(browser.selected_index(), Some(0));
+    assert_eq!(browser.focus_index(), Some(0));
     // A fresh open has no back history, so the first climb goes to the parent
     // rather than a remembered directory.
     assert_eq!(browser.go_up(), Ok(true));
@@ -1131,8 +1145,8 @@ fn an_empty_directory_has_no_selection() {
     browser.open_index(0).expect("enter Fonts");
     assert_eq!(browser.path(), "/System/Fonts");
     assert!(browser.entries().is_empty());
-    assert_eq!(browser.selected_index(), None);
-    assert_eq!(browser.selected_entry(), None);
+    assert_eq!(browser.focus_index(), None);
+    assert_eq!(focused(&browser), None);
 }
 
 #[test]
@@ -1149,13 +1163,13 @@ fn open_selected_descends_into_the_selected_directory() {
 fn selection_movement_clamps_at_both_ends() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select_previous();
-    assert_eq!(browser.selected_index(), Some(0));
+    assert_eq!(browser.focus_index(), Some(0));
     for _ in 0..10 {
         browser.select_next();
     }
-    assert_eq!(browser.selected_index(), Some(3));
+    assert_eq!(browser.focus_index(), Some(3));
     assert_eq!(browser.select(99), Err(BrowseError::NoSuchEntry));
-    assert_eq!(browser.selected_index(), Some(3));
+    assert_eq!(browser.focus_index(), Some(3));
 }
 
 #[test]
@@ -1169,7 +1183,7 @@ fn refresh_clamps_a_stale_selection_into_the_new_listing() {
 
     browser.refresh().expect("refresh");
     assert_eq!(names(&browser), ["System"]);
-    assert_eq!(browser.selected_index(), Some(0));
+    assert_eq!(browser.focus_index(), Some(0));
 }
 
 #[test]
@@ -1238,6 +1252,37 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     );
 }
 
+/// Every selected entry is drawn selected, not just the one the focus rests
+/// on: a multi-selection the view did not show was one the user could not
+/// see they had made. A listing with nothing selected draws no row selected.
+#[test]
+fn render_draws_every_selected_entry_and_none_while_nothing_is_selected() {
+    let theme = Theme::dark();
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
+    let row_height = font.glyph_height() + 4;
+    let header = crate::render::chrome_height(Scale::ONE, &theme, BAND);
+    let raised = Color::from(theme.palette().surface_raised).premultiply();
+    let rows_lifted = |browser: &Browser<MockFs>| -> Vec<bool> {
+        let surface = paint(
+            browser,
+            Scale::ONE,
+            &theme,
+            Rect::new(0, 0, 200, header + row_height * 4),
+            &crate::ManagerChrome::none(),
+            &mut NoArtwork,
+        );
+        (0..4)
+            .map(|row| surface.get(100, header + row_height * row + 1) == Some(raised))
+            .collect()
+    };
+
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    assert_eq!(rows_lifted(&browser), [false; 4]);
+    browser.select(0).expect("first");
+    browser.toggle_selection(2).expect("and third");
+    assert_eq!(rows_lifted(&browser), [true, false, true, false]);
+}
+
 #[test]
 fn render_into_a_tiny_viewport_does_not_panic() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
@@ -1254,6 +1299,24 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     );
     assert_eq!(surface.width(), 4);
     assert_eq!(surface.height(), 3);
+}
+
+/// A tile is exactly as tall as its picture and one name line under it: the
+/// picture keeps the side tiles have always drawn, while the name sits half an
+/// inset beneath it rather than a whole one, and nothing is left over below.
+#[test]
+fn a_grid_tile_is_as_tall_as_its_picture_and_one_name_line() {
+    use crate::render::{grid_metrics, TILE_LAYOUT};
+
+    let theme = Theme::dark();
+    for (percent, picture, height) in [(100, 42, 78), (200, 84, 156)] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        let tiles = grid_metrics(scale, &theme);
+        assert_eq!(tiles.cell_height, height, "at {percent}%");
+        let cell = Rect::new(0, 0, tiles.cell_width, tiles.cell_height);
+        assert_eq!(TILE_LAYOUT.icon_side(cell, scale, &theme), picture);
+        assert_eq!(TILE_LAYOUT.label_lines(cell, scale, &theme), 1);
+    }
 }
 
 /// Every chrome length tracks the desktop's density, not just the glyphs.
@@ -1469,6 +1532,30 @@ fn entries_from_dir_stream_maps_names_and_kinds_in_order() {
         entries,
         vec![Entry::directory("Logs"), Entry::file("motd.txt")]
     );
+}
+
+/// A listed entry names the file its record named, which a thumbnail
+/// checks an open against.
+#[test]
+fn a_listed_entry_names_the_file_its_record_named() {
+    let id = tairix_abi::FileId {
+        volume: [3; 16],
+        node: 9,
+    };
+    let mut buf = vec![0u8; 256];
+    let len = DirEntry {
+        kind: FileKind::Regular,
+        size: 5,
+        allocated: 0,
+        modified: Time64::UNIX_EPOCH,
+        id,
+        nlink: 1,
+        name: b"cat.png",
+    }
+    .encode_into(&mut buf)
+    .expect("fits");
+    let entries = entries_from_dir_stream("/", &buf[..len], &mut NoLinks).expect("valid stream");
+    assert_eq!(entries.iter().map(Entry::id).collect::<Vec<_>>(), [id]);
 }
 
 #[test]
@@ -1888,7 +1975,7 @@ fn set_sort_mode_keeps_the_selection_on_the_same_entry() {
     let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
     // Default (name asc): [a, b, c]; select "b".
     assert_eq!(browser.select(1), Ok(()));
-    assert_eq!(browser.selected_entry().map(Entry::name), Some("b.txt"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("b.txt"));
 
     browser.set_sort_mode(SortMode {
         key: SortKey::Size,
@@ -1897,8 +1984,8 @@ fn set_sort_mode_keeps_the_selection_on_the_same_entry() {
     // Now [b(100), c(200), a(300)]; the selection followed "b" to index 0.
     let names: Vec<&str> = browser.entries().iter().map(Entry::name).collect();
     assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
-    assert_eq!(browser.selected_entry().map(Entry::name), Some("b.txt"));
-    assert_eq!(browser.selected_index(), Some(0));
+    assert_eq!(focused(&browser).map(Entry::name), Some("b.txt"));
+    assert_eq!(browser.focus_index(), Some(0));
     assert_eq!(browser.sort_mode().key, SortKey::Size);
 }
 
@@ -1918,7 +2005,7 @@ fn set_sort_mode_is_a_no_op_when_the_mode_is_unchanged() {
         .map(|e| e.name().to_string())
         .collect();
     assert_eq!(before, after);
-    assert_eq!(browser.selected_index(), Some(2));
+    assert_eq!(browser.focus_index(), Some(2));
 }
 
 // --- FM2b: the view toggle, the icon grid, and the drawn scrollbar -------
@@ -1959,7 +2046,7 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
     browser.set_view_mode(ViewMode::Grid);
     assert_eq!(browser.view_mode(), ViewMode::Grid);
     // The selection stays on the same entry and the listing is untouched.
-    assert_eq!(browser.selected_index(), Some(7));
+    assert_eq!(browser.focus_index(), Some(7));
     let names_after: Vec<String> = browser
         .entries()
         .iter()
@@ -1971,7 +2058,7 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
     // Toggling back is symmetric.
     browser.set_view_mode(ViewMode::List);
     assert_eq!(browser.view_mode(), ViewMode::List);
-    assert_eq!(browser.selected_index(), Some(7));
+    assert_eq!(browser.focus_index(), Some(7));
 }
 
 /// One wheel detent, in the seat's scroll units.
@@ -3316,7 +3403,7 @@ mod rename_model {
     use tairix_geometry::{Rect, Scale};
     use tairix_theme::Theme;
 
-    use super::{names, MockFs};
+    use super::{focused, names, MockFs};
     use crate::browser::Browser;
     use crate::entry::Entry;
     use crate::rename::{validate_new_name, RenameError};
@@ -3339,7 +3426,7 @@ mod rename_model {
         ]);
         let mut browser = Browser::open_root(fs).expect("root");
         browser.select(0).expect("select Apps");
-        assert_eq!(browser.selected_name(), Some("Apps"));
+        assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
 
         let seen = RefCell::new(None);
         let result = browser.rename_selected("Downloads", |from, to| {
@@ -3354,7 +3441,7 @@ mod rename_model {
         );
         // The listing refreshed and the selection followed the entry.
         assert_eq!(names(&browser), ["Downloads", "Storage", "System", "Users"]);
-        assert_eq!(browser.selected_name(), Some("Downloads"));
+        assert_eq!(focused(&browser).map(Entry::name), Some("Downloads"));
     }
 
     #[test]
@@ -3376,7 +3463,7 @@ mod rename_model {
         }
         // The listing is untouched.
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
-        assert_eq!(browser.selected_name(), Some("Apps"));
+        assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
     }
 
     #[test]
@@ -3409,7 +3496,7 @@ mod rename_model {
         assert_eq!(result, Err(RenameError::Refused(Errno::PermissionDenied)));
         // No refresh happened: the original listing and selection stand.
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
-        assert_eq!(browser.selected_name(), Some("Apps"));
+        assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
     }
 
     #[test]
@@ -3420,7 +3507,7 @@ mod rename_model {
         browser
             .open_index(0)
             .expect("enter the empty Fonts directory");
-        assert_eq!(browser.selected_name(), None);
+        assert_eq!(focused(&browser).map(Entry::name), None);
         let result = browser.rename_selected("x", |_, _| panic!("nothing to rename"));
         assert_eq!(result, Err(RenameError::NoSelection));
     }
@@ -3554,23 +3641,19 @@ mod rename_model {
     }
 }
 
-// --- FM7b: the new-folder model (validate + commit a directory create) -----
-//
-// The `mkdir` model runs end to end over the `MockFs` fixture, so every
-// validation, transactional, and fail-closed branch of `create_directory` runs
-// in `cargo test` without a kernel.
+// --- The New ▸ create model over the `MockFs` fixture -----------------------
 
-mod mkdir_model {
+mod create_model {
     use core::cell::RefCell;
 
     use alloc::string::ToString;
 
     use tairix_abi::Errno;
 
-    use super::{names, MockFs};
+    use super::{focused, names, MockFs};
     use crate::browser::Browser;
+    use crate::create::{validate_new_entry_name, CreateError};
     use crate::entry::Entry;
-    use crate::mkdir::{validate_new_dir_name, MkdirError};
 
     /// A `MockFs` whose root re-reads as `after` once a commit refreshes it.
     fn fs_with_refreshed_root(after: alloc::vec::Vec<Entry>) -> MockFs {
@@ -3592,7 +3675,7 @@ mod mkdir_model {
         let mut browser = Browser::open_root(fs).expect("root");
 
         let seen = RefCell::new(None);
-        let result = browser.create_directory("Downloads", |path| {
+        let result = browser.create_entry("Downloads", |path| {
             *seen.borrow_mut() = Some(path.to_string());
             Ok(())
         });
@@ -3605,20 +3688,20 @@ mod mkdir_model {
             names(&browser),
             ["Apps", "Downloads", "Storage", "System", "Users"]
         );
-        assert_eq!(browser.selected_name(), Some("Downloads"));
+        assert_eq!(focused(&browser).map(Entry::name), Some("Downloads"));
     }
 
     #[test]
     fn an_invalid_name_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         for (name, expected) in [
-            ("", MkdirError::Empty),
-            (".", MkdirError::Reserved),
-            ("..", MkdirError::Reserved),
-            ("a/b", MkdirError::Separator),
-            ("bad:name", MkdirError::Invalid),
+            ("", CreateError::Empty),
+            (".", CreateError::Reserved),
+            ("..", CreateError::Reserved),
+            ("a/b", CreateError::Separator),
+            ("bad:name", CreateError::Invalid),
         ] {
-            let result = browser.create_directory(name, |_| {
+            let result = browser.create_entry(name, |_| {
                 panic!("the VFS must not be touched for an invalid name");
             });
             assert_eq!(result, Err(expected));
@@ -3630,18 +3713,18 @@ mod mkdir_model {
     #[test]
     fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        let result = browser.create_directory("System", |_| {
+        let result = browser.create_entry("System", |_| {
             panic!("a clashing create must not reach the VFS");
         });
-        assert_eq!(result, Err(MkdirError::Clash));
+        assert_eq!(result, Err(CreateError::Clash));
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
     }
 
     #[test]
     fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        let result = browser.create_directory("Downloads", |_| Err(Errno::PermissionDenied));
-        assert_eq!(result, Err(MkdirError::Refused(Errno::PermissionDenied)));
+        let result = browser.create_entry("Downloads", |_| Err(Errno::PermissionDenied));
+        assert_eq!(result, Err(CreateError::Refused(Errno::PermissionDenied)));
         // No refresh happened: the original listing stands.
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
     }
@@ -3654,10 +3737,10 @@ mod mkdir_model {
         browser
             .open_index(0)
             .expect("enter the empty Fonts directory");
-        assert_eq!(browser.selected_name(), None);
+        assert_eq!(focused(&browser).map(Entry::name), None);
 
         let seen = RefCell::new(None);
-        let result = browser.create_directory("New Folder", |path| {
+        let result = browser.create_entry("New Folder", |path| {
             *seen.borrow_mut() = Some(path.to_string());
             Ok(())
         });
@@ -3672,40 +3755,43 @@ mod mkdir_model {
         // directory that becomes unreadable between the create and the refresh.
         fs.deny_after_first.insert("/".to_string());
         let mut browser = Browser::open_root(fs).expect("root");
-        let result = browser.create_directory("Downloads", |_| Ok(()));
-        assert_eq!(result, Err(MkdirError::Source(Errno::PermissionDenied)));
+        let result = browser.create_entry("Downloads", |_| Ok(()));
+        assert_eq!(result, Err(CreateError::Source(Errno::PermissionDenied)));
     }
 
     #[test]
-    fn validate_new_dir_name_is_pure_and_covers_the_model_rules() {
+    fn validate_new_entry_name_is_pure_and_covers_the_model_rules() {
         let siblings = alloc::vec![Entry::directory("Apps"), Entry::file("notes.txt")];
-        assert_eq!(validate_new_dir_name("Documents", &siblings), Ok(()));
+        assert_eq!(validate_new_entry_name("Documents", &siblings), Ok(()));
         assert_eq!(
-            validate_new_dir_name("Apps", &siblings),
-            Err(MkdirError::Clash)
+            validate_new_entry_name("Apps", &siblings),
+            Err(CreateError::Clash)
         );
         assert_eq!(
-            validate_new_dir_name("notes.txt", &siblings),
-            Err(MkdirError::Clash)
+            validate_new_entry_name("notes.txt", &siblings),
+            Err(CreateError::Clash)
         );
-        assert_eq!(validate_new_dir_name("", &siblings), Err(MkdirError::Empty));
         assert_eq!(
-            validate_new_dir_name("..", &siblings),
-            Err(MkdirError::Reserved)
+            validate_new_entry_name("", &siblings),
+            Err(CreateError::Empty)
+        );
+        assert_eq!(
+            validate_new_entry_name("..", &siblings),
+            Err(CreateError::Reserved)
         );
     }
 
     #[test]
-    fn every_mkdir_error_has_a_nonempty_message() {
+    fn every_create_error_has_a_nonempty_message() {
         for err in [
-            MkdirError::Empty,
-            MkdirError::Reserved,
-            MkdirError::Separator,
-            MkdirError::Invalid,
-            MkdirError::TooLong,
-            MkdirError::Clash,
-            MkdirError::Refused(Errno::PermissionDenied),
-            MkdirError::Source(Errno::NotFound),
+            CreateError::Empty,
+            CreateError::Reserved,
+            CreateError::Separator,
+            CreateError::Invalid,
+            CreateError::TooLong,
+            CreateError::Clash,
+            CreateError::Refused(Errno::PermissionDenied),
+            CreateError::Source(Errno::NotFound),
         ] {
             assert!(!err.message().is_empty());
         }
@@ -3920,7 +4006,13 @@ fn activation_source() -> VfsDirectorySource<impl FnMut(&str) -> Result<Vec<u8>,
 fn activating_a_directory_descends_into_it() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     // Default order: the directory first, then the bundle and the file.
-    assert_eq!(browser.selected_name(), Some("Docs"));
+    assert_eq!(
+        browser.activate_selected(BundleIntent::Launch),
+        Err(BrowseError::NoSuchEntry),
+        "nothing is chosen until the user picks it"
+    );
+    browser.select(0).expect("select Docs");
+    assert_eq!(focused(&browser).map(Entry::name), Some("Docs"));
     assert_eq!(
         browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::Descended)
@@ -3934,7 +4026,7 @@ fn activating_a_directory_descends_into_it() {
 fn activating_a_bundle_names_it_for_launch_without_descending() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(1).expect("select Editor.app");
-    assert_eq!(browser.selected_name(), Some("Editor.app"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("Editor.app"));
     // A bundle is a sealed unit: the engine names it for the launcher and does
     // not descend — the browser stays exactly where it was.
     assert_eq!(
@@ -3944,7 +4036,7 @@ fn activating_a_bundle_names_it_for_launch_without_descending() {
         })
     );
     assert!(browser.is_root());
-    assert_eq!(browser.selected_name(), Some("Editor.app"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("Editor.app"));
 }
 
 #[test]
@@ -3969,6 +4061,7 @@ fn the_browse_intent_changes_nothing_for_a_directory_or_a_file() {
     // Only a bundle is ambiguous; every other kind activates the same way
     // whether or not the modifier was held.
     let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(0).expect("select Docs");
     assert_eq!(
         browser.activate_selected(BundleIntent::Browse),
         Ok(Activation::Descended)
@@ -3995,12 +4088,13 @@ fn browsing_an_unreadable_bundle_fails_closed_and_stays_put() {
     );
     // `/Sealed.app` is deliberately absent from the tree, so listing it fails.
     let mut browser = Browser::open_root(tree_source(dirs)).expect("root");
+    browser.select(0).expect("select Sealed.app");
     assert!(matches!(
         browser.activate_selected(BundleIntent::Browse),
         Err(BrowseError::Source(_))
     ));
     assert_eq!(browser.path(), "/");
-    assert_eq!(browser.selected_name(), Some("Sealed.app"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("Sealed.app"));
 }
 
 #[test]
@@ -4014,7 +4108,7 @@ fn activating_a_file_names_it_for_open_without_descending() {
         })
     );
     assert!(browser.is_root());
-    assert_eq!(browser.selected_name(), Some("notes.txt"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("notes.txt"));
 }
 
 #[test]
@@ -4046,7 +4140,7 @@ fn activating_with_no_selection_is_refused() {
     // Descend into the empty /System/Fonts, which has no selection.
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter the empty Fonts");
-    assert_eq!(browser.selected_name(), None);
+    assert_eq!(focused(&browser).map(Entry::name), None);
     assert_eq!(
         browser.activate_selected(BundleIntent::Launch),
         Err(BrowseError::NoSuchEntry)
@@ -4191,6 +4285,144 @@ fn applications_for_is_empty_when_no_bundle_claims_a_known_type() {
     // A recognised type (gzip archive) that no installed bundle handles is an
     // honest "no application" answer, not a fabricated default.
     assert!(applications_for("backup.tgz", &bundles).is_empty());
+}
+
+#[test]
+fn new_offers_each_type_a_writing_application_declares_exactly() {
+    use crate::open_with::blank_documents;
+
+    let nouns = |bundles: &[AppAssociation]| -> Vec<&'static str> {
+        blank_documents(bundles)
+            .iter()
+            .map(|document| document.noun())
+            .collect()
+    };
+    let editor = |types: &[&str]| {
+        AppAssociation::new(
+            "editor",
+            "/Apps/editor.app",
+            types.iter().map(ToString::to_string).collect(),
+        )
+        .writing_documents()
+    };
+    // A viewer opens text but makes none.
+    assert!(nouns(&open_with_store()).is_empty());
+    assert_eq!(nouns(&[editor(&["text/plain"])]), ["Text Document"]);
+    // Opening Rust source through the subclass chain is not declaring it.
+    assert_eq!(
+        nouns(&[editor(&["text/plain"]), editor(&["text/x-rust"])]),
+        ["Text Document", "Rust Source File"]
+    );
+    // An empty file is not a picture, or JSON.
+    assert!(nouns(&[editor(&["image/png", "application/json"])]).is_empty());
+    // Registry order, once each, however the bundles declare them.
+    assert_eq!(
+        nouns(&[
+            editor(&["TEXT/MARKDOWN", "text/plain"]),
+            editor(&["text/plain"]),
+        ]),
+        ["Text Document", "Markdown Document"]
+    );
+}
+
+#[test]
+fn a_drop_copies_by_default_moves_with_shift_and_refuses_what_moves_nothing() {
+    use crate::clipboard::{drop_operation, ClipboardOp};
+
+    let path = |parts: &[&str]| -> Vec<String> { parts.iter().map(ToString::to_string).collect() };
+    let items = [
+        path(&["Users", "ann", "a.txt"]),
+        path(&["Users", "ann", "Work"]),
+    ];
+    let elsewhere = path(&["Users", "ann", "Desktop"]);
+    assert_eq!(
+        drop_operation(&items, &elsewhere, false),
+        Some(ClipboardOp::Copy)
+    );
+    assert_eq!(
+        drop_operation(&items, &elsewhere, true),
+        Some(ClipboardOp::Cut)
+    );
+    // Back into the folder they came from moves nothing.
+    assert_eq!(
+        drop_operation(&items, &path(&["Users", "ann"]), false),
+        None
+    );
+    // A folder into itself, or anywhere inside it, is refused outright.
+    assert_eq!(
+        drop_operation(&items, &path(&["Users", "ann", "Work"]), false),
+        None
+    );
+    assert_eq!(
+        drop_operation(&items, &path(&["Users", "ann", "Work", "Deep"]), true),
+        None
+    );
+    // A sibling whose name only starts like an item's is not inside it.
+    assert_eq!(
+        drop_operation(&items, &path(&["Users", "ann", "Workshop"]), false),
+        Some(ClipboardOp::Copy)
+    );
+    // Nothing dragged, and the root, move nothing.
+    assert_eq!(drop_operation(&[], &elsewhere, false), None);
+    assert_eq!(drop_operation(&[Vec::new()], &elsewhere, false), None);
+}
+
+#[test]
+fn a_drop_lands_in_the_folder_under_the_point_or_the_listing_s_own() {
+    use crate::chrome::ToolbarBand;
+    use crate::render::{drop_folder_at, entry_rect, listing_area};
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 480, 320);
+    let band = ToolbarBand::Shown;
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let at = |index: usize| {
+        entry_rect(&browser, Scale::ONE, &theme, window, band, index)
+            .expect("the entry shows")
+            .center()
+    };
+    let drop = |point| drop_folder_at(&browser, Scale::ONE, &theme, window, band, point);
+    assert_eq!(
+        drop(at(0)),
+        Some((alloc::vec!["Docs".to_string()], Some(0))),
+        "a folder takes the drop itself"
+    );
+    assert_eq!(
+        drop(at(1)),
+        Some((Vec::new(), None)),
+        "a bundle is no folder to drop in"
+    );
+    assert_eq!(drop(at(2)), Some((Vec::new(), None)), "nor is a file");
+    let area = listing_area(&browser, Scale::ONE, &theme, window, band);
+    assert_eq!(
+        drop(Point::new(area.left() + 4, area.bottom() - 2)),
+        Some((Vec::new(), None)),
+        "the ground below the entries is the listing's own folder"
+    );
+    assert_eq!(
+        drop(Point::new(area.left() + 4, area.top() - 1)),
+        None,
+        "the toolbar takes none"
+    );
+}
+
+#[test]
+fn a_drop_mark_lights_one_listed_entry_until_the_listing_changes() {
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    assert_eq!(browser.set_drop_mark(Some(9)), None);
+    assert_eq!(
+        browser.drop_mark(),
+        None,
+        "an index past the listing lights nothing"
+    );
+    assert_eq!(browser.set_drop_mark(Some(0)), None);
+    assert_eq!(browser.set_drop_mark(Some(0)), Some(0));
+    assert_eq!(browser.drop_mark(), Some(0));
+    browser.set_sort_mode(browser.sort_mode().next());
+    assert_eq!(browser.drop_mark(), None, "a reorder puts it out");
+    browser.set_drop_mark(Some(1));
+    browser.refresh().expect("relisted");
+    assert_eq!(browser.drop_mark(), None, "a relist puts it out");
 }
 
 #[test]
@@ -4480,12 +4712,19 @@ fn selection_clear_drops_everything() {
     assert_eq!(s.anchor(), None);
 }
 
+/// A listing opens with nothing selected: the focus rests on the first entry
+/// without choosing it, so no verb acts until the user picks something, and
+/// the first arrow key picks the entry the focus rests on.
 #[test]
-fn open_root_selects_the_focused_entry() {
-    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+fn a_listing_opens_with_nothing_selected() {
+    let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+    assert!(browser.selection().is_empty());
+    assert_eq!(browser.focus_index(), Some(0));
+    assert_eq!(browser.chosen_index(), None);
+    browser.select_next();
     assert_eq!(selected(browser.selection()), [0]);
-    assert!(browser.is_selected(0));
-    assert!(!browser.is_selected(1));
+    browser.select_next();
+    assert_eq!(selected(browser.selection()), [1]);
 }
 
 #[test]
@@ -4504,7 +4743,7 @@ fn toggle_and_extend_build_a_multi_selection() {
     // Extend grows from the toggle's anchor (2) to 3.
     browser.extend_selection_to(3).expect("extend 3");
     assert_eq!(selected(browser.selection()), [2, 3]);
-    assert_eq!(browser.selected_index(), Some(3));
+    assert_eq!(browser.focus_index(), Some(3));
 }
 
 #[test]
@@ -4517,7 +4756,7 @@ fn out_of_range_selection_ops_are_refused_and_change_nothing() {
         Err(BrowseError::NoSuchEntry)
     );
     assert_eq!(selected(browser.selection()), [1]);
-    assert_eq!(browser.selected_index(), Some(1));
+    assert_eq!(browser.focus_index(), Some(1));
 }
 
 #[test]
@@ -4529,26 +4768,43 @@ fn an_unmodified_move_collapses_a_multi_selection() {
     assert_eq!(selected(browser.selection()), [1]);
 }
 
+/// A fresh directory selects nothing: the old indices name nothing there.
 #[test]
-fn navigation_collapses_the_selection_to_the_focus() {
+fn navigation_clears_the_selection() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select_all();
     // Enter /System (index 2 in the sorted root).
     browser.open_index(2).expect("enter System");
     assert_eq!(browser.path(), "/System");
-    assert_eq!(selected(browser.selection()), [0]);
+    assert!(browser.selection().is_empty());
+    assert_eq!(browser.focus_index(), Some(0));
 }
 
+/// A reorder carries the selection and the focus with the entries they named,
+/// rather than with the positions those entries left.
 #[test]
-fn a_reorder_collapses_the_selection_to_the_focus() {
+fn a_reorder_keeps_the_selection_on_its_entries() {
     use crate::sort::{SortDirection, SortKey, SortMode};
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    browser.select_all();
+    browser.select(0).expect("first");
+    browser.toggle_selection(2).expect("third");
+    let chosen: BTreeSet<String> = browser
+        .selection()
+        .iter()
+        .map(|i| browser.entries()[i].name().to_string())
+        .collect();
+    let focus = focused(&browser).map(|e| e.name().to_string());
     browser.set_sort_mode(SortMode {
         key: SortKey::Name,
         direction: SortDirection::Descending,
     });
-    assert_eq!(browser.selection().len(), 1);
+    let after: BTreeSet<String> = browser
+        .selection()
+        .iter()
+        .map(|i| browser.entries()[i].name().to_string())
+        .collect();
+    assert_eq!(after, chosen);
+    assert_eq!(focused(&browser).map(|e| e.name().to_string()), focus);
 }
 
 #[test]
@@ -5557,7 +5813,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter the empty Fonts");
-    assert_eq!(browser.selected_name(), None);
+    assert_eq!(focused(&browser).map(Entry::name), None);
 
     let menu = ContextMenuModel::for_browser(&browser, false);
     for command in [
@@ -5581,13 +5837,51 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
 }
 
 #[test]
+fn the_context_menu_offers_single_entry_verbs_only_for_one_chosen_entry() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    let nothing = ContextMenuModel::for_browser(&browser, true);
+    for command in [ContextCommand::Open, ContextCommand::Delete] {
+        assert_eq!(nothing.reason(command), "nothing selected", "{command:?}");
+    }
+    assert_eq!(nothing.reason(ContextCommand::Paste), "");
+
+    // Several selected: the set verbs act on them all, and the verbs that act
+    // on one entry say why they cannot rather than picking one.
+    browser.select(1).expect("Editor.app");
+    browser.toggle_selection(2).expect("and notes.txt");
+    let several = ContextMenuModel::for_browser(&browser, false);
+    for command in [
+        ContextCommand::Cut,
+        ContextCommand::Copy,
+        ContextCommand::Delete,
+    ] {
+        assert!(several.is_enabled(command), "{command:?}");
+    }
+    for command in [
+        ContextCommand::Open,
+        ContextCommand::OpenWith,
+        ContextCommand::Rename,
+        ContextCommand::Properties,
+    ] {
+        assert_eq!(
+            several.reason(command),
+            "several items selected",
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
 fn the_context_menu_enables_the_item_commands_on_a_directory() {
     use crate::chrome::{ContextCommand, ContextMenuModel};
 
     // A directory descends on Open; every selection-scoped command is offered,
     // but Open With… is not — a directory has no application to choose.
-    let browser = Browser::open_root(activation_source()).expect("root");
-    assert_eq!(browser.selected_name(), Some("Docs"));
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(0).expect("select Docs");
+    assert_eq!(focused(&browser).map(Entry::name), Some("Docs"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
@@ -5610,7 +5904,7 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     // launches itself, so there is no application to choose for it.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(1).expect("select Editor.app");
-    assert!(browser.selected_entry().expect("bundle").is_bundle());
+    assert!(focused(&browser).expect("bundle").is_bundle());
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
@@ -5628,7 +5922,7 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
 
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
-    assert_eq!(browser.selected_name(), Some("notes.txt"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("notes.txt"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     // Open With… is offered only for a regular file, so it is enabled here, and
@@ -5683,13 +5977,14 @@ fn context_commands_list_covers_every_variant_once() {
 #[test]
 fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
     use crate::chrome::{context_choice_from_item, ContextChoice, CONTEXT_COMMANDS};
+    use crate::open_with::OPEN_WITH_QUICK_MAX;
     use tairix_abi::window_ipc::AppMenuItemId;
 
-    // The numbering runs: the commands in CONTEXT_COMMANDS order, then the
-    // Rename row's own quick-entry field, then one id per quick candidate.
-    // Reading a chosen row back is the exact inverse of numbering it, so no
-    // second table can drift and the three kinds of answer can never be
-    // mistaken for one another.
+    // The numbering runs: the commands in CONTEXT_COMMANDS order, the Rename
+    // row's quick-entry field, a block as long as a plate offers candidates,
+    // New ▸ Folder, then the New ▸ documents. Reading a chosen row back is the
+    // exact inverse of numbering it, so no kind of answer can be mistaken for
+    // another.
     let id = |index: usize| {
         AppMenuItemId::new(u16::try_from(index + 1).expect("a small index")).expect("non-zero")
     };
@@ -5703,12 +5998,159 @@ fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
         context_choice_from_item(id(CONTEXT_COMMANDS.len())),
         Some(ContextChoice::RenameCommit)
     );
-    for candidate in 0..4 {
+    for candidate in 0..OPEN_WITH_QUICK_MAX {
         assert_eq!(
             context_choice_from_item(id(CONTEXT_COMMANDS.len() + 1 + candidate)),
             Some(ContextChoice::OpenWithCandidate(candidate))
         );
     }
+    let new_folder = CONTEXT_COMMANDS.len() + 1 + OPEN_WITH_QUICK_MAX;
+    assert_eq!(
+        context_choice_from_item(id(new_folder)),
+        Some(ContextChoice::NewFolder)
+    );
+    for document in 0..4 {
+        assert_eq!(
+            context_choice_from_item(id(new_folder + 1 + document)),
+            Some(ContextChoice::NewDocument(document))
+        );
+    }
+}
+
+#[test]
+fn new_sits_above_properties_and_offers_folder_then_the_documents() {
+    use crate::chrome::{
+        context_choice_from_item, context_menu, ContextChoice, ContextMenuModel, ContextQuick,
+    };
+    use crate::media::{BlankDocument, MediaType};
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let documents = [
+        BlankDocument::of(MediaType::TextPlain).expect("text starts empty"),
+        BlankDocument::of(MediaType::TextMarkdown).expect("markdown starts empty"),
+    ];
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, false),
+        "Files",
+        ContextQuick {
+            documents: &documents,
+            ..ContextQuick::default()
+        },
+    )
+    .expect("the rows fit the bounds");
+    let rows: alloc::vec::Vec<_> = menu.rows().collect();
+    let new_at = rows
+        .iter()
+        .position(|(row, _)| {
+            matches!(
+                row,
+                AppMenuRowView::Submenu {
+                    label: "New",
+                    enabled: true
+                }
+            )
+        })
+        .expect("New is declared, and opens");
+    assert_eq!(rows[new_at].1, None, "New is on the root plate");
+    assert!(matches!(rows[new_at - 1].0, AppMenuRowView::Separator));
+    assert!(matches!(rows[new_at + 1].0, AppMenuRowView::Separator));
+    let label_at = |at: usize| match rows[at].0 {
+        AppMenuRowView::Item(item) => item.label,
+        _ => "",
+    };
+    assert_eq!(label_at(new_at - 2), "Paste");
+    assert_eq!(label_at(new_at + 2), "Properties");
+
+    let children: alloc::vec::Vec<_> = rows
+        .iter()
+        .filter(|(_, parent)| *parent == Some(new_at))
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(*item),
+            _ => None,
+        })
+        .collect();
+    let labels: alloc::vec::Vec<_> = children.iter().map(|item| item.label).collect();
+    assert_eq!(labels, ["Folder", "Text Document", "Markdown Document"]);
+    assert_eq!(children[0].shortcut, "Ctrl+Shift+N");
+    let choices: alloc::vec::Vec<_> = children
+        .iter()
+        .map(|item| context_choice_from_item(item.id))
+        .collect();
+    assert_eq!(
+        choices,
+        [
+            Some(ContextChoice::NewFolder),
+            Some(ContextChoice::NewDocument(0)),
+            Some(ContextChoice::NewDocument(1)),
+        ]
+    );
+}
+
+#[test]
+fn new_offers_folder_when_no_editor_makes_a_document() {
+    use crate::chrome::{context_menu, ContextMenuModel, ContextQuick};
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let browser = Browser::open_root(activation_source()).expect("root");
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, false),
+        "Files",
+        ContextQuick::default(),
+    )
+    .expect("the rows fit the bounds");
+    let rows: alloc::vec::Vec<_> = menu.rows().collect();
+    let new_at = rows
+        .iter()
+        .position(|(row, _)| matches!(row, AppMenuRowView::Submenu { label: "New", .. }))
+        .expect("New is declared");
+    let children: alloc::vec::Vec<_> = rows
+        .iter()
+        .filter(|(_, parent)| *parent == Some(new_at))
+        .collect();
+    assert_eq!(children.len(), 1);
+    assert!(matches!(children[0].0, AppMenuRowView::Item(item) if item.label == "Folder"));
+}
+
+#[test]
+fn more_candidates_than_a_plate_offers_never_reach_the_new_rows_ids() {
+    use crate::chrome::{
+        context_choice_from_item, context_menu, ContextChoice, ContextMenuModel, ContextQuick,
+    };
+    use crate::open_with::OPEN_WITH_QUICK_MAX;
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let apps: alloc::vec::Vec<_> = (0..OPEN_WITH_QUICK_MAX + 3)
+        .map(|n| {
+            AppAssociation::new(
+                alloc::format!("app{n}"),
+                alloc::format!("/Apps/app{n}.app"),
+                vec!["text/plain".to_string()],
+            )
+        })
+        .collect();
+    let candidates: alloc::vec::Vec<_> = apps.iter().collect();
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, false),
+        "Files",
+        ContextQuick {
+            name: "notes.txt",
+            candidates: &candidates,
+            documents: &[],
+        },
+    )
+    .expect("the rows fit the bounds");
+    let offered: alloc::vec::Vec<_> = menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => context_choice_from_item(item.id),
+            _ => None,
+        })
+        .filter(|choice| matches!(choice, ContextChoice::OpenWithCandidate(_)))
+        .collect();
+    assert_eq!(offered.len(), OPEN_WITH_QUICK_MAX);
 }
 
 #[test]
@@ -5730,8 +6172,8 @@ fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
 
     let items: alloc::vec::Vec<_> = menu
         .rows()
-        .filter_map(|(row, _parent)| match row {
-            AppMenuRowView::Item(item) => Some(item),
+        .filter_map(|(row, parent)| match row {
+            AppMenuRowView::Item(item) if parent.is_none() => Some(item),
             _ => None,
         })
         .collect();
@@ -5756,15 +6198,15 @@ fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter the empty Fonts");
-    assert_eq!(browser.selected_name(), None);
+    assert_eq!(focused(&browser).map(Entry::name), None);
 
     let model = ContextMenuModel::for_browser(&browser, false);
     let menu = context_menu(model, "Files", ContextQuick::default())
         .expect("the fixed rows fit the bounds");
     let items: alloc::vec::Vec<_> = menu
         .rows()
-        .filter_map(|(row, _parent)| match row {
-            AppMenuRowView::Item(item) => Some(item),
+        .filter_map(|(row, parent)| match row {
+            AppMenuRowView::Item(item) if parent.is_none() => Some(item),
             _ => None,
         })
         .collect();
@@ -5787,7 +6229,8 @@ fn the_context_menu_reason_distinguishes_why_a_row_cannot_act() {
     // directory, a bundle, and a file each turn Open With… and Open and Close
     // down for a different reason, and each states it.
     let mut browser = Browser::open_root(activation_source()).expect("root");
-    assert_eq!(browser.selected_name(), Some("Docs"));
+    browser.select(0).expect("select Docs");
+    assert_eq!(focused(&browser).map(Entry::name), Some("Docs"));
     let on_directory = ContextMenuModel::for_browser(&browser, false);
     assert_eq!(
         on_directory.reason(ContextCommand::OpenWith),
@@ -5840,8 +6283,13 @@ fn a_declared_context_reason_reaches_a_tip_and_never_the_drawn_row() {
     use tairix_geometry::Scale;
     use tairix_theme::Theme;
 
-    let browser = Browser::open_root(activation_source()).expect("root");
-    assert_eq!(browser.selected_name(), Some("Docs"), "a directory");
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(0).expect("select Docs");
+    assert_eq!(
+        focused(&browser).map(Entry::name),
+        Some("Docs"),
+        "a directory"
+    );
     let model = ContextMenuModel::for_browser(&browser, false);
     let refused = model.reason(ContextCommand::OpenWith);
     assert!(!refused.is_empty(), "the directory refuses Open With…");
@@ -6415,6 +6863,7 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     let quick = ContextQuick {
         name: "notes.txt",
         candidates: &candidates,
+        documents: &[],
     };
     let menu = context_menu(model, "Files", quick).expect("the rows fit");
 
@@ -6474,15 +6923,22 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     empty.open_index(0).expect("enter the empty Fonts");
     let menu = context_menu(ContextMenuModel::for_browser(&empty, false), "Files", quick)
         .expect("the rows fit");
+    let rows: alloc::vec::Vec<_> = menu.rows().collect();
+    let open_with = rows
+        .iter()
+        .position(|(row, _)| {
+            matches!(row, AppMenuRowView::Item(item) if item.label == ContextCommand::OpenWith.label())
+        })
+        .expect("the Open With… row");
     assert!(
-        menu.rows().all(|(row, parent)| {
-            parent.is_none()
+        rows.iter().all(|(row, parent)| {
+            *parent != Some(open_with)
                 && match row {
                     AppMenuRowView::Item(item) => item.entry.is_none(),
                     _ => true,
                 }
         }),
-        "no field and no submenu where no row can act"
+        "no field and no candidate where no row can act"
     );
 }
 
@@ -6931,43 +7387,104 @@ fn browser_navigate_to_an_unlistable_location_fails_closed() {
 }
 
 #[test]
-fn suggest_new_dir_name_disambiguates_against_the_listing() {
-    use crate::mkdir::{suggest_new_dir_name, NEW_FOLDER_BASE};
+fn a_new_folder_takes_the_first_free_number() {
+    use crate::create::{NewEntry, NEW_FOLDER_BASE};
 
-    // An empty (or unrelated) listing gets the plain base name.
-    assert_eq!(suggest_new_dir_name(&[]), NEW_FOLDER_BASE);
+    let folder = |siblings: &[Entry]| NewEntry::Folder.suggest_name(siblings);
+    assert_eq!(folder(&[]), NEW_FOLDER_BASE);
     assert_eq!(
-        suggest_new_dir_name(&[Entry::directory("Documents"), Entry::file("notes.txt")]),
+        folder(&[Entry::directory("Documents"), Entry::file("notes.txt")]),
         NEW_FOLDER_BASE
     );
-
-    // The base taken pushes to the first free numeric suffix, and further
-    // clashes advance it, so the placeholder never collides with a sibling
-    // (which the create would refuse).
+    assert_eq!(folder(&[Entry::directory(NEW_FOLDER_BASE)]), "New Folder 2");
     assert_eq!(
-        suggest_new_dir_name(&[Entry::directory(NEW_FOLDER_BASE)]),
-        "New Folder 2"
-    );
-    assert_eq!(
-        suggest_new_dir_name(&[
+        folder(&[
             Entry::directory(NEW_FOLDER_BASE),
             Entry::directory("New Folder 2"),
             Entry::directory("New Folder 3"),
         ]),
         "New Folder 4"
     );
-
-    // A gap is filled by the smallest free suffix, not the next after the max.
+    // A gap is filled by the smallest free number, not the next after the
+    // largest.
     assert_eq!(
-        suggest_new_dir_name(&[
+        folder(&[
             Entry::directory(NEW_FOLDER_BASE),
             Entry::directory("New Folder 3"),
         ]),
         "New Folder 2"
     );
+    // A file holds a name as surely as a folder does.
+    assert_eq!(folder(&[Entry::file(NEW_FOLDER_BASE)]), "New Folder 2");
 }
 
-// --- FM8b: the Properties window's facts + selected_target_path -----------
+#[test]
+fn only_the_exact_spelling_of_a_number_holds_it() {
+    use crate::create::{NewEntry, NEW_FOLDER_BASE};
+
+    // None of these is "New Folder 2", so none keeps it from being offered.
+    let near_misses = [
+        Entry::directory(NEW_FOLDER_BASE),
+        Entry::directory("New Folder 02"),
+        Entry::directory("New Folder  2"),
+        Entry::directory("New Folder 2a"),
+        Entry::directory("New Folder +2"),
+        Entry::directory("New Folder "),
+        Entry::directory("New Folders 2"),
+        Entry::directory("new folder 2"),
+        Entry::directory("New Folder 1"),
+        Entry::directory("New Folder 99999999999999999999999999"),
+    ];
+    assert_eq!(NewEntry::Folder.suggest_name(&near_misses), "New Folder 2");
+}
+
+#[test]
+fn a_new_document_is_numbered_before_its_extension() {
+    use crate::create::NewEntry;
+    use crate::media::{BlankDocument, MediaType};
+
+    let text = BlankDocument::of(MediaType::TextPlain).expect("text starts empty");
+    let document = |siblings: &[Entry]| NewEntry::Document(text).suggest_name(siblings);
+    assert_eq!(document(&[]), "New Text Document.txt");
+    // A folder of the bare stem does not hold the document's name.
+    assert_eq!(
+        document(&[Entry::directory("New Text Document")]),
+        "New Text Document.txt"
+    );
+    assert_eq!(
+        document(&[
+            Entry::file("New Text Document.txt"),
+            Entry::file("New Text Document 2.txt"),
+        ]),
+        "New Text Document 3.txt"
+    );
+    // Another extension is another name.
+    assert_eq!(
+        document(&[Entry::file("New Text Document.md")]),
+        "New Text Document.txt"
+    );
+}
+
+#[test]
+fn a_listing_holding_every_number_gets_the_one_past_it() {
+    use alloc::format;
+
+    use crate::create::{NewEntry, NEW_FOLDER_BASE};
+
+    let count = 20_000;
+    let mut siblings = alloc::vec![Entry::directory(NEW_FOLDER_BASE)];
+    siblings.extend(
+        (2..=count)
+            .rev()
+            .map(|n| Entry::directory(format!("New Folder {n}"))),
+    );
+    assert_eq!(
+        NewEntry::Folder.suggest_name(&siblings),
+        format!("New Folder {}", count + 1)
+    );
+}
+
+// --- FM8b: the Properties window's facts + chosen_target_path -------------
 
 use crate::properties::Properties;
 use crate::render::{general_facts, mode_reading_for_test};
@@ -7090,7 +7607,7 @@ fn the_general_section_shows_where_an_alias_points_and_only_for_an_alias() {
 }
 
 #[test]
-fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
+fn chosen_target_path_spells_the_chosen_node_and_is_none_without_one() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     // Default sort: the four view-binding directories in name order.
     browser
@@ -7103,7 +7620,7 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
         )
         .expect("select System");
     assert_eq!(
-        browser.selected_target_path(),
+        browser.chosen_target_path(),
         Some(Ok("/System".to_string()))
     );
 
@@ -7114,9 +7631,14 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
         .position(|e| e.name() == "System")
         .expect("System listed");
     browser.open_index(system).expect("descend into System");
-    let first = browser.selected_name().expect("a selection").to_string();
+    assert_eq!(browser.chosen_target_path(), None, "nothing chosen yet");
+    browser.select(0).expect("the first entry");
+    let first = focused(&browser)
+        .map(Entry::name)
+        .expect("a selection")
+        .to_string();
     assert_eq!(
-        browser.selected_target_path(),
+        browser.chosen_target_path(),
         Some(Ok(alloc::format!("/System/{first}")))
     );
 
@@ -7136,7 +7658,7 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
             .unwrap(),
     )
     .expect("enter Fonts");
-    assert_eq!(b2.selected_target_path(), None);
+    assert_eq!(b2.chosen_target_path(), None);
 }
 
 // --- The Properties window: fields, toggles, ownership, attributes --------
@@ -9525,10 +10047,12 @@ mod occupancy {
     use alloc::rc::Rc;
     use core::cell::RefCell;
 
+    use tairix_abi::fs::FileKind;
     use tairix_abi::time::Time64;
+    use tairix_icon::FolderSample;
 
     use crate::entry::{EntryKind, Occupancy};
-    use crate::media::icon_for_entry;
+    use crate::media::{folder_sample, icon_for_entry};
     use crate::render::visible_range;
     use crate::vfs::VfsDirectorySource;
 
@@ -9587,7 +10111,13 @@ mod occupancy {
             }
             self.dirs
                 .get(&path)
-                .map(|children| Probe::Ready(!children.is_empty()))
+                .map(|children| {
+                    if children.is_empty() {
+                        Probe::Empty
+                    } else {
+                        Probe::Holds(FolderSample::default())
+                    }
+                })
                 .ok_or(Errno::NotFound)
         }
     }
@@ -9643,26 +10173,51 @@ mod occupancy {
         content_kinds(&artwork.asked)
     }
 
+    /// A probe batch of `entries`, as one read of a directory answers it.
+    fn batch(entries: &[(&str, FileKind)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &(name, kind) in entries {
+            let mut record = [0u8; tairix_abi::fs::DirEntry::MAX_LEN];
+            let len = tairix_abi::fs::DirEntry {
+                kind,
+                size: 0,
+                allocated: 0,
+                modified: tairix_abi::time::Time64::UNIX_EPOCH,
+                id: tairix_abi::fs::FileId::NONE,
+                nlink: 1,
+                name: name.as_bytes(),
+            }
+            .encode_into(&mut record)
+            .expect("encodes");
+            out.extend_from_slice(&record[..len]);
+        }
+        out
+    }
+
     #[test]
-    fn a_probing_vfs_source_decides_occupancy_from_one_record() {
-        // The kernel packs the whole listing or refuses, so one maximal
-        // record decides all three cases without transferring a listing: no
-        // bytes is empty, some bytes is occupied, and a listing too big for
-        // the buffer is occupied too.
-        for (answer, want) in [
-            (Ok(0), false),
-            (Ok(48), true),
-            (Err(Errno::BufferTooSmall), true),
+    fn a_probing_vfs_source_samples_what_one_batch_holds() {
+        let held = batch(&[
+            ("a.jpg", FileKind::Regular),
+            ("sub", FileKind::Directory),
+            ("b.jpg", FileKind::Regular),
+            ("notes.txt", FileKind::Regular),
+        ]);
+        for (records, want) in [
+            (Vec::new(), Probe::Empty),
+            (
+                held,
+                Probe::Holds(FolderSample::new([IconKind::ImageJpeg, IconKind::Text])),
+            ),
         ] {
             let mut source = VfsDirectorySource::probing(
                 |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
                 NoLinks,
-                move |_: &str, _: &mut [u8]| answer,
+                move |_: &str, buf: &mut [u8]| {
+                    buf[..records.len()].copy_from_slice(&records);
+                    Ok(records.len())
+                },
             );
-            assert_eq!(
-                source.has_children(&["d".to_string()]),
-                Ok(Probe::Ready(want))
-            );
+            assert_eq!(source.has_children(&["d".to_string()]), Ok(want));
         }
 
         // Any other refusal is surfaced, never guessed at.
@@ -9675,6 +10230,43 @@ mod occupancy {
             refusing.has_children(&["d".to_string()]),
             Err(Errno::PermissionDenied)
         );
+    }
+
+    /// The sample is the most frequent families first, each as its most
+    /// frequent kind, ties going to whichever was seen first; folders and
+    /// files of no recognised type make no card, and a bundle is a program.
+    #[test]
+    fn a_folder_sample_ranks_families_then_kinds_by_count_then_first_sight() {
+        let sample = |entries: &[(&str, FileKind)]| folder_sample(&[], entries.iter().copied());
+        assert_eq!(
+            sample(&[
+                ("song.mp3", FileKind::Regular),
+                ("a.png", FileKind::Regular),
+                ("b.jpg", FileKind::Regular),
+                ("c.jpg", FileKind::Regular),
+                ("film.mkv", FileKind::Regular),
+                ("other.mp3", FileKind::Regular),
+                ("blob.bin", FileKind::Regular),
+                ("Folder", FileKind::Directory),
+                ("Paint.app", FileKind::Directory),
+            ]),
+            FolderSample::new([IconKind::ImageJpeg, IconKind::Audio, IconKind::Video]),
+            "three pictures, two songs, then a video and a program tied, the video seen first"
+        );
+        assert_eq!(
+            sample(&[
+                ("b.txt", FileKind::Regular),
+                ("a.rs", FileKind::Regular),
+                ("Tool.app", FileKind::Directory),
+            ]),
+            FolderSample::new([IconKind::Text, IconKind::AppBundle]),
+            "a tie between kinds goes to the first seen"
+        );
+        assert!(sample(&[
+            ("Folder", FileKind::Directory),
+            ("x.bin", FileKind::Regular)
+        ])
+        .is_empty());
     }
 
     #[test]
@@ -9771,7 +10363,7 @@ mod occupancy {
             fn has_children(&mut self, _components: &[String]) -> Result<Probe, Errno> {
                 self.asks += 1;
                 if self.asks > 2 {
-                    return Ok(Probe::Ready(true));
+                    return Ok(Probe::Holds(FolderSample::default()));
                 }
                 Ok(Probe::Pending)
             }
@@ -9792,7 +10384,10 @@ mod occupancy {
         resolve_visible(&mut browser);
         assert_eq!(browser.entries()[0].occupancy(), Occupancy::Unprobed);
         resolve_visible(&mut browser);
-        assert_eq!(browser.entries()[0].occupancy(), Occupancy::NonEmpty);
+        assert_eq!(
+            browser.entries()[0].occupancy(),
+            Occupancy::NonEmpty(FolderSample::default())
+        );
     }
 
     /// A deferring app repaints on the resolve that *adopts* an answer, so the
@@ -9811,7 +10406,8 @@ mod occupancy {
 
         fn has_children(&mut self, _components: &[String]) -> Result<Probe, Errno> {
             Ok(match *self.answer.borrow() {
-                Some(occupied) => Probe::Ready(occupied),
+                Some(true) => Probe::Holds(FolderSample::default()),
+                Some(false) => Probe::Empty,
                 None => Probe::Pending,
             })
         }
@@ -9830,11 +10426,17 @@ mod occupancy {
             "nothing is left unprobed, so nothing moved and no frame is owed"
         );
 
-        // A refused probe is an answer too — it moves the entry off
-        // `Unprobed`, so it is adopted once and never asked again.
-        let mut refused = Browser::open_root(empty_and_full().refusing("/bb-full")).expect("root");
-        assert!(resolve_visible(&mut refused));
+        // A refused probe is an answer too: it moves the entry off
+        // `Unprobed`, so it is adopted once and never asked again. Like an
+        // empty folder it draws the plain picture it drew before, so neither
+        // owes a frame.
+        let source = empty_and_full().refusing("/bb-full");
+        let tally = source.tally();
+        let mut refused = Browser::open_root(source).expect("root");
         assert!(!resolve_visible(&mut refused));
+        assert_eq!(refused.entries()[1].occupancy(), Occupancy::Indeterminate);
+        assert!(!resolve_visible(&mut refused));
+        assert_eq!(probes_of(&tally, "/bb-full"), 1, "never asked again");
 
         // A source that answers elsewhere moves nothing until its answer
         // lands, which is exactly the deferred app's case.

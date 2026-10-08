@@ -24,10 +24,12 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::Errno;
+use tairix_icon::FolderSample;
 
-use crate::entry::Entry;
+use crate::entry::{Entry, Occupancy};
 
 /// What a source has for a directory right now.
 ///
@@ -54,8 +56,11 @@ pub enum Listing {
 /// error, and an error is never retried by waiting.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Probe {
-    /// Whether the directory holds at least one child.
-    Ready(bool),
+    /// The directory holds nothing.
+    Empty,
+    /// The directory holds something; the sample is what its first batch of
+    /// entries shows of it.
+    Holds(FolderSample),
     /// The probe is under way somewhere else and the answer will arrive later.
     ///
     /// The source has taken note; the *embedder* asks again when whatever it
@@ -114,23 +119,24 @@ pub trait DirectorySource {
         false
     }
 
-    /// Whether the directory named by `components` holds at least one child.
+    /// Whether the directory named by `components` holds anything, and what
+    /// its first batch of entries shows of it.
     ///
     /// This answers the one question a listing cannot: no VFS surface reports
-    /// a child count, so the empty/non-empty cue the browser draws is only
-    /// knowable by reading the directory. The answer is a `bool`, never a
-    /// listing — an implementation must read the *cheapest* thing that decides
-    /// it (one record) and must never build, copy, or walk the children.
+    /// a child count, so the cue the browser draws is only knowable by reading
+    /// the directory. An implementation reads one bounded batch and classifies
+    /// its names ([`crate::folder_sample`]); it never reads further, opens a
+    /// child, or reads a byte of content.
     ///
     /// A source that probes on the caller's own thread answers
-    /// [`Probe::Ready`]. One that probes elsewhere answers [`Probe::Pending`]
-    /// and is asked again on the next resolve; asking again with the same
-    /// `components` must not start a second probe.
+    /// [`Probe::Holds`] or [`Probe::Empty`]. One that probes elsewhere answers
+    /// [`Probe::Pending`] and is asked again on the next resolve; asking again
+    /// with the same `components` must not start a second probe.
     ///
     /// Probing exercises the caller's directory-read authority on a child the
     /// caller is only *displaying*, so a source is free not to offer it: the
     /// default answers [`Errno::NotImplemented`], which the browser records as
-    /// [`Occupancy::Indeterminate`](crate::Occupancy::Indeterminate) and draws
+    /// [`Occupancy::Indeterminate`] and draws
     /// as a plain folder. The trusted file picker takes that default
     /// deliberately — the cue adds nothing to choosing a file, so the picker
     /// exercises no authority it does not need.
@@ -145,4 +151,56 @@ pub trait DirectorySource {
         let _ = components;
         Err(Errno::NotImplemented)
     }
+}
+
+/// Latch what `source` now knows of each plain directory in `range` of
+/// `entries`, listed out of the directory `parent` names, calling `moved` with
+/// the index of each whose picture changed.
+///
+/// Only an entry that [needs one](Entry::needs_occupancy_probe) is asked
+/// about, so a file, a bundle, and an answered folder cost nothing — a refused
+/// probe included, which latches
+/// [`Indeterminate`](Occupancy::Indeterminate) rather than becoming a
+/// per-frame ask. An answer still [`Pending`](Probe::Pending) leaves the entry
+/// to be asked on the next resolve. Indices past the end are ignored.
+///
+/// Every surface that draws folder cues resolves them here, so the file
+/// manager and the desktop cannot read the same answer differently. `parent`
+/// is borrowed only to spell each child's components in place, and is as it
+/// was when this returns.
+pub fn resolve_occupancy<S: DirectorySource + ?Sized>(
+    source: &mut S,
+    parent: &mut Vec<String>,
+    entries: &mut [Entry],
+    range: Range<usize>,
+    mut moved: impl FnMut(usize),
+) {
+    let end = range.end.min(entries.len());
+    let Some(asked) = entries.get_mut(range.start.min(end)..end) else {
+        return;
+    };
+    // One leaf buffer, rewritten per child, rather than an allocation per ask.
+    parent.push(String::new());
+    for (index, entry) in (range.start..).zip(asked) {
+        if !entry.needs_occupancy_probe() {
+            continue;
+        }
+        if let Some(leaf) = parent.last_mut() {
+            leaf.clear();
+            leaf.push_str(entry.name());
+        }
+        let occupancy = match source.has_children(parent) {
+            Ok(Probe::Holds(sample)) => Occupancy::NonEmpty(sample),
+            Ok(Probe::Empty) => Occupancy::Empty,
+            Ok(Probe::Pending) => continue,
+            Err(_) => Occupancy::Indeterminate,
+        };
+        // Only a folder with contents draws them: an empty one, an unknown one
+        // and an unprobed one are the same plain picture.
+        if entry.occupancy().pictured() != occupancy.pictured() {
+            moved(index);
+        }
+        entry.set_occupancy(occupancy);
+    }
+    parent.pop();
 }

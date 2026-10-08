@@ -61,8 +61,8 @@
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NameMatching,
-    NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -79,7 +79,7 @@ mod volume;
 #[cfg(test)]
 mod tests;
 
-use bigdir::{BigDir, DirStore};
+use bigdir::{BigDir, BigHeader, DirStore};
 use dir::{FixedDir, FixedFormat, Object};
 use disc::{
     boot_block_checksum, DiscRecord, BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, DISC_RECORD_IN_BOOT_BLOCK,
@@ -111,38 +111,74 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
 
-/// Mask isolating the indirect disc address in a packed `NodeId` (a new
-/// map indirect address is at most a 19-bit fragment id plus the 8-bit
-/// share offset; an old-map start sector is 24 bits).
+/// Mask isolating an address in a packed `NodeId`: a new-map indirect
+/// address is at most a 19-bit fragment id plus the 8-bit share offset, and
+/// an old-map start sector is 24 bits.
 const NODE_ADDR_MASK: u64 = (1 << 28) - 1;
 /// `NodeId` bit marking a directory.
 const NODE_DIR_FLAG: u64 = 1 << 28;
 /// `NodeId` validity bit, set on every live node so that no live node
 /// ever equals `NodeId::NONE` (`0`).
 const NODE_VALID_FLAG: u64 = 1 << 29;
-/// Bit position at which the object's byte size is packed.
-const NODE_SIZE_SHIFT: u64 = 32;
+/// `NodeId` bit marking an object with no allocation, which has no address
+/// and is named by a digest of its name instead.
+const NODE_EMPTY_FLAG: u64 = 1 << 30;
+/// Bit position of the parent directory's address.
+const NODE_PARENT_SHIFT: u64 = 32;
+/// Bit position of the digest bits an empty object keeps past the address
+/// field.
+const NODE_DIGEST_HIGH_SHIFT: u64 = 60;
 
-/// Pack an object's identity into a self-describing `NodeId`.
-fn pack_node(indaddr: u32, is_dir: bool, size: u32) -> NodeId {
-    let mut raw = u64::from(indaddr) & NODE_ADDR_MASK | NODE_VALID_FLAG;
-    if is_dir {
+/// The node of `object`, an entry of the directory at `parent`.
+///
+/// An object is its address, so its node names that and the parent whose
+/// entry holds its size, stamp and attributes: resolving it reads one
+/// directory, never the tree. Its size is not part of it, so writing a file
+/// or growing a directory leaves the node as it was. An object with no
+/// allocation is named by a digest of its name, unique within the parent.
+fn child_node(object: &Object, parent: u32) -> NodeId {
+    let mut raw = NODE_VALID_FLAG | (u64::from(parent) & NODE_ADDR_MASK) << NODE_PARENT_SHIFT;
+    if object.is_dir() {
         raw |= NODE_DIR_FLAG;
     }
-    raw |= u64::from(size) << NODE_SIZE_SHIFT;
+    if object.indaddr == 0 {
+        let digest = name_digest(object.name());
+        raw |= NODE_EMPTY_FLAG
+            | u64::from(digest) & NODE_ADDR_MASK
+            | u64::from(digest >> 28) << NODE_DIGEST_HIGH_SHIFT;
+    } else {
+        raw |= u64::from(object.indaddr) & NODE_ADDR_MASK;
+    }
     NodeId::from_raw(raw)
 }
 
-/// Pack a directory `Object`'s identity (a file's node carries its
-/// byte size; a directory's carries its on-disc directory size).
-fn object_node(object: &Object) -> NodeId {
-    pack_node(object.indaddr, object.is_dir(), object.size)
+/// The root directory's node: its address, and no parent.
+fn root_node_at(indaddr: u32) -> NodeId {
+    NodeId::from_raw(NODE_VALID_FLAG | NODE_DIR_FLAG | u64::from(indaddr) & NODE_ADDR_MASK)
 }
 
-/// Indirect disc address (or old-map start sector) in a packed node.
+/// A digest of `name` as `FileCore` compares it, without regard to case.
+fn name_digest(name: &[u8]) -> u32 {
+    let mut folded = [0u8; dir::MAX_NAME_LEN];
+    let name = &name[..name.len().min(dir::MAX_NAME_LEN)];
+    for (into, &byte) in folded.iter_mut().zip(name) {
+        *into = byte.to_ascii_uppercase();
+    }
+    let [a, b, c, d, ..] =
+        tairix_hash::FastHash::hash_bytes(0, &folded[..name.len()]).to_le_bytes();
+    u32::from_le_bytes([a, b, c, d])
+}
+
+/// Address (or old-map start sector) in a packed node; for an empty object,
+/// the low bits of its name digest.
 fn node_addr(node: NodeId) -> u32 {
     // The masked value spans at most 28 bits, so it always fits `u32`.
     u32::try_from(node.raw() & NODE_ADDR_MASK).unwrap_or(0)
+}
+
+/// The address of the directory whose entry holds `node`.
+fn node_parent(node: NodeId) -> u32 {
+    u32::try_from(node.raw() >> NODE_PARENT_SHIFT & NODE_ADDR_MASK).unwrap_or(0)
 }
 
 /// Whether a packed node denotes a directory.
@@ -150,16 +186,26 @@ fn node_is_dir(node: NodeId) -> bool {
     node.raw() & NODE_DIR_FLAG != 0
 }
 
+/// Whether a packed node denotes an object with no allocation.
+fn node_is_empty(node: NodeId) -> bool {
+    node.raw() & NODE_EMPTY_FLAG != 0
+}
+
 /// Whether the node was packed by this driver (fail-closed guard).
 fn node_is_valid(node: NodeId) -> bool {
     node.raw() & NODE_VALID_FLAG != 0
 }
 
-/// Object byte size carried by a packed node (a directory's is its
-/// on-disc directory size).
-fn node_size(node: NodeId) -> u32 {
-    // The high 32 bits of a `u64` always fit in `u32`.
-    u32::try_from(node.raw() >> NODE_SIZE_SHIFT).unwrap_or(0)
+/// Whether `node` names `object`, an entry of its parent.
+fn node_names(node: NodeId, object: &Object) -> bool {
+    if node_is_dir(node) != object.is_dir() {
+        return false;
+    }
+    if node_is_empty(node) {
+        object.indaddr == 0 && child_node(object, node_parent(node)) == node
+    } else {
+        object.indaddr != 0 && object.indaddr == node_addr(node)
+    }
 }
 
 /// A fixed directory's size, in the `u32` form node packing uses.
@@ -214,10 +260,27 @@ enum Backing {
     },
 }
 
+/// How many resolved entries an [`Adfs`] keeps.
+const RESOLVED_LEN: usize = 8;
+
 /// An ADFS volume attached to a block device.
 pub struct Adfs<B: Block> {
     volume: Volume<B>,
     backing: Backing,
+    /// Bumped by every insertion and removal, which shift a sorted
+    /// directory's entries: a listing cursor carries the generation it was
+    /// minted in, so its index is trusted only while nothing has moved.
+    generation: u32,
+    /// Entries recently resolved by node, so the read or stat that follows a
+    /// lookup does not read the parent again. Emptied by every directory
+    /// write, which may change any of them.
+    resolved: [Option<(NodeId, Object)>; RESOLVED_LEN],
+    /// Where the next resolution is kept, round the slots in turn.
+    next_resolved: usize,
+    /// The big directory last validated whole, so a listing's later batches
+    /// and the lookups between them do not re-read it to check it again.
+    /// Replaced by each write's own result, and dropped by any other.
+    validated: Option<(u32, BigHeader)>,
 }
 
 impl<B: Block> Adfs<B> {
@@ -248,10 +311,17 @@ impl<B: Block> Adfs<B> {
                 None => Self::probe_old_map(&mut volume)?,
             },
         };
-        let mut adfs = Self { volume, backing };
+        let mut adfs = Self {
+            volume,
+            backing,
+            generation: 0,
+            resolved: [None; RESOLVED_LEN],
+            next_resolved: 0,
+            validated: None,
+        };
         // The root directory must itself validate.
-        let root = adfs.root_node();
-        adfs.load_dir(node_addr(root), node_size(root))?;
+        let root = adfs.root_addr();
+        adfs.load_dir(root)?;
         Ok(adfs)
     }
 
@@ -338,21 +408,26 @@ impl<B: Block> Adfs<B> {
         })
     }
 
-    /// The packed root directory node.
+    /// The root directory's node.
     fn root_node(&self) -> NodeId {
+        root_node_at(self.root_addr())
+    }
+
+    /// The root directory's address (old map: start sector).
+    fn root_addr(&self) -> u32 {
         match &self.backing {
-            Backing::Old {
-                format,
-                root_sector,
-            } => pack_node(*root_sector, true, fixed_size_u32(*format)),
-            Backing::New { map, .. } => {
-                let size = if map.record.format_version != 0 {
-                    map.record.root_size
-                } else {
-                    dir::NEW_DIR_SIZE_U32
-                };
-                pack_node(map.record.root, true, size)
-            }
+            Backing::Old { root_sector, .. } => *root_sector,
+            Backing::New { map, .. } => map.record.root,
+        }
+    }
+
+    /// The root directory's size, which no entry records: the volume's
+    /// fixed directory size, or a big root's in the disc record.
+    fn root_size(&self) -> u32 {
+        match &self.backing {
+            Backing::Old { format, .. } => fixed_size_u32(*format),
+            Backing::New { map, .. } if map.record.format_version != 0 => map.record.root_size,
+            Backing::New { .. } => dir::NEW_DIR_SIZE_U32,
         }
     }
 
@@ -428,18 +503,25 @@ impl<B: Block> Adfs<B> {
 
     /// Load and validate the directory object at `indaddr`.
     ///
-    /// The node-carried size is deliberately not consulted: a fixed
-    /// directory's size is dictated by the volume's format, a big
-    /// directory's by its own validated header, and the allocation map
-    /// bounds every access, so a stale or lying size still fails closed.
-    fn load_dir(&mut self, indaddr: u32, _size_hint: u32) -> Result<DirHandle, DriverError> {
+    /// A fixed directory's size is dictated by the volume's format and a big
+    /// directory's by its own validated header, and the allocation map bounds
+    /// every access. A big directory validated whole since its last write is
+    /// taken as it stands.
+    fn load_dir(&mut self, indaddr: u32) -> Result<DirHandle, DriverError> {
         if self.is_big_dir() {
+            if let Some((held, header)) = self.validated {
+                if held == indaddr {
+                    return Ok(DirHandle::Big(BigDir { header }));
+                }
+            }
             let mut store = ObjectStore {
                 adfs: self,
                 indaddr,
                 size: u32::MAX,
             };
-            Ok(DirHandle::Big(BigDir::load(&mut store, u32::MAX)?))
+            let dir = BigDir::load(&mut store, u32::MAX)?;
+            self.validated = Some((indaddr, dir.header));
+            Ok(DirHandle::Big(dir))
         } else {
             let format = self.fixed_format();
             let mut data = [0u8; dir::NEW_DIR_SIZE];
@@ -448,8 +530,21 @@ impl<B: Block> Adfs<B> {
         }
     }
 
+    /// A directory is about to be written: forget what was resolved, and
+    /// what was validated, until the write re-seats it.
+    fn directories_changing(&mut self) {
+        self.resolved = [None; RESOLVED_LEN];
+        self.validated = None;
+    }
+
+    /// The big directory at `indaddr` stands as `dir`, just written.
+    fn validated_as(&mut self, indaddr: u32, dir: &BigDir) {
+        self.validated = Some((indaddr, dir.header));
+    }
+
     /// Write a mutated fixed directory back to `indaddr`.
     fn store_fixed_dir(&mut self, indaddr: u32, dir: &FixedDir) -> Result<(), DriverError> {
+        self.directories_changing();
         let size = dir.format.size();
         // Re-stage through the object map so a fragmented new-map
         // directory lands in the right places.
@@ -464,13 +559,28 @@ impl<B: Block> Adfs<B> {
     }
 
     /// The `index`-th entry of the directory at `indaddr`, if any.
-    fn dir_get(
+    fn dir_get(&mut self, indaddr: u32, index: u32) -> Result<Option<Object>, DriverError> {
+        let handle = self.load_dir(indaddr)?;
+        self.dir_entry(&handle, indaddr, index)
+    }
+
+    /// How many entries the loaded directory `handle` holds.
+    fn dir_len(handle: &DirHandle) -> u32 {
+        match handle {
+            // A fixed directory holds at most 77 entries.
+            DirHandle::Fixed(dir) => u32::try_from(dir.count()).unwrap_or(u32::MAX),
+            DirHandle::Big(dir) => dir.header.entries,
+        }
+    }
+
+    /// The `index`-th entry of the loaded directory `handle` at `indaddr`.
+    fn dir_entry(
         &mut self,
+        handle: &DirHandle,
         indaddr: u32,
-        size: u32,
         index: u32,
     ) -> Result<Option<Object>, DriverError> {
-        match self.load_dir(indaddr, size)? {
+        match handle {
             DirHandle::Fixed(dir) => Ok(usize::try_from(index).ok().and_then(|i| dir.entry(i))),
             DirHandle::Big(dir) => {
                 let mut store = ObjectStore {
@@ -483,14 +593,48 @@ impl<B: Block> Adfs<B> {
         }
     }
 
+    /// Where a listing of `handle` resumes for `cursor`, which follows the
+    /// entry named `after`.
+    ///
+    /// The cursor's own index holds while no insertion or removal has run
+    /// since it was minted. Otherwise entries may have shifted, and the
+    /// listing resumes just past `after` in the directory's sort order, which
+    /// nothing shifts: an entry present throughout is listed exactly once.
+    fn resume_index(
+        &mut self,
+        handle: &DirHandle,
+        indaddr: u32,
+        cursor: u64,
+        after: &[u8],
+    ) -> Result<u32, DriverError> {
+        let [i0, i1, i2, i3, g0, g1, g2, g3] = cursor.to_le_bytes();
+        let index = u32::from_le_bytes([i0, i1, i2, i3]);
+        let minted = u32::from_le_bytes([g0, g1, g2, g3]);
+        if cursor == 0 || minted == self.generation || after.is_empty() {
+            return Ok(index);
+        }
+        let (mut low, mut high) = (0u32, Self::dir_len(handle));
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let object = self
+                .dir_entry(handle, indaddr, mid)?
+                .ok_or(DriverError::BadMagic)?;
+            if dir::name_cmp(object.name(), after) == core::cmp::Ordering::Greater {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        Ok(low)
+    }
+
     /// Find the entry named `name` in the directory at `indaddr`.
     fn dir_lookup(
         &mut self,
         indaddr: u32,
-        size: u32,
         name: &[u8],
     ) -> Result<Option<(u32, Object)>, DriverError> {
-        match self.load_dir(indaddr, size)? {
+        match self.load_dir(indaddr)? {
             DirHandle::Fixed(dir) => Ok(dir
                 .find(name)
                 // A fixed directory holds at most 77 entries.
@@ -557,6 +701,7 @@ impl<B: Block> Adfs<B> {
         if indaddr == 0 {
             return Ok(());
         }
+        self.directories_changing();
         match &self.backing {
             Backing::Old { .. } => {
                 // A zero-length object occupies no sectors.
@@ -593,10 +738,15 @@ impl<B: Block> Adfs<B> {
     /// growth is impossible. Returns the object's (possibly new)
     /// indirect disc address.
     ///
-    /// A relocated shared-fragment object leaves its old fragment to
-    /// [`Self::release_maybe_shared`], which the caller invokes with
-    /// the old address.
-    fn grow_object(&mut self, indaddr: u32, size: u32, new_size: u64) -> Result<u32, DriverError> {
+    /// A relocated shared-fragment object, an entry of the directory at
+    /// `parent`, leaves its old fragment to [`Self::release_maybe_shared`].
+    fn grow_object(
+        &mut self,
+        indaddr: u32,
+        size: u32,
+        new_size: u64,
+        parent: u32,
+    ) -> Result<u32, DriverError> {
         if new_size <= u64::from(size) && indaddr != 0 {
             return Ok(indaddr);
         }
@@ -643,7 +793,7 @@ impl<B: Block> Adfs<B> {
                 if size != 0 {
                     self.copy_object(indaddr, new_indaddr, u64::from(size))?;
                 }
-                self.release_maybe_shared(indaddr, size)?;
+                self.release_maybe_shared(indaddr, size, parent)?;
                 Ok(new_indaddr)
             }
         }
@@ -681,58 +831,47 @@ impl<B: Block> Adfs<B> {
         }
     }
 
-    /// Release the allocation behind `indaddr`, honouring fragment
-    /// sharing: a shared fragment is freed only when no other live
-    /// directory entry references it.
-    fn release_maybe_shared(&mut self, indaddr: u32, size: u32) -> Result<(), DriverError> {
+    /// Release the allocation behind `indaddr`, an entry of the directory
+    /// at `parent`, honouring fragment sharing: a shared fragment is freed
+    /// only when nothing else uses it.
+    fn release_maybe_shared(
+        &mut self,
+        indaddr: u32,
+        size: u32,
+        parent: u32,
+    ) -> Result<(), DriverError> {
         if indaddr == 0 {
             return Ok(());
         }
         let shared = matches!(&self.backing, Backing::New { .. }) && indaddr & 0xFF != 0;
-        if shared && self.fragment_used_elsewhere(indaddr)? {
+        if shared && self.fragment_shared_in(parent, indaddr)? {
             return Ok(());
         }
         self.free(indaddr, size)
     }
 
-    /// Whether any live directory entry other than `skip_indaddr`
-    /// references the same new-map fragment id.
+    /// Whether the directory at `parent`, or another of its entries, uses
+    /// the fragment of the object at `indaddr`.
     ///
-    /// The walk is depth-first over the directory tree with an explicit,
-    /// bounded stack: a genuine `FileCore` tree never approaches the
-    /// bound (RISC OS's path length limits nesting long before it), so
-    /// exceeding it means a corrupt or cyclic tree and fails closed.
-    fn fragment_used_elsewhere(&mut self, skip_indaddr: u32) -> Result<bool, DriverError> {
-        const MAX_DEPTH: usize = 96;
-        let frag_id = skip_indaddr >> 8;
-        let root = self.root_node();
-        let mut stack = [(0u32, 0u32, 0u32); MAX_DEPTH];
-        stack[0] = (node_addr(root), node_size(root), 0);
-        let mut depth = 0usize;
-        loop {
-            let (dir_addr, dir_size, index) = stack[depth];
-            match self.dir_get(dir_addr, dir_size, index)? {
-                None => {
-                    if depth == 0 {
-                        return Ok(false);
-                    }
-                    depth -= 1;
-                }
-                Some(object) => {
-                    stack[depth].2 = index + 1;
-                    if object.indaddr >> 8 == frag_id && object.indaddr != skip_indaddr {
-                        return Ok(true);
-                    }
-                    if object.is_dir() {
-                        depth += 1;
-                        if depth == MAX_DEPTH {
-                            return Err(DriverError::BadMagic);
-                        }
-                        stack[depth] = (object.indaddr, object.size, 0);
-                    }
-                }
+    /// They are the only objects that can: `FileCore` shares a disc object
+    /// only between a directory and the files in it, or files of one
+    /// directory (RISC OS PRM, `FileCore`), so one directory answers what a
+    /// walk of the tree once did.
+    fn fragment_shared_in(&mut self, parent: u32, indaddr: u32) -> Result<bool, DriverError> {
+        let fragment = indaddr >> 8;
+        if parent >> 8 == fragment {
+            return Ok(true);
+        }
+        let handle = self.load_dir(parent)?;
+        for index in 0..Self::dir_len(&handle) {
+            let Some(object) = self.dir_entry(&handle, parent, index)? else {
+                break;
+            };
+            if object.indaddr >> 8 == fragment && object.indaddr != indaddr {
+                return Ok(true);
             }
         }
+        Ok(false)
     }
 }
 
@@ -791,13 +930,9 @@ impl<B: Block> Adfs<B> {
 
     /// Insert `object` into the directory at `dir_addr`, growing a big
     /// directory in place when it is full.
-    fn dir_insert(
-        &mut self,
-        dir_addr: u32,
-        dir_size: u32,
-        object: &Object,
-    ) -> Result<(), DriverError> {
-        match self.load_dir(dir_addr, dir_size)? {
+    fn dir_insert(&mut self, dir_addr: u32, object: &Object) -> Result<(), DriverError> {
+        self.generation = self.generation.wrapping_add(1);
+        match self.load_dir(dir_addr)? {
             DirHandle::Fixed(mut dir) => {
                 dir.insert(object)?;
                 self.store_fixed_dir(dir_addr, &dir)
@@ -810,7 +945,11 @@ impl<B: Block> Adfs<B> {
                 };
                 match dir.insert(&mut store, object) {
                     Err(DriverError::NoSpace) => {}
-                    other => return other,
+                    Ok(()) => {
+                        self.validated_as(dir_addr, &dir);
+                        return Ok(());
+                    }
+                    Err(err) => return Err(err),
                 }
                 // Full: grow by one grain and retry.
                 let new_size = dir
@@ -829,19 +968,16 @@ impl<B: Block> Adfs<B> {
                 };
                 dir.grow(&mut store, new_size)?;
                 dir.insert(&mut store, object)?;
+                self.validated_as(dir_addr, &dir);
                 self.record_dir_size(dir_addr, new_size)
             }
         }
     }
 
     /// Remove the entry at `index` from the directory at `dir_addr`.
-    fn dir_remove_at(
-        &mut self,
-        dir_addr: u32,
-        dir_size: u32,
-        index: u32,
-    ) -> Result<(), DriverError> {
-        match self.load_dir(dir_addr, dir_size)? {
+    fn dir_remove_at(&mut self, dir_addr: u32, index: u32) -> Result<(), DriverError> {
+        self.generation = self.generation.wrapping_add(1);
+        match self.load_dir(dir_addr)? {
             DirHandle::Fixed(mut dir) => {
                 dir.remove(index as usize);
                 self.store_fixed_dir(dir_addr, &dir)
@@ -852,7 +988,9 @@ impl<B: Block> Adfs<B> {
                     indaddr: dir_addr,
                     size: u32::MAX,
                 };
-                dir.remove(&mut store, index)
+                dir.remove(&mut store, index)?;
+                self.validated_as(dir_addr, &dir);
+                Ok(())
             }
         }
     }
@@ -862,11 +1000,10 @@ impl<B: Block> Adfs<B> {
     fn dir_update_at(
         &mut self,
         dir_addr: u32,
-        dir_size: u32,
         index: u32,
         object: &Object,
     ) -> Result<(), DriverError> {
-        match self.load_dir(dir_addr, dir_size)? {
+        match self.load_dir(dir_addr)? {
             DirHandle::Fixed(mut dir) => {
                 dir.update(index as usize, object);
                 self.store_fixed_dir(dir_addr, &dir)
@@ -877,14 +1014,16 @@ impl<B: Block> Adfs<B> {
                     indaddr: dir_addr,
                     size: u32::MAX,
                 };
-                dir.update(&mut store, index, object)
+                dir.update(&mut store, index, object)?;
+                self.validated_as(dir_addr, &dir);
+                Ok(())
             }
         }
     }
 
     /// The parent address recorded inside the directory at `dir_addr`.
-    fn dir_parent(&mut self, dir_addr: u32, dir_size: u32) -> Result<u32, DriverError> {
-        match self.load_dir(dir_addr, dir_size)? {
+    fn dir_parent(&mut self, dir_addr: u32) -> Result<u32, DriverError> {
+        match self.load_dir(dir_addr)? {
             DirHandle::Fixed(dir) => Ok(dir.parent()),
             DirHandle::Big(dir) => Ok(dir.header.parent),
         }
@@ -903,18 +1042,18 @@ impl<B: Block> Adfs<B> {
             let boot = *boot_block;
             return map.set_root_size(&mut self.volume, boot, new_size);
         }
-        let parent = self.dir_parent(dir_addr, 0)?;
+        let parent = self.dir_parent(dir_addr)?;
         // Find the directory's entry in its parent by address.
         let mut index = 0u32;
         loop {
-            let Some(entry) = self.dir_get(parent, 0, index)? else {
+            let Some(entry) = self.dir_get(parent, index)? else {
                 // The tree disagrees with the child's parent pointer.
                 return Err(DriverError::BadMagic);
             };
             if entry.indaddr == dir_addr {
                 let mut updated = entry;
                 updated.size = new_size;
-                return self.dir_update_at(parent, 0, index, &updated);
+                return self.dir_update_at(parent, index, &updated);
             }
             index += 1;
         }
@@ -946,26 +1085,27 @@ impl<B: Block> FilesystemRead for Adfs<B> {
             return Err(DriverError::NotFound);
         }
         // The root has no directory entry and so no stored stamp; every
-        // other node's stamp lives in its parent's entry, resolved here.
-        let times = if node == self.root_node() {
-            NodeTimes::default()
-        } else {
-            object_times(&self.entry_of(node)?.3)
-        };
-        self.node_info_with_times(node, times)
+        // other node's lives in its parent's entry.
+        if node == self.root_node() {
+            let root = self.root_addr();
+            let allocated = self.object_allocated(root, self.root_size())?;
+            return Ok(NodeInfo {
+                kind: NodeKind::Directory,
+                nlink: NodeInfo::SINGLE_NAME,
+                size: 0,
+                allocated,
+                times: NodeTimes::default(),
+            });
+        }
+        let object = self.resolve(node)?;
+        self.info_of(&object)
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
-        if !node_is_valid(dir) || !node_is_dir(dir) {
-            return Err(DriverError::Unsupported);
-        }
-        if name.is_empty() || name.len() > dir::MAX_NAME_LEN {
-            return Err(DriverError::NotFound);
-        }
-        match self.dir_lookup(node_addr(dir), node_size(dir), name)? {
-            Some((_, object)) => Ok(object_node(&object)),
-            None => Err(DriverError::NotFound),
-        }
+        let (_, object) = self.resolve_child(dir, name)?;
+        let node = child_node(&object, node_addr(dir));
+        self.keep_resolved(node, &object);
+        Ok(node)
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
@@ -975,13 +1115,18 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         if node_is_dir(file) {
             return Err(DriverError::Unsupported);
         }
-        let size = u64::from(node_size(file));
-        if buf.is_empty() || offset >= size {
+        // An object with no allocation holds no bytes.
+        if node_is_empty(file) || buf.is_empty() {
+            return Ok(0);
+        }
+        let object = self.resolve(file)?;
+        let size = u64::from(object.size);
+        if offset >= size {
             return Ok(0);
         }
         let want = usize::try_from((size - offset).min(buf.len() as u64))
             .map_err(|_| DriverError::LengthOutOfRange)?;
-        self.object_read(node_addr(file), offset, &mut buf[..want])?;
+        self.object_read(object.indaddr, offset, &mut buf[..want])?;
         Ok(want)
     }
 
@@ -989,65 +1134,71 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         if !node_is_valid(dir) || !node_is_dir(dir) {
             return Err(DriverError::Unsupported);
         }
-        let Ok(index) = u32::try_from(cursor) else {
-            // A cursor beyond any possible entry is a finished listing.
-            return Ok(None);
-        };
-        let Some(object) = self.dir_get(node_addr(dir), node_size(dir), index)? else {
-            return Ok(None);
-        };
-        if object.name_len > name_out.len() {
-            return Err(DriverError::BufferTooSmall);
+        let indaddr = node_addr(dir);
+        // One load serves the whole call, however many entries it lists.
+        let handle = self.load_dir(indaddr)?;
+        let start = self.resume_index(&handle, indaddr, cursor, after)?;
+        for index in start..Self::dir_len(&handle) {
+            let Some(object) = self.dir_entry(&handle, indaddr, index)? else {
+                break;
+            };
+            let entry = DirEntry {
+                node: child_node(&object, indaddr),
+                info: self.info_of(&object)?,
+                next_cursor: (u64::from(self.generation) << 32) | u64::from(index + 1),
+            };
+            if visit(&entry, object.name()) == DirVisit::Stop {
+                break;
+            }
         }
-        name_out[..object.name_len].copy_from_slice(object.name());
-        let node = object_node(&object);
-        // The listing already holds the object, so its stamps come free
-        // without a second entry resolution.
-        let info = self.node_info_with_times(node, object_times(&object))?;
-        Ok(Some(DirEntry {
-            node,
-            info,
-            name_len: object.name_len,
-            next_cursor: u64::from(index) + 1,
-        }))
+        Ok(())
     }
 }
 
 impl<B: Block> Adfs<B> {
-    /// Build the [`NodeInfo`] of `node` from its already-known `times`.
-    ///
-    /// The structural half (kind, size, allocation) is computed once here,
-    /// so `node_info` and `read_dir` — which learn a node's timestamps by
-    /// different paths — never restate the size/allocation logic.
-    fn node_info_with_times(
-        &mut self,
-        node: NodeId,
-        times: NodeTimes,
-    ) -> Result<NodeInfo, DriverError> {
-        let size = node_size(node);
-        let allocated = self.object_allocated(node_addr(node), size)?;
-        if node_is_dir(node) {
-            Ok(NodeInfo {
-                kind: NodeKind::Directory,
-                nlink: NodeInfo::SINGLE_NAME,
-                size: 0,
-                allocated,
-                times,
-            })
+    /// The [`NodeInfo`] of `object`, from its entry alone.
+    fn info_of(&mut self, object: &Object) -> Result<NodeInfo, DriverError> {
+        let allocated = self.object_allocated(object.indaddr, object.size)?;
+        let (kind, size) = if object.is_dir() {
+            (NodeKind::Directory, 0)
         } else {
-            Ok(NodeInfo {
-                kind: NodeKind::RegularFile,
-                nlink: NodeInfo::SINGLE_NAME,
-                size: u64::from(size),
-                allocated,
-                times,
-            })
+            (NodeKind::RegularFile, u64::from(object.size))
+        };
+        Ok(NodeInfo {
+            kind,
+            nlink: NodeInfo::SINGLE_NAME,
+            size,
+            allocated,
+            times: object_times(object),
+        })
+    }
+
+    /// The entry non-root `node` names: one a lookup just made, else found
+    /// in its parent.
+    fn resolve(&mut self, node: NodeId) -> Result<Object, DriverError> {
+        if let Some((_, object)) = self
+            .resolved
+            .iter()
+            .flatten()
+            .find(|(held, _)| *held == node)
+        {
+            return Ok(*object);
         }
+        let (_, _, object) = self.entry_of(node)?;
+        self.keep_resolved(node, &object);
+        Ok(object)
+    }
+
+    /// Remember that `node` names `object` until the next directory write.
+    fn keep_resolved(&mut self, node: NodeId, object: &Object) {
+        self.resolved[self.next_resolved] = Some((node, *object));
+        self.next_resolved = (self.next_resolved + 1) % RESOLVED_LEN;
     }
 
     /// Resolve `name` within the directory node `dir`.
@@ -1058,13 +1209,13 @@ impl<B: Block> Adfs<B> {
         if name.is_empty() || name.len() > dir::MAX_NAME_LEN {
             return Err(DriverError::NotFound);
         }
-        self.dir_lookup(node_addr(dir), node_size(dir), name)?
+        self.dir_lookup(node_addr(dir), name)?
             .ok_or(DriverError::NotFound)
     }
 
     /// Whether the directory at `dir_addr` has no entries.
-    fn dir_is_empty(&mut self, dir_addr: u32, dir_size: u32) -> Result<bool, DriverError> {
-        match self.load_dir(dir_addr, dir_size)? {
+    fn dir_is_empty(&mut self, dir_addr: u32) -> Result<bool, DriverError> {
+        match self.load_dir(dir_addr)? {
             DirHandle::Fixed(dir) => Ok(dir.count() == 0),
             DirHandle::Big(dir) => Ok(dir.header.entries == 0),
         }
@@ -1073,8 +1224,8 @@ impl<B: Block> Adfs<B> {
     /// The `Hugo`/`Nick` marker of the fixed directory at `dir_addr`,
     /// copied onto directories created inside it so a volume stays
     /// marker-consistent.
-    fn fixed_marker(&mut self, dir_addr: u32, dir_size: u32) -> Result<[u8; 4], DriverError> {
-        match self.load_dir(dir_addr, dir_size)? {
+    fn fixed_marker(&mut self, dir_addr: u32) -> Result<[u8; 4], DriverError> {
+        match self.load_dir(dir_addr)? {
             DirHandle::Fixed(dir) => {
                 let mut marker = [0u8; 4];
                 marker.copy_from_slice(&dir.data[1..5]);
@@ -1104,8 +1255,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         }
         self.validate_new_name(name)?;
         let dir_addr = node_addr(dir);
-        let dir_size = node_size(dir);
-        if self.dir_lookup(dir_addr, dir_size, name)?.is_some() {
+        if self.dir_lookup(dir_addr, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
         let mut object = Object::named(name)?;
@@ -1113,7 +1263,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             NodeKind::RegularFile => {
                 // Created with owner read/write, no data allocation.
                 object.attr = dir::ATTR_OWNER_READ | dir::ATTR_OWNER_WRITE;
-                self.dir_insert(dir_addr, dir_size, &object)?;
+                self.dir_insert(dir_addr, &object)?;
             }
             // Acorn ADFS / FileCore has no symbolic-link object type, so the
             // creation is refused rather than approximated by a file whose
@@ -1141,14 +1291,14 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                     BigDir::initialise(&mut store, bytes, name, dir_addr)
                 } else {
                     let format = self.fixed_format();
-                    self.fixed_marker(dir_addr, dir_size).and_then(|marker| {
+                    self.fixed_marker(dir_addr).and_then(|marker| {
                         let fresh = FixedDir::initialise(format, marker, name, dir_addr);
                         self.store_fixed_dir(child, &fresh)
                     })
                 };
                 object.indaddr = child;
                 object.size = bytes;
-                let inserted = seeded.and_then(|()| self.dir_insert(dir_addr, dir_size, &object));
+                let inserted = seeded.and_then(|()| self.dir_insert(dir_addr, &object));
                 if let Err(err) = inserted {
                     // Fail closed: reclaim the orphaned allocation.
                     self.free(child, bytes)?;
@@ -1156,7 +1306,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 }
             }
         }
-        Ok(object_node(&object))
+        Ok(child_node(&object, dir_addr))
     }
 
     fn write_at(
@@ -1182,8 +1332,9 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             return Err(DriverError::NoSpace);
         }
         let size = object.size;
+        let dir_addr = node_addr(dir);
         let indaddr = if end > u64::from(size) {
-            self.grow_object(object.indaddr, size, end)?
+            self.grow_object(object.indaddr, size, end, dir_addr)?
         } else {
             object.indaddr
         };
@@ -1196,7 +1347,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             updated.indaddr = indaddr;
             // `end` was bounded by `u32::MAX` above.
             updated.size = size.max(u32::try_from(end).unwrap_or(u32::MAX));
-            self.dir_update_at(node_addr(dir), node_size(dir), index, &updated)?;
+            self.dir_update_at(dir_addr, index, &updated)?;
         }
         Ok(data.len())
     }
@@ -1210,14 +1361,15 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             return Err(DriverError::NoSpace);
         }
         let old = u64::from(object.size);
+        let dir_addr = node_addr(dir);
         let mut updated = object;
         match size.cmp(&old) {
             core::cmp::Ordering::Greater => {
-                updated.indaddr = self.grow_object(object.indaddr, object.size, size)?;
+                updated.indaddr = self.grow_object(object.indaddr, object.size, size, dir_addr)?;
                 self.zero_object_range(updated.indaddr, old, size)?;
             }
             core::cmp::Ordering::Less if size == 0 => {
-                self.release_maybe_shared(object.indaddr, object.size)?;
+                self.release_maybe_shared(object.indaddr, object.size, dir_addr)?;
                 updated.indaddr = 0;
             }
             core::cmp::Ordering::Less => {
@@ -1227,16 +1379,17 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         }
         // `size` was bounded by `u32::MAX` above.
         updated.size = u32::try_from(size).unwrap_or(u32::MAX);
-        self.dir_update_at(node_addr(dir), node_size(dir), index, &updated)
+        self.dir_update_at(dir_addr, index, &updated)
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         let (index, object) = self.resolve_child(dir, name)?;
-        if object.is_dir() && !self.dir_is_empty(object.indaddr, object.size)? {
+        if object.is_dir() && !self.dir_is_empty(object.indaddr)? {
             return Err(DriverError::DirectoryNotEmpty);
         }
-        self.dir_remove_at(node_addr(dir), node_size(dir), index)?;
-        self.release_maybe_shared(object.indaddr, object.size)
+        let dir_addr = node_addr(dir);
+        self.dir_remove_at(dir_addr, index)?;
+        self.release_maybe_shared(object.indaddr, object.size, dir_addr)
     }
 
     fn rename(
@@ -1260,7 +1413,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         // detach the cycle from the tree; walk the destination's
         // ancestry (bounded like the liveness walk).
         if object.is_dir() && src_addr != dst_addr {
-            let root_addr = node_addr(self.root_node());
+            let root_addr = self.root_addr();
             let mut cursor = dst_addr;
             let mut reached_root = false;
             for _ in 0..96 {
@@ -1271,7 +1424,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                     reached_root = true;
                     break;
                 }
-                cursor = self.dir_parent(cursor, 0)?;
+                cursor = self.dir_parent(cursor)?;
             }
             if !reached_root {
                 // Ancestry that never reaches the root is corrupt (or
@@ -1279,46 +1432,45 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
                 return Err(DriverError::BadMagic);
             }
         }
-        let replaced = self.dir_lookup(dst_addr, node_size(dst_dir), dst_name)?;
+        let replaced = self.dir_lookup(dst_addr, dst_name)?;
         if let Some((_, existing)) = &replaced {
             // Kind-compatible replacement only; a directory may replace
             // only an empty directory.
             if existing.is_dir() != object.is_dir() {
                 return Err(DriverError::Unsupported);
             }
-            if existing.is_dir() && !self.dir_is_empty(existing.indaddr, existing.size)? {
+            if existing.is_dir() && !self.dir_is_empty(existing.indaddr)? {
                 return Err(DriverError::DirectoryNotEmpty);
             }
         }
-        self.dir_remove_at(src_addr, node_size(src_dir), src_index)?;
+        self.dir_remove_at(src_addr, src_index)?;
         if let Some((_, existing)) = &replaced {
             // The destination entry already carries the right name:
             // point it at the moved object and free the replaced
             // one. (Indices may have shifted when the source entry
             // left the same directory, so look the name up afresh.)
-            let Some((dst_index, _)) = self.dir_lookup(dst_addr, node_size(dst_dir), dst_name)?
-            else {
+            let Some((dst_index, _)) = self.dir_lookup(dst_addr, dst_name)? else {
                 return Err(DriverError::BadMagic);
             };
             let mut updated = object;
             updated.name = existing.name;
             updated.name_len = existing.name_len;
-            self.dir_update_at(dst_addr, node_size(dst_dir), dst_index, &updated)?;
-            self.release_maybe_shared(existing.indaddr, existing.size)?;
+            self.dir_update_at(dst_addr, dst_index, &updated)?;
+            self.release_maybe_shared(existing.indaddr, existing.size, dst_addr)?;
         } else {
             let mut moved = object;
             moved.name = [0; dir::MAX_NAME_LEN];
             moved.name[..dst_name.len()].copy_from_slice(dst_name);
             moved.name_len = dst_name.len();
-            if let Err(err) = self.dir_insert(dst_addr, node_size(dst_dir), &moved) {
+            if let Err(err) = self.dir_insert(dst_addr, &moved) {
                 // Roll the source entry back so no entry is lost.
-                self.dir_insert(src_addr, node_size(src_dir), &object)?;
+                self.dir_insert(src_addr, &object)?;
                 return Err(err);
             }
         }
         // A moved directory's parent pointer follows it.
         if object.is_dir() && src_addr != dst_addr {
-            match self.load_dir(object.indaddr, object.size)? {
+            match self.load_dir(object.indaddr)? {
                 DirHandle::Fixed(mut child) => {
                     child.set_parent(dst_addr);
                     self.store_fixed_dir(object.indaddr, &child)?;
@@ -1353,55 +1505,39 @@ const ACORN_KEYS: [&[u8]; 5] = [
 ];
 
 impl<B: Block> Adfs<B> {
-    /// Find the directory entry whose object sits at `indaddr`,
-    /// returning `(parent_addr, parent_size, index, object)`.
+    /// The entry non-root `node` names, as `(parent, index, object)`, read
+    /// from the one directory that holds it.
     ///
-    /// The walk mirrors [`Self::fragment_used_elsewhere`]: depth-first
-    /// with a bounded stack, failing closed on a tree deeper than any
-    /// genuine `FileCore` volume.
-    fn find_entry_by_addr(
-        &mut self,
-        indaddr: u32,
-    ) -> Result<Option<(u32, u32, u32, Object)>, DriverError> {
-        const MAX_DEPTH: usize = 96;
-        let root = self.root_node();
-        let mut stack = [(0u32, 0u32, 0u32); MAX_DEPTH];
-        stack[0] = (node_addr(root), node_size(root), 0);
-        let mut depth = 0usize;
-        loop {
-            let (dir_addr, dir_size, index) = stack[depth];
-            match self.dir_get(dir_addr, dir_size, index)? {
-                None => {
-                    if depth == 0 {
-                        return Ok(None);
-                    }
-                    depth -= 1;
-                }
-                Some(object) => {
-                    stack[depth].2 = index + 1;
-                    if object.indaddr == indaddr {
-                        return Ok(Some((dir_addr, dir_size, index, object)));
-                    }
-                    if object.is_dir() {
-                        depth += 1;
-                        if depth == MAX_DEPTH {
-                            return Err(DriverError::BadMagic);
-                        }
-                        stack[depth] = (object.indaddr, object.size, 0);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Resolve `node` to its directory entry, or the error the trait
-    /// method reports for a dead node.
-    fn entry_of(&mut self, node: NodeId) -> Result<(u32, u32, u32, Object), DriverError> {
-        if !node_is_valid(node) {
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] for a node whose entry has gone.
+    /// * [`DriverError::Unsupported`] for an empty object whose name digest
+    ///   another empty sibling shares: it cannot be told apart by node, and
+    ///   is reached by name instead, never by a guess.
+    fn entry_of(&mut self, node: NodeId) -> Result<(u32, u32, Object), DriverError> {
+        if !node_is_valid(node) || node == self.root_node() {
             return Err(DriverError::NotFound);
         }
-        self.find_entry_by_addr(node_addr(node))?
-            .ok_or(DriverError::NotFound)
+        let parent = node_parent(node);
+        let handle = self.load_dir(parent)?;
+        let mut found = None;
+        for index in 0..Self::dir_len(&handle) {
+            let Some(object) = self.dir_entry(&handle, parent, index)? else {
+                break;
+            };
+            if !node_names(node, &object) {
+                continue;
+            }
+            if found.is_some() {
+                return Err(DriverError::Unsupported);
+            }
+            found = Some((parent, index, object));
+            // An address names one object; only a digest needs the rest.
+            if !node_is_empty(node) {
+                break;
+            }
+        }
+        found.ok_or(DriverError::NotFound)
     }
 
     /// The attribute bits this volume's directory format can store.
@@ -1443,7 +1579,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             // The root has no directory entry to hold metadata.
             return Ok(None);
         }
-        let (_, _, _, object) = self.entry_of(node)?;
+        let object = self.resolve(node)?;
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut staging = [0u8; acorn::ATTR_VALUE_MAX];
         let value: &[u8] = match key.as_bytes() {
@@ -1498,7 +1634,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             // The root has no directory entry to hold metadata.
             return Err(DriverError::Unsupported);
         }
-        let (parent, parent_size, index, object) = self.entry_of(node)?;
+        let (parent, index, object) = self.entry_of(node)?;
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut updated = object;
         match key.as_bytes() {
@@ -1551,7 +1687,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             // namespace has nowhere to live.
             _ => return Err(DriverError::Unsupported),
         }
-        self.dir_update_at(parent, parent_size, index, &updated)
+        self.dir_update_at(parent, index, &updated)
     }
 
     fn list_attr(
@@ -1566,7 +1702,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         if node == self.root_node() {
             return Ok(None);
         }
-        let (_, _, _, object) = self.entry_of(node)?;
+        let object = self.resolve(node)?;
         let (present, _) = Self::present_keys(&object);
         let mut seen = 0u64;
         for (key, &here) in ACORN_KEYS.iter().zip(present.iter()) {
@@ -1593,7 +1729,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
         if node == self.root_node() {
             return Err(DriverError::NotFound);
         }
-        let (parent, parent_size, index, object) = self.entry_of(node)?;
+        let (parent, index, object) = self.entry_of(node)?;
         let decoded = acorn::decode_load_exec(object.load, object.exec);
         let mut updated = object;
         match key.as_bytes() {
@@ -1622,7 +1758,7 @@ impl<B: Block> FilesystemAttrs for Adfs<B> {
             }
             _ => return Err(DriverError::NotFound),
         }
-        self.dir_update_at(parent, parent_size, index, &updated)
+        self.dir_update_at(parent, index, &updated)
     }
 }
 
@@ -1679,6 +1815,7 @@ impl<B: Block> DirStore for ObjectStore<'_, B> {
         if u64::from(offset) + data.len() as u64 > u64::from(self.size) {
             return Err(DriverError::BadMagic);
         }
+        self.adfs.directories_changing();
         self.adfs
             .object_write(self.indaddr, u64::from(offset), data)
     }

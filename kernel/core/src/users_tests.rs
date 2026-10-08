@@ -6,8 +6,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes,
+    DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, NodeTimes,
 };
 use tairix_abi::{CapabilityId, DriverError};
 use tairix_users::{
@@ -123,10 +123,11 @@ impl FilesystemRead for MockRoot {
     fn read_dir(
         &mut self,
         _dir: NodeId,
-        _index: u64,
-        _name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        Ok(None)
+        _cursor: u64,
+        _after: &[u8],
+        _visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        Ok(())
     }
 }
 

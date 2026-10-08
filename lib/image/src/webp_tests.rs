@@ -748,15 +748,34 @@ fn a_canvas_past_the_callers_limit_is_refused_before_it_is_allocated() {
     );
 }
 
+/// A fitted decode streams either codec's rows, an alpha plane applied to
+/// each, into exactly the whole decode reduced.
 #[test]
-fn a_fitted_decode_of_a_webp_is_its_natural_size() {
-    // Neither codec has a reduced-scale decode process, so there is nothing
-    // to choose between: VP8's intra prediction reads full-resolution
-    // neighbours and VP8L's predictors read the pixels already produced.
-    let bytes = riff(&[lossless(8, 8, [1, 2, 3, 4])]);
-    let fitted = crate::decode_fitted(&bytes, &limits(), crate::FitBox::new(2, 2))
-        .expect("a valid file decodes");
-    assert_eq!((fitted.width(), fitted.height()), (8, 8));
+fn a_fitted_decode_is_the_whole_decode_reduced() {
+    let plane: Vec<u8> = (0..16 * 9u32)
+        .map(|at| u8::try_from(at % 251).unwrap_or(0))
+        .collect();
+    let cases = [
+        riff(&[lossless(8, 8, [1, 2, 3, 4])]),
+        riff(&[lossy(16, 9)]),
+        riff(&[
+            chunk(*b"VP8X", &extended(0x10, 16, 9)),
+            chunk(*b"ALPH", &alpha_chunk(0, 1, &plane)),
+            lossy(16, 9),
+        ]),
+    ];
+    for bytes in cases {
+        let whole = decode(&bytes, &limits()).expect("a valid file decodes");
+        let fit = crate::FitBox::new(2, 2);
+        let size = fit.reduction(whole.width(), whole.height());
+        let fitted = crate::decode_fitted(&bytes, &limits(), fit).expect("a valid file decodes");
+        assert_eq!((fitted.width(), fitted.height()), size);
+        let source = tairix_raster::Rgba8Image::new(whole.width(), whole.height(), whole.pixels())
+            .expect("image");
+        let reduced =
+            tairix_raster::resample(&source, source.whole(), size.0, size.1).expect("resamples");
+        assert_eq!(fitted.pixels(), reduced.as_slice());
+    }
 }
 
 #[test]
@@ -797,4 +816,86 @@ fn an_odd_payload_is_padded_and_the_pad_is_not_part_of_it() {
         chunk(*b"VP8L", &stream),
     ]);
     expect_flat(&bytes, 4, 4, [3, 4, 5, 6]);
+}
+
+/// A lossy picture `width`×`height`, drawn over several macroblock rows.
+fn drawn(width: u32, height: u32) -> Vec<u8> {
+    let filter = crate::vp8::fixture::Filter {
+        simple: false,
+        level: 20,
+        sharpness: 0,
+    };
+    let frame = crate::vp8::fixture::drawn_keyframe(
+        width,
+        height,
+        filter,
+        1,
+        &mut tairix_fuzzseed::Prng::new(7),
+    );
+    chunk(*b"VP8 ", &frame)
+}
+
+/// A lossy picture's alpha is unfiltered a row at a time against the row
+/// above it, for every filter and for both the uncompressed and the lossless
+/// methods, so a fitted decode of a picture several macroblock rows tall is
+/// the whole decode reduced.
+#[test]
+fn alpha_read_a_row_at_a_time_is_the_whole_decode_for_every_method_and_filter() {
+    let (width, height) = (16u32, 40u32);
+    let plane: Vec<u8> = (0..width * height)
+        .map(|at| u8::try_from((at * 7) % 251).unwrap_or(0))
+        .collect();
+    let mut compressed = Bits::new();
+    compressed.put(0, 1);
+    compressed.put(0, 1);
+    compressed.put(0, 1);
+    flat_group(&mut compressed, [0, 0x5A, 0, 0]);
+    let compressed = compressed.finish();
+    for filter in 0..4u8 {
+        for (method, samples) in [(0u8, &plane[..]), (1, &compressed[..])] {
+            let bytes = riff(&[
+                chunk(*b"VP8X", &extended(0x10, width, height)),
+                chunk(*b"ALPH", &alpha_chunk(method, filter, samples)),
+                drawn(width, height),
+            ]);
+            let whole = decode(&bytes, &limits()).expect("a valid file decodes");
+            let fit = crate::FitBox::new(4, 4);
+            let size = fit.reduction(width, height);
+            let fitted = crate::decode_fitted(&bytes, &limits(), fit).expect("decodes");
+            let source =
+                tairix_raster::Rgba8Image::new(width, height, whole.pixels()).expect("image");
+            let reduced = tairix_raster::resample(&source, source.whole(), size.0, size.1)
+                .expect("resamples");
+            assert_eq!(
+                fitted.pixels(),
+                reduced.as_slice(),
+                "method {method} filter {filter}"
+            );
+        }
+    }
+}
+
+/// A lossy picture with uncompressed alpha is forecast at a window of rows
+/// however tall it is: no alpha plane is held.
+#[test]
+fn an_uncompressed_alpha_forecast_does_not_grow_with_the_picture() {
+    let forecast = |height: u32| {
+        let plane = vec![0x40u8; 16 * height as usize];
+        let bytes = riff(&[
+            chunk(*b"VP8X", &extended(0x10, 16, height)),
+            chunk(*b"ALPH", &alpha_chunk(0, 1, &plane)),
+            drawn(16, height),
+        ]);
+        super::fitted_peak_bytes(&bytes, &limits(), crate::FitBox::new(4, 4)).expect("forecast")
+    };
+    let (short, tall) = (forecast(64), forecast(256));
+    let fit = crate::FitBox::new(4, 4);
+    let reducer = |height: u32| {
+        tairix_raster::RowReducer::peak_bytes((16, height), fit.reduction(16, height))
+    };
+    assert_eq!(
+        tall - short,
+        reducer(256) - reducer(64),
+        "{short} then {tall}"
+    );
 }

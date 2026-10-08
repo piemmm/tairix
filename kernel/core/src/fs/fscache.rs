@@ -90,9 +90,9 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, VolumeStats, WritebackHost,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -103,6 +103,7 @@ use tairix_reclaim::{
     CacheCandidate, CacheLedger, CachePolicy, InvalidationSource, MemoryPressure, RebuildCost,
     ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
+use tairix_util::secret::Wiped;
 use zeroize::Zeroize;
 
 use super::changelog::ChangeLog;
@@ -601,6 +602,37 @@ impl<F> CachedFs<F> {
         }
     }
 
+    /// Cache the entry read at `cursor` of `dir`, and the child's stat record
+    /// it carries, so a follow-up listing or `node_info` is a hit.
+    fn admit_dirent(&mut self, dir: u64, cursor: u64, entry: DirEntry, mut name: Vec<u8>) {
+        if name.len() <= MAX_COMPONENT_LEN {
+            let payload = name.len().saturating_add(size_of::<DirEntry>());
+            if let Some(tick) = self.admit(KeyRef::Dirent(dir, cursor), payload, ENTRY_OVERHEAD) {
+                self.dirent
+                    .insert((dir, cursor), DirentEntry { entry, name, tick });
+            } else {
+                name.as_mut_slice().zeroize();
+            }
+        } else {
+            name.as_mut_slice().zeroize();
+            self.accounting.record_refusal(ReclaimClass::FsMetadata);
+        }
+        let child = entry.node.raw();
+        if !self.stat.contains_key(&child) {
+            if let Some(tick) =
+                self.admit(KeyRef::Stat(child), size_of::<NodeInfo>(), ENTRY_OVERHEAD)
+            {
+                self.stat.insert(
+                    child,
+                    StatEntry {
+                        info: entry.info,
+                        tick,
+                    },
+                );
+            }
+        }
+    }
+
     /// Admit an entry of `payload` cached-content bytes plus `metadata`
     /// bookkeeping bytes under `key`, evicting to make room. Returns
     /// the recency tick to store in the entry, or `None` when the entry
@@ -1067,67 +1099,58 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         self.enforce_pressure();
         let dir_raw = dir.raw();
-        if let Some(cached) = self.dirent.get(&(dir_raw, cursor)) {
-            // The contract's refusal for an undersized buffer is served
-            // from the cached name length exactly as the driver would.
-            if name_out.len() < cached.name.len() {
-                self.accounting.record_hit(ReclaimClass::FsMetadata);
-                return Err(DriverError::BufferTooSmall);
+        // The run of entries already cached from `cursor` on is served from
+        // memory; the driver is asked only from the first entry not held.
+        let mut at = cursor;
+        let mut resume = Wiped::<MAX_COMPONENT_LEN>::new();
+        let mut resume_len = after.len();
+        resume
+            .get_mut(..after.len())
+            .ok_or(DriverError::LengthOutOfRange)?
+            .copy_from_slice(after);
+        while let Some(cached) = self.dirent.get(&(dir_raw, at)) {
+            let (entry, old_tick) = (cached.entry, cached.tick);
+            let flow = visit(&entry, &cached.name);
+            if flow == DirVisit::Take {
+                resume_len = cached.name.len();
+                resume[..resume_len].copy_from_slice(&cached.name);
             }
-            let mut entry = cached.entry;
-            entry.name_len = cached.name.len();
-            name_out[..cached.name.len()].copy_from_slice(&cached.name);
-            let old_tick = cached.tick;
             let tick = self.touch(old_tick);
-            if let Some(cached) = self.dirent.get_mut(&(dir_raw, cursor)) {
+            if let Some(cached) = self.dirent.get_mut(&(dir_raw, at)) {
                 cached.tick = tick;
             }
             self.accounting.record_hit(ReclaimClass::FsMetadata);
-            return Ok(Some(entry));
+            if flow == DirVisit::Stop {
+                return Ok(());
+            }
+            at = entry.next_cursor;
         }
         self.accounting.record_miss(ReclaimClass::FsMetadata);
-        let Some(entry) = self.inner.read_dir(dir, cursor, name_out)? else {
-            return Ok(None);
-        };
-        if entry.name_len <= MAX_COMPONENT_LEN && entry.name_len <= name_out.len() {
-            if let Some(name) = Self::try_copy(&name_out[..entry.name_len]) {
-                let payload = name.len().saturating_add(size_of::<DirEntry>());
-                if let Some(tick) =
-                    self.admit(KeyRef::Dirent(dir_raw, cursor), payload, ENTRY_OVERHEAD)
-                {
-                    self.dirent
-                        .insert((dir_raw, cursor), DirentEntry { entry, name, tick });
-                } else {
-                    let mut name = name;
-                    name.as_mut_slice().zeroize();
+        // Every entry the driver reads is kept to cache once it returns,
+        // keyed by the cursor it was read at.
+        let mut read: Vec<(u64, DirEntry, Vec<u8>)> = Vec::new();
+        let mut key = at;
+        let result = self
+            .inner
+            .read_dir(dir, at, &resume[..resume_len], &mut |entry, name| {
+                if let Some(copy) = Self::try_copy(name) {
+                    if read.try_reserve(1).is_ok() {
+                        read.push((key, *entry, copy));
+                    }
                 }
-            } else {
-                self.accounting.record_refusal(ReclaimClass::FsMetadata);
-            }
-        } else {
-            self.accounting.record_refusal(ReclaimClass::FsMetadata);
+                let flow = visit(entry, name);
+                key = entry.next_cursor;
+                flow
+            });
+        for (cursor, entry, name) in read {
+            self.admit_dirent(dir_raw, cursor, entry, name);
         }
-        // The entry carries the child's stat record; populate the stat
-        // cache so a follow-up `node_info` is a hit.
-        let child = entry.node.raw();
-        if !self.stat.contains_key(&child) {
-            if let Some(tick) =
-                self.admit(KeyRef::Stat(child), size_of::<NodeInfo>(), ENTRY_OVERHEAD)
-            {
-                self.stat.insert(
-                    child,
-                    StatEntry {
-                        info: entry.info,
-                        tick,
-                    },
-                );
-            }
-        }
-        Ok(Some(entry))
+        result
     }
 }
 

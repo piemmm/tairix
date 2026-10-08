@@ -231,6 +231,9 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
+# The production thumbnail document (`RtDocument`): a picture file opened under
+# this program's own identity and read at an offset, written once in `lib/icon`.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0", features = ["rt"] }
 # The display-client half of the zero-copy present protocol: `DisplayClient`
 # (query/configure/present over the `DisplayTransport` seam) and
 # `RemoteDisplay` (the `Display` trait over the client's own frame mapping,

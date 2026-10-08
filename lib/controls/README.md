@@ -261,7 +261,8 @@ A `shell::TaskbarItem`, a `collection::IconTile`, a `collection::ListRow`, and
 a `button::IconButton` each draw an icon whose artwork their owner may already
 hold rasterised (a desktop icon cache, an app bundle's own icon). They share one
 seam: `icon_side(bounds, scale, theme, …)` reports the exact pixel side the
-icon slot will be drawn into (`0` when the geometry leaves room for none), so the
+icon slot will be drawn into (`0` when the geometry leaves room for none; an
+icon tile answers through its `TileLayout`), so the
 owner can ask its cache for artwork at precisely that size; `render(…,
 artwork: Option<&Surface>)` then blits that artwork centred in the slot, or
 rasterises the control's built-in vector glyph when none is supplied. A
@@ -329,12 +330,16 @@ mark took to arrive read as a border flickering on and off under the pointer.
 The ring is what distinguishes a *focused* tile from a hovered one, so an
 unselected tile still takes it.
 
-The name wraps rather than being cut: as many whole lines as the band under the
-picture holds, each centred, the last elided with the shared ellipsis when the
-name runs past them; a band too short for one whole line draws nothing rather
-than clipping a glyph. `IconTile::label_lines` reports that budget from the same
-geometry the render lays out to, so an owner sizing its tiles asks the tile
-instead of re-deriving its label layout — the pair to `icon_side` above.
+A tile's geometry is its `TileLayout`: the owner states how many name lines
+the band under the picture holds, the band sits half an inset below the picture
+and above the tile's foot, and the picture takes the height that leaves, capped
+by the width. `TileLayout::height_for(side, …)` is the cell height that seats a
+`side`-pixel picture, and `icon_side`, `label_lines` and `label_rect` read the
+same geometry the render lays out to, so an owner never re-derives it. The
+name, set in `TextRole::ItemLabel`, wraps rather than being cut: each line
+centred, the last elided with the shared ellipsis when the name runs past the
+stated lines; a band too short for one whole line draws nothing rather than
+clipping a glyph.
 
 `with_label_shadow` draws that name — the eliding ellipsis included — through
 `lib/font`'s one soft shadow, every line's shadow laid before any line's ink,

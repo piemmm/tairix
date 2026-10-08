@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_compress::inflate::inflate_into;
+use tairix_compress::inflate::{inflate_into, inflate_prefix};
 use tairix_crc32::checksum as crc32;
 use tairix_util::fallible;
 
@@ -70,32 +70,38 @@ impl Writer {
 
     /// Store `data` as entry `name`.
     pub(crate) fn store(&mut self, name: &str, data: &[u8]) -> Result<(), ZipError> {
+        self.add(name, STORED, data, data)
+    }
+
+    /// Add entry `name` holding `data`, written as `packed` under `method`.
+    fn add(&mut self, name: &str, method: u16, data: &[u8], packed: &[u8]) -> Result<(), ZipError> {
         let offset = u32::try_from(self.bytes.len()).map_err(|_| ZipError::TooLarge)?;
         let size = u32::try_from(data.len()).map_err(|_| ZipError::TooLarge)?;
+        let packed_len = u32::try_from(packed.len()).map_err(|_| ZipError::TooLarge)?;
         let name_len = u16::try_from(name.len()).map_err(|_| ZipError::TooLarge)?;
         self.count = self.count.checked_add(1).ok_or(ZipError::TooLarge)?;
         let crc = crc32(data);
         let mut local = [0u8; LOCAL_LEN];
         put32(&mut local, 0, LOCAL);
         put16(&mut local, 4, VERSION);
-        put16(&mut local, 8, STORED);
+        put16(&mut local, 8, method);
         put16(&mut local, 12, DOS_DATE);
         put32(&mut local, 14, crc);
-        put32(&mut local, 18, size);
+        put32(&mut local, 18, packed_len);
         put32(&mut local, 22, size);
         put16(&mut local, 26, name_len);
         let mut central = [0u8; CENTRAL_LEN];
         put32(&mut central, 0, CENTRAL);
         put16(&mut central, 4, VERSION);
         put16(&mut central, 6, VERSION);
-        put16(&mut central, 10, STORED);
+        put16(&mut central, 10, method);
         put16(&mut central, 14, DOS_DATE);
         put32(&mut central, 16, crc);
-        put32(&mut central, 20, size);
+        put32(&mut central, 20, packed_len);
         put32(&mut central, 24, size);
         put16(&mut central, 28, name_len);
         put32(&mut central, 42, offset);
-        let more = LOCAL_LEN + name.len() + data.len();
+        let more = LOCAL_LEN + name.len() + packed.len();
         if !fallible::reserve(&mut self.bytes, more)
             || !fallible::reserve(&mut self.central, CENTRAL_LEN + name.len())
         {
@@ -103,7 +109,7 @@ impl Writer {
         }
         self.bytes.extend_from_slice(&local);
         self.bytes.extend_from_slice(name.as_bytes());
-        self.bytes.extend_from_slice(data);
+        self.bytes.extend_from_slice(packed);
         self.central.extend_from_slice(&central);
         self.central.extend_from_slice(name.as_bytes());
         Ok(())
@@ -125,6 +131,20 @@ impl Writer {
         self.bytes.extend_from_slice(&self.central);
         self.bytes.extend_from_slice(&end);
         Ok(self.bytes)
+    }
+}
+
+#[cfg(test)]
+impl Writer {
+    /// Add `data` as entry `name`, deflated as one stored block: a member a
+    /// reader must inflate, for the tests that need one.
+    pub(crate) fn store_deflated(&mut self, name: &str, data: &[u8]) -> Result<(), ZipError> {
+        let len = u16::try_from(data.len()).map_err(|_| ZipError::TooLarge)?;
+        let mut packed = alloc::vec![0x01];
+        packed.extend_from_slice(&len.to_le_bytes());
+        packed.extend_from_slice(&(!len).to_le_bytes());
+        packed.extend_from_slice(data);
+        self.add(name, DEFLATED, data, &packed)
     }
 }
 
@@ -281,6 +301,30 @@ impl<'a> Archive<'a> {
             _ => None,
         };
         Ok(Some(View { size, stored }))
+    }
+
+    /// The opening bytes of the entry named `name`, into `into`, inflating no
+    /// more of it than they need: how many it holds, fewer where the entry is
+    /// shorter, or `None` where no entry is so named. Unchecked against the
+    /// CRC-32, which covers the whole entry: a head is costed, not trusted.
+    pub(crate) fn head(&self, name: &str, into: &mut [u8]) -> Result<Option<usize>, ZipError> {
+        let Some(entry) = self.entry(name) else {
+            return Ok(None);
+        };
+        let size = usize::try_from(entry.size).map_err(|_| ZipError::TooLarge)?;
+        let want = size.min(into.len());
+        let into = &mut into[..want];
+        let data = self.data(entry)?;
+        let made = match entry.method {
+            STORED if entry.packed == entry.size => {
+                into.copy_from_slice(data.get(..want).ok_or(ZipError::Malformed)?);
+                want
+            }
+            DEFLATED => inflate_prefix(data, into).map_err(|_| ZipError::Malformed)?,
+            STORED => return Err(ZipError::Malformed),
+            _ => return Err(ZipError::Unsupported),
+        };
+        Ok(Some(made))
     }
 
     /// The bytes of the entry named `name`, no more than `most` of them,

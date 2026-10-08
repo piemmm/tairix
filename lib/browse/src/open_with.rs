@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use tairix_abi::{mime_type_at, AppInfoHeader};
 
 use crate::column::ScrollColumn;
-use crate::media::{ancestry, media_for_name};
+use crate::media::{ancestry, media_for_name, BlankDocument, ALL};
 use crate::rowlist::RowList;
 
 /// One installed application and the file types its signed `AppInfo` claims to
@@ -196,6 +196,25 @@ pub fn applications_for<'a>(name: &str, bundles: &'a [AppAssociation]) -> Vec<&'
     ranked.sort_by_key(|(distance, _)| *distance);
     ranked.into_iter().map(|(_, bundle)| bundle).collect()
 }
+
+/// The documents New ▸ offers: every [`BlankDocument`] type an installed
+/// application both writes and declares by name, in registry order.
+///
+/// The declaration must be exact. An editor declaring `text/plain` opens Rust
+/// source through the subclass chain, but counting that would make every text
+/// editor a maker of every textual format.
+#[must_use]
+pub fn blank_documents(bundles: &[AppAssociation]) -> Vec<BlankDocument> {
+    ALL.iter()
+        .filter_map(|media| BlankDocument::of(*media))
+        .filter(|document| {
+            bundles.iter().any(|bundle| {
+                bundle.writes_documents() && bundle.handles(document.media().as_str())
+            })
+        })
+        .collect()
+}
+
 /// Most candidate applications the context menu's "Open With…" submenu
 /// offers.
 ///

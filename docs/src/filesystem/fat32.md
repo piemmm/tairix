@@ -22,7 +22,7 @@ shipped one (`AGENTS.md` §2.4 / §9).
 | `lookup`              | Scan a directory's entries for a name.            |
 | `node_info`           | Report `{ kind, size }` from the node token.      |
 | `read_at`             | Walk the FAT cluster chain and copy file bytes.   |
-| `read_dir`            | Yield a directory's entries in on-disk order.     |
+| `read_dir`            | Hand a visitor a directory's entries in on-disk order, from a cursor. |
 | `create`              | Write a new LFN set + 8.3 entry; alloc a dir cluster for a directory. |
 | `write_at`            | Extend/chain clusters, zero-fill gaps, write bytes, update the entry. |
 | `truncate`            | Free the tail chain (shrink) or zero-extend (grow); update the entry. |
@@ -43,7 +43,28 @@ Names are returned as **UTF-8**: the long name's UTF-16LE code units
 (including surrogate pairs) are decoded, and the driver falls back to
 the short name on any malformed set — an unpaired surrogate, an invalid
 scalar value, or a checksum mismatch — rather than surfacing a partial
-name.
+name. A long name longer than the VFS's 255-byte name limit once decoded —
+another system's name in a script of three-byte characters — is listed and
+reached by its short alias, so it neither hides the file nor makes the
+directory unlistable.
+
+## Listing
+
+A listing cursor is a **logical slot index** within the directory,
+resolved by walking the directory's own cluster chain, so no cursor — stale
+or forged — reaches another directory's clusters. Slots never move while in
+use: a deletion marks its slots in place and an insertion takes a free run,
+so an entry present throughout a listing is listed exactly once. A walk
+reads each device block once, holding the block its last slot came from.
+
+A corrupt chain fails closed rather than looping: a link past the volume's
+last cluster is a bad chain, a chain walk stops at the volume's cluster
+count, a directory walk at the format's 65,536 entries, and a move's walk up
+`..` links at a link that comes round again or names no parent.
+
+A listed entry's `allocated` is the clusters its size needs, as Linux
+reports it; only a directory, whose entry records no size, has its chain
+walked. A listing therefore never costs a file's size.
 
 A `NodeId` is self-describing: it packs the entry's first cluster, a
 directory flag, and (for files) the size, so `node_info` needs no extra
@@ -67,10 +88,13 @@ Writes address their target as a `(dir, name)` pair, because a FAT file's
 length and starting cluster live in its **parent directory entry**, not
 in a self-describing `NodeId` (`AGENTS.md` §2.4 — the symmetric counter
 to `FilesystemRead`). Each created entry is written as a VFAT long-name
-set bound to a generated, directory-unique `~N` 8.3 short alias, so an
-arbitrary, case-preserving name round-trips through a later read. Free
-clusters are found by scanning the FAT; directories grow by one zeroed
-cluster at a time when their entry slots are exhausted; and every FAT
+set bound to an 8.3 short alias taking the lowest `~N` tail no live alias
+holds, so an arbitrary, case-preserving name round-trips through a later
+read. One walk of the directory chooses both the tail and the run of free
+slots the set takes. Free clusters are found by scanning the FAT;
+directories grow by one zeroed cluster at a time when their entry slots
+are exhausted, up to the format's 65,536 entries, past which a create is
+refused as out of space; and every FAT
 mutation is mirrored across all FAT copies. Sub-block writes are
 read-modified-written so neighbouring bytes are preserved.
 

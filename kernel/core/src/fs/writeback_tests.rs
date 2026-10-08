@@ -14,8 +14,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats, WritebackHost,
+    DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
+    FilesystemStats, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverError;
 
@@ -77,9 +77,10 @@ impl FilesystemRead for FlushSpy {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        self.inner.read_dir(dir, cursor, name_out)
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        self.inner.read_dir(dir, cursor, after, visit)
     }
 
     fn read_link(&mut self, node: NodeId, out: &mut [u8]) -> Result<usize, DriverError> {

@@ -24,8 +24,9 @@ use tairix_abi::{
 use tairix_procinfo::{for_each_mount, IpcTransport, VolumeBytes, WalkStep};
 use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 use tairix_stress::{
-    completion_line, dispatch_line, refusal_line, run_scratch_paths, size_targets, summary_record,
-    Action, Controller, Discovered, Event, RunSpec, WorkerKind, WorkerSpec, USAGE, WORKER_FLAG,
+    completion_line, default_scratch, dispatch_line, refusal_line, run_scratch_paths, size_targets,
+    summary_record, Action, Controller, Discovered, Event, RunSpec, WorkerKind, WorkerSpec, USAGE,
+    WORKER_FLAG,
 };
 
 extern crate alloc;
@@ -338,10 +339,8 @@ fn prepare_scratch(spec: &RunSpec) -> Result<String, &'static str> {
         .and_then(|raw| core::str::from_utf8(raw).ok())
         .filter(|home| !home.is_empty())
         .ok_or("no scratch directory: HOME is unset and no --temp-path was given")?;
-    let home = home.trim_end_matches('/');
-    // The per-user cache home first, then the app-scoped directory in it.
-    ensure_dir(&format!("{home}/Library"))?;
-    let dir = format!("{home}/Library/stress");
+    let [library, dir] = default_scratch(home);
+    ensure_dir(&library)?;
     ensure_dir(&dir)?;
     Ok(dir)
 }

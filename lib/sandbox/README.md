@@ -97,6 +97,13 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   rasterises directly through the shared vector-icon path. Either a typed
   refusal or a sandbox failure simply means the desktop session falls
   back to its own built-in glyph.
+- **The thumbnail service** (also `imagerender`, the same worker): a picture
+  file streamed through the chunked document upload is drawn as its own
+  content (`OP_THUMBNAIL`) — its peak decode forecast from the header and
+  held to `MAX_THUMBNAIL_PEAK_BYTES` before any pixel buffer exists, decoded
+  straight to the size its square needs, centred and never enlarged — and the
+  worker lets the file go once it is drawn. `thumbnail` is the whole of what
+  a program pays: the upload from an `ArtworkDocument`, then the render.
 - **The wallpaper-placement service** (also `imagerender`, the same
   worker): a desktop wallpaper — a shipped master or a file the user
   picked, whatever `tairix-image` can decode (every format its `sniff`

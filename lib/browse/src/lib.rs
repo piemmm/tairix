@@ -76,14 +76,17 @@
 //!   the [`GridFlow`] that also lays the desktop's trailing-edge icon column out
 //!   of the very same grid, and the [`GridFill`](tairix_geometry::GridFill) policy that decides what a line
 //!   does with the space it has left over.
+//! * [`marquee`](mod@marquee) — the [`Marquee`] band dragged across the
+//!   listing's ground, which selects every entry it touches as it grows and
+//!   scrolls the listing while held at an end.
 //! * [`format`](mod@format) — the size/date column formatting and the
 //!   properties view's date-and-time spelling.
 //! * [`properties`](mod@properties) — the [`Properties`] view model: the
 //!   display-ready summary of a node's `fs_stat` metadata the file manager's
 //!   Properties panel shows (`plans/NEW-FILEMANAGER.md` FM8).
-//! * [`mkdir`](mod@mkdir) — the new-folder [`MkdirError`]/[`validate_new_dir_name`]
-//!   model and the [`suggest_new_dir_name`] placeholder-name helper, committed
-//!   through the `fs_mkdir` seam (`plans/NEW-FILEMANAGER.md` `FM7b`).
+//! * [`create`](mod@create) — the New ▸ model: what a new folder or blank
+//!   document is first called ([`NewEntry`]) and whether a name may be created
+//!   ([`CreateError`]/[`validate_new_entry_name`]).
 //! * [`mode_edit`](mod@mode_edit) — the [`ModeError`]/[`validate_mode`]
 //!   permission-change model committed through the `fs_set_mode` seam
 //!   (`plans/NEW-FILEMANAGER.md` `FM8b`).
@@ -124,6 +127,7 @@ pub mod browser;
 pub mod chrome;
 pub mod clipboard;
 pub mod column;
+pub mod create;
 pub mod delete;
 pub mod desk;
 pub mod document;
@@ -132,12 +136,13 @@ pub mod error;
 pub mod execute;
 pub mod format;
 pub mod layout;
+pub mod marquee;
 pub mod media;
-pub mod mkdir;
 pub mod mode_edit;
 pub mod open_with;
 pub mod owner_edit;
 pub mod places;
+pub mod probes;
 pub mod progress;
 pub mod properties;
 pub mod rename;
@@ -157,8 +162,11 @@ pub use chrome::{
     ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand,
     ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
-pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
+pub use clipboard::{
+    drop_operation, plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan,
+};
 pub use column::ScrollColumn;
+pub use create::{validate_new_entry_name, CreateError, NewEntry, NEW_FOLDER_BASE};
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
@@ -173,17 +181,21 @@ pub use execute::{
 };
 pub use format::{format_date, format_datetime, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
+pub use marquee::Marquee;
 pub use media::{
-    entry_icon_request, icon_for_entry, media_for_entry, media_for_name, Ending, MediaType,
+    entry_icon, folder_sample, icon_for_entry, media_for_entry, media_for_name, BlankDocument,
+    Ending, Family, MediaType,
 };
-pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{
-    applications_for, association_from_manifest, quick_applications, AppAssociation,
-    OpenWithCandidate, OpenWithChooser,
+    applications_for, association_from_manifest, blank_documents, quick_applications,
+    AppAssociation, OpenWithCandidate, OpenWithChooser,
 };
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
-pub use places::{Place, PlaceKind, Places, Volume, MAX_PLACE_LABEL, WIDEST_FIXED_LABEL};
+pub use places::{
+    bare_open_places, Place, PlaceKind, Places, Volume, FIXED_LABELS, MAX_PLACE_LABEL,
+};
+pub use probes::Probes;
 pub use progress::{ProgressModel, ProgressOp};
 pub use properties::{Attribute, Attributes, Properties};
 pub use rename::{validate_new_name, RenameError};
@@ -191,7 +203,7 @@ pub use render::{render_into, ManagerChrome};
 pub use rowlist::RowList;
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
-pub use source::{DirectorySource, Listing, Probe};
+pub use source::{resolve_occupancy, DirectorySource, Listing, Probe};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_geometry::Scale;
 /// The pointer button a consumer names when it reports a press. Re-exported

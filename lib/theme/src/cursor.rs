@@ -52,13 +52,19 @@ pub enum CursorKind {
     /// The open cross shown where a pointer picks out one pixel, as over an
     /// image editor's canvas.
     Crosshair,
+    /// The arrow badged with a plus, shown while a drop would copy what is
+    /// dragged.
+    DragCopy,
+    /// The arrow badged with an arrow, shown while a drop would move what is
+    /// dragged.
+    DragMove,
 }
 
 /// Every cursor kind the desktop defines.
 ///
 /// The closed [`CursorKind`] vocabulary as a table, so a loader, a cache, or a
 /// test iterates every kind without restating the list.
-pub const CURSOR_KINDS: [CursorKind; 10] = [
+pub const CURSOR_KINDS: [CursorKind; 12] = [
     CursorKind::Arrow,
     CursorKind::Text,
     CursorKind::Pointer,
@@ -69,6 +75,8 @@ pub const CURSOR_KINDS: [CursorKind; 10] = [
     CursorKind::ResizeDiagonalRising,
     CursorKind::ResizeDiagonalFalling,
     CursorKind::Crosshair,
+    CursorKind::DragCopy,
+    CursorKind::DragMove,
 ];
 
 impl CursorKind {
@@ -90,6 +98,8 @@ impl CursorKind {
             Self::ResizeDiagonalRising => "cursor.resize-diagonal-rising",
             Self::ResizeDiagonalFalling => "cursor.resize-diagonal-falling",
             Self::Crosshair => "cursor.crosshair",
+            Self::DragCopy => "cursor.drag-copy",
+            Self::DragMove => "cursor.drag-move",
         }
     }
 }
@@ -183,6 +193,10 @@ pub struct CursorSet {
     pub resize_diagonal_falling: String,
     /// Asset for [`CursorKind::Crosshair`].
     pub crosshair: String,
+    /// Asset for [`CursorKind::DragCopy`].
+    pub drag_copy: String,
+    /// Asset for [`CursorKind::DragMove`].
+    pub drag_move: String,
 }
 
 impl CursorSet {
@@ -204,6 +218,8 @@ impl CursorSet {
             resize_diagonal_rising: String::from(CursorKind::ResizeDiagonalRising.asset_id()),
             resize_diagonal_falling: String::from(CursorKind::ResizeDiagonalFalling.asset_id()),
             crosshair: String::from(CursorKind::Crosshair.asset_id()),
+            drag_copy: String::from(CursorKind::DragCopy.asset_id()),
+            drag_move: String::from(CursorKind::DragMove.asset_id()),
         }
     }
 
@@ -221,6 +237,8 @@ impl CursorSet {
             CursorKind::ResizeDiagonalRising => &self.resize_diagonal_rising,
             CursorKind::ResizeDiagonalFalling => &self.resize_diagonal_falling,
             CursorKind::Crosshair => &self.crosshair,
+            CursorKind::DragCopy => &self.drag_copy,
+            CursorKind::DragMove => &self.drag_move,
         }
     }
 }

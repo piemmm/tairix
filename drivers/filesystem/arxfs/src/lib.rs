@@ -54,9 +54,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
-    NodeTimes, VolumeStats, WritebackHost,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
+    NodeInfo, NodeKind, NodeTimes, VolumeStats, WritebackHost,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -4962,43 +4962,39 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         let dir_ino = self.ino_of(dir)?;
         let dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
             return Err(DriverError::Unsupported);
         }
-        // The cursor is the entry's global slot position, so resumption seeks
-        // straight past the previously returned entry instead of rescanning
-        // the whole directory per call. Any cursor past the last block —
-        // including an arbitrary value that was never returned — ends the
-        // listing (fail closed, never out of bounds).
+        // The cursor is a global slot position, and slots never move while
+        // they are occupied: removal empties one in place and insertion fills
+        // the first free one, so an entry present throughout a listing is
+        // reached exactly once. A cursor past the last block, including one
+        // never returned, ends the listing.
         let mut scan = DirScan::new(self.block_size)?;
         scan.seek(cursor);
         while let Some((position, ino)) = self.dir_next(&dir_inode, &mut scan)? {
             if scan.is_dot() {
                 continue;
             }
-            let name = scan.name();
-            let name_len = name.len();
-            if name_out.len() < name_len {
-                return Err(DriverError::BufferTooSmall);
-            }
-            name_out[..name_len].copy_from_slice(name);
-            // The child inode is read once here and its metadata returned with
-            // the entry, so a listing consumer never re-resolves the child by
-            // path to learn its sizes.
+            // The child inode is read once here and its metadata handed over
+            // with the entry, so a listing consumer never re-resolves the
+            // child by path to learn its sizes.
             let child = self.read_inode(ino)?;
-            let child_info = self.inode_info(ino, &child)?;
-            return Ok(Some(DirEntry {
+            let entry = DirEntry {
                 node: NodeId::from_raw(u64::from(ino)),
-                info: child_info,
-                name_len,
+                info: self.inode_info(ino, &child)?,
                 next_cursor: position + 1,
-            }));
+            };
+            if visit(&entry, scan.name()) == DirVisit::Stop {
+                break;
+            }
         }
-        Ok(None)
+        Ok(())
     }
 }
 

@@ -349,23 +349,39 @@ trait**, `FilesystemRead`, not an added method on the frozen one
 | `node_info(node)`                 | Driver handle.                        |
 | `lookup(dir, name)`               | Driver handle.                        |
 | `read_at(file, offset, &mut)`     | Driver handle.                        |
-| `read_dir(dir, cursor, &mut name)` | Driver handle.                       |
+| `read_dir(dir, cursor, after, visit)` | Driver handle.                    |
 
 The surface is allocation-free: a `NodeId` is an opaque,
 implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
 reports `{ kind, size, allocated }` — `allocated` being the bytes of
 on-disk storage the node's data really occupies, from the format's own
-allocation tracking (ext4 `i_blocks`, a FAT cluster chain, ARXFS mapped
-extents) — and `read_dir` writes the entry name into a caller-provided
-buffer alongside a `DirEntry { node, info, name_len, next_cursor }`.
-The entry carries the child's full `NodeInfo`, so a listing consumer
-never re-resolves each child by path to learn its kind or sizes, and
-`cursor` is an opaque resume token (`0` starts; each entry's
-`next_cursor` continues the listing in O(1), the `getdents` `d_off`
-model — a full listing is one bounded scan, never a quadratic rescan
-per entry). A token is meaningful only for the unmodified directory
-that produced it; any other value is handled safely (bounds-checked,
-fail-closed).
+allocation tracking (ext4 `i_blocks`, the clusters a FAT file's size needs
+or a FAT directory's chain, ARXFS mapped extents).
+
+`read_dir` hands a visitor the directory's entries in order, each a
+`DirEntry { node, info, next_cursor }` with its name borrowed from the
+driver, until the visitor answers `DirVisit::Stop` or the directory ends.
+One call reads each directory block it crosses once. The entry carries the
+child's full `NodeInfo`, so a listing consumer never re-resolves a child by
+path to learn its kind or sizes.
+
+- `cursor` is an opaque resume token, the `getdents` `d_off` model: `0`
+  starts, and each entry's `next_cursor` resumes after it. `after` is the name
+  of the entry the cursor came from, empty at the start; a format whose
+  entries shift when others are added or removed resumes from it.
+- A listing may span calls between which the directory changes, and keeps the
+  POSIX stream contract across them: an entry present throughout is handed
+  over exactly once. ARXFS and FAT cursors are slot positions, which never
+  move while occupied; a linear ext4 directory's is a record offset, resumed
+  at the first record at or past it, while a hash-indexed one, whose records
+  move as leaves split, lists in `(hash, name)` order and resumes after
+  `after`; ADFS, whose directories are sorted arrays, resumes after `after` by
+  binary search once any insertion or removal has run, which its cursor's
+  generation shows.
+- A token is confined to the directory it is applied to: stale or forged, it
+  never reads outside that directory, and a corrupt directory still ends —
+  FAT bounds a chain walk by the volume's cluster count and a directory walk
+  by the format's 65,536 entries.
 Implementations expose raw structural access only and make **no**
 permission decisions — the VFS authorises every traversal against the
 §5.3 model before calling here (`AGENTS.md` §5.4). The first

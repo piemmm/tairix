@@ -46,23 +46,37 @@ can never diverge in navigation semantics, listing policy, or look.
   an operation; authority stays in the VFS and the launcher.
   `icon_for_entry(entry, parent)` is the one classification both views draw
   through: the registry's glyph, except that a plain directory *known* to hold
-  something takes `IconKind::FolderFilled`. Only a known answer changes the
-  icon, so an unprobed, empty, or unreadable folder is the plain one.
+  something takes `IconKind::FolderFilled`, and `entry_icon_request` asks for
+  the composite of its `FolderSample` (`folder_sample`, by file `Family`).
+  Only a known answer changes the icon, so an unprobed, empty, or unreadable
+  folder is the plain one.
 - **Folder occupancy** (`Occupancy`, `DirectorySource::has_children`,
-  `Browser::resolve_occupancy`): a directory's `size` is `0` and no VFS
-  surface reports a child count, so "does this folder hold anything?" is a
-  separate per-child read. An `Entry` carries the four honest answers
-  — `Unprobed`, `Empty`, `NonEmpty`, `Indeterminate` (refused or failed) — and
-  `resolve_occupancy(range)` answers only the indices its caller passes,
-  probing only an entry that still needs one, so a hundred-thousand-entry
-  directory costs what is on screen. A refusal is recorded rather than
-  retried, and a fresh listing resets every answer. A source that does not
-  implement the probe answers `NotImplemented`, which reads as
-  `Indeterminate`: the trusted picker takes that default deliberately, so it
-  exercises no directory-read authority it does not need. A source that probes
-  *elsewhere* answers `Probe::Pending`, which leaves the entry unanswered and
-  asks again next resolve — that is what lets a caller resolve occupancy from
-  inside a paint while the paint performs no I/O at all.
+  `resolve_occupancy`): a directory's `size` is `0` and no VFS surface reports
+  a child count, so "what does this folder hold?" is a separate per-child read
+  of one batch. An `Entry` carries the four honest answers — `Unprobed`,
+  `Empty`, `NonEmpty(sample)`, `Indeterminate` (refused or failed) — and
+  `resolve_occupancy` (behind `Browser::resolve_occupancy` and the desktop's
+  own) answers only the indices its caller passes, probing only an entry that
+  still needs one, so a hundred-thousand-entry directory costs what is on
+  screen. It reports an entry only when its picture moved. A refusal is
+  recorded rather than retried, and a fresh listing resets every answer. A
+  source that does not implement the probe answers `NotImplemented`, which
+  reads as `Indeterminate`: the trusted picker takes that default
+  deliberately, so it exercises no directory-read authority it does not need.
+  A source that probes *elsewhere* answers `Probe::Pending`, which leaves the
+  entry unanswered and asks again next resolve — that is what lets a caller
+  resolve occupancy from inside a paint while the paint performs no I/O at
+  all.
+- **Probe desk** (`Probes`, `vfs::probe_batch`, `vfs::probe_directory` under
+  `rt`): the deferred probe's policy, shared by the file manager and the
+  desktop. Asks are recorded and read by a worker as one batch, one batch in
+  flight at a time; a refusal is an answer; a held answer survives one resolve
+  pass, so the desk is bounded by the screen; a reported change to a folder,
+  or a fresh listing of its parent, drops what is held or in flight for it. A
+  `sweep` after a pass over every surface drawing cues drops each wanted
+  folder no pass asked about, a landed batch holds the next until it runs,
+  and `MAX_WANTED_PROBES` bounds what one pass may want. A stopped desk
+  answers as a source that does not probe.
 - **Sort** (`SortMode`/`sort_entries`): the one listing order both views
   share — directories first, then a `Name`/`Size`/`Modified` key with a
   direction, with a case-insensitive name tiebreak so the result never
@@ -152,16 +166,16 @@ can never diverge in navigation semantics, listing policy, or look.
   Paste needs only the app's held clipboard — threaded in, since the clipboard
   lives in the app, not the browser. Each command's `label()` and
   keyboard-`shortcut()` caption drive its declared row, and `CONTEXT_COMMANDS`
-  is the one top-to-bottom order the menu iterates. Only commands the file
-  manager can carry out today are modelled, so none is speculative surface:
-  New Folder is absent from `CONTEXT_COMMANDS` (it is a toolbar write tool) and
-  lands with the stage that first wires its behaviour.
+  is the one top-to-bottom order the menu iterates. New ▸ is not a command:
+  it is a submenu above Properties, always open, offering Folder and then each
+  `BlankDocument` an installed application writes (`blank_documents`); its
+  rows answer `ContextChoice::NewFolder` and `ContextChoice::NewDocument`.
   `is_enabled` is **derived from** `reason`, so a row can never grey out with
   nothing to say — the reason is the text the seat shows as a tooltip when the
-  pointer rests on the row, never a caption beside its label. **Nothing here draws a menu**: `context_menu(model, title)` declares
-  the row model the desktop's own menu service renders
-  (`plans/NEW-MENUS.md`), read back by `context_command_from_item`, whose
-  one-based numbering is that declaration's exact inverse. The files app sends
+  pointer rests on the row, never a caption beside its label. **Nothing here draws a menu**: `context_menu(model, title, quick)`
+  declares the row model the desktop's own menu service renders
+  (`plans/NEW-MENUS.md`), read back by `context_choice_from_item`, whose
+  numbering is that declaration's exact inverse. The files app sends
   it on a secondary-button press and routes the one answer to the same verbs the
   toolbar and keyboard drive.
   The **Open With…** row carries both answers. Its submenu offers the
@@ -377,22 +391,36 @@ can never diverge in navigation semantics, listing policy, or look.
   a non-empty Trash (`ManagerToolModel`), builds the `empty_trash_plan`,
   confirms it with the `DeleteDisposition::Permanent` dialog, and drives its
   `DeleteWalk` through the same interleaved progress/cancel runner a delete uses.
-- **New folder** (`mkdir`, `Browser::create_directory`,
-  `plans/NEW-FILEMANAGER.md` FM7b): the model of creating a directory in the
-  current listing, host-proven ahead of the New Folder tool. `validate_new_dir_name`
-  spells the typed name through the one shared `tairix_path::validate_file_name`
-  rule (the same rule the rename editor uses) and refuses a name already taken
-  by a sibling (`MkdirError::Clash`) — both decided before any syscall.
-  `Browser::create_directory` then spells the child path through the shared
-  `spell_child`, applies the create through an injected `fs_mkdir` seam, and on
-  success re-lists and follows the selection onto the new folder (ready for the
-  app's inline rename); a VFS refusal leaves the listing exactly as it was and
-  is surfaced as `MkdirError::Refused`. The create is the caller's own
-  permission-checked `fs_mkdir` (no new capability), so the read-only picker
-  composes the same `Browser` and never calls it. `suggest_new_dir_name`
-  supplies the non-clashing placeholder name (`New Folder`, then `New Folder 2`,
-  …) the manager creates with before opening the inline rename — bounded by the
-  listing (pigeonhole), never an arbitrary cap.
+- **Drops** (`plans/FILES-INTERACTION.md` FI9): `drop_operation` is the one
+  policy a drag's drop is decided by — a copy, or a move with `Shift`, and
+  nothing for a drop that would put a folder inside itself or leave every item
+  where it is. `render::drop_folder_at` resolves the folder a drop at a point
+  lands in (a folder under it, else the listing's own folder, and nothing off
+  the listing or mid-navigation), and `Browser::set_drop_mark` lights that
+  folder's entry, drawn as the shared drop-target look; any change to the
+  listing puts the mark out.
+- **The band** (`marquee`, `plans/FILES-INTERACTION.md` FI8): a drag across
+  the listing's ground. `begin` anchors it in layout coordinates, `sweep`
+  selects every entry it covers (`ViewLayout::band_cells`, arithmetic over the
+  view's lines and slots) and releases those it leaves unless it began with
+  them, touching only the entries that change; `autoscroll` says how fast a
+  head held in either end's strip of the window scrolls the listing, `step`
+  scrolls and re-sweeps, `cancel` takes back what it selected, and `draw` / `report_band`
+  paint it and report the pixels it moved.
+- **New ▸** (`create`, `Browser::create_entry`,
+  `plans/FILES-INTERACTION.md` FI10): creating a folder or a blank document in
+  the current listing. `validate_new_entry_name` spells the name through the
+  one shared `tairix_path::validate_file_name` rule and refuses one a sibling
+  holds (`CreateError::Clash`), both before any syscall.
+  `Browser::create_entry` spells the child path, applies the create through
+  the injected seam (`fs_mkdir`, or an exclusive `fs_open` for a document), and
+  on success re-lists and follows the selection onto the new entry, ready for
+  the inline rename; a refusal leaves the listing as it was
+  (`CreateError::Refused`). The create is the caller's own permission-checked
+  call, so the read-only picker never calls it. `NewEntry::suggest_name` gives
+  the first free name — `New Folder`, `New Text Document.txt`, then ` 2`, ` 3`
+  before any extension — in one pass over the listing. A `BlankDocument` is a
+  type whose empty file is a complete document (`MediaType::blank_noun`).
 - **Places / devices rail** (`places`, `layout::SidebarView`,
   `plans/NEW-FILEMANAGER.md`): the shortcut column down the leading edge of a
   file-manager window — the user's own places above, every mounted volume
@@ -405,7 +433,7 @@ can never diverge in navigation semantics, listing policy, or look.
   themselves available, so a surprise-removed device is never drawn as a row
   that would fail on the first click.
   - **One fixed order**, so the rail never reshuffles between two paints of
-    the same state: Home, Desktop, Documents, the application root, the system
+    the same state: Home, Desktop, UserFiles, the application root, the system
     root — the fixed user places, offered whether or not their directories
     exist, since the model does no I/O and a shortcut that silently vanishes is
     less honest than one that says why it cannot open — then a drawn
@@ -537,7 +565,7 @@ can never diverge in navigation semantics, listing policy, or look.
   It reads nothing and holds no authority: the app performs the one
   capability-checked `fs_stat` under the user's own identity and hands the
   result here, so the read-only picker builds the same view.
-  `Browser::selected_target_path` is the shared spelling of the selected
+  `Browser::chosen_target_path` is the shared spelling of the chosen
   node's absolute path the `fs_stat` acts on. The closed `Field` vocabulary is
   the one definition of which facts the General section states and how each
   reads, so the display order, each label, each value, and which facts a given
@@ -659,7 +687,9 @@ can never diverge in navigation semantics, listing policy, or look.
   rectangles such a round reports. `render_into`'s trailing
   `artwork: &mut dyn tairix_icon::IconArtwork` is the
   draw-site icon lookup: for each grid tile it is asked for the classified
-  `IconKind` at exactly the side `IconTile::icon_side` reserves, and the tile
+  `IconKind` at exactly the side `TILE_LAYOUT.icon_side` reserves (one name
+  line under the picture, the cell `grid_metrics` sizes as tall as both and
+  no taller, shared with the desktop's icon field), and the tile
   blits what it returns or draws the built-in vector glyph when it returns
   `None` — so a missing, oversize, or refused asset degrades to a meaningful
   icon and can never blank the tile. A caller with no cache passes
@@ -711,7 +741,7 @@ can never diverge in navigation semantics, listing policy, or look.
   a damage report names — and `selection_name_rect` is the narrower rectangle
   the selected item's **name** occupies, read from the drawn controls
   themselves (`TableRow::cell_text_rect` for a list row's name cell,
-  `IconTile::label_rect` for a tile's label band) so the in-place rename editor
+  `TILE_LAYOUT.label_rect` for a tile's label band) so the in-place rename editor
   sits on the name rather than over the icon and the columns beside it.
   `draw_properties_window` is the file manager's Properties
   surface, laid out from its own window's client: the metadata fields, the

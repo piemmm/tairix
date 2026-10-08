@@ -32,11 +32,11 @@ use core::panic::PanicInfo;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
+use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::{
-    CapabilityId, CapabilityQuery, Errno, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
-    WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
+    CapabilityId, CapabilityQuery, DirEntry, Errno, FileKind, FileStat, OpenFlags, RealpathMode,
+    UnlinkFlags, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_arch_riscv64::fdt::Fdt;
@@ -51,7 +51,7 @@ use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel::riscv64::boot::{self as boot_riscv64, RiscvBinArch, RISCV_UART_CONSOLES};
 use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAWN};
-use tairix_kernel_core::fs::{FinalLink, ReaddirEntry};
+use tairix_kernel_core::fs::{FinalLink, Listing};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, FilesystemService,
     InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
@@ -273,7 +273,9 @@ impl FilesystemService for FixtureFs {
         _caps: &dyn CapabilityQuery,
         _path: &str,
         _final_link: FinalLink,
-    ) -> Result<Vec<ReaddirEntry>, Errno> {
+        _at: &mut Listing,
+        _each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

@@ -12,21 +12,26 @@
 //! already-bounded geometry, before it is used to allocate or index
 //! anything; see the crate documentation for the full bounds policy.
 //!
-//! Once the chunk stream is validated, the concatenated `IDAT` payload is
-//! zlib-decompressed (`tairix_compress::zlib`) into a buffer sized exactly
-//! to what the image's geometry implies — a stream producing a different
-//! number of bytes is refused rather than truncated or over-read — then
-//! each scanline (or, for an interlaced image, each of Adam7's seven
-//! passes' scanlines) is unfiltered and its samples expanded to
-//! straight-alpha RGBA8.
+//! Once the chunk stream is validated, the `IDAT` payloads are inflated in
+//! place, as they are read, by the streaming zlib decoder: a scanline at a
+//! time (an interlaced image's in Adam7 pass order), each unfiltered against
+//! the one above it, so neither the compressed data nor the inflated
+//! scanlines are ever held whole. A stream yielding fewer bytes than the
+//! geometry implies, or more, is refused.
+//!
+//! A fitted decode streams a sequential image's rows through a reduction to
+//! the size covering its box, and reads an interlaced image's passes only
+//! until the coarsest grid covering the box is complete.
 
 use alloc::vec::Vec;
 
+use tairix_compress::zlib;
+use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
 use crate::density::{Density, DensityUnit, Stated};
 use crate::picture::{IndexDepth, Picture};
-use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
 
 /// The CRC-32 a chunk carries: over its type and its payload, not its length
 /// (W3C PNG §"Chunk layout").
@@ -57,6 +62,10 @@ pub(crate) const PHYS_METRE: u8 = 1;
 /// The `IHDR` payload length (W3C PNG §"IHDR Image header"): four fields of
 /// 4 bytes plus five of 1 byte.
 const IHDR_LEN: usize = 13;
+
+/// The bytes a PNG opens with that [`probe`] and the header forecasts read:
+/// its signature and its `IHDR` chunk.
+pub(crate) const HEADER_LEN: usize = SIGNATURE.len() + 8 + IHDR_LEN + 4;
 
 /// The five legal PNG colour types, made a closed type so an unvalidated
 /// byte can never reach the pixel-assembly code — an illegal colour type is
@@ -280,14 +289,11 @@ fn first_header(bytes: &[u8], limits: &DecodeLimits) -> Result<Ihdr, DecodeError
     parse_ihdr(payload, limits)
 }
 
-/// The payload bytes the chunks of `stream` declare, read from their
+/// The payload bytes the table chunks of `stream` declare, read from their
 /// headers alone. A stream whose structure breaks off is summed to where it
-/// does; the parse refuses it there. Neither sum is ever more than `stream`.
+/// does; the parse refuses it there. The sum is never more than `stream`.
 #[derive(Default)]
 struct Declared {
-    /// The image data, so its concatenation is reserved once rather than
-    /// regrown, and copied, chunk by chunk.
-    image_data: usize,
     /// The palette and transparency tables a parse copies out.
     tables: usize,
 }
@@ -307,42 +313,59 @@ fn declared(stream: &[u8]) -> Declared {
         else {
             break;
         };
-        match <[u8; 4]>::try_from(&header[4..8]) {
-            Ok(IDAT) => sums.image_data += length,
-            Ok(PLTE | TRNS) => sums.tables += length,
-            _ => {}
+        if let Ok(PLTE | TRNS) = <[u8; 4]>::try_from(&header[4..8]) {
+            sums.tables += length;
         }
         pos = next;
     }
     sums
 }
 
-/// An upper bound of the bytes a [`decode`] holds at once for any PNG of
-/// `input_len` bytes `limits` admit, for a caller that cannot read its
-/// header: the image data, the tables at their largest, sixteen-bit RGBA
-/// scanlines with every pass's filter bytes, and the RGBA picture.
-pub(crate) fn peak_ceiling(input_len: usize, limits: &DecodeLimits) -> u64 {
-    // The palette and its transparency at their largest.
-    const TABLE_BYTES: u64 = 256 * 3 + 256;
+/// The palette and its transparency at their largest.
+const TABLE_BYTES: u64 = 256 * 3 + 256;
+
+/// What inflating a row at a time holds besides the rows: the zlib stream's
+/// state and history window.
+const STREAM_BYTES: u64 = core::mem::size_of::<zlib::Decoder>() as u64;
+
+/// The two scanlines a row-at-a-time reconstruction holds, at their widest.
+fn rows_bytes(width: u32, bits_per_pixel: u32) -> u64 {
+    sample_bytes_per_row(u64::from(width), bits_per_pixel)
+        .map_or(u64::MAX, |row| row.saturating_add(1).saturating_mul(2))
+}
+
+/// An upper bound of the bytes a [`decode`] holds at once for any PNG
+/// `limits` admit, for a caller that cannot read its header: the tables at
+/// their largest, the stream, sixteen-bit RGBA scanlines, and the RGBA
+/// picture.
+pub(crate) fn peak_ceiling(limits: &DecodeLimits) -> u64 {
     let pixels = limits.max_pixels();
-    let rows = u64::from(limits.max_height()).min(pixels);
-    // Adam7's passes hold every row at most twice over, and seven more.
-    let inflated = pixels
-        .saturating_mul(8)
-        .saturating_add(rows.saturating_mul(2))
-        .saturating_add(7);
+    let widest = u32::try_from(u64::from(limits.max_width()).min(pixels)).unwrap_or(u32::MAX);
     [
         TABLE_BYTES,
-        inflated,
+        STREAM_BYTES,
+        rows_bytes(widest, 64),
         pixels.saturating_mul(RGBA_BYTES as u64),
     ]
     .into_iter()
-    .fold(input_len as u64, u64::saturating_add)
+    .fold(0, u64::saturating_add)
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] holds at once for any PNG
+/// `limits` admit, for a caller that cannot read its header: the scan at its
+/// widest, and a reduction from the largest picture to itself.
+pub(crate) fn fitted_peak_ceiling(limits: &DecodeLimits) -> u64 {
+    let pixels = limits.max_pixels();
+    let side = |extent: u32| u32::try_from(u64::from(extent).min(pixels)).unwrap_or(u32::MAX);
+    let (widest, tallest) = (side(limits.max_width()), side(limits.max_height()));
+    peak_ceiling(limits)
+        .saturating_add(u64::from(widest).saturating_mul(RGBA_BYTES as u64))
+        .saturating_add(RowReducer::peak_bytes((widest, tallest), (widest, tallest)))
 }
 
 /// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
-/// from its chunk headers: the concatenated image data, the palette and
-/// transparency tables, the inflated scanlines, and the RGBA picture.
+/// from its chunk headers: the palette and transparency tables, the stream,
+/// two scanlines, and the RGBA picture.
 ///
 /// # Errors
 ///
@@ -350,27 +373,103 @@ pub(crate) fn peak_ceiling(input_len: usize, limits: &DecodeLimits) -> u64 {
 /// chunk that is not a valid `IHDR`, or a size `limits` do not admit.
 pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
     let ihdr = first_header(bytes, limits)?;
-    let bits = bits_per_pixel(ihdr.colour_type, ihdr.bit_depth);
-    let inflated = expected_decompressed_len(&passes_for(&ihdr), bits)?;
+    Ok(decode_bytes(&ihdr, declared_tables(bytes)))
+}
+
+/// [`peak_bytes`] of a PNG known only by its opening [`HEADER_LEN`] bytes, its
+/// tables at the most a parse copies out.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse from the header.
+pub(crate) fn header_peak_bytes(header: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    Ok(decode_bytes(&first_header(header, limits)?, TABLE_BYTES))
+}
+
+fn decode_bytes(ihdr: &Ihdr, tables: u64) -> u64 {
     let picture = u64::from(ihdr.width)
-        .checked_mul(u64::from(ihdr.height))
-        .and_then(|pixels| pixels.checked_mul(RGBA_BYTES as u64))
-        .ok_or(DecodeError::DimensionsOverflow)?;
-    let stream = declared(bytes.get(SIGNATURE.len()..).unwrap_or_default());
-    [stream.tables as u64, inflated, picture]
-        .into_iter()
-        .try_fold(stream.image_data as u64, u64::checked_add)
-        .ok_or(DecodeError::DimensionsOverflow)
+        .saturating_mul(u64::from(ihdr.height))
+        .saturating_mul(RGBA_BYTES as u64);
+    scanning_bytes(ihdr, tables).saturating_add(picture)
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once, read from its chunk headers: what the scan holds, and what the
+/// result needs — the coarsest covering grid of an interlaced image, or a
+/// sequential one's reduction and the row it feeds it.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse from the header.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let ihdr = first_header(bytes, limits)?;
+    Ok(fitted_bytes(&ihdr, declared_tables(bytes), fit))
+}
+
+/// [`fitted_peak_bytes`] of a PNG known only by its opening [`HEADER_LEN`]
+/// bytes, its tables at the most a parse copies out.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse from the header.
+pub(crate) fn header_fitted_peak_bytes(
+    header: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    Ok(fitted_bytes(
+        &first_header(header, limits)?,
+        TABLE_BYTES,
+        fit,
+    ))
+}
+
+fn fitted_bytes(ihdr: &Ihdr, tables: u64, fit: FitBox) -> u64 {
+    let produced = if ihdr.interlaced {
+        let grid = Grid::choose(ihdr, fit);
+        u64::from(grid.width)
+            .saturating_mul(u64::from(grid.height))
+            .saturating_mul(RGBA_BYTES as u64)
+    } else {
+        let reduced = fit.reduction(ihdr.width, ihdr.height);
+        u64::from(ihdr.width)
+            .saturating_mul(RGBA_BYTES as u64)
+            .saturating_add(RowReducer::peak_bytes((ihdr.width, ihdr.height), reduced))
+    };
+    scanning_bytes(ihdr, tables).saturating_add(produced)
+}
+
+/// The table bytes `bytes`' chunks declare.
+fn declared_tables(bytes: &[u8]) -> u64 {
+    declared(bytes.get(SIGNATURE.len()..).unwrap_or_default()).tables as u64
+}
+
+/// What reading the scanlines of an image of `ihdr` holds whatever is made of
+/// them: `tables`, the stream, and two scanlines.
+fn scanning_bytes(ihdr: &Ihdr, tables: u64) -> u64 {
+    [
+        tables,
+        STREAM_BYTES,
+        rows_bytes(ihdr.width, bits_per_pixel(ihdr.colour_type, ihdr.bit_depth)),
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add)
 }
 
 /// A validated chunk stream: the header, the palette and transparency it
-/// declared, the concatenated image data, and whether it held any other
-/// chunk.
-struct Parsed {
+/// declared, the run of chunks holding its image data, and whether it held
+/// any other chunk.
+struct Parsed<'a> {
     ihdr: Ihdr,
     palette: Option<Vec<[u8; 3]>>,
     trns: Option<Trns>,
-    idat: Vec<u8>,
+    /// The contiguous `IDAT` chunks, framing included, read in place rather
+    /// than copied out.
+    idat: &'a [u8],
     extras: bool,
     density: Option<Density>,
 }
@@ -418,7 +517,7 @@ fn read_phys(payload: &[u8]) -> Stated {
 }
 
 /// Validate a complete PNG file's chunk stream, decompressing nothing.
-fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
+fn parse<'a>(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Parsed<'a>, DecodeError> {
     let rest = bytes
         .strip_prefix(&SIGNATURE)
         .ok_or(DecodeError::BadSignature)?;
@@ -427,12 +526,13 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
     let mut ihdr: Option<Ihdr> = None;
     let mut palette: Option<Vec<[u8; 3]>> = None;
     let mut trns: Option<Trns> = None;
-    let mut idat = Vec::new();
+    let mut idat = 0..0;
     let mut seen_idat = false;
     let mut idat_finished = false;
     let mut seen_iend = false;
     let mut first_chunk = true;
     let mut held = Held::default();
+    let mut image_bytes = false;
 
     while pos < rest.len() {
         if seen_iend {
@@ -478,15 +578,11 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
                 if idat_finished {
                     return Err(DecodeError::ImageDataNotContiguous);
                 }
-                let run = if seen_idat {
-                    payload.len()
-                } else {
-                    declared(&rest[chunk_pos..]).image_data
-                };
-                if !fallible::reserve(&mut idat, run) {
-                    return Err(DecodeError::OutOfMemory);
+                if !seen_idat {
+                    idat.start = chunk_pos;
                 }
-                idat.extend_from_slice(payload);
+                idat.end = pos;
+                image_bytes |= !payload.is_empty();
                 seen_idat = true;
             }
             IEND => {
@@ -511,7 +607,7 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
     if !seen_iend {
         return Err(DecodeError::MissingEnd);
     }
-    if idat.is_empty() {
+    if !image_bytes {
         return Err(DecodeError::MissingImageData);
     }
     if ihdr.colour_type == ColourType::Indexed && palette.is_none() {
@@ -521,7 +617,7 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
         ihdr,
         palette,
         trns,
-        idat,
+        idat: &rest[idat],
         extras: held.extras,
         density: held.density,
     })
@@ -543,13 +639,13 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
 }
 
 /// Every pixel of `parsed` as straight RGBA8, row-major.
-fn rgba_pixels(parsed: &Parsed) -> Result<Vec<u8>, DecodeError> {
+fn rgba_pixels(parsed: &Parsed<'_>) -> Result<Vec<u8>, DecodeError> {
     let (ihdr, palette, trns) = (
         &parsed.ihdr,
         parsed.palette.as_deref(),
         parsed.trns.as_ref(),
     );
-    decode_pixels(ihdr, &parsed.idat, RGBA_BYTES, |row, x, out| {
+    decode_pixels(ihdr, parsed.idat, RGBA_BYTES, |row, x, out| {
         out.copy_from_slice(&pixel_rgba(row, x, ihdr, palette, trns)?);
         Ok(())
     })
@@ -587,7 +683,7 @@ pub(crate) fn decode_native(
         .palette
         .as_deref()
         .ok_or(DecodeError::PaletteRequired)?;
-    let indices = decode_pixels(ihdr, &parsed.idat, 1, |row, x, out| {
+    let indices = decode_pixels(ihdr, parsed.idat, 1, |row, x, out| {
         let index = extract_sample(row, x, ihdr.bit_depth, 0, 1)
             .ok_or(DecodeError::CompressedSizeMismatch)?;
         if usize::from(index) >= colours.len() {
@@ -730,27 +826,6 @@ fn sample_bytes_per_row(width: u64, bits_per_pixel: u32) -> Result<u64, DecodeEr
         .ok_or(DecodeError::DimensionsOverflow)
 }
 
-/// The total decompressed byte count every declared pass implies: each
-/// non-empty pass contributes `height * (1 + sample_bytes_per_row)`.
-fn expected_decompressed_len(passes: &[Pass], bits_per_pixel: u32) -> Result<u64, DecodeError> {
-    let mut total = 0u64;
-    for pass in passes {
-        if pass.width == 0 || pass.height == 0 {
-            continue;
-        }
-        let row_len = sample_bytes_per_row(u64::from(pass.width), bits_per_pixel)?
-            .checked_add(1)
-            .ok_or(DecodeError::DimensionsOverflow)?;
-        let pass_len = row_len
-            .checked_mul(u64::from(pass.height))
-            .ok_or(DecodeError::DimensionsOverflow)?;
-        total = total
-            .checked_add(pass_len)
-            .ok_or(DecodeError::DimensionsOverflow)?;
-    }
-    Ok(total)
-}
-
 /// What filter type `filter` predicts a byte to be from `a` (left), `b`
 /// (above) and `c` (above-left), or `None` for no filter type: the decoder
 /// adds it back and the encoder takes it away (W3C PNG §"Filtering").
@@ -782,46 +857,25 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Reconstruct one pass's scanlines in place.
-///
-/// `scanlines` holds `pass_height` rows, each a filter-type byte followed by
-/// `row_sample_bytes` filtered sample bytes, and each row's samples are
-/// replaced by their reconstruction. A sample is predicted only from bytes to
-/// its left and from the row above, both already reconstructed when it is
-/// reached, so no second buffer is needed.
-fn defilter_pass(
-    scanlines: &mut [u8],
-    pass_height: u32,
-    row_sample_bytes: usize,
+/// Reconstruct one scanline in place from the reconstructed row above it,
+/// `prior` (none on a pass's first row): a sample is predicted only from
+/// bytes to its left and above, both already reconstructed when it is reached.
+fn defilter_row(
+    filter_type: u8,
+    samples: &mut [u8],
+    prior: Option<&[u8]>,
     bpp: usize,
 ) -> Result<(), DecodeError> {
-    let stride = row_sample_bytes
-        .checked_add(1)
-        .ok_or(DecodeError::DimensionsOverflow)?;
-    let rows = to_usize(pass_height)?;
-    if Some(scanlines.len()) != stride.checked_mul(rows) {
-        return Err(DecodeError::CompressedSizeMismatch);
-    }
-    for row in 0..rows {
-        let (above, current) = scanlines.split_at_mut(row * stride);
-        let prior = above
-            .len()
-            .checked_sub(row_sample_bytes)
-            .map(|at| &above[at..]);
-        let Some((&mut filter_type, samples)) = current[..stride].split_first_mut() else {
-            return Err(DecodeError::CompressedSizeMismatch);
+    for i in 0..samples.len() {
+        let a = if i >= bpp { samples[i - bpp] } else { 0 };
+        let b = prior.map_or(0, |prior| prior[i]);
+        let c = if i >= bpp {
+            prior.map_or(0, |prior| prior[i - bpp])
+        } else {
+            0
         };
-        for i in 0..row_sample_bytes {
-            let a = if i >= bpp { samples[i - bpp] } else { 0 };
-            let b = prior.map_or(0, |prior| prior[i]);
-            let c = if i >= bpp {
-                prior.map_or(0, |prior| prior[i - bpp])
-            } else {
-                0
-            };
-            let predicted = predict(filter_type, a, b, c).ok_or(DecodeError::InvalidFilterType)?;
-            samples[i] = samples[i].wrapping_add(predicted);
-        }
+        let predicted = predict(filter_type, a, b, c).ok_or(DecodeError::InvalidFilterType)?;
+        samples[i] = samples[i].wrapping_add(predicted);
     }
     Ok(())
 }
@@ -951,11 +1005,145 @@ fn pixel_rgba(
     }
 }
 
-/// Decompress `idat`, reconstruct every scanline, honouring interlacing, and
-/// have `store` write each pixel's `out_bytes` output bytes.
+/// The image data as it inflates: the payloads of the `IDAT` run, in order,
+/// fed to one zlib stream, so neither the compressed data nor the inflated
+/// scanlines are ever held whole.
+struct ImageData<'a> {
+    /// The run's chunks not yet reached.
+    chunks: &'a [u8],
+    /// The unread part of the chunk being inflated.
+    payload: &'a [u8],
+    /// Heap-held: its history window is too large for a stack.
+    zlib: Vec<zlib::Decoder>,
+}
+
+impl<'a> ImageData<'a> {
+    fn new(run: &'a [u8]) -> Result<Self, DecodeError> {
+        let mut zlib = Vec::new();
+        if !fallible::reserve(&mut zlib, 1) {
+            return Err(DecodeError::OutOfMemory);
+        }
+        zlib.push(zlib::Decoder::new());
+        Ok(Self {
+            chunks: run,
+            payload: &[],
+            zlib,
+        })
+    }
+
+    /// Fill `out` from the stream, refusing a stream that ends first.
+    fn read(&mut self, out: &mut [u8]) -> Result<(), DecodeError> {
+        let mut filled = 0;
+        while filled < out.len() {
+            let (consumed, produced) = self.inflate(&mut out[filled..])?;
+            if consumed == 0 && produced == 0 {
+                return Err(DecodeError::CompressedSizeMismatch);
+            }
+            filled += produced;
+        }
+        Ok(())
+    }
+
+    /// End the stream where the rows read end it: a byte past them is more
+    /// image than the header declares, and the trailer must verify. Bytes
+    /// after the stream's end are ignored, as a decoder may.
+    fn finish(mut self) -> Result<(), DecodeError> {
+        let mut spare = [0u8; 1];
+        while !self.finished() {
+            let (consumed, produced) = self.inflate(&mut spare)?;
+            if produced != 0 {
+                return Err(DecodeError::CompressedSizeMismatch);
+            }
+            if consumed == 0 {
+                return Err(DecodeError::CompressedData(zlib::Error::MissingTrailer));
+            }
+        }
+        Ok(())
+    }
+
+    fn finished(&self) -> bool {
+        self.zlib.first().is_some_and(zlib::Decoder::is_finished)
+    }
+
+    /// One step of the stream into `out`, answering the input it consumed
+    /// and the output it produced; nothing of either once the stream or the
+    /// run is spent.
+    fn inflate(&mut self, out: &mut [u8]) -> Result<(usize, usize), DecodeError> {
+        if self.finished() {
+            return Ok((0, 0));
+        }
+        while self.payload.is_empty() {
+            let Some(payload) = next_payload(&mut self.chunks) else {
+                return Ok((0, 0));
+            };
+            self.payload = payload;
+        }
+        let Some(decoder) = self.zlib.first_mut() else {
+            return Ok((0, 0));
+        };
+        let progress = decoder
+            .decompress(self.payload, out)
+            .map_err(DecodeError::CompressedData)?;
+        self.payload = self.payload.get(progress.consumed..).unwrap_or_default();
+        Ok((progress.consumed, progress.produced))
+    }
+}
+
+/// The payload of the next chunk of a run the parse has already validated,
+/// stepping past its framing.
+fn next_payload<'a>(chunks: &mut &'a [u8]) -> Option<&'a [u8]> {
+    let len = usize::try_from(crate::be_u32(chunks, 0)?).ok()?;
+    let payload = chunks.get(8..len.checked_add(8)?)?;
+    *chunks = chunks.get(len.checked_add(12)?..)?;
+    Some(payload)
+}
+
+/// Reconstruct the scanlines of `passes` in stream order, handing `each`
+/// every reconstructed row with its pass and its row within the pass. Two
+/// rows are held, whatever the image's height.
+fn for_each_row(
+    ihdr: &Ihdr,
+    data: &mut ImageData<'_>,
+    passes: &[Pass],
+    mut each: impl FnMut(&Pass, u32, &[u8]) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
+    let bpp_bits = bits_per_pixel(ihdr.colour_type, ihdr.bit_depth);
+    let bpp = filter_bpp(bpp_bits);
+    let row_len = |pass: &Pass| to_usize64(sample_bytes_per_row(u64::from(pass.width), bpp_bits)?);
+    let mut widest = 0;
+    for pass in passes {
+        widest = row_len(pass)?.max(widest);
+    }
+    let stride = widest
+        .checked_add(1)
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let mut current = fallible::filled(stride, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    let mut above = fallible::filled(stride, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    for pass in passes {
+        if pass.width == 0 || pass.height == 0 {
+            continue;
+        }
+        let len = row_len(pass)?;
+        for y in 0..pass.height {
+            let row = &mut current[..=len];
+            data.read(row)?;
+            let Some((&mut filter_type, samples)) = row.split_first_mut() else {
+                return Err(DecodeError::CompressedSizeMismatch);
+            };
+            let prior = (y > 0).then(|| &above[1..=len]);
+            defilter_row(filter_type, samples, prior, bpp)?;
+            each(pass, y, samples)?;
+            core::mem::swap(&mut current, &mut above);
+        }
+    }
+    Ok(())
+}
+
+/// Reconstruct every scanline, honouring interlacing, and have `store` write
+/// each pixel's `out_bytes` output bytes.
 ///
-/// `store` is handed a defiltered row, the pixel's column within it, and the
-/// slice of the output that pixel owns.
+/// `store` is handed a reconstructed row, the pixel's column within it, and
+/// the slice of the output that pixel owns.
 fn decode_pixels<F>(
     ihdr: &Ihdr,
     idat: &[u8],
@@ -965,19 +1153,6 @@ fn decode_pixels<F>(
 where
     F: FnMut(&[u8], u32, &mut [u8]) -> Result<(), DecodeError>,
 {
-    let bpp_bits = bits_per_pixel(ihdr.colour_type, ihdr.bit_depth);
-    let bpp = filter_bpp(bpp_bits);
-    let passes = passes_for(ihdr);
-
-    let expected = expected_decompressed_len(&passes, bpp_bits)?;
-    let expected_len = to_usize64(expected)?;
-    let mut raw = fallible::filled(expected_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    let produced = tairix_compress::zlib::decompress_into(idat, &mut raw)
-        .map_err(DecodeError::CompressedData)?;
-    if produced != expected_len {
-        return Err(DecodeError::CompressedSizeMismatch);
-    }
-
     let pixel_count = u64::from(ihdr.width)
         .checked_mul(u64::from(ihdr.height))
         .ok_or(DecodeError::DimensionsOverflow)?;
@@ -988,38 +1163,126 @@ where
     )?;
     let mut output = fallible::filled(output_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
     let width = to_usize(ihdr.width)?;
-
-    let mut raw_pos = 0usize;
-    for pass in &passes {
-        if pass.width == 0 || pass.height == 0 {
-            continue;
+    let mut data = ImageData::new(idat)?;
+    for_each_row(ihdr, &mut data, &passes_for(ihdr), |pass, y, row| {
+        let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)?)?;
+        for x in 0..pass.width {
+            let out_x = to_usize(placed_coordinate(pass.col_start, x, pass.col_step)?)?;
+            let index = (out_y * width + out_x) * out_bytes;
+            let pixel = output
+                .get_mut(index..index + out_bytes)
+                .ok_or(DecodeError::CompressedSizeMismatch)?;
+            store(row, x, pixel)?;
         }
-        let row_sample_bytes = to_usize64(sample_bytes_per_row(u64::from(pass.width), bpp_bits)?)?;
-        let pass_len = row_sample_bytes
-            .checked_add(1)
-            .and_then(|full| full.checked_mul(to_usize(pass.height).ok()?))
-            .ok_or(DecodeError::DimensionsOverflow)?;
-        let scanlines = raw
-            .get_mut(raw_pos..raw_pos + pass_len)
-            .ok_or(DecodeError::CompressedSizeMismatch)?;
-        raw_pos += pass_len;
+        Ok(())
+    })?;
+    data.finish()?;
+    Ok(output)
+}
 
-        defilter_pass(scanlines, pass.height, row_sample_bytes, bpp)?;
+/// The coarsest grid of an interlaced image whose Adam7 passes cover a box:
+/// every `step`-th pixel on both axes, complete once the first `passes`
+/// passes are read.
+#[derive(Clone, Copy)]
+struct Grid {
+    step: u32,
+    passes: usize,
+    width: u32,
+    height: u32,
+}
 
-        for (y, scanline) in (0..pass.height).zip(scanlines.chunks_exact(row_sample_bytes + 1)) {
-            let row = &scanline[1..];
-            let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)?)?;
-            for x in 0..pass.width {
-                let out_x = to_usize(placed_coordinate(pass.col_start, x, pass.col_step)?)?;
-                let index = (out_y * width + out_x) * out_bytes;
-                let pixel = output
-                    .get_mut(index..index + out_bytes)
-                    .ok_or(DecodeError::CompressedSizeMismatch)?;
-                store(row, x, pixel)?;
-            }
+impl Grid {
+    /// The grids the passes complete, coarsest first.
+    const ALL: [(u32, usize); 4] = [(8, 1), (4, 3), (2, 5), (1, 7)];
+
+    fn of(ihdr: &Ihdr, (step, passes): (u32, usize)) -> Self {
+        Self {
+            step,
+            passes,
+            width: pass_extent(ihdr.width, 0, step),
+            height: pass_extent(ihdr.height, 0, step),
         }
     }
-    Ok(output)
+
+    /// The coarsest grid covering `fit`, or the whole image where none
+    /// coarser does.
+    fn choose(ihdr: &Ihdr, fit: FitBox) -> Self {
+        let mut grids = Self::ALL.iter().map(|&grid| Self::of(ihdr, grid));
+        grids
+            .find(|grid| grid.width >= fit.width() && grid.height >= fit.height())
+            .unwrap_or_else(|| Self::of(ihdr, (1, ADAM7.len())))
+    }
+}
+
+/// Decode a complete PNG file no smaller than it must be to cover `fit`,
+/// holding what the result needs rather than what the picture would.
+///
+/// A sequential image streams its rows through a reduction to the size
+/// covering `fit`. An interlaced one decodes only the passes that complete
+/// the coarsest grid covering it, and the rest of the stream is never read.
+/// It admits what [`decode`] admits.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let parsed = parse(bytes, limits)?;
+    let ihdr = &parsed.ihdr;
+    let (palette, trns) = (parsed.palette.as_deref(), parsed.trns.as_ref());
+    let passes = passes_for(ihdr);
+    let mut data = ImageData::new(parsed.idat)?;
+    if ihdr.interlaced {
+        let grid = Grid::choose(ihdr, fit);
+        let width = to_usize(grid.width)?;
+        let len = to_usize64(
+            u64::from(grid.width)
+                .checked_mul(u64::from(grid.height))
+                .and_then(|pixels| pixels.checked_mul(RGBA_BYTES as u64))
+                .ok_or(DecodeError::DimensionsOverflow)?,
+        )?;
+        let mut output = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+        for_each_row(ihdr, &mut data, &passes[..grid.passes], |pass, y, row| {
+            let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)? / grid.step)?;
+            for x in 0..pass.width {
+                let out_x =
+                    to_usize(placed_coordinate(pass.col_start, x, pass.col_step)? / grid.step)?;
+                let index = (out_y * width + out_x) * RGBA_BYTES;
+                output
+                    .get_mut(index..index + RGBA_BYTES)
+                    .ok_or(DecodeError::CompressedSizeMismatch)?
+                    .copy_from_slice(&pixel_rgba(row, x, ihdr, palette, trns)?);
+            }
+            Ok(())
+        })?;
+        if grid.passes == passes.len() {
+            data.finish()?;
+        }
+        return Ok(RasterImage::from_parts(grid.width, grid.height, output));
+    }
+    let (width, height) = fit.reduction(ihdr.width, ihdr.height);
+    let mut reducer = RowReducer::new(
+        (ihdr.width, ihdr.height),
+        (width, height),
+        RowOrder::TopDown,
+    )
+    .map_err(crate::reduction_refused)?;
+    let row = to_usize(ihdr.width)?
+        .checked_mul(RGBA_BYTES)
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let mut rgba = fallible::filled(row, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    for_each_row(ihdr, &mut data, &passes[..1], |_, _, row| {
+        for (x, pixel) in (0..ihdr.width).zip(rgba.as_chunks_mut::<RGBA_BYTES>().0) {
+            *pixel = pixel_rgba(row, x, ihdr, palette, trns)?;
+        }
+        reducer.push_row(&rgba).map_err(crate::reduction_refused)
+    })?;
+    data.finish()?;
+    let pixels = reducer.finish().map_err(crate::reduction_refused)?;
+    Ok(RasterImage::from_parts(width, height, pixels))
 }
 
 #[cfg(test)]

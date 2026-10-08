@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::fixture::{flat, flat_group, header, prefix_for, simple_one, Bits, Prefix};
-use super::{decode, decode_alpha, probe, SIGNATURE};
+use super::{alpha_sample, decode, decode_alpha, probe, SIGNATURE};
 use crate::{DecodeError, DecodeLimits, RGBA_BYTES};
 
 /// Generous enough that no fixture here is refused for its size.
@@ -419,7 +419,13 @@ fn the_alpha_entry_point_answers_the_green_channel_as_a_plane() {
     flat_group(&mut bits, [0, 0x7F, 0, 0]);
     let bytes = bits.finish();
     let plane = decode_alpha(&bytes, 4, 2).expect("a valid alpha plane decodes");
-    assert_eq!(plane, vec![0x7Fu8; 8]);
+    assert_eq!(
+        plane
+            .iter()
+            .map(|&pixel| alpha_sample(pixel))
+            .collect::<Vec<_>>(),
+        vec![0x7Fu8; 8]
+    );
 }
 
 #[test]

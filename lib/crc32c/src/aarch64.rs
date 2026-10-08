@@ -15,18 +15,19 @@
 
 use core::arch::aarch64::{__crc32cb, __crc32cd};
 
-/// Compute the CRC-32C of `data` using the ARMv8 `crc32c*` instructions.
+/// Advance the raw CRC-32C register `state` over `data` using the ARMv8
+/// `crc32c*` instructions, inverting neither side.
 ///
 /// Safe wrapper: the unsafe intrinsic call is sound because the candidate is
 /// compiled and selected only when the CRC32 extension is present (the
 /// `lib/cpuops` caller gates on the feature bit).
 #[must_use]
-pub fn crc32c_hw(data: &[u8]) -> u32 {
+pub fn crc32c_hw(state: u32, data: &[u8]) -> u32 {
     // SAFETY: `crc32c_hw_unchecked` requires the CRC32 extension. This
     // candidate is registered with `requires: &[CpuFeature::Crc32]`, so
     // `lib/cpuops` only hands out its pointer after confirming the bit is set;
     // a core without it filters the candidate out and runs the baseline.
-    unsafe { crc32c_hw_unchecked(data) }
+    unsafe { crc32c_hw_unchecked(state, data) }
 }
 
 /// The `#[target_feature]` core.
@@ -38,8 +39,8 @@ pub fn crc32c_hw(data: &[u8]) -> u32 {
 /// undefined-instruction fault. The `lib/cpuops` capability gate is the sole
 /// caller and enforces this.
 #[target_feature(enable = "crc")]
-unsafe fn crc32c_hw_unchecked(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
+unsafe fn crc32c_hw_unchecked(state: u32, data: &[u8]) -> u32 {
+    let mut crc = state;
     let (chunks, remainder) = data.as_chunks::<8>();
     for chunk in chunks {
         // Bytes folded low-address-first (`from_le_bytes`) to match the
@@ -54,5 +55,5 @@ unsafe fn crc32c_hw_unchecked(data: &[u8]) -> u32 {
     for &byte in remainder {
         crc = __crc32cb(crc, byte);
     }
-    !crc
+    crc
 }

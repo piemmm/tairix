@@ -177,7 +177,8 @@ The leaf name of any pick is disclosed to the requester through
 ## Drag-and-drop
 
 A drag starts only from the window holding the pointer grab with the primary
-button down (`BeginDrag`, which carries only the item's name). The session
+button down (`BeginDrag`, which carries only the first item's name and the
+count; only a drag of one openable file is offered to a slot). The session
 takes the grab, floats an input-transparent plate naming the item beside the
 pointer, and lights an icon-bar slot whose application's associations cover
 the item, asking each slot once as the pointer arrives. A release there ends

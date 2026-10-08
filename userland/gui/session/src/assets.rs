@@ -17,12 +17,14 @@
 //! so a missing or corrupt `/System/Graphics` can never blank the pointer or a
 //! status icon — it simply yields the built-in set.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_cursor::{cursor_asset_path, CursorAssetSource, CursorTheme, MAX_CURSOR_ASSET_BYTES};
 use tairix_icon::{
-    icon_vector_path, IconAssetSource, IconKind, IconSet, ICON_KINDS, MAX_ARTWORK_BYTES,
+    icon_vector_path, ArtworkDocument, IconAssetSource, IconKind, IconSet, ICON_KINDS,
+    MAX_ARTWORK_BYTES,
 };
 use tairix_svg::font::FontProvider;
 use tairix_theme::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
@@ -50,6 +52,15 @@ pub trait SessionFileReader {
     /// it. A read failure is never fatal to the desktop: each loader falls
     /// back per file (built-in artwork, an empty catalog) and reports.
     fn read(&mut self, path: &str, max: usize) -> Result<Vec<u8>, Errno>;
+
+    /// The file at absolute `path`, opened to stream a thumbnail from, or
+    /// `None` when it is missing or unreadable.
+    ///
+    /// The default opens nothing, so a reader of the desktop's own assets
+    /// draws every picture file as its class picture.
+    fn open_document(&mut self, _path: &str) -> Option<Box<dyn ArtworkDocument + '_>> {
+        None
+    }
 }
 
 /// The cursor SVG bytes read from disk, one optional blob per [`CursorKind`],

@@ -39,6 +39,7 @@
 use alloc::vec::Vec;
 
 use tairix_compress::zlib;
+use tairix_raster::{RowOrder, RowReducer};
 use tairix_util::fallible;
 
 use crate::ccitt;
@@ -49,7 +50,9 @@ use crate::lzw::{CodeSource, Lzw, Widen};
 use crate::orientation::Orientation;
 use crate::pages::{PageSource, Pages};
 use crate::picture::{IndexDepth, Picture};
-use crate::{jpeg, rgba_picture, DecodeError, DecodeLimits, RasterImage, Unkept, RGBA_BYTES};
+use crate::{
+    jpeg, rgba_picture, DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, RGBA_BYTES,
+};
 
 /// The four openings a TIFF can have: the byte-order mark, then the version
 /// in that order. Version 43 is `BigTIFF`, recognised here so its refusal can
@@ -138,6 +141,42 @@ const COMPRESSION_JPEG: u16 = 7;
 pub(crate) const COMPRESSION_ADOBE_DEFLATE: u16 = 8;
 pub(crate) const COMPRESSION_PACK_BITS: u16 = 32773;
 const COMPRESSION_DEFLATE: u16 = 32946;
+
+/// How a page's units are coded: its compression tag, read once, so a coding
+/// no codec reads is refused before anything of the page is reserved.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Codec {
+    Raw,
+    PackBits,
+    Lzw,
+    Deflate,
+    Fax(Fax),
+    Jpeg,
+}
+
+/// The CCITT codings.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Fax {
+    ModifiedHuffman,
+    Group3,
+    Group4,
+}
+
+impl Codec {
+    const fn of(compression: u16) -> Option<Self> {
+        Some(match compression {
+            COMPRESSION_NONE => Self::Raw,
+            COMPRESSION_PACK_BITS => Self::PackBits,
+            COMPRESSION_LZW => Self::Lzw,
+            COMPRESSION_ADOBE_DEFLATE | COMPRESSION_DEFLATE => Self::Deflate,
+            COMPRESSION_CCITT_RLE => Self::Fax(Fax::ModifiedHuffman),
+            COMPRESSION_GROUP3 => Self::Fax(Fax::Group3),
+            COMPRESSION_GROUP4 => Self::Fax(Fax::Group4),
+            COMPRESSION_JPEG => Self::Jpeg,
+            _ => return None,
+        })
+    }
+}
 
 /// `Predictor`: none, horizontal differencing, and the floating-point
 /// predictor, which also shuffles each row's bytes aside.
@@ -475,7 +514,7 @@ struct Page<'a> {
     width: u32,
     height: u32,
     orientation: Orientation,
-    compression: u16,
+    codec: Codec,
     colour: Colour,
     samples: Samples,
     planar: bool,
@@ -535,12 +574,11 @@ impl<'a> Page<'a> {
         }
         let orientation = Orientation::from_tag(ifd.value(TAG_ORIENTATION, 1)?)
             .ok_or(DecodeError::TiffInvalidOrientation)?;
-        let compression = u16::try_from(ifd.value(TAG_COMPRESSION, u32::from(COMPRESSION_NONE))?)
-            .map_err(|_| DecodeError::TiffUnsupportedCompression)?;
-        let fax = matches!(
-            compression,
-            COMPRESSION_CCITT_RLE | COMPRESSION_GROUP3 | COMPRESSION_GROUP4
-        );
+        let codec = u16::try_from(ifd.value(TAG_COMPRESSION, u32::from(COMPRESSION_NONE))?)
+            .ok()
+            .and_then(Codec::of)
+            .ok_or(DecodeError::TiffUnsupportedCompression)?;
+        let fax = matches!(codec, Codec::Fax(_));
         let photometric = match ifd.field(TAG_PHOTOMETRIC)? {
             Some(field) if field.count > 0 => u16::try_from(ifd.integer(&field, 0)?)
                 .map_err(|_| DecodeError::TiffUnsupportedPhotometric)?,
@@ -549,7 +587,7 @@ impl<'a> Page<'a> {
             _ if fax => PHOTOMETRIC_WHITE_ZERO,
             _ => return Err(DecodeError::TiffMissingTag),
         };
-        let samples = read_samples(&ifd, photometric, compression)?;
+        let samples = read_samples(&ifd, photometric, codec)?;
         let colour = read_colour(&ifd, photometric, &samples)?;
         let planar = match ifd.value(TAG_PLANAR_CONFIGURATION, 1)? {
             1 => false,
@@ -557,7 +595,7 @@ impl<'a> Page<'a> {
             _ => return Err(DecodeError::TiffUnsupportedPlanarConfiguration),
         };
         if planar && samples.count > 1 {
-            if compression == COMPRESSION_JPEG {
+            if codec == Codec::Jpeg {
                 return Err(DecodeError::TiffUnsupportedPlanarConfiguration);
             }
             if let Colour::YCbCr(ycbcr) = colour {
@@ -602,7 +640,7 @@ impl<'a> Page<'a> {
             _ => return Err(DecodeError::TiffInvalidPredictor),
         }
         let (grid, offsets, counts) = read_grid(&ifd, width, height, &samples, planar)?;
-        let group3_2d = compression == COMPRESSION_GROUP3
+        let group3_2d = codec == Codec::Fax(Fax::Group3)
             && ifd.value(TAG_T4_OPTIONS, 0)? & 1 != 0
             && !matches!(colour, Colour::YCbCr(_));
         Ok(Self {
@@ -610,7 +648,7 @@ impl<'a> Page<'a> {
             width,
             height,
             orientation,
-            compression,
+            codec,
             colour,
             samples,
             planar,
@@ -626,7 +664,7 @@ impl<'a> Page<'a> {
 
 /// Read and validate the sample layout: how many, how wide, how signed, and
 /// which of them is alpha.
-fn read_samples(ifd: &Ifd<'_>, photometric: u16, compression: u16) -> Result<Samples, DecodeError> {
+fn read_samples(ifd: &Ifd<'_>, photometric: u16, codec: Codec) -> Result<Samples, DecodeError> {
     let count = ifd.value(TAG_SAMPLES_PER_PIXEL, 1)?;
     if count == 0 {
         return Err(DecodeError::TiffSampleCountMismatch);
@@ -666,7 +704,7 @@ fn read_samples(ifd: &Ifd<'_>, photometric: u16, compression: u16) -> Result<Sam
     }
     // A JPEG unit decodes to colour on its own, so an extra sample beside it
     // would be one the container has nowhere to carry.
-    if compression == COMPRESSION_JPEG && count != base {
+    if codec == Codec::Jpeg && count != base {
         return Err(DecodeError::TiffSampleCountMismatch);
     }
     let alpha = read_alpha(ifd, base, count)?;
@@ -1000,16 +1038,16 @@ fn decompress(
     columns: u32,
     out: &mut [u8],
 ) -> Result<(), DecodeError> {
-    match page.compression {
-        COMPRESSION_NONE => {
+    match page.codec {
+        Codec::Raw => {
             let source = data
                 .get(..out.len())
                 .ok_or(DecodeError::TiffStripTruncated)?;
             out.copy_from_slice(source);
             Ok(())
         }
-        COMPRESSION_PACK_BITS => unpack_bits(data, out),
-        COMPRESSION_LZW => {
+        Codec::PackBits => unpack_bits(data, out),
+        Codec::Lzw => {
             let lzw = match &mut codecs.lzw {
                 Some(lzw) => lzw,
                 slot => slot.insert(Lzw::new().ok_or(DecodeError::OutOfMemory)?),
@@ -1031,7 +1069,7 @@ fn decompress(
             }
             Ok(())
         }
-        COMPRESSION_ADOBE_DEFLATE | COMPRESSION_DEFLATE => {
+        Codec::Deflate => {
             let written =
                 zlib::decompress_into(data, out).map_err(DecodeError::TiffCompressedData)?;
             if written != out.len() {
@@ -1039,22 +1077,23 @@ fn decompress(
             }
             Ok(())
         }
-        COMPRESSION_CCITT_RLE | COMPRESSION_GROUP3 | COMPRESSION_GROUP4 => {
+        Codec::Fax(fax) => {
             let tables = match &mut codecs.fax {
                 Some(tables) => tables,
                 slot => slot.insert(ccitt::Codes::new().ok_or(DecodeError::OutOfMemory)?),
             };
-            let coding = match page.compression {
-                COMPRESSION_CCITT_RLE => ccitt::Coding::ModifiedHuffman,
-                COMPRESSION_GROUP4 => ccitt::Coding::Group4,
-                _ => ccitt::Coding::Group3 {
+            let coding = match fax {
+                Fax::ModifiedHuffman => ccitt::Coding::ModifiedHuffman,
+                Fax::Group4 => ccitt::Coding::Group4,
+                Fax::Group3 => ccitt::Coding::Group3 {
                     two_dimensional: page.group3_2d,
                 },
             };
             out.fill(0);
             ccitt::decode(data, tables, coding, columns, rows, page.fill_lsb, out)
         }
-        _ => Err(DecodeError::TiffUnsupportedCompression),
+        // A JPEG unit is decoded whole by the JPEG decoder, never expanded.
+        Codec::Jpeg => Err(DecodeError::TiffUnsupportedCompression),
     }
 }
 
@@ -1260,6 +1299,19 @@ struct Convert {
 }
 
 /// Turn one pixel's gathered samples into straight-alpha RGBA.
+impl Convert {
+    /// How `page`'s raw samples become colours.
+    fn for_page(page: &Page<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            sampler: Sampler::new(Channel::fixed(0, page.samples.bits)),
+            palette: match page.colour {
+                Colour::Palette => Some(Palette::read(&page.ifd, page.samples.bits)?),
+                _ => None,
+            },
+        })
+    }
+}
+
 fn to_rgba(page: &Page<'_>, convert: &Convert, raw: &[u32; 5]) -> [u8; 4] {
     let samples = &page.samples;
     let value = |index: usize| normalise(raw[index], samples, &convert.sampler);
@@ -1496,6 +1548,20 @@ const fn output_size(page: &Page<'_>) -> (u32, u32) {
     page.orientation.picture_size(page.width, page.height)
 }
 
+/// Refuse `page` where decoding it would, before anything of it is reserved:
+/// a picture past `limits`, a tile past them — a tile's extent is not bounded
+/// by the picture, since nothing in the format caps one — or a tile layout or
+/// palette that does not read. Answers the conversion its samples take.
+fn admit(page: &Page<'_>, limits: &DecodeLimits) -> Result<Convert, DecodeError> {
+    let (width, height) = output_size(page);
+    limits.check(width, height)?;
+    if page.codec != Codec::Jpeg {
+        limits.check(page.grid.columns, page.grid.rows)?;
+        page.layout(page.grid.rows)?;
+    }
+    Convert::for_page(page)
+}
+
 /// Decode one page into a straight-alpha RGBA image.
 fn decode_page(
     file: &[u8],
@@ -1503,8 +1569,8 @@ fn decode_page(
     limits: &DecodeLimits,
     scratch: &mut Scratch,
 ) -> Result<RasterImage, DecodeError> {
+    let convert = admit(page, limits)?;
     let (out_width, out_height) = output_size(page);
-    limits.check(out_width, out_height)?;
     let out_len = usize::try_from(
         u64::from(out_width)
             .checked_mul(u64::from(out_height))
@@ -1513,64 +1579,222 @@ fn decode_page(
     )
     .map_err(|_| DecodeError::DimensionsOverflow)?;
     let mut out = fallible::filled(out_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    if page.compression == COMPRESSION_JPEG {
-        decode_jpeg_page(
-            file,
-            page,
-            limits,
-            &mut scratch.codecs,
-            &mut out,
-            out_width,
-            out_height,
-        )?;
-        return Ok(RasterImage::from_parts(out_width, out_height, out));
-    }
-    let convert = Convert {
-        sampler: Sampler::new(Channel::fixed(0, page.samples.bits)),
-        palette: match page.colour {
-            Colour::Palette => Some(Palette::read(&page.ifd, page.samples.bits)?),
-            _ => None,
-        },
-    };
-    walk_page(file, page, limits, scratch, |x, y, raw| {
-        place(&mut out, out_width, x, y, to_rgba(page, &convert, raw));
+    walk_units(file, page, limits, scratch, |walked| {
+        if let Walked::Unit(unit) = walked {
+            for y in 0..unit.covered {
+                for x in 0..unit.columns {
+                    let pixel = unit.rgba(page, &convert, x, y)?;
+                    let (dx, dy) = page.orientation.place(
+                        unit.origin.0 + x,
+                        unit.origin.1 + y,
+                        out_width,
+                        out_height,
+                    );
+                    place(&mut out, out_width, dx, dy, pixel);
+                }
+            }
+        }
+        Ok(())
     })?;
     Ok(RasterImage::from_parts(out_width, out_height, out))
 }
 
-/// Decompress every unit of `page` and hand each pixel's raw samples to
-/// `put` at the place the page's orientation puts it.
-fn walk_page(
+/// Decode a page whose orientation keeps its rows rows, no smaller than it
+/// must be to cover `target`, its stored rows streamed through a reduction:
+/// a strip's straight from the unit, a tile's once its band of tiles is
+/// whole. A vertically flipped page's rows are fed bottom first.
+fn stream_page(
     file: &[u8],
     page: &Page<'_>,
     limits: &DecodeLimits,
     scratch: &mut Scratch,
-    mut put: impl FnMut(u32, u32, &[u32; 5]),
+    target: (u32, u32),
+) -> Result<RasterImage, DecodeError> {
+    let convert = admit(page, limits)?;
+    let (width, height) = output_size(page);
+    let order = if page.orientation.place(0, 0, width, height).1 == 0 {
+        RowOrder::TopDown
+    } else {
+        RowOrder::BottomUp
+    };
+    let mut reducer =
+        RowReducer::new((width, height), target, order).map_err(crate::reduction_refused)?;
+    let banded = page.grid.across > 1;
+    // A band holds no more rows than the page, so the reservation is bounded
+    // by the picture the limits admitted rather than by the tile height.
+    let band_rows = if banded {
+        page.grid.rows.min(height)
+    } else {
+        1
+    };
+    let row_bytes = (width as usize)
+        .checked_mul(RGBA_BYTES)
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let band_len = row_bytes
+        .checked_mul(band_rows as usize)
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let mut band = fallible::filled(band_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    let mut push = |row: &[u8]| reducer.push_row(row).map_err(crate::reduction_refused);
+    walk_units(file, page, limits, scratch, |walked| match walked {
+        Walked::Unit(unit) => {
+            for y in 0..unit.covered {
+                let line = if banded { y as usize } else { 0 } * row_bytes;
+                for x in 0..unit.columns {
+                    let pixel = unit.rgba(page, &convert, x, y)?;
+                    let (dx, _) =
+                        page.orientation
+                            .place(unit.origin.0 + x, unit.origin.1 + y, width, height);
+                    let at = line + dx as usize * RGBA_BYTES;
+                    band.get_mut(at..at + RGBA_BYTES)
+                        .ok_or(DecodeError::TiffStripTruncated)?
+                        .copy_from_slice(&pixel);
+                }
+                if !banded {
+                    push(&band)?;
+                }
+            }
+            Ok(())
+        }
+        Walked::Band { rows } => {
+            if banded {
+                for row in band.chunks_exact(row_bytes).take(rows as usize) {
+                    push(row)?;
+                }
+                band.fill(0);
+            }
+            Ok(())
+        }
+    })?;
+    let pixels = reducer.finish().map_err(crate::reduction_refused)?;
+    Ok(RasterImage::from_parts(target.0, target.1, pixels))
+}
+
+/// One unit of a page as it is decompressed: where it lies in the stored
+/// raster, how much of it the picture covers, and its pixels.
+struct Unit<'b> {
+    origin: (u32, u32),
+    columns: u32,
+    covered: u32,
+    pixels: UnitPixels<'b>,
+}
+
+/// A unit's pixels: its raw samples, or the picture a JPEG unit decoded to.
+enum UnitPixels<'b> {
+    Samples {
+        buffer: &'b [u8],
+        layout: &'b UnitLayout,
+    },
+    Decoded(&'b RasterImage),
+}
+
+impl Unit<'_> {
+    /// The raw samples of the unit's pixel `(x, y)`, which a JPEG unit, coded
+    /// as colours, does not keep.
+    fn raw(&self, page: &Page<'_>, x: u32, y: u32) -> Option<[u32; 5]> {
+        match &self.pixels {
+            UnitPixels::Samples { buffer, layout } => Some(match layout.blocks {
+                Some(blocks) => gather_blocks(buffer, &blocks, x, y),
+                None => gather_samples(page, buffer, layout, x, y),
+            }),
+            UnitPixels::Decoded(_) => None,
+        }
+    }
+
+    /// The colour of the unit's pixel `(x, y)`.
+    fn rgba(
+        &self,
+        page: &Page<'_>,
+        convert: &Convert,
+        x: u32,
+        y: u32,
+    ) -> Result<[u8; RGBA_BYTES], DecodeError> {
+        match &self.pixels {
+            UnitPixels::Samples { .. } => {
+                let raw = self
+                    .raw(page, x, y)
+                    .ok_or(DecodeError::DimensionsOverflow)?;
+                Ok(to_rgba(page, convert, &raw))
+            }
+            UnitPixels::Decoded(image) => {
+                let at =
+                    (u64::from(y) * u64::from(image.width()) + u64::from(x)) * RGBA_BYTES as u64;
+                usize::try_from(at)
+                    .ok()
+                    .and_then(|at| image.pixels().get(at..at + RGBA_BYTES))
+                    .and_then(|slice| <[u8; RGBA_BYTES]>::try_from(slice).ok())
+                    .ok_or(DecodeError::TiffJpegGeometryMismatch)
+            }
+        }
+    }
+}
+
+/// What a page walk hands its visitor.
+enum Walked<'b> {
+    /// A unit, as it is decompressed.
+    Unit(Unit<'b>),
+    /// Every unit of a band, `rows` stored rows of the picture tall, has been
+    /// handed over.
+    Band { rows: u32 },
+}
+
+/// Decompress every unit of `page`, a band of units across at a time,
+/// handing each to `visit` and announcing the end of each band.
+fn walk_units(
+    file: &[u8],
+    page: &Page<'_>,
+    limits: &DecodeLimits,
+    scratch: &mut Scratch,
+    mut visit: impl FnMut(Walked<'_>) -> Result<(), DecodeError>,
 ) -> Result<(), DecodeError> {
-    let (out_width, out_height) = output_size(page);
     let Scratch {
         unit: buffer,
         shuffle,
         codecs,
     } = scratch;
-    // A tile's own extent is not bounded by the picture — a writer may use
-    // 256-pixel tiles for a 100-pixel image, and nothing in the format caps
-    // one — so the working buffer behind a unit is weighed against the same
-    // limits the picture was, before it is reserved.
-    limits.check(page.grid.columns, page.grid.rows)?;
-    let widest = page.layout(page.grid.rows)?;
-    let scratch_len = usize::try_from(widest.planes)
-        .ok()
-        .and_then(|planes| planes.checked_mul(widest.plane_bytes))
-        .ok_or(DecodeError::DimensionsOverflow)?;
-    if !fallible::grow_to(buffer, scratch_len, 0u8) {
-        return Err(DecodeError::OutOfMemory);
+    let jpeg = page.codec == Codec::Jpeg;
+    let tables = match page.ifd.field(TAG_JPEG_TABLES)? {
+        Some(field) if jpeg => usize::try_from(field.count)
+            .ok()
+            .and_then(|count| field.at.checked_add(count))
+            .and_then(|end| file.get(field.at..end))
+            .ok_or(DecodeError::TiffTruncated)?,
+        _ => &[][..],
+    };
+    // The page was admitted, so its tiles fit the limits the picture did.
+    if !jpeg {
+        let widest = page.layout(page.grid.rows)?;
+        let scratch_len = usize::try_from(widest.planes)
+            .ok()
+            .and_then(|planes| planes.checked_mul(widest.plane_bytes))
+            .ok_or(DecodeError::DimensionsOverflow)?;
+        if !fallible::grow_to(buffer, scratch_len, 0u8) {
+            return Err(DecodeError::OutOfMemory);
+        }
     }
     for down in 0..page.grid.down {
         let rows = page.unit_rows(down);
-        let layout = page.layout(rows)?;
+        let top = down * page.grid.rows;
+        let covered = rows.min(page.height.saturating_sub(top));
+        let layout = if jpeg { None } else { Some(page.layout(rows)?) };
         for across in 0..page.grid.across {
             let unit = down * page.grid.across + across;
+            let origin = (across * page.grid.columns, top);
+            let columns = page.grid.columns.min(page.width.saturating_sub(origin.0));
+            let Some(layout) = &layout else {
+                let data = page.unit_data(file, unit)?;
+                let stream = splice_jpeg(&mut codecs.jpeg, tables, data)?;
+                let image = jpeg::decode(stream, limits)?;
+                if image.width() != page.grid.columns || image.height() != rows {
+                    return Err(DecodeError::TiffJpegGeometryMismatch);
+                }
+                visit(Walked::Unit(Unit {
+                    origin,
+                    columns,
+                    covered,
+                    pixels: UnitPixels::Decoded(&image),
+                }))?;
+                continue;
+            };
             for plane in 0..layout.planes {
                 let index = plane * page.grid.per_plane + unit;
                 let data = page.unit_data(file, index)?;
@@ -1579,24 +1803,16 @@ fn walk_page(
                     .get_mut(from..from + layout.plane_bytes)
                     .ok_or(DecodeError::DimensionsOverflow)?;
                 decompress(page, codecs, data, rows, page.grid.columns, target)?;
-                page.unpredict(target, shuffle, &layout, rows)?;
+                page.unpredict(target, shuffle, layout, rows)?;
             }
-            let origin = (across * page.grid.columns, down * page.grid.rows);
-            let columns = page.grid.columns.min(page.width.saturating_sub(origin.0));
-            let covered = rows.min(page.height.saturating_sub(origin.1));
-            for y in 0..covered {
-                for x in 0..columns {
-                    let raw = match layout.blocks {
-                        Some(blocks) => gather_blocks(buffer, &blocks, x, y),
-                        None => gather_samples(page, buffer, &layout, x, y),
-                    };
-                    let (dx, dy) =
-                        page.orientation
-                            .place(origin.0 + x, origin.1 + y, out_width, out_height);
-                    put(dx, dy, &raw);
-                }
-            }
+            visit(Walked::Unit(Unit {
+                origin,
+                columns,
+                covered,
+                pixels: UnitPixels::Samples { buffer, layout },
+            }))?;
         }
+        visit(Walked::Band { rows: covered })?;
     }
     Ok(())
 }
@@ -1643,63 +1859,6 @@ fn gather_blocks(unit: &[u8], blocks: &Blocks, x: u32, y: u32) -> [u32; 5] {
         0,
         0,
     ]
-}
-
-/// Decode a page whose units are each a JPEG stream of their own.
-#[allow(clippy::too_many_arguments)]
-fn decode_jpeg_page(
-    file: &[u8],
-    page: &Page<'_>,
-    limits: &DecodeLimits,
-    codecs: &mut Codecs,
-    out: &mut [u8],
-    out_width: u32,
-    out_height: u32,
-) -> Result<(), DecodeError> {
-    let tables = match page.ifd.field(TAG_JPEG_TABLES)? {
-        Some(field) => usize::try_from(field.count)
-            .ok()
-            .and_then(|count| field.at.checked_add(count))
-            .and_then(|end| file.get(field.at..end))
-            .ok_or(DecodeError::TiffTruncated)?,
-        None => &[][..],
-    };
-    for down in 0..page.grid.down {
-        let rows = page.unit_rows(down);
-        for across in 0..page.grid.across {
-            let unit = down * page.grid.across + across;
-            let data = page.unit_data(file, unit)?;
-            let stream = splice_jpeg(&mut codecs.jpeg, tables, data)?;
-            let image = jpeg::decode(stream, limits)?;
-            if image.width() != page.grid.columns || image.height() != rows {
-                return Err(DecodeError::TiffJpegGeometryMismatch);
-            }
-            let origin = (across * page.grid.columns, down * page.grid.rows);
-            let columns = page.grid.columns.min(page.width.saturating_sub(origin.0));
-            let rows = rows.min(page.height.saturating_sub(origin.1));
-            for y in 0..rows {
-                for x in 0..columns {
-                    let at = usize::try_from(
-                        (u64::from(y) * u64::from(image.width()) + u64::from(x))
-                            * RGBA_BYTES as u64,
-                    )
-                    .unwrap_or(usize::MAX);
-                    let Some(pixel) = image
-                        .pixels()
-                        .get(at..at + RGBA_BYTES)
-                        .and_then(|slice| <[u8; RGBA_BYTES]>::try_from(slice).ok())
-                    else {
-                        return Err(DecodeError::TiffJpegGeometryMismatch);
-                    };
-                    let (dx, dy) =
-                        page.orientation
-                            .place(origin.0 + x, origin.1 + y, out_width, out_height);
-                    place(out, out_width, dx, dy, pixel);
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The markers that open and close a JPEG stream, which an abbreviated one
@@ -1856,6 +2015,53 @@ impl Chain {
         ))
     }
 
+    /// The page a decode to `fit` reads: the smallest reduced copy of the
+    /// primary page, at its shape, that covers `fit`, else the primary.
+    fn fitted_page(
+        &self,
+        file: &[u8],
+        measured: &Measured,
+        fit: FitBox,
+    ) -> Result<u32, DecodeError> {
+        let primary = measured.geometry;
+        let mut best: Option<(u32, Geometry)> = None;
+        walk_chain(file, self.endian, self.first, |index, ifd, _| {
+            if let Ok(found) = geometry(ifd) {
+                let covers = found.reduced
+                    && found.width >= fit.width()
+                    && found.height >= fit.height()
+                    && found.width <= primary.width
+                    && found.height <= primary.height
+                    && crate::same_shape(
+                        (found.width, found.height),
+                        (primary.width, primary.height),
+                    );
+                if covers && best.is_none_or(|(_, held)| area(found) < area(held)) {
+                    best = Some((index, found));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(best.map_or(measured.primary, |(index, _)| index))
+    }
+
+    /// Refuse a reduced copy at `index` whose primary page a plain decode
+    /// would refuse: the copy stands in for it, so it admits only what it
+    /// does.
+    fn admit_primary(
+        &mut self,
+        file: &[u8],
+        measured: &Measured,
+        index: u32,
+        limits: &DecodeLimits,
+    ) -> Result<(), DecodeError> {
+        if index == measured.primary {
+            return Ok(());
+        }
+        let at = self.locate(file, measured.primary)?;
+        admit(&Page::read(file, self.endian, at)?, limits).map(drop)
+    }
+
     /// Where the directory of the page at `index` begins.
     fn locate(&mut self, file: &[u8], index: u32) -> Result<usize, DecodeError> {
         let (mut from, mut at) = if index >= self.located.0 {
@@ -1907,31 +2113,21 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     chain.decode(bytes, measured.primary, limits)
 }
 
-/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
-/// from the page it decodes: the RGBA picture, the widest unit's working
-/// buffer and its float-predictor shuffle, the palette, and the tables the
-/// page's coding builds. A JPEG page's units are each decoded as a JPEG of up
-/// to the size `limits` admit, beside the run its tables and data are joined
-/// in, which a regrowth holds twice.
-///
-/// # Errors
-///
-/// What [`decode`] would refuse before decoding: a malformed directory or
-/// page, or a picture or unit `limits` do not admit.
-pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+/// What decoding `page`'s units holds besides the picture they are placed
+/// into: the widest unit's working buffer and its float-predictor shuffle,
+/// the palette, and the tables the page's coding builds. A JPEG page's units
+/// are each decoded as a JPEG of up to the size `limits` admit, beside the
+/// run its tables and data are joined in, which a regrowth holds twice.
+fn units_peak_bytes(
+    bytes: &[u8],
+    page: &Page<'_>,
+    limits: &DecodeLimits,
+) -> Result<u64, DecodeError> {
     // An empty working buffer grows to no fewer bytes than this.
     const MIN_GROWTH: u64 = 8;
-    let (mut chain, measured) = Chain::open(bytes)?;
-    let at = chain.locate(bytes, measured.primary)?;
-    let page = Page::read(bytes, chain.endian, at)?;
-    let (out_width, out_height) = output_size(&page);
-    limits.check(out_width, out_height)?;
-    let picture = u64::from(out_width) * u64::from(out_height) * RGBA_BYTES as u64;
-    if page.compression == COMPRESSION_JPEG {
+    if page.codec == Codec::Jpeg {
         let joined = 2 * (2 + 2 * bytes.len() as u64);
-        return Ok([joined, jpeg::peak_ceiling(limits)]
-            .into_iter()
-            .fold(picture, u64::saturating_add));
+        return Ok(joined.saturating_add(jpeg::peak_ceiling(limits)));
     }
     limits.check(page.grid.columns, page.grid.rows)?;
     let widest = page.layout(page.grid.rows)?;
@@ -1947,16 +2143,99 @@ pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, Dec
         Colour::Palette => 3u64 << page.samples.bits,
         _ => 0,
     };
-    let codec = match page.compression {
-        COMPRESSION_LZW => crate::lzw::TABLE_BYTES,
-        COMPRESSION_CCITT_RLE | COMPRESSION_GROUP3 | COMPRESSION_GROUP4 => {
-            ccitt::TABLE_BYTES.saturating_add(ccitt::row_bytes(page.grid.columns))
-        }
-        _ => 0,
+    let codec = match page.codec {
+        Codec::Lzw => crate::lzw::TABLE_BYTES,
+        Codec::Fax(_) => ccitt::TABLE_BYTES.saturating_add(ccitt::row_bytes(page.grid.columns)),
+        Codec::Raw | Codec::PackBits | Codec::Deflate | Codec::Jpeg => 0,
     };
     Ok([unit, shuffle, palette, codec]
         .into_iter()
-        .fold(picture, u64::saturating_add))
+        .fold(0, u64::saturating_add))
+}
+
+/// How a decode to `fit` reads `page`: whole, where the box does not reduce
+/// it; held whole and then reduced, where its orientation makes its stored
+/// rows the picture's columns; and otherwise streamed.
+enum Reading {
+    Whole,
+    Held((u32, u32)),
+    Streamed((u32, u32)),
+}
+
+impl Reading {
+    fn of(page: &Page<'_>, fit: FitBox) -> Self {
+        let (width, height) = output_size(page);
+        let reduced = fit.reduction(width, height);
+        if reduced == (width, height) {
+            Self::Whole
+        } else if page.orientation.transposes() {
+            Self::Held(reduced)
+        } else {
+            Self::Streamed(reduced)
+        }
+    }
+}
+
+/// Decode the page a fitted decode reads — the smallest reduced copy of the
+/// primary covering `fit`, or the primary — no smaller than it must be to
+/// cover `fit`, its rows streamed through a reduction a unit at a time where
+/// its orientation keeps them rows. It admits what [`decode`] admits.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let (mut chain, measured) = Chain::open(bytes)?;
+    let index = chain.fitted_page(bytes, &measured, fit)?;
+    chain.admit_primary(bytes, &measured, index, limits)?;
+    let at = chain.locate(bytes, index)?;
+    let page = Page::read(bytes, chain.endian, at)?;
+    let scratch = &mut chain.scratch;
+    match Reading::of(&page, fit) {
+        Reading::Whole => decode_page(bytes, &page, limits, scratch),
+        Reading::Held(_) => crate::reduce_held(decode_page(bytes, &page, limits, scratch)?, fit),
+        Reading::Streamed(reduced) => stream_page(bytes, &page, limits, scratch, reduced),
+    }
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once: what decoding the page's units holds, and the picture, the
+/// picture and its reduction, or the row or band of rows being streamed and
+/// the reduction it is fed into.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse before decoding.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let (mut chain, measured) = Chain::open(bytes)?;
+    let index = chain.fitted_page(bytes, &measured, fit)?;
+    chain.admit_primary(bytes, &measured, index, limits)?;
+    let at = chain.locate(bytes, index)?;
+    let page = Page::read(bytes, chain.endian, at)?;
+    admit(&page, limits)?;
+    let size = output_size(&page);
+    let row = u64::from(size.0) * RGBA_BYTES as u64;
+    let picture = row
+        .checked_mul(u64::from(size.1))
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let held = match Reading::of(&page, fit) {
+        Reading::Whole => picture,
+        Reading::Held(reduced) => picture.saturating_add(RowReducer::peak_bytes(size, reduced)),
+        Reading::Streamed(reduced) => {
+            let rows = if page.grid.across > 1 {
+                page.grid.rows.min(size.1)
+            } else {
+                1
+            };
+            row.saturating_mul(u64::from(rows))
+                .saturating_add(RowReducer::peak_bytes(size, reduced))
+        }
+    };
+    Ok(held.saturating_add(units_peak_bytes(bytes, &page, limits)?))
 }
 
 /// Validate the chain and measure its pages, decoding none of them.
@@ -2078,12 +2357,12 @@ impl Page<'_> {
     /// The compression the page is stored under, where it is one written
     /// here.
     const fn written(&self) -> Option<TiffCompression> {
-        match self.compression {
-            COMPRESSION_NONE => Some(TiffCompression::None),
-            COMPRESSION_PACK_BITS => Some(TiffCompression::PackBits),
-            COMPRESSION_LZW => Some(TiffCompression::Lzw),
-            COMPRESSION_ADOBE_DEFLATE | COMPRESSION_DEFLATE => Some(TiffCompression::Deflate),
-            _ => None,
+        match self.codec {
+            Codec::Raw => Some(TiffCompression::None),
+            Codec::PackBits => Some(TiffCompression::PackBits),
+            Codec::Lzw => Some(TiffCompression::Lzw),
+            Codec::Deflate => Some(TiffCompression::Deflate),
+            Codec::Fax(_) | Codec::Jpeg => None,
         }
     }
 }
@@ -2182,11 +2461,28 @@ impl NativePages {
             let len = usize::try_from(u64::from(width) * u64::from(height))
                 .map_err(|_| DecodeError::DimensionsOverflow)?;
             let mut indices = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-            walk_page(file, &page, limits, &mut self.scratch, |x, y, raw| {
-                let at = y as usize * width as usize + x as usize;
-                if let Some(slot) = indices.get_mut(at) {
-                    *slot = u8::try_from(raw[0]).unwrap_or(u8::MAX);
+            walk_units(file, &page, limits, &mut self.scratch, |walked| {
+                let Walked::Unit(unit) = walked else {
+                    return Ok(());
+                };
+                for y in 0..unit.covered {
+                    for x in 0..unit.columns {
+                        let raw = unit
+                            .raw(&page, x, y)
+                            .ok_or(DecodeError::TiffJpegGeometryMismatch)?;
+                        let (dx, dy) = page.orientation.place(
+                            unit.origin.0 + x,
+                            unit.origin.1 + y,
+                            width,
+                            height,
+                        );
+                        let at = dy as usize * width as usize + dx as usize;
+                        if let Some(slot) = indices.get_mut(at) {
+                            *slot = u8::try_from(raw[0]).unwrap_or(u8::MAX);
+                        }
+                    }
                 }
+                Ok(())
             })?;
             let map = Palette::read(&page.ifd, page.samples.bits)?;
             let palette = fallible::collected(

@@ -133,67 +133,130 @@ impl Lzw {
         invalid: &DecodeError,
         out: &mut [u8],
     ) -> Result<usize, DecodeError> {
+        self.expansion(root_bits, widen, invalid)?
+            .fill(source, invalid, out)
+    }
+
+    /// A stream's expansion, taken by as many [`Expansion::fill`] calls as
+    /// the caller wants its output split into.
+    pub(crate) fn expansion(
+        &mut self,
+        root_bits: u32,
+        widen: Widen,
+        invalid: &DecodeError,
+    ) -> Result<Expansion<'_>, DecodeError> {
         let roots = 1u16 << root_bits;
-        let end = roots + 1;
         for index in 0..usize::from(roots) {
             self.prefix[index] = NO_PREFIX;
             self.suffix[index] = u8::try_from(index).map_err(|_| invalid.clone())?;
         }
-        let mut next = end + 1;
-        let mut width = root_bits + 1;
-        let mut previous: Option<u16> = None;
-        let mut written = 0usize;
-        while let Some(code) = source.code(width)? {
-            if code == roots {
-                next = end + 1;
-                width = root_bits + 1;
-                previous = None;
+        Ok(Expansion {
+            lzw: self,
+            roots,
+            root_bits,
+            widen,
+            next: roots + 2,
+            width: root_bits + 1,
+            previous: None,
+            pending: 0,
+            ended: false,
+        })
+    }
+}
+
+/// One stream's expansion, suspended between calls, so its output can be
+/// taken a row at a time without the stream ever being held whole.
+pub(crate) struct Expansion<'t> {
+    lzw: &'t mut Lzw,
+    roots: u16,
+    root_bits: u32,
+    widen: Widen,
+    next: u16,
+    width: u32,
+    previous: Option<u16>,
+    /// The bytes of the last string not yet handed out: its stack slots
+    /// below this one.
+    pending: usize,
+    ended: bool,
+}
+
+impl Expansion<'_> {
+    /// Fill `out` from `source`, resuming where the last call stopped,
+    /// answering the bytes written: fewer than `out` holds only where the
+    /// stream has ended.
+    pub(crate) fn fill(
+        &mut self,
+        source: &mut impl CodeSource,
+        invalid: &DecodeError,
+        out: &mut [u8],
+    ) -> Result<usize, DecodeError> {
+        let mut written = self.drain(out);
+        if written == out.len() || self.ended {
+            return Ok(written);
+        }
+        let end = self.roots + 1;
+        while let Some(code) = source.code(self.width)? {
+            if code == self.roots {
+                self.next = end + 1;
+                self.width = self.root_bits + 1;
+                self.previous = None;
                 continue;
             }
             if code == end {
+                self.ended = true;
                 break;
             }
+            let lzw = &mut *self.lzw;
             let mut depth = 0usize;
-            let first = match code.cmp(&next) {
-                core::cmp::Ordering::Less => self.walk(code, roots, &mut depth, invalid)?,
+            let first = match code.cmp(&self.next) {
+                core::cmp::Ordering::Less => lzw.walk(code, self.roots, &mut depth, invalid)?,
                 // The code this very step defines: its string is the previous
                 // one followed by that string's own first byte. The stack
                 // fills in reverse, so the trailing byte takes the slot below
                 // the walk — which is why the stack carries one extra.
                 core::cmp::Ordering::Equal => {
-                    let Some(prev) = previous else {
+                    let Some(prev) = self.previous else {
                         return Err(invalid.clone());
                     };
                     depth = 1;
-                    let first = self.walk(prev, roots, &mut depth, invalid)?;
-                    self.stack[0] = first;
+                    let first = lzw.walk(prev, self.roots, &mut depth, invalid)?;
+                    lzw.stack[0] = first;
                     first
                 }
                 core::cmp::Ordering::Greater => return Err(invalid.clone()),
             };
-            for slot in (0..depth).rev() {
-                if written == out.len() {
-                    break;
-                }
-                out[written] = self.stack[slot];
-                written += 1;
-            }
-            if written == out.len() {
-                break;
-            }
-            if let Some(prev) = previous {
-                if usize::from(next) < MAX_CODES {
-                    self.prefix[usize::from(next)] = prev;
-                    self.suffix[usize::from(next)] = first;
-                    next += 1;
-                    if widen.reached(next, width) && width < MAX_CODE_BITS {
-                        width += 1;
+            // The entry is defined before any of the string is handed out,
+            // so a suspended expansion resumes against the table the encoder
+            // had.
+            if let Some(prev) = self.previous {
+                if usize::from(self.next) < MAX_CODES {
+                    lzw.prefix[usize::from(self.next)] = prev;
+                    lzw.suffix[usize::from(self.next)] = first;
+                    self.next += 1;
+                    if self.widen.reached(self.next, self.width) && self.width < MAX_CODE_BITS {
+                        self.width += 1;
                     }
                 }
             }
-            previous = Some(code);
+            self.previous = Some(code);
+            self.pending = depth;
+            written += self.drain(&mut out[written..]);
+            if written == out.len() {
+                break;
+            }
         }
         Ok(written)
+    }
+
+    /// Hand out as much of the pending string as `out` holds.
+    fn drain(&mut self, out: &mut [u8]) -> usize {
+        let mut written = 0;
+        while self.pending > 0 && written < out.len() {
+            self.pending -= 1;
+            out[written] = self.lzw.stack[self.pending];
+            written += 1;
+        }
+        written
     }
 }
 
@@ -332,5 +395,73 @@ impl Coder {
         self.width = self.root_bits + 1;
         self.fresh = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use super::{CodeSink, CodeSource, Coder, Lzw, Widen};
+    use crate::encode::EncodeError;
+    use crate::DecodeError;
+
+    /// Codes held as written, read back in the same order.
+    #[derive(Default)]
+    struct Codes {
+        codes: Vec<(u16, u32)>,
+        read: usize,
+    }
+
+    impl CodeSink for Codes {
+        fn put(&mut self, code: u16, width: u32) -> Result<(), EncodeError> {
+            self.codes.push((code, width));
+            Ok(())
+        }
+    }
+
+    impl CodeSource for Codes {
+        fn code(&mut self, width: u32) -> Result<Option<u16>, DecodeError> {
+            let Some(&(code, written)) = self.codes.get(self.read) else {
+                return Ok(None);
+            };
+            assert_eq!(written, width, "read at the width it was written");
+            self.read += 1;
+            Ok(Some(code))
+        }
+    }
+
+    /// An expansion taken in pieces of any size hands out exactly the bytes
+    /// one call would, across clears and the code a step defines for itself.
+    #[test]
+    fn an_expansion_taken_in_pieces_is_the_whole_expansion() {
+        let data: Vec<u8> = (0..5000u32)
+            .map(|at| u8::try_from((at * at / 7 + at / 3) % 16).unwrap_or(0))
+            .collect();
+        let mut codes = Codes::default();
+        let mut encoder = Coder::new(4, Widen::WhenFull, 4095).expect("tables");
+        encoder.begin(&mut codes).expect("begins");
+        for &byte in &data {
+            encoder.push(byte, &mut codes).expect("pushes");
+        }
+        encoder.finish(&mut codes).expect("ends");
+        let invalid = DecodeError::GifInvalidCode;
+        let mut lzw = Lzw::new().expect("tables");
+        for piece in [1, 3, 7, 64, 4999, 5000] {
+            codes.read = 0;
+            let mut expansion = lzw.expansion(4, Widen::WhenFull, &invalid).expect("starts");
+            let mut out = Vec::new();
+            let mut chunk = alloc::vec![0u8; piece];
+            loop {
+                let written = expansion
+                    .fill(&mut codes, &invalid, &mut chunk)
+                    .expect("expands");
+                out.extend_from_slice(&chunk[..written]);
+                if written < piece {
+                    break;
+                }
+            }
+            assert_eq!(out, data, "in pieces of {piece}");
+        }
     }
 }

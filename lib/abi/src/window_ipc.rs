@@ -2269,6 +2269,21 @@ pub enum WindowRequest {
         /// The shape.
         shape: CursorShape,
     },
+    /// Raise the caller's own window `window_id` and give it the keyboard.
+    ///
+    /// Restacking is the session's: it is honoured only while the caller holds
+    /// an **activation** — one of its windows already has the keyboard (the
+    /// user is working in it), or the session handed it a one-shot activation
+    /// with a user-driven [`WindowEvent::AppBarDefault`],
+    /// [`WindowEvent::AppBarMenu`] or [`WindowEvent::OpenRequested`] — and is
+    /// otherwise `PermissionDenied`. An activation is spent by its first use.
+    /// So an application asked to show a folder it already shows brings that
+    /// window forward instead of opening a second, and nothing can raise
+    /// itself over the user's work unbidden.
+    ActivateWindow {
+        /// The caller's own window (from the `Create` reply).
+        window_id: u64,
+    },
     /// Put the first `len` bytes of the shared-memory region `shm_handle`,
     /// which the caller granted the session, on the clipboard as `kind`.
     ///
@@ -2328,20 +2343,22 @@ pub enum WindowRequest {
         /// The window whose pick concluded.
         window_id: u64,
     },
-    /// Hand the session the drag the user began on the file `name` in window
+    /// Hand the session the drag the user began on `items` in window
     /// `window_id`, while the press that began it is still held there.
     ///
-    /// Only the name crosses: it is what the session matches an application's
-    /// declared types against as the pointer passes over it. The dragging
-    /// application keeps the file, and opens it itself for the application it
-    /// was dropped on ([`WindowRequest::TakeDropTarget`]), so no path and no
-    /// authority reaches the session. A drag the session takes concludes with
-    /// one [`WindowEvent::DragEnded`].
+    /// Only a name and a count cross: what the plate says, and what an
+    /// application slot's declared types are matched against. The dragging
+    /// application keeps the items and performs every drop itself
+    /// ([`WindowEvent::DragEnded`]), so no path of its own and no authority
+    /// reaches the session. While the pointer is over one of the application's
+    /// own windows or the desktop the session reports where
+    /// ([`WindowEvent::DragOver`]) and shows the verdict the application
+    /// answers ([`WindowRequest::DragVerdict`]).
     BeginDrag {
         /// The window the drag began in.
         window_id: u64,
-        /// The dragged file's own name.
-        name: DocumentName,
+        /// What is dragged.
+        items: DragItems,
     },
     /// Take the application window `window_id`'s drag was dropped on, once its
     /// [`WindowEvent::DragEnded`] said it was. One-shot; the reply is a
@@ -2349,6 +2366,28 @@ pub enum WindowRequest {
     TakeDropTarget {
         /// The window the drag began in.
         window_id: u64,
+    },
+    /// Answer the [`WindowEvent::DragOver`] numbered `serial` for the drag
+    /// window `window_id` began: what dropping there would do, or `None` to
+    /// refuse. The session shows the answer on the pointer and drops with the
+    /// last one shown; an answer for a superseded report is not shown.
+    DragVerdict {
+        /// The window the drag began in.
+        window_id: u64,
+        /// The report being answered.
+        serial: u32,
+        /// What a drop there would do, or `None` to refuse it.
+        verdict: Option<DropOperation>,
+    },
+    /// Read the desktop folder the [`WindowEvent::DragOver`] or
+    /// [`WindowEvent::DragEnded`] numbered `serial` named, for the drag window
+    /// `window_id` began. The reply is a [`decode_drag_spot_reply`] frame, and
+    /// `NotFound` once the session has named another.
+    QueryDragSpot {
+        /// The window the drag began in.
+        window_id: u64,
+        /// The report that named the folder.
+        serial: u32,
     },
     /// Set window `window_id`'s backdrop-blur radius, in **logical** pixels
     /// (at most [`WINDOW_BACKDROP_BLUR_MAX_PX`]): the compositor blurs
@@ -2804,6 +2843,12 @@ const OP_SET_CURSOR: u16 = 30;
 const OP_SET_CLIPBOARD: u16 = 31;
 /// Wire operation discriminant of [`WindowRequest::GetClipboard`].
 const OP_GET_CLIPBOARD: u16 = 32;
+/// Wire operation discriminant of [`WindowRequest::ActivateWindow`].
+const OP_ACTIVATE_WINDOW: u16 = 33;
+/// Wire operation discriminant of [`WindowRequest::DragVerdict`].
+const OP_DRAG_VERDICT: u16 = 34;
+/// Wire operation discriminant of [`WindowRequest::QueryDragSpot`].
+const OP_QUERY_DRAG_SPOT: u16 = 35;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2840,15 +2885,29 @@ const _: () = assert!(
     pick_file_wire_len(crate::FS_NAME_MAX, SaveEndings::MAX_WIRE_LEN)
         <= WindowRequest::MAX_WIRE_LEN
 );
-/// Byte offset of a [`WindowRequest::BeginDrag`]'s name length.
-const DRAG_NAME_LEN_OFFSET: usize = WINDOW_ID_WIRE_LEN;
-/// Byte offset of its name.
+/// Byte offset of a [`WindowRequest::BeginDrag`]'s item count.
+const DRAG_COUNT_OFFSET: usize = WINDOW_ID_WIRE_LEN;
+/// Byte offset of its flags.
+const DRAG_FLAGS_OFFSET: usize = DRAG_COUNT_OFFSET + 4;
+/// Byte offset of its first item's name length.
+const DRAG_NAME_LEN_OFFSET: usize = DRAG_FLAGS_OFFSET + 1;
+/// Byte offset of that name.
 const DRAG_NAME_OFFSET: usize = DRAG_NAME_LEN_OFFSET + 1;
+/// Flag: the drag is one file an application may open.
+const DRAG_OPENABLE: u8 = 1;
 
-/// Encoded size of a [`WindowRequest::BeginDrag`] naming a `name`-byte file.
+/// Encoded size of a [`WindowRequest::BeginDrag`] whose first item's name is
+/// `name` bytes.
 const fn begin_drag_wire_len(name: usize) -> usize {
     DRAG_NAME_OFFSET + name
 }
+
+/// Encoded size of a [`WindowRequest::DragVerdict`]: the header, the window,
+/// the serial, and the verdict.
+const DRAG_VERDICT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 5;
+/// Encoded size of a [`WindowRequest::QueryDragSpot`]: the header, the window,
+/// and the serial.
+const QUERY_DRAG_SPOT_WIRE_LEN: usize = WINDOW_ID_WIRE_LEN + 4;
 /// Byte offset of the frame-layout block [`WindowRequest::Create`],
 /// [`WindowRequest::CreatePopup`] and [`WindowRequest::Resize`] share
 /// verbatim ([`FrameLayout::write_to`] / [`read_frame_layout`]).
@@ -3226,8 +3285,13 @@ impl WindowRequest {
             Self::Close { .. }
             | Self::TakePickedName { .. }
             | Self::TakeDropTarget { .. }
-            | Self::TakeTerrain { .. } => WINDOW_ID_WIRE_LEN,
-            Self::BeginDrag { ref name, .. } => begin_drag_wire_len(name.len_byte() as usize),
+            | Self::TakeTerrain { .. }
+            | Self::ActivateWindow { .. } => WINDOW_ID_WIRE_LEN,
+            Self::BeginDrag { ref items, .. } => {
+                begin_drag_wire_len(items.first().len_byte() as usize)
+            }
+            Self::DragVerdict { .. } => DRAG_VERDICT_WIRE_LEN,
+            Self::QueryDragSpot { .. } => QUERY_DRAG_SPOT_WIRE_LEN,
             Self::PickFile { purpose, .. } => pick_file_wire_len(
                 purpose.suggested_len_byte() as usize,
                 purpose.endings().wire_len(),
@@ -3342,6 +3406,8 @@ impl WindowRequest {
             Self::TakePickedName { .. } => OP_TAKE_PICKED_NAME,
             Self::BeginDrag { .. } => OP_BEGIN_DRAG,
             Self::TakeDropTarget { .. } => OP_TAKE_DROP_TARGET,
+            Self::DragVerdict { .. } => OP_DRAG_VERDICT,
+            Self::QueryDragSpot { .. } => OP_QUERY_DRAG_SPOT,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
             Self::SetSizing { .. } => OP_SET_SIZING,
@@ -3349,6 +3415,7 @@ impl WindowRequest {
             Self::SetCursor { .. } => OP_SET_CURSOR,
             Self::SetClipboard { .. } => OP_SET_CLIPBOARD,
             Self::GetClipboard { .. } => OP_GET_CLIPBOARD,
+            Self::ActivateWindow { .. } => OP_ACTIVATE_WINDOW,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
@@ -3409,10 +3476,14 @@ impl WindowRequest {
             Self::Close { window_id }
             | Self::TakePickedName { window_id }
             | Self::TakeDropTarget { window_id }
-            | Self::TakeTerrain { window_id } => {
+            | Self::TakeTerrain { window_id }
+            | Self::ActivateWindow { window_id } => {
                 put_u64(out, 8, window_id);
             }
-            Self::PickFile { .. } | Self::BeginDrag { .. } => write_transfer_operands(self, out),
+            Self::PickFile { .. }
+            | Self::BeginDrag { .. }
+            | Self::DragVerdict { .. }
+            | Self::QueryDragSpot { .. } => write_transfer_operands(self, out),
             Self::OpenLayer { .. } => self.write_layer_operands(out),
             Self::PlaceLayer {
                 window_id,
@@ -3709,9 +3780,8 @@ impl WindowRequest {
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
-            OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_BEGIN_DRAG | OP_TAKE_DROP_TARGET => {
-                read_transfer_request(op, bytes)
-            }
+            OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_BEGIN_DRAG | OP_TAKE_DROP_TARGET
+            | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT => read_transfer_request(op, bytes),
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -3746,7 +3816,9 @@ impl WindowRequest {
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_SIZING => read_set_sizing(bytes),
             OP_SET_SIZE_STATE => read_set_size_state(bytes),
-            OP_SET_CURSOR | OP_SET_CLIPBOARD | OP_GET_CLIPBOARD => read_input_request(op, bytes),
+            OP_SET_CURSOR | OP_SET_CLIPBOARD | OP_GET_CLIPBOARD | OP_ACTIVATE_WINDOW => {
+                read_input_request(op, bytes)
+            }
             OP_TAKE_OPEN_TARGET => {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN).map(|()| Self::TakeOpenTarget)
             }
@@ -3882,12 +3954,27 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
         }
         WindowRequest::BeginDrag {
             window_id,
-            ref name,
+            ref items,
         } => {
             put_u64(out, 8, window_id);
-            let text = name.as_str().as_bytes();
-            out[DRAG_NAME_LEN_OFFSET] = name.len_byte();
+            put_u32(out, DRAG_COUNT_OFFSET, items.count());
+            out[DRAG_FLAGS_OFFSET] = if items.openable() { DRAG_OPENABLE } else { 0 };
+            let text = items.first().as_str().as_bytes();
+            out[DRAG_NAME_LEN_OFFSET] = items.first().len_byte();
             out[DRAG_NAME_OFFSET..DRAG_NAME_OFFSET + text.len()].copy_from_slice(text);
+        }
+        WindowRequest::DragVerdict {
+            window_id,
+            serial,
+            verdict,
+        } => {
+            put_u64(out, 8, window_id);
+            put_u32(out, WINDOW_ID_WIRE_LEN, serial);
+            out[WINDOW_ID_WIRE_LEN + 4] = verdict.map_or(0, DropOperation::to_wire);
+        }
+        WindowRequest::QueryDragSpot { window_id, serial } => {
+            put_u64(out, 8, window_id);
+            put_u32(out, WINDOW_ID_WIRE_LEN, serial);
         }
         _ => {}
     }
@@ -3899,6 +3986,21 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
     match op {
         OP_PICK_FILE => read_pick_file(bytes),
         OP_BEGIN_DRAG => read_begin_drag(bytes),
+        OP_DRAG_VERDICT => {
+            exact_len(bytes, DRAG_VERDICT_WIRE_LEN)?;
+            Ok(WindowRequest::DragVerdict {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+                verdict: DropOperation::verdict_from_wire(bytes[WINDOW_ID_WIRE_LEN + 4])?,
+            })
+        }
+        OP_QUERY_DRAG_SPOT => {
+            exact_len(bytes, QUERY_DRAG_SPOT_WIRE_LEN)?;
+            Ok(WindowRequest::QueryDragSpot {
+                window_id: nonzero_id(read_u64(bytes, 8))?,
+                serial: read_u32(bytes, WINDOW_ID_WIRE_LEN),
+            })
+        }
         _ => {
             exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
             let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -3911,13 +4013,17 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
     }
 }
 
-/// Decode the operands of a [`WindowRequest::BeginDrag`]: a name exactly as
-/// long as its length byte says.
+/// Decode the operands of a [`WindowRequest::BeginDrag`]: the count, the
+/// flags, and a name exactly as long as its length byte says.
 fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if bytes.len() < DRAG_NAME_OFFSET {
         return Err(Errno::BufferTooSmall);
     }
     let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let flags = bytes[DRAG_FLAGS_OFFSET];
+    if flags & !DRAG_OPENABLE != 0 {
+        return Err(Errno::OutOfRange);
+    }
     let len = bytes[DRAG_NAME_LEN_OFFSET];
     exact_len(bytes, begin_drag_wire_len(usize::from(len)))?;
     let mut name = [0u8; crate::FS_NAME_MAX];
@@ -3927,7 +4033,11 @@ fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         .copy_from_slice(text);
     Ok(WindowRequest::BeginDrag {
         window_id,
-        name: DocumentName::from_wire(len, &name)?,
+        items: DragItems::new(
+            DocumentName::from_wire(len, &name)?,
+            read_u32(bytes, DRAG_COUNT_OFFSET),
+            flags & DRAG_OPENABLE != 0,
+        )?,
     })
 }
 
@@ -4068,13 +4178,20 @@ fn read_set_size_state(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     Ok(WindowRequest::SetSizeState { window_id, state })
 }
 
-/// Decode a request about a window's pointer or the clipboard: a shape or a
-/// kind outside its closed set is refused, and so is a clipboard payload
-/// past [`CLIPBOARD_MAX_BYTES`], before anything is mapped for it.
+/// Decode a request a window makes of the seat — its pointer, the keyboard,
+/// the clipboard: a shape or a kind outside its closed set is refused, and so
+/// is a clipboard payload past [`CLIPBOARD_MAX_BYTES`], before anything is
+/// mapped for it.
 fn read_input_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
     let window_id = |bytes: &[u8]| nonzero_id(read_u64(bytes, 8));
     let handle = |bytes: &[u8]| nonzero_id(read_u64(bytes, CLIPBOARD_HANDLE_OFFSET));
     match op {
+        OP_ACTIVATE_WINDOW => {
+            exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+            Ok(WindowRequest::ActivateWindow {
+                window_id: window_id(bytes)?,
+            })
+        }
         OP_SET_CURSOR => {
             exact_len(bytes, SET_CURSOR_WIRE_LEN)?;
             Ok(WindowRequest::SetCursor {
@@ -4913,6 +5030,207 @@ pub const WINDOW_PANE_NAME_MAX: usize = 32;
 /// bytes rather than four kibibytes. Both sides hold their buffer once for
 /// the life of the connection rather than taking one per call.
 pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + crate::FS_PATH_MAX;
+
+/// What a drag carries, as the session sees it: the first item's name, how
+/// many items there are, and whether the drag is one file an application may
+/// open.
+///
+/// The name is the plate's label and what an application slot's declared
+/// types are matched against; only an openable drag is offered to a slot.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DragItems {
+    first: DocumentName,
+    count: u32,
+    openable: bool,
+}
+
+impl DragItems {
+    /// `count` items led by `first`, `openable` when the drag is exactly one
+    /// file an application may open.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an unnamed first item, no items, or an
+    /// openable drag of more than one.
+    pub fn new(first: DocumentName, count: u32, openable: bool) -> Result<Self, Errno> {
+        if first.as_str().is_empty() || count == 0 || (openable && count != 1) {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            first,
+            count,
+            openable,
+        })
+    }
+
+    /// The first item's name.
+    #[must_use]
+    pub const fn first(&self) -> &DocumentName {
+        &self.first
+    }
+
+    /// How many items are dragged.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Whether the drag is one file an application may open.
+    #[must_use]
+    pub const fn openable(&self) -> bool {
+        self.openable
+    }
+}
+
+/// What dropping a drag's items does.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum DropOperation {
+    /// Copy them, leaving the originals.
+    Copy,
+    /// Move them.
+    Move,
+}
+
+impl DropOperation {
+    /// The operation's wire value; `0` is a refusal.
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Copy => 1,
+            Self::Move => 2,
+        }
+    }
+
+    /// The operation a wire value names.
+    fn from_wire(value: u8) -> Result<Self, Errno> {
+        match value {
+            1 => Ok(Self::Copy),
+            2 => Ok(Self::Move),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// A verdict's wire value: a refusal, or an operation.
+    fn verdict_from_wire(value: u8) -> Result<Option<Self>, Errno> {
+        match value {
+            0 => Ok(None),
+            other => Self::from_wire(other).map(Some),
+        }
+    }
+}
+
+/// Where a carried drag is, as [`WindowEvent::DragOver`] reports it to the
+/// application that began it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DragAt {
+    /// Over the event's window, one of the application's own, at this
+    /// window-local point.
+    Window {
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+    },
+    /// Over the desktop, whose folder there [`WindowRequest::QueryDragSpot`]
+    /// yields.
+    Desktop,
+    /// Over nothing the application can drop on.
+    Nowhere,
+}
+
+/// Where a carried drag was dropped, as [`WindowEvent::DragEnded`] reports
+/// it to the application that began it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DropSite {
+    /// On nothing that takes it.
+    Nothing,
+    /// On an application, which [`WindowRequest::TakeDropTarget`] names.
+    Application,
+    /// On one of the application's own windows, at a window-local point,
+    /// with the operation the pointer showed.
+    Window {
+        /// The window dropped on.
+        window_id: u64,
+        /// Window-local x.
+        x: u32,
+        /// Window-local y.
+        y: u32,
+        /// What the drop does.
+        operation: DropOperation,
+    },
+    /// On the desktop folder [`WindowRequest::QueryDragSpot`] yields for
+    /// `serial`, with the operation the pointer showed.
+    Desktop {
+        /// The report that named the folder.
+        serial: u32,
+        /// What the drop does.
+        operation: DropOperation,
+    },
+}
+
+/// Longest reply to a [`WindowRequest::QueryDragSpot`]: the status word, the
+/// path's length, and the widest path.
+pub const WINDOW_DRAG_SPOT_REPLY_MAX: usize = DRAG_SPOT_REPLY_PATH_OFFSET + crate::FS_PATH_MAX;
+/// Byte offset of a drag spot reply's path length.
+const DRAG_SPOT_REPLY_LEN_OFFSET: usize = 4;
+/// Byte offset of its path.
+const DRAG_SPOT_REPLY_PATH_OFFSET: usize = DRAG_SPOT_REPLY_LEN_OFFSET + 2;
+
+/// Encode a [`WindowRequest::QueryDragSpot`] outcome into `out`, answering the
+/// number of bytes written. A path past [`crate::FS_PATH_MAX`] is refused as
+/// [`Errno::LengthOutOfRange`] rather than cut.
+#[must_use]
+pub fn encode_drag_spot_reply(
+    out: &mut [u8; WINDOW_DRAG_SPOT_REPLY_MAX],
+    result: Result<&str, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_DRAG_SPOT_REPLY_MAX];
+    let refused = |out: &mut [u8; WINDOW_DRAG_SPOT_REPLY_MAX], err: Errno| {
+        out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+        4
+    };
+    let path = match result {
+        Ok(path) => path.as_bytes(),
+        Err(err) => return refused(out, err),
+    };
+    let Ok(len) = u16::try_from(path.len()) else {
+        return refused(out, Errno::LengthOutOfRange);
+    };
+    if path.len() > crate::FS_PATH_MAX {
+        return refused(out, Errno::LengthOutOfRange);
+    }
+    put_u16(out, DRAG_SPOT_REPLY_LEN_OFFSET, len);
+    out[DRAG_SPOT_REPLY_PATH_OFFSET..DRAG_SPOT_REPLY_PATH_OFFSET + path.len()]
+        .copy_from_slice(path);
+    DRAG_SPOT_REPLY_PATH_OFFSET + path.len()
+}
+
+/// Decode a [`WindowRequest::QueryDragSpot`] reply.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame shorter than its own header.
+/// * [`Errno::LengthOutOfRange`] for a frame whose length is not the one it
+///   states, or a path past the bound.
+/// * [`Errno::OutOfRange`] for a path that is empty or not text.
+pub fn decode_drag_spot_reply(bytes: &[u8]) -> Result<&str, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < DRAG_SPOT_REPLY_PATH_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let len = usize::from(read_u16(bytes, DRAG_SPOT_REPLY_LEN_OFFSET));
+    let text = &bytes[DRAG_SPOT_REPLY_PATH_OFFSET..];
+    if text.len() != len || len > crate::FS_PATH_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let path = core::str::from_utf8(text).map_err(|_| Errno::OutOfRange)?;
+    if path.is_empty() {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(path)
+}
 
 /// The application a drag was dropped on: what the dragging application
 /// launches, or hands the file to, to open it there.
@@ -5901,6 +6219,8 @@ const EV_RESIZED: u16 = 9;
 const EV_REDRAW_REQUESTED: u16 = 10;
 /// Wire kind of [`WindowEvent::DragEnded`].
 const EV_DRAG_ENDED: u16 = 11;
+/// Wire kind of [`WindowEvent::DragOver`].
+const EV_DRAG_OVER: u16 = 22;
 /// Wire event discriminant of [`WindowEvent::AlternateCloseRequested`].
 const EV_ALTERNATE_CLOSE_REQUESTED: u16 = 12;
 /// Wire kind of [`WindowEvent::AppBarDefault`].
@@ -6032,14 +6352,30 @@ pub enum WindowEvent {
         /// The window whose pick was dismissed.
         window_id: u64,
     },
-    /// A [`WindowRequest::BeginDrag`] ended: `dropped` on an application
-    /// that claims the file, whose name [`WindowRequest::TakeDropTarget`]
-    /// then yields, or anywhere else — which does nothing.
+    /// Where the drag a [`WindowRequest::BeginDrag`] began now is, for its
+    /// application to answer with a [`WindowRequest::DragVerdict`].
+    ///
+    /// Addressed to the window the pointer is over when that is one of the
+    /// application's own, and otherwise to the window the drag began in.
+    /// Reports are numbered in the order they are made, so an answer names the
+    /// one it decided.
+    DragOver {
+        /// The window addressed.
+        window_id: u64,
+        /// The report's number.
+        serial: u32,
+        /// Where the drag is.
+        at: DragAt,
+        /// Whether `Shift` is held, which asks for a move.
+        shift: bool,
+    },
+    /// A [`WindowRequest::BeginDrag`] ended, where `site` says. The
+    /// application performs the drop itself.
     DragEnded {
         /// The window the drag began in.
         window_id: u64,
-        /// Whether it was dropped on an application to open it with.
-        dropped: bool,
+        /// Where it was dropped.
+        site: DropSite,
     },
     /// A [`WindowRequest::RenderPreview`] concluded.
     ///
@@ -6387,6 +6723,7 @@ impl WindowEvent {
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
+            | Self::DragOver { window_id, .. }
             | Self::DragEnded { window_id, .. }
             | Self::PreviewRendered { window_id, .. }
             | Self::Minimized { window_id }
@@ -6414,10 +6751,10 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_FOCUS);
                 out[16] = u8::from(focused);
             }
-            Self::DragEnded { dropped, .. } => {
-                put_u16(&mut out, 6, EV_DRAG_ENDED);
-                out[16] = u8::from(dropped);
-            }
+            Self::DragOver {
+                serial, at, shift, ..
+            } => write_drag_over(&mut out, serial, at, shift),
+            Self::DragEnded { site, .. } => write_drop_site(&mut out, site),
             Self::Key { key, .. } => {
                 put_u16(&mut out, 6, EV_KEY);
                 out[16..16 + KeyInput::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
@@ -6554,21 +6891,18 @@ impl WindowEvent {
             return event;
         }
         match kind {
-            EV_FOCUS | EV_DRAG_ENDED => {
+            EV_FOCUS => {
                 event_reserved_zero(bytes, 17)?;
-                let set = flag_at(bytes, 16)?;
-                Ok(if kind == EV_FOCUS {
-                    Self::Focus {
-                        window_id,
-                        focused: set,
-                    }
-                } else {
-                    Self::DragEnded {
-                        window_id,
-                        dropped: set,
-                    }
+                Ok(Self::Focus {
+                    window_id,
+                    focused: flag_at(bytes, 16)?,
                 })
             }
+            EV_DRAG_OVER => read_drag_over(window_id, bytes),
+            EV_DRAG_ENDED => Ok(Self::DragEnded {
+                window_id,
+                site: read_drop_site(bytes)?,
+            }),
             EV_KEY => {
                 event_reserved_zero(bytes, 16 + KeyInput::WIRE_LEN)?;
                 let key = KeyInput::from_bytes(&bytes[16..16 + KeyInput::WIRE_LEN])?;
@@ -6632,6 +6966,153 @@ impl WindowEvent {
             }
             _ => Err(Errno::OutOfRange),
         }
+    }
+}
+
+/// Byte offset of a drag event's serial.
+const DRAG_EVENT_SERIAL_OFFSET: usize = 16;
+/// Byte offset of a drag event's kind: where it is, or where it was dropped.
+const DRAG_EVENT_KIND_OFFSET: usize = 20;
+/// Byte offset of a [`WindowEvent::DragOver`]'s shift flag, or a
+/// [`WindowEvent::DragEnded`]'s operation.
+const DRAG_EVENT_SHIFT_OFFSET: usize = 21;
+/// Byte offset of a drag event's window-local x.
+const DRAG_EVENT_X_OFFSET: usize = 24;
+/// Byte offset of its window-local y.
+const DRAG_EVENT_Y_OFFSET: usize = 28;
+/// Byte offset of a [`DropSite::Window`]'s window.
+const DRAG_EVENT_WINDOW_OFFSET: usize = 32;
+/// [`DragAt::Nowhere`] and [`DropSite::Nothing`].
+const DRAG_AT_NOWHERE: u8 = 0;
+/// [`DragAt::Window`] and [`DropSite::Window`].
+const DRAG_AT_WINDOW: u8 = 1;
+/// [`DragAt::Desktop`] and [`DropSite::Desktop`].
+const DRAG_AT_DESKTOP: u8 = 2;
+/// [`DropSite::Application`].
+const DROP_AT_APPLICATION: u8 = 3;
+
+/// Refuse a drag event whose padding between its flags and its point is not
+/// zero.
+fn drag_padding_zero(bytes: &[u8]) -> Result<(), Errno> {
+    if bytes[DRAG_EVENT_SHIFT_OFFSET + 1..DRAG_EVENT_X_OFFSET]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    Ok(())
+}
+
+/// Decode where a carried drag is: the point is carried only over a window,
+/// and every byte a case does not carry is zero.
+fn read_drag_over(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, DRAG_EVENT_Y_OFFSET + 4)?;
+    drag_padding_zero(bytes)?;
+    let (x, y) = (
+        read_u32(bytes, DRAG_EVENT_X_OFFSET),
+        read_u32(bytes, DRAG_EVENT_Y_OFFSET),
+    );
+    let unplaced = x == 0 && y == 0;
+    let at = match bytes[DRAG_EVENT_KIND_OFFSET] {
+        DRAG_AT_WINDOW => DragAt::Window { x, y },
+        DRAG_AT_NOWHERE if unplaced => DragAt::Nowhere,
+        DRAG_AT_DESKTOP if unplaced => DragAt::Desktop,
+        DRAG_AT_NOWHERE | DRAG_AT_DESKTOP => return Err(Errno::BadMagic),
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowEvent::DragOver {
+        window_id,
+        serial: read_u32(bytes, DRAG_EVENT_SERIAL_OFFSET),
+        at,
+        shift: flag_at(bytes, DRAG_EVENT_SHIFT_OFFSET)?,
+    })
+}
+
+/// Write where a drag is into a [`WindowEvent::DragOver`] frame.
+fn write_drag_over(out: &mut [u8; WindowEvent::WIRE_LEN], serial: u32, at: DragAt, shift: bool) {
+    put_u16(out, 6, EV_DRAG_OVER);
+    put_u32(out, DRAG_EVENT_SERIAL_OFFSET, serial);
+    out[DRAG_EVENT_KIND_OFFSET] = match at {
+        DragAt::Nowhere => DRAG_AT_NOWHERE,
+        DragAt::Window { x, y } => {
+            put_u32(out, DRAG_EVENT_X_OFFSET, x);
+            put_u32(out, DRAG_EVENT_Y_OFFSET, y);
+            DRAG_AT_WINDOW
+        }
+        DragAt::Desktop => DRAG_AT_DESKTOP,
+    };
+    out[DRAG_EVENT_SHIFT_OFFSET] = u8::from(shift);
+}
+
+/// Write where a drag was dropped into a [`WindowEvent::DragEnded`] frame.
+fn write_drop_site(out: &mut [u8; WindowEvent::WIRE_LEN], site: DropSite) {
+    put_u16(out, 6, EV_DRAG_ENDED);
+    let (kind, operation) = match site {
+        DropSite::Nothing => (DRAG_AT_NOWHERE, None),
+        DropSite::Application => (DROP_AT_APPLICATION, None),
+        DropSite::Window {
+            window_id,
+            x,
+            y,
+            operation,
+        } => {
+            put_u32(out, DRAG_EVENT_X_OFFSET, x);
+            put_u32(out, DRAG_EVENT_Y_OFFSET, y);
+            put_u64(out, DRAG_EVENT_WINDOW_OFFSET, window_id);
+            (DRAG_AT_WINDOW, Some(operation))
+        }
+        DropSite::Desktop { serial, operation } => {
+            put_u32(out, DRAG_EVENT_SERIAL_OFFSET, serial);
+            (DRAG_AT_DESKTOP, Some(operation))
+        }
+    };
+    out[DRAG_EVENT_KIND_OFFSET] = kind;
+    out[DRAG_EVENT_SHIFT_OFFSET] = operation.map_or(0, DropOperation::to_wire);
+}
+
+/// Decode where a drag was dropped: each site carries exactly its own fields
+/// and every other byte is zero.
+fn read_drop_site(bytes: &[u8]) -> Result<DropSite, Errno> {
+    drag_padding_zero(bytes)?;
+    let serial = read_u32(bytes, DRAG_EVENT_SERIAL_OFFSET);
+    let (x, y) = (
+        read_u32(bytes, DRAG_EVENT_X_OFFSET),
+        read_u32(bytes, DRAG_EVENT_Y_OFFSET),
+    );
+    let window = read_u64(bytes, DRAG_EVENT_WINDOW_OFFSET);
+    let operation = bytes[DRAG_EVENT_SHIFT_OFFSET];
+    match bytes[DRAG_EVENT_KIND_OFFSET] {
+        kind @ (DRAG_AT_NOWHERE | DROP_AT_APPLICATION) => {
+            if serial != 0 || x != 0 || y != 0 || window != 0 || operation != 0 {
+                return Err(Errno::BadMagic);
+            }
+            Ok(if kind == DRAG_AT_NOWHERE {
+                DropSite::Nothing
+            } else {
+                DropSite::Application
+            })
+        }
+        DRAG_AT_WINDOW => {
+            if serial != 0 {
+                return Err(Errno::BadMagic);
+            }
+            Ok(DropSite::Window {
+                window_id: nonzero_id(window)?,
+                x,
+                y,
+                operation: DropOperation::from_wire(operation)?,
+            })
+        }
+        DRAG_AT_DESKTOP => {
+            if x != 0 || y != 0 || window != 0 {
+                return Err(Errno::BadMagic);
+            }
+            Ok(DropSite::Desktop {
+                serial,
+                operation: DropOperation::from_wire(operation)?,
+            })
+        }
+        _ => Err(Errno::OutOfRange),
     }
 }
 
@@ -6883,18 +7364,19 @@ fn flag_at(bytes: &[u8], at: usize) -> Result<bool, Errno> {
 mod tests {
     use super::{
         app_bar_wire_len, decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply,
-        decode_desktop_reply, decode_drop_target_reply, decode_hand_over_reply,
-        decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-        decode_open_target_reply, decode_picked_name_reply, decode_terrain_reply,
-        decode_wallpapers_reply, encode_clipboard_reply, encode_create_reply,
-        encode_cursor_sets_reply, encode_desktop_reply, encode_drop_target_reply,
-        encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
-        encode_notify_sources_reply, encode_open_target_reply, encode_picked_name_reply,
-        encode_terrain_reply, encode_wallpapers_reply, hand_over_wire_len, open_menu_wire_len,
-        put_i32, put_u16, put_u64, read_i32, read_u16, read_u32, AppBar, AppBarClick, AppMenu,
-        AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel,
-        AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut,
-        BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget,
+        decode_desktop_reply, decode_drag_spot_reply, decode_drop_target_reply,
+        decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
+        decode_notify_sources_reply, decode_open_target_reply, decode_picked_name_reply,
+        decode_terrain_reply, decode_wallpapers_reply, encode_clipboard_reply, encode_create_reply,
+        encode_cursor_sets_reply, encode_desktop_reply, encode_drag_spot_reply,
+        encode_drop_target_reply, encode_hand_over_reply, encode_menu_text_reply,
+        encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
+        encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply,
+        hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
+        read_u32, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
+        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
+        AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath, ClipboardHeld, ClipboardKind,
+        CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
         HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget,
         PickPurpose, PinchPhase, PointerAction, SaveEndings, TerrainPlate, TooltipText,
         WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing,
@@ -6907,7 +7389,9 @@ mod tests {
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
         APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN,
         CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET, DRAG_EVENT_KIND_OFFSET,
+        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
+        DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
         HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
         HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
         HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
@@ -6929,12 +7413,13 @@ mod tests {
         SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
         SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
-        WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX,
-        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
-        WINDOW_MAX_FRAMES, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-        WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX,
-        WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
-        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+        WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
+        WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
+        WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
+        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
+        WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
+        WINDOW_WALLPAPERS_REPLY_MAX,
     };
     use super::{PreviewOutcome, PreviewSubject};
     use crate::desktop::ScreensaverKind;
@@ -7347,10 +7832,29 @@ mod tests {
                     endings,
                 },
             });
-            visit(WindowRequest::BeginDrag { window_id: 9, name });
+            let first = DocumentName::new(&"n".repeat(len.max(1))).expect("a valid name");
+            visit(WindowRequest::BeginDrag {
+                window_id: 9,
+                items: DragItems::new(first, 1, true).expect("one openable file"),
+            });
+            visit(WindowRequest::BeginDrag {
+                window_id: 9,
+                items: DragItems::new(first, u32::MAX, false).expect("many items"),
+            });
         }
         visit(WindowRequest::TakePickedName { window_id: 9 });
         visit(WindowRequest::TakeDropTarget { window_id: 9 });
+        for verdict in [None, Some(DropOperation::Copy), Some(DropOperation::Move)] {
+            visit(WindowRequest::DragVerdict {
+                window_id: 9,
+                serial: 3,
+                verdict,
+            });
+        }
+        visit(WindowRequest::QueryDragSpot {
+            window_id: 9,
+            serial: u32::MAX,
+        });
     }
 
     /// Visit one of every operation the request codec encodes, including the
@@ -7462,12 +7966,14 @@ mod tests {
         each_seat_request(&mut visit);
     }
 
-    /// The pointer-shape and clipboard requests [`each_request`] visits.
+    /// The pointer-shape, activation and clipboard requests [`each_request`]
+    /// visits.
     fn each_seat_request(visit: &mut impl FnMut(WindowRequest)) {
         visit(WindowRequest::SetCursor {
             window_id: 9,
             shape: CursorShape::Text,
         });
+        visit(WindowRequest::ActivateWindow { window_id: 9 });
         for kind in [ClipboardKind::Text, ClipboardKind::Octets] {
             visit(WindowRequest::SetClipboard {
                 window_id: 9,
@@ -9091,7 +9597,12 @@ mod tests {
     fn begin_drag_refuses_a_zero_id_and_a_name_it_does_not_carry_whole() {
         let drag = WindowRequest::BeginDrag {
             window_id: 9,
-            name: DocumentName::new("notes.txt").expect("a valid name"),
+            items: DragItems::new(
+                DocumentName::new("notes.txt").expect("a valid name"),
+                1,
+                true,
+            )
+            .expect("one openable file"),
         };
         let frame = drag.frame();
         let len = drag.wire_len();
@@ -9119,14 +9630,181 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_ended_flag_outside_its_two_values_is_refused() {
-        let mut bytes = WindowEvent::DragEnded {
-            window_id: 4,
-            dropped: true,
+    fn a_drag_names_at_least_one_item_and_only_one_openable_file() {
+        let name = DocumentName::new("notes.txt").expect("a valid name");
+        let unnamed = DocumentName::new("").expect("a valid name");
+        assert_eq!(DragItems::new(name, 0, false), Err(Errno::OutOfRange));
+        assert_eq!(DragItems::new(name, 2, true), Err(Errno::OutOfRange));
+        assert_eq!(DragItems::new(unnamed, 1, false), Err(Errno::OutOfRange));
+        let items = DragItems::new(name, 3, false).expect("three items");
+        assert_eq!((items.count(), items.openable()), (3, false));
+
+        let frame = WindowRequest::BeginDrag {
+            window_id: 9,
+            items: DragItems::new(name, 1, true).expect("one openable file"),
+        };
+        let len = frame.wire_len();
+        let bytes = frame.frame();
+        let mut flagged = bytes;
+        flagged[DRAG_FLAGS_OFFSET] = 0x80;
+        assert_eq!(
+            WindowRequest::from_bytes(&flagged[..len]),
+            Err(Errno::OutOfRange)
+        );
+        let mut several = bytes;
+        several[DRAG_COUNT_OFFSET..DRAG_COUNT_OFFSET + 4].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&several[..len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_verdict_outside_refuse_copy_and_move_is_refused() {
+        let frame = WindowRequest::DragVerdict {
+            window_id: 9,
+            serial: 1,
+            verdict: Some(DropOperation::Move),
+        };
+        let len = frame.wire_len();
+        let mut bytes = frame.frame();
+        bytes[WINDOW_ID_WIRE_LEN + 4] = 3;
+        assert_eq!(
+            WindowRequest::from_bytes(&bytes[..len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn every_drag_report_and_drop_site_round_trips() {
+        let events = [
+            WindowEvent::DragOver {
+                window_id: 4,
+                serial: 0,
+                at: DragAt::Nowhere,
+                shift: false,
+            },
+            WindowEvent::DragOver {
+                window_id: 4,
+                serial: u32::MAX,
+                at: DragAt::Window { x: 0, y: u32::MAX },
+                shift: true,
+            },
+            WindowEvent::DragOver {
+                window_id: 4,
+                serial: 7,
+                at: DragAt::Desktop,
+                shift: true,
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                site: DropSite::Nothing,
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                site: DropSite::Application,
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                site: DropSite::Window {
+                    window_id: u64::MAX,
+                    x: 12,
+                    y: 0,
+                    operation: DropOperation::Copy,
+                },
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                site: DropSite::Desktop {
+                    serial: 9,
+                    operation: DropOperation::Move,
+                },
+            },
+        ];
+        for event in events {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
         }
-        .to_le_bytes();
-        bytes[16] = 2;
-        assert_eq!(WindowEvent::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_drag_event_carrying_what_its_case_does_not_is_refused() {
+        let over = |at| {
+            WindowEvent::DragOver {
+                window_id: 4,
+                serial: 1,
+                at,
+                shift: false,
+            }
+            .to_le_bytes()
+        };
+        let mut placed_desktop = over(DragAt::Desktop);
+        placed_desktop[DRAG_EVENT_X_OFFSET] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&placed_desktop),
+            Err(Errno::BadMagic)
+        );
+        let mut unknown = over(DragAt::Nowhere);
+        unknown[DRAG_EVENT_KIND_OFFSET] = 9;
+        assert_eq!(WindowEvent::from_bytes(&unknown), Err(Errno::OutOfRange));
+        let mut shift = over(DragAt::Nowhere);
+        shift[DRAG_EVENT_SHIFT_OFFSET] = 2;
+        assert_eq!(WindowEvent::from_bytes(&shift), Err(Errno::OutOfRange));
+
+        let ended = |site| WindowEvent::DragEnded { window_id: 4, site }.to_le_bytes();
+        let window = DropSite::Window {
+            window_id: 5,
+            x: 1,
+            y: 1,
+            operation: DropOperation::Copy,
+        };
+        let mut unaddressed = ended(window);
+        unaddressed[DRAG_EVENT_WINDOW_OFFSET..].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&unaddressed),
+            Err(Errno::OutOfRange)
+        );
+        let mut numbered = ended(window);
+        numbered[DRAG_EVENT_SERIAL_OFFSET] = 1;
+        assert_eq!(WindowEvent::from_bytes(&numbered), Err(Errno::BadMagic));
+        let mut unoperated = ended(window);
+        unoperated[DRAG_EVENT_SHIFT_OFFSET] = 0;
+        assert_eq!(WindowEvent::from_bytes(&unoperated), Err(Errno::OutOfRange));
+        let mut nothing_moved = ended(DropSite::Nothing);
+        nothing_moved[DRAG_EVENT_SHIFT_OFFSET] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&nothing_moved),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn a_drag_spot_reply_round_trips_and_refuses_a_frame_that_misstates_it() {
+        let mut out = [0u8; WINDOW_DRAG_SPOT_REPLY_MAX];
+        let mut widest = "d".repeat(crate::FS_PATH_MAX - 1);
+        widest.insert(0, '/');
+        for path in ["/Users/ann/Desktop", widest.as_str()] {
+            let len = encode_drag_spot_reply(&mut out, Ok(path));
+            assert_eq!(decode_drag_spot_reply(&out[..len]), Ok(path));
+            assert_eq!(
+                decode_drag_spot_reply(&out[..len - 1]),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let mut too_long = "d".repeat(crate::FS_PATH_MAX);
+        too_long.insert(0, '/');
+        let len = encode_drag_spot_reply(&mut out, Ok(&too_long));
+        assert_eq!(
+            decode_drag_spot_reply(&out[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let len = encode_drag_spot_reply(&mut out, Err(Errno::NotFound));
+        assert_eq!(decode_drag_spot_reply(&out[..len]), Err(Errno::NotFound));
+        let len = encode_drag_spot_reply(&mut out, Ok(""));
+        assert_eq!(decode_drag_spot_reply(&out[..len]), Err(Errno::OutOfRange));
+        assert_eq!(
+            decode_drag_spot_reply(&out[..3]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 
     #[test]
@@ -9777,11 +10455,11 @@ mod tests {
             WindowEvent::PickCancelled { window_id: 4 },
             WindowEvent::DragEnded {
                 window_id: 4,
-                dropped: true,
+                site: DropSite::Application,
             },
             WindowEvent::DragEnded {
                 window_id: 4,
-                dropped: false,
+                site: DropSite::Nothing,
             },
             WindowEvent::Minimized { window_id: 4 },
             WindowEvent::Resized {

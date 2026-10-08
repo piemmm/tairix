@@ -108,8 +108,8 @@ mod program {
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{
-        AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, RtLinkReader, Took,
-        WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
+        AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, ListingJob, Probe,
+        Probes, RtLinkReader, Took, WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::damage;
@@ -127,25 +127,26 @@ mod program {
         drain_locked, drop_is_noteworthy, encode_switchboard_reply, land_preview, launch_argv,
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
         open_tray, parse, publish_pinboard, reap_launched, relay_power, resize_drag_event,
-        resolve_launch, resolve_window_identities, serve_park_ns, serve_pinboard_apply,
+        resolve_launch, resolve_window_identities, seat_held, serve_park_ns, serve_pinboard_apply,
         serve_switchboard_request, size_state_name, window_control_alternate_event,
         window_control_event, Acquisition, AidPolicy, Answer, AppBarBridge, AppBarService,
         AppearanceWork, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command,
         ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction, DesktopActivation,
         DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd,
-        ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
-        FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy,
-        InputPolicy, KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable,
-        LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch,
-        OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, Prepared, PresentedOwners,
-        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget,
-        PromptOutcome, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
-        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        DragPlace, DragSurface, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
+        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
+        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
+        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
+        LoadedPrograms, MachineWatch, OwedReport, OwnerBundleGate, OwnerWindow, PickAccess,
+        PickEnd, PickStep, Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob,
+        PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Routed, SaverIdentity,
+        SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader,
+        SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker,
+        SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
+        APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
+        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
+        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
         LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
@@ -184,8 +185,8 @@ mod program {
         WALLPAPER_STORE,
     };
     use tairix_window::{
-        app, CallerIdentity, ClientRegion, EventSink, PickedFile, WallpaperName, WindowServer,
-        WINDOW_REPLY_MAX,
+        app, Activation, CallerIdentity, ClientRegion, DragConclusion, DragReport, EventSink,
+        PickedFile, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Presentation, Rect, Region,
@@ -791,7 +792,7 @@ mod program {
         elevate.abandon(shell, compositor);
         if let Some(ended) = shell.end_drag(compositor, false) {
             // A source whose port has gone is torn down by its next delivery.
-            let _ = server.conclude_drag(sink, ended.source, None);
+            let _ = server.conclude_drag(sink, ended.source, ended.ended);
         }
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
@@ -1649,7 +1650,7 @@ mod program {
         region: &'a mut Option<FrameRegion>,
         compositor: &'a mut Compositor,
         shell: &'a mut DesktopShell,
-        desktop: &'a Desktop<S>,
+        desktop: &'a mut Desktop<S>,
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
         fade: &'a mut ScreenFade,
@@ -1735,6 +1736,10 @@ mod program {
                 self.compositor,
                 tairix_rt::clock_get(),
             );
+            // The new work area may show icons the old one did not; the whole
+            // layer is presented next, so no cell needs marking.
+            let shown = self.shell.desktop_layout(self.compositor, self.desktop);
+            self.desktop.resolve_occupancy(&shown, &mut Region::new());
             self.shell.present_desktop(self.compositor, self.desktop);
             Ok(())
         }
@@ -2083,7 +2088,9 @@ mod program {
             .and_then(|home| core::str::from_utf8(home).ok())
             .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
             .unwrap_or_default();
-        desktop_folder.push(alloc::string::String::from("Desktop"));
+        desktop_folder.push(alloc::string::String::from(
+            tairix_abi::home::HOME_DESKTOP_DIR,
+        ));
         let mut desktop = Desktop::new(
             AsyncDirectorySource {
                 listings: alloc::sync::Arc::clone(&listings),
@@ -2149,12 +2156,12 @@ mod program {
         // The trusted file picker (AW5/CU6): the one shared browser engine
         // over the session's own capability-checked listing call. Every
         // pick starts from a fresh listing under the session's authority;
-        // the app never lists anything itself. The picker opens at the
-        // logged-in user's home (`HOME`, exported by login) so the user
-        // lands among their own files rather than at the storage-forest
-        // root; an unset or malformed `HOME` parses to no components (the
-        // root), and a home that cannot be listed when a pick begins falls
-        // back to the root there (fail closed, never a guessed path).
+        // the app never lists anything itself. The picker opens where a bare
+        // file-manager window does, among the logged-in user's own files
+        // (`HOME`, exported by login); an unset or malformed `HOME` opens it
+        // at the root, and a start that cannot be listed climbs to the
+        // nearest folder above it that can (fail closed, never a guessed
+        // path).
         //
         // Built before the first present because every present announces the
         // picker it has newly carried, and one announcement path serves them
@@ -2162,6 +2169,10 @@ mod program {
         let picker_start = tairix_rt::env_var(b"HOME")
             .and_then(|home| core::str::from_utf8(home).ok())
             .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
+            .map(|home| {
+                let [files, _] = tairix_browse::bare_open_places(&home);
+                files
+            })
             .unwrap_or_default();
         let picker_listings = alloc::sync::Arc::clone(&listings);
         let mut picker = SessionPicker::new(move || AsyncDirectorySource {
@@ -2860,7 +2871,7 @@ mod program {
                     // Read before the bridge borrows the picker: a menu may
                     // not be drawn over a lock screen or the trusted picker,
                     // and an accepted open is answered `SeatBusy` instead.
-                    let seat_held = seat_held(&lock, &picker);
+                    let seat_held = seat_held(&lock, &picker, &confirm, &elevate);
                     let n = {
                         let mut bridge = ShellWindowHost {
                             shell: &mut shell,
@@ -2903,6 +2914,11 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                    // An answer this pass took may light or darken the
+                    // desktop folder a carried drag is over.
+                    if shell.drag_active() {
+                        light_drop_icon(&mut shell, &mut compositor, &mut desktop);
+                    }
                     // The desktop's Settings application asked to see a
                     // screensaver; it is shown once the request that asked is
                     // answered.
@@ -3154,7 +3170,8 @@ mod program {
                 // A listing landing and what the folder's watch reported change
                 // the icon cells they touch and nothing behind them.
                 let mut cells = damage::sink();
-                desktop.resume_into(|desk| shell.desktop_layout(&compositor, desk), &mut cells);
+                let resumed =
+                    desktop.resume_into(|desk| shell.desktop_layout(&compositor, desk), &mut cells);
                 let papered = prepare_wallpaper(
                     &mut pinboard,
                     &wallpapers,
@@ -3197,18 +3214,25 @@ mod program {
                     shell.present_icon_artwork(&mut compositor, &arted);
                 }
                 let layout = |desk: &_| shell.desktop_layout(&compositor, desk);
-                match listings.take_update(ListingClient::Pinboard) {
-                    WatchUpdate::Quiet => {}
+                let moved = match listings.take_update(ListingClient::Pinboard) {
+                    WatchUpdate::Quiet => false,
                     WatchUpdate::Changes(changes) => {
-                        desktop.apply_changes(changes, layout, &mut cells);
+                        let cued = listings.invalidate_probes(desktop.folder(), &changes);
+                        desktop.apply_changes(changes, layout, &mut cells) || cued
                     }
-                    WatchUpdate::Rescan => {
-                        desktop.relist_into(layout, &mut cells);
-                    }
+                    WatchUpdate::Rescan => desktop.relist_into(layout, &mut cells),
                     WatchUpdate::Gone => {
                         listings.unwatch(ListingClient::Pinboard);
-                        desktop.relist_into(layout, &mut cells);
+                        desktop.relist_into(layout, &mut cells)
                     }
+                };
+                // Each folder the column now shows is asked about, and each cue
+                // a probe batch answered is drawn.
+                if listings.take_probes_landed() || resumed || moved || settings_landed {
+                    desktop.resolve_occupancy(&layout(&desktop), &mut cells);
+                    // The desktop is the session's one surface with folder
+                    // cues, and it just asked about every folder it shows.
+                    listings.sweep_probes();
                 }
                 // A new wallpaper replaced the ground, and a settings change
                 // restyled or re-laid the layer: each of those is the whole
@@ -3222,6 +3246,13 @@ mod program {
                     if !cells.is_empty() {
                         shell.present_desktop_area(&mut compositor, &desktop, &cells);
                     }
+                }
+                // The desktop is the session's one surface drawing thumbnails;
+                // asking for every icon it shows first is what lets a pass that
+                // repainted a few cells withdraw only pictures gone from view.
+                if !arted.is_empty() {
+                    shell.want_desktop_artwork(&compositor, &desktop);
+                    artworks.sweep_thumbnails();
                 }
                 picker.resume(&mut shell, &mut compositor);
                 let update = listings.take_update(ListingClient::Picker);
@@ -3435,7 +3466,7 @@ mod program {
                             region: &mut region,
                             compositor: &mut compositor,
                             shell: &mut shell,
-                            desktop: &desktop,
+                            desktop: &mut desktop,
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
                             fade: &mut fade,
@@ -3737,7 +3768,7 @@ mod program {
                 &mut compositor,
                 &mut server,
                 &mut sink,
-                trusted_surface_up(&lock, &picker, &elevate),
+                seat_held(&lock, &picker, &confirm, &elevate),
             );
             // One present per frame deadline: the compositor accumulates the
             // damage the pumped events and served presents produced, and the
@@ -4403,7 +4434,9 @@ mod program {
                         if desk.stopping() {
                             return;
                         }
-                        if let Some(job) = desk.next_job() {
+                        // Every icon before any picture file's own content,
+                        // which its class picture already stands in for.
+                        if let Some(job) = desk.next_job().or_else(|| desk.next_thumbnail()) {
                             break job;
                         }
                         desk = self.work.wait(desk);
@@ -4463,6 +4496,11 @@ mod program {
             self.desk.lock().take_landed()
         }
 
+        /// Withdraw the thumbnails nothing asked for since the last sweep.
+        fn sweep_thumbnails(&self) {
+            self.desk.lock().sweep_thumbnails();
+        }
+
         /// Note that the cache refused to keep this decode, so nothing asks for
         /// it again until the band moves.
         fn decline(&self, key: &ArtworkKey, side: u32) {
@@ -4505,16 +4543,16 @@ mod program {
 
     /// The desktop's directory listings, read on a worker thread so a slow or
     /// contended disk cannot stall the compositor, the seat drain, or an
-    /// application blocked in a window call, and the watches that keep each
-    /// listing current.
+    /// application blocked in a window call, the watches that keep each
+    /// listing current, and the probes its folder icons are pictured from.
     ///
     /// The policy — who asked for what, which answer is stale, whose turn it is,
-    /// which watch a listing installs — is the host-tested [`ListingDesk`] and
-    /// [`Watches`]; this adds the runtime's futex mutex for exclusion, a
-    /// condition variable the worker parks on with nothing to do (never a
-    /// spin), and the write end of the pipe whose read end is a wait-set
-    /// member, so the session learns an answer landed through the very loop it
-    /// already parks in.
+    /// which watch a listing installs, which folder cue is owed — is the
+    /// host-tested [`ListingDesk`], [`Watches`] and [`Probes`]; this adds the
+    /// runtime's futex mutex for exclusion, a condition variable the worker
+    /// parks on with nothing to do (never a spin), and the write end of the
+    /// pipe whose read end is a wait-set member, so the session learns an
+    /// answer landed through the very loop it already parks in.
     struct Listings {
         work: tairix_rt::sync::Mutex<ListingWork>,
         /// Signalled when a request is recorded, and on teardown.
@@ -4525,15 +4563,42 @@ mod program {
         set: u64,
     }
 
-    /// What [`Listings`] holds under its one lock: the worker reads both desks,
-    /// so one lock is one ordering rather than two that could interleave.
+    /// What [`Listings`] holds under its one lock: the worker reads every desk,
+    /// so one lock is one ordering rather than several that could interleave.
     /// With no worker, `alone`, the session reads and drains on its own task
-    /// through `scratch`.
+    /// through `scratch`, and probes nothing.
     struct ListingWork {
         desk: ListingDesk<ListingClient>,
         watches: Watches<ListingClient, alloc::sync::Arc<WatchedDirectory>>,
+        probes: Probes,
         alone: bool,
         scratch: Vec<u8>,
+    }
+
+    /// One unit of the listing worker's work.
+    enum ListingRead {
+        List(ListingJob<ListingClient>),
+        Drain(
+            ListingClient,
+            Vec<alloc::string::String>,
+            alloc::sync::Arc<WatchedDirectory>,
+        ),
+        Probe(Vec<Vec<alloc::string::String>>),
+    }
+
+    impl ListingRead {
+        /// The next unit of work: a listing someone is waiting on, then a
+        /// change to a folder on screen, then the folder cues, which a frame
+        /// already draws without.
+        fn next(work: &mut ListingWork) -> Option<Self> {
+            if let Some(job) = work.desk.next_job() {
+                return Some(Self::List(job));
+            }
+            if let Some((client, location, dir)) = work.watches.next_drain() {
+                return Some(Self::Drain(client, location, dir));
+            }
+            work.probes.next_batch().map(Self::Probe)
+        }
     }
 
     /// State that a desktop folder no longer follows its changes, and why.
@@ -4559,6 +4624,7 @@ mod program {
                 work: tairix_rt::sync::Mutex::new(ListingWork {
                     desk: ListingDesk::new(),
                     watches: Watches::new(),
+                    probes: Probes::new(),
                     alone: false,
                     scratch: Vec::new(),
                 }),
@@ -4568,8 +4634,9 @@ mod program {
             }
         }
 
-        /// One worker's whole life: park until there is a directory to read or
-        /// a watch to drain, do it, deliver it, wake the session.
+        /// One worker's whole life: park until there is a directory to read, a
+        /// watch to drain, or a folder to probe, do it, deliver it, wake the
+        /// session.
         ///
         /// Leaves when the desk stops. A read that nobody wants any more is
         /// delivered all the same and reports itself unwanted, so no wake is
@@ -4580,25 +4647,22 @@ mod program {
             let mut scratch =
                 tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
             loop {
-                let job = {
+                let read = {
                     let mut work = self.work.lock();
                     loop {
                         if work.desk.stopping() {
                             return;
                         }
-                        if let Some(job) = work.desk.next_job() {
-                            break Ok(job);
-                        }
-                        if let Some(drain) = work.watches.next_drain() {
-                            break Err(drain);
+                        if let Some(read) = ListingRead::next(&mut work) {
+                            break read;
                         }
                         work = self.signal.wait(work);
                     }
                 };
                 // The read itself, with no lock held: this is the call that can
                 // take as long as the disk takes.
-                let owed = match job {
-                    Ok(job) => {
+                let owed = match read {
+                    ListingRead::List(job) => {
                         let (client, target) = (job.client(), job.target().to_vec());
                         // A reload of the folder already watched reads through
                         // that watch, so its pacing carries on.
@@ -4612,9 +4676,16 @@ mod program {
                         drop(unwanted);
                         owed
                     }
-                    Err((client, location, dir)) => {
+                    ListingRead::Drain(client, location, dir) => {
                         let update = dir.drain(&mut scratch);
                         self.work.lock().watches.deliver(client, &location, update)
+                    }
+                    ListingRead::Probe(batch) => {
+                        let answers = tairix_browse::vfs::probe_batch(
+                            batch,
+                            tairix_browse::vfs::probe_directory,
+                        );
+                        self.work.lock().probes.deliver(answers)
                     }
                 };
                 if owed {
@@ -4670,8 +4741,52 @@ mod program {
         ) -> Result<Listing, Errno> {
             self.ask(client, components, |work| {
                 work.desk.refresh(client, components);
+                // The folder may just have changed, so what was probed of its
+                // folders may have too.
+                work.probes.invalidate_listing(components);
                 Ok(Listing::Pending)
             })
+        }
+
+        /// Answer the folder cue for `components`, recording a probe for the
+        /// worker if none is held or under way.
+        ///
+        /// Asked while the session resolves the icons it shows, so it never
+        /// reads: an unknown cue is [`Probe::Pending`] and is drawn when its
+        /// batch lands. With no worker the desk answers that it does not
+        /// probe, and the folder draws plain rather than costing the loop a
+        /// directory read.
+        fn probe(&self, components: &[alloc::string::String]) -> Result<Probe, Errno> {
+            let (answer, recorded) = self.work.lock().probes.ask(components);
+            if recorded {
+                self.signal.notify_one();
+            }
+            answer
+        }
+
+        /// Whether a probe batch has landed since this was last asked. Asked
+        /// before each resolve of the icons' cues.
+        fn take_probes_landed(&self) -> bool {
+            self.work.lock().probes.take_landed()
+        }
+
+        /// Drop the probes the pass just resolved did not ask for, waking the
+        /// worker if a batch is left for it.
+        fn sweep_probes(&self) {
+            if self.work.lock().probes.sweep() {
+                self.signal.notify_one();
+            }
+        }
+
+        /// The folders among `changes` in `dir` changed, so what was probed of
+        /// them is stale. Whether any was a folder, which owes the cues a
+        /// resolve.
+        fn invalidate_probes(
+            &self,
+            dir: &[alloc::string::String],
+            changes: &[tairix_browse::EntryChange],
+        ) -> bool {
+            self.work.lock().probes.invalidate(dir, changes)
         }
 
         /// Put `client`'s listing request to the desk through `record`, waking
@@ -4776,17 +4891,20 @@ mod program {
                 let mut work = self.work.lock();
                 work.desk.stop();
                 work.watches.stop();
+                work.probes.stop();
                 work.alone = false;
             }
             self.signal.notify_all();
         }
 
         /// No worker will answer: every listing is read, and every watch
-        /// drained, on the session's own task. Refused its scratch, each drain
-        /// reads its changes a few at a time instead.
+        /// drained, on the session's own task, and no folder is probed.
+        /// Refused its scratch, each drain reads its changes a few at a time
+        /// instead.
         fn alone(&self) {
             let mut work = self.work.lock();
             work.desk.stop();
+            work.probes.stop();
             work.alone = true;
             work.scratch = tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
         }
@@ -5284,6 +5402,15 @@ mod program {
         fn follows(&self, components: &[alloc::string::String]) -> bool {
             self.listings.follows(self.client, components)
         }
+
+        fn has_children(&mut self, components: &[alloc::string::String]) -> Result<Probe, Errno> {
+            match self.client {
+                ListingClient::Pinboard => self.listings.probe(components),
+                // Choosing a file gains nothing from a cue, so the picker reads
+                // no folder it is not showing.
+                ListingClient::Picker => Err(Errno::NotImplemented),
+            }
+        }
     }
 
     /// How many CPUs are online, or one when the question cannot be asked.
@@ -5562,6 +5689,15 @@ mod program {
             )
             .ok()
         }
+
+        fn thumbnail(
+            &mut self,
+            side: u32,
+            reading: tairix_icon::Reading,
+            document: &mut dyn tairix_icon::ArtworkDocument,
+        ) -> Option<alloc::vec::Vec<u8>> {
+            tairix_sandbox::imagerender::thumbnail(&mut self.0, side, reading, document).ok()
+        }
     }
 
     /// The session's pinboard state, kept beside the loop: the loop's own
@@ -5660,7 +5796,7 @@ mod program {
                 seat.compositor,
                 self.windows,
                 seat.menu,
-                seat_held(seat.lock, self.picker),
+                seat_held(seat.lock, self.picker, self.confirm, self.elevate),
                 &mut LaunchCtx {
                     launched: self.launched,
                     apps: &self.apps.service,
@@ -5748,7 +5884,97 @@ mod program {
             )
         }
 
-        fn drop_target(&mut self, slot: usize, name: &str) -> Option<DropTarget> {
+        fn drag_place(&mut self, seat: &mut Seat<'_>, at: tairix_wm::Point) -> DragPlace {
+            let Some((source, _)) = seat.shell.drag_items() else {
+                return DragPlace::Nothing;
+            };
+            let scale = seat.compositor.scale();
+            if let Some(index) = seat.shell.session().taskbar().app_slot_at(at, scale) {
+                return DragPlace::Slot { index };
+            }
+            if let Some(wm) = seat.compositor.window_at(at) {
+                return self.drag_window(seat.compositor, source, wm, at);
+            }
+            let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
+            DragPlace::Desktop {
+                icon: self.desktop.drop_icon_at(at, &layout),
+                revision: self.desktop.revision(),
+            }
+        }
+
+        fn drag_surface(&mut self, seat: &mut Seat<'_>, place: DragPlace) -> DragSurface {
+            match place {
+                DragPlace::Nothing => DragSurface::Nothing,
+                DragPlace::Slot { index } => {
+                    let target = seat
+                        .shell
+                        .drag_items()
+                        .filter(|(_, items)| items.openable())
+                        .and_then(|(_, items)| self.drop_target(index, items.first().as_str()));
+                    DragSurface::Slot {
+                        index,
+                        target: target.map(alloc::boxed::Box::new),
+                    }
+                }
+                DragPlace::Window { window_id, x, y } => DragSurface::Window { window_id, x, y },
+                DragPlace::Desktop { icon, revision } => DragSurface::Desktop {
+                    folder: self.desktop.drop_folder(icon),
+                    icon,
+                    revision,
+                },
+            }
+        }
+
+        fn report_drag(&mut self, seat: &mut Seat<'_>, report: OwedReport) {
+            let at = match &report.at {
+                &DragSurface::Window { window_id, x, y } => DragReport::Window { window_id, x, y },
+                DragSurface::Desktop { folder, .. } => DragReport::Desktop { folder },
+                DragSurface::Nothing | DragSurface::Slot { .. } => DragReport::Nowhere,
+            };
+            // A report the engine refuses — the window under the pointer has
+            // just closed — draws no answer, so the pointer shows none and a
+            // drop there drops nothing.
+            let _ =
+                self.server
+                    .report_drag(self.sink, report.source, report.serial, at, report.shift);
+            light_drop_icon(seat.shell, seat.compositor, self.desktop);
+        }
+
+        fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd) {
+            let Some(owner) = self.server.owner_of(ended.source) else {
+                return;
+            };
+            let concluded = match self
+                .server
+                .conclude_drag(self.sink, ended.source, ended.ended)
+            {
+                // A window dropped on that has closed is a drop on nothing.
+                Err(Errno::OutOfRange) => {
+                    self.server
+                        .conclude_drag(self.sink, ended.source, DragConclusion::Nothing)
+                }
+                other => other,
+            };
+            if let Err(Errno::NotFound) = concluded {
+                drop_departed(
+                    owner,
+                    self.server,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                );
+            }
+            light_drop_icon(seat.shell, seat.compositor, self.desktop);
+        }
+    }
+
+    impl<S: DirectorySource, F: FnMut() -> S> SessionRoute<'_, S, F> {
+        /// What the application on icon-bar slot `slot` does with a dragged
+        /// file named `name`: open it, or `None` when it does not claim it.
+        fn drop_target(&self, slot: usize, name: &str) -> Option<DropTarget> {
             // Only a slot attested to an installed bundle can be vouched for,
             // and only a bundle whose signed manifest claims the file takes
             // it — by the one matching rule "Open With" uses.
@@ -5764,25 +5990,53 @@ mod program {
             })
         }
 
-        fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd) {
-            let Some(owner) = self.server.owner_of(ended.source) else {
-                return;
+        /// The compositor window `wm` under a carried drag at `at`: the drag's
+        /// own application's window, at a point in its content, or nothing a
+        /// drop is offered to — another application's window, the session's
+        /// own surfaces, or a window's frame.
+        fn drag_window(
+            &self,
+            compositor: &Compositor,
+            source: u64,
+            wm: tairix_wm::WindowId,
+            at: tairix_wm::Point,
+        ) -> DragPlace {
+            let Some(window_id) = self.windows.ipc_id(wm) else {
+                return DragPlace::Nothing;
             };
-            if let Err(Errno::NotFound) =
-                self.server
-                    .conclude_drag(self.sink, ended.source, ended.target.as_ref())
-            {
-                drop_departed(
-                    owner,
-                    self.server,
-                    seat.shell,
-                    seat.compositor,
-                    self.windows,
-                    self.picker,
-                    &mut self.apps.service,
-                    seat.menu,
-                );
+            let owner = self.server.owner_of(source);
+            if owner.is_none() || self.server.owner_of(window_id) != owner {
+                return DragPlace::Nothing;
             }
+            let Some(client) = compositor
+                .window_client_rect(wm)
+                .filter(|rect| rect.contains(at))
+            else {
+                return DragPlace::Nothing;
+            };
+            let (Ok(x), Ok(y)) = (
+                u32::try_from(i64::from(at.x) - i64::from(client.left())),
+                u32::try_from(i64::from(at.y) - i64::from(client.top())),
+            ) else {
+                return DragPlace::Nothing;
+            };
+            DragPlace::Window { window_id, x, y }
+        }
+    }
+
+    /// Light the desktop folder icon a carried drag would drop into while its
+    /// application accepts it there, and darken the one it no longer would,
+    /// painting only those cells.
+    fn light_drop_icon<S: DirectorySource>(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        desktop: &mut Desktop<S>,
+    ) {
+        let layout = shell.desktop_layout(compositor, desktop);
+        let mut damage = Region::new();
+        desktop.set_drop_target(shell.drag_drop_icon(), &layout, &mut damage);
+        if !damage.is_empty() {
+            shell.present_desktop_area(compositor, desktop, &damage);
         }
     }
 
@@ -6854,7 +7108,7 @@ mod program {
                 // — the same service an application's `OpenMenu` reaches.
                 open_bar_menu(
                     request,
-                    seat_held(lock, picker),
+                    seat_held(lock, picker, confirm, elevate),
                     menu,
                     shell,
                     compositor,
@@ -7136,7 +7390,10 @@ mod program {
                 },
             ],
         );
-        if let Err(Errno::NotFound) = server.deliver_app_event(sink, owner, event) {
+        let activation = Activation::Granted {
+            focus: windows.focused(shell),
+        };
+        if let Err(Errno::NotFound) = server.deliver_app_event(sink, owner, event, activation) {
             // The declaration is gone with the process: its windows go too,
             // exactly as a refused window-scoped send tears them down.
             let mut bridge = ShellWindowHost {
@@ -7307,48 +7564,6 @@ mod program {
         }
     }
 
-    /// Open the backdrop menu as the seat's one chain, anchored at the press
-    /// that asked for it.
-    ///
-    /// The desktop's own menu is a client of the menu service exactly as an
-    /// application's is; the only difference is that its model is built here
-    /// rather than decoded from the wire, so its rows may state things
-    /// (a command the *system* lacks the authority for) that an application
-    /// structurally cannot. The chain places, draws, grabs, traverses and
-    /// dismisses it, and its one answer arrives at the session's single
-    /// delivery point like every other chain's.
-    ///
-    /// A model the chain will not show is reported and opens nothing: a
-    /// refused menu is an answer, never a reason to draw one here.
-    ///
-    /// Whether a surface a menu may not displace holds the seat: the screen
-    /// lock, or the trusted picker. One definition, because every direction a
-    /// chain arrives from consults it — an application's `OpenMenu` over the
-    /// window channel, the desktop's own backdrop press, and a press on the
-    /// icon bar.
-    fn seat_held<S: DirectorySource, F: FnMut() -> S>(
-        lock: &ScreenLock,
-        picker: &SessionPicker<S, F>,
-    ) -> bool {
-        lock.is_locked() || picker.wm_id().is_some()
-    }
-
-    /// Whether a surface the user is meant to trust is on screen.
-    ///
-    /// Wider than [`seat_held`], and deliberately so: a menu may not be drawn
-    /// over the lock screen or the trusted picker, but a *desktop layer
-    /// surface* must also go away for the elevation prompt — a pet watching
-    /// the pointer travel over a password field is exactly what the
-    /// suppression exists to stop. Built on `seat_held` rather than beside
-    /// it, so the shared part has one definition.
-    fn trusted_surface_up<S: DirectorySource, F: FnMut() -> S>(
-        lock: &ScreenLock,
-        picker: &SessionPicker<S, F>,
-        elevate: &ElevatePrompt,
-    ) -> bool {
-        seat_held(lock, picker) || elevate.wm_id().is_some()
-    }
-
     /// Resolve the desktop layer surface's feeds for this frame: hide or show
     /// it as a trusted surface comes and goes, notice whether the desktop's
     /// shape changed, and deliver at most one message of each kind.
@@ -7446,6 +7661,13 @@ mod program {
         }
     }
 
+    /// Open the backdrop menu as the seat's one chain, anchored at the press
+    /// that asked for it.
+    ///
+    /// The desktop is a client of the menu service like any application; its
+    /// model is built here rather than decoded from the wire, so its rows may
+    /// state what only the system can (a command it lacks the authority for).
+    /// A model the chain will not show is reported and opens nothing.
     #[allow(clippy::too_many_arguments)] // The chain's whole mutable surround, threaded explicitly.
     fn open_backdrop_menu<S: DirectorySource>(
         at: Point,
@@ -7900,6 +8122,16 @@ mod program {
         fn read(&mut self, path: &str, max: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
             read_file(path, max)
         }
+
+        fn open_document(
+            &mut self,
+            path: &str,
+        ) -> Option<alloc::boxed::Box<dyn tairix_icon::ArtworkDocument + '_>> {
+            tairix_icon::RtDocument::open(path).map(|document| {
+                alloc::boxed::Box::new(document)
+                    as alloc::boxed::Box<dyn tairix_icon::ArtworkDocument>
+            })
+        }
     }
 
     impl tairix_appstore::StoreReader for VfsFileReader {
@@ -8179,14 +8411,22 @@ mod program {
         fn recent_window(&self, app: ProcId) -> Option<tairix_wm::WindowId> {
             window_of_app(app, self.ctx.server, self.ctx.windows)
         }
+
+        /// The one raise the user's own launch lends the instance it reaches.
+        fn activation(&self) -> Activation {
+            Activation::Granted {
+                focus: self.ctx.windows.focused(self.shell),
+            }
+        }
     }
 
     impl LaunchHost for Reach<'_, '_> {
         fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
+            let activation = self.activation();
             match self
                 .ctx
                 .server
-                .hand_over_open_target(self.ctx.sink, app, || {
+                .hand_over_open_target(self.ctx.sink, app, activation, || {
                     open_entry(target, &mut RtDocumentRelay, app)
                 }) {
                 Ok(()) => true,
@@ -8203,9 +8443,10 @@ mod program {
         }
 
         fn ask_default(&mut self, app: ProcId) -> bool {
+            let activation = self.activation();
             self.ctx
                 .server
-                .deliver_app_event(self.ctx.sink, app, &WindowEvent::AppBarDefault)
+                .deliver_app_event(self.ctx.sink, app, &WindowEvent::AppBarDefault, activation)
                 .is_ok()
         }
 

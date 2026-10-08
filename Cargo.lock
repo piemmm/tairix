@@ -1762,6 +1762,7 @@ dependencies = [
  "tairix-abi",
  "tairix-fsmeta",
  "tairix-fuzzseed",
+ "tairix-hash",
 ]
 
 [[package]]
@@ -1787,7 +1788,10 @@ name = "tairix-drv-fs-ext4"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-crc32c",
  "tairix-fsprobe",
+ "tairix-hash",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2408,6 +2412,7 @@ dependencies = [
  "tairix-path",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-rt",
  "tairix-svg",
 ]
 

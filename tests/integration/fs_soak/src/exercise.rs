@@ -8,6 +8,7 @@
 use tairix_abi::driver::filesystem::{FilesystemRead, NodeId, NodeKind};
 use tairix_abi::DriverError;
 
+use crate::check::{ck, list_names, want_err};
 use crate::{RamBlock, SoakFs};
 
 // Note: `FilesystemWrite` is reached through the `SoakFs` supertrait, so
@@ -38,30 +39,6 @@ fn byte_at(seed: u64, file: u64, offset: u64) -> u8 {
 /// Build `len` bytes of deterministic content for file `file`.
 fn content(seed: u64, file: u64, len: usize) -> Vec<u8> {
     (0..len).map(|o| byte_at(seed, file, o as u64)).collect()
-}
-
-/// Map a driver result into a descriptive soak error tagged with `what`
-/// and the reproducing `seed`.
-fn ck<T>(r: Result<T, DriverError>, what: &str, seed: u64) -> Result<T, String> {
-    r.map_err(|e| format!("seed {seed:#x}: {what}: unexpected {e:?}"))
-}
-
-/// Assert that an operation failed with exactly `want`. Callers pass the
-/// operation's `.err()` so the success payload is dropped, keeping this
-/// free of a moved generic value (clippy `needless_pass_by_value`).
-fn want_err(
-    got: Option<DriverError>,
-    want: DriverError,
-    what: &str,
-    seed: u64,
-) -> Result<(), String> {
-    match got {
-        Some(e) if e == want => Ok(()),
-        Some(e) => Err(format!(
-            "seed {seed:#x}: {what}: expected {want:?}, got {e:?}"
-        )),
-        None => Err(format!("seed {seed:#x}: {what}: expected {want:?}, got Ok")),
-    }
 }
 
 /// Read the whole of file `node` (known `len`) into a buffer, looping
@@ -150,30 +127,6 @@ fn verify_file<F: SoakFs>(
         ));
     }
     Ok(())
-}
-
-/// Collect the names a directory lists, terminating at the first `None`.
-fn list_names<F: FilesystemRead>(
-    fs: &mut F,
-    dir: NodeId,
-    seed: u64,
-) -> Result<Vec<Vec<u8>>, String> {
-    let mut names = Vec::new();
-    let mut cursor = 0u64;
-    let mut steps = 0u64;
-    let mut buf = [0u8; 256];
-    while let Some(entry) = ck(fs.read_dir(dir, cursor, &mut buf), "read_dir", seed)? {
-        names.push(buf[..entry.name_len].to_vec());
-        if entry.next_cursor == cursor {
-            return Err(format!("seed {seed:#x}: read_dir cursor did not advance"));
-        }
-        cursor = entry.next_cursor;
-        steps += 1;
-        if steps > 1_000_000 {
-            return Err(format!("seed {seed:#x}: read_dir did not terminate"));
-        }
-    }
-    Ok(names)
 }
 
 /// Run one deterministic soak iteration over a fresh `device_bytes`

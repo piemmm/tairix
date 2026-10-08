@@ -234,7 +234,9 @@ listing (`MountTable::direct_children`, consumed by the `fs_readdir`
 service), so a runtime `/Storage/<name>` mount appears in `/Storage` even
 though the parent volume holds no node of that name — deduplicated against
 any same-named real node, rendered as a structural directory entry with the
-same `UNIX_EPOCH` stamp any stampless backing reports.
+same `UNIX_EPOCH` stamp any stampless backing reports. The mount points
+follow the volume's own entries in name order, so a batched listing resumes
+after the last one it returned.
 
 ## 11. Fail-closed rules
 

@@ -13,12 +13,15 @@ use super::*;
 use std::vec;
 use std::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::DriverKind;
 
-/// In-memory block device backing the test volumes.
+/// In-memory block device backing the test volumes, counting the reads it
+/// serves so a test can bound what an operation costs.
 struct MemDisk {
     data: Vec<u8>,
     block_size: u32,
+    reads: std::sync::Arc<core::sync::atomic::AtomicUsize>,
 }
 
 impl MemDisk {
@@ -26,6 +29,7 @@ impl MemDisk {
         Self {
             data: vec![0; bytes],
             block_size,
+            reads: std::sync::Arc::default(),
         }
     }
 }
@@ -39,6 +43,8 @@ impl Block for MemDisk {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.reads
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let at = usize::try_from(lba * u64::from(self.block_size))
             .map_err(|_| DriverError::LengthOutOfRange)?;
         let end = at
@@ -131,18 +137,46 @@ fn read_all(fs: &mut Adfs<MemDisk>, node: NodeId) -> Vec<u8> {
 
 /// Collect `(name, is_dir, size)` for every entry of `dir`.
 fn list(fs: &mut Adfs<MemDisk>, dir: NodeId) -> Vec<(Vec<u8>, bool, u64)> {
-    let mut out = Vec::new();
-    let mut cursor = 0u64;
-    let mut name = [0u8; 255];
-    while let Some(entry) = fs.read_dir(dir, cursor, &mut name).expect("read_dir") {
-        out.push((
-            name[..entry.name_len].to_vec(),
-            entry.info.kind == NodeKind::Directory,
-            entry.info.size,
-        ));
-        cursor = entry.next_cursor;
+    listed(fs, dir, 0, &[])
+        .expect("read_dir")
+        .into_iter()
+        .map(|(entry, name)| {
+            (
+                name,
+                entry.info.kind == NodeKind::Directory,
+                entry.info.size,
+            )
+        })
+        .collect()
+}
+
+/// A listing resumed by cursor while the sorted directory shifts under it —
+/// two names inserted before the resume point and one removed after it —
+/// lists every lasting entry exactly once.
+#[test]
+fn a_listing_resumed_across_shifts_lists_each_lasting_entry_once() {
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = fs.root();
+        for name in [&b"Bravo"[..], b"Delta", b"Echo", b"Golf", b"Hotel"] {
+            fs.create(root, name, NodeKind::RegularFile)
+                .expect("create");
+        }
+        let head = listed(&mut fs, root, 0, &[]).expect("read_dir");
+        let (cursor_entry, after) = &head[1];
+        assert_eq!(after, b"Delta", "{variant:?}: sorted");
+        for name in [&b"Alpha"[..], b"Charlie"] {
+            fs.create(root, name, NodeKind::RegularFile)
+                .expect("create");
+        }
+        fs.remove(root, b"Golf").expect("remove");
+        let rest: Vec<Vec<u8>> = listed(&mut fs, root, cursor_entry.next_cursor, after)
+            .expect("read_dir")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(rest, [&b"Echo"[..], b"Hotel"], "{variant:?}");
     }
-    out
 }
 
 #[test]
@@ -447,6 +481,7 @@ fn assert_rejected(variant: AdfsVariant, data: Vec<u8>, what: &str) {
     let device = MemDisk {
         data,
         block_size: 512,
+        reads: std::sync::Arc::default(),
     };
     match Adfs::open(device) {
         Err(DriverError::BadMagic) => {}
@@ -604,11 +639,11 @@ fn corrupt_entry_pointers_fail_closed_at_use() {
     // Forge the entry through the driver's own directory codec so the
     // check byte stays valid.
     let (index, mut object) = fs
-        .dir_lookup(node_addr(root), 0, b"File")
+        .dir_lookup(node_addr(root), b"File")
         .expect("io")
         .expect("found");
     object.indaddr = 0x00F0 << 8; // An id the map never allocated.
-    fs.dir_update_at(node_addr(root), 0, index, &object)
+    fs.dir_update_at(node_addr(root), index, &object)
         .expect("forge");
     let node = fs.lookup(root, b"File").expect("entry resolves");
     assert_eq!(
@@ -818,10 +853,7 @@ fn directories_nest_and_list_sorted() {
             "{variant:?}: read_at on dir"
         );
         let file = fs.lookup(sub, b"inner").expect("file");
-        assert_eq!(
-            fs.read_dir(file, 0, &mut [0u8; 32]),
-            Err(DriverError::Unsupported)
-        );
+        assert_eq!(listed(&mut fs, file, 0, &[]), Err(DriverError::Unsupported));
     }
 }
 
@@ -848,4 +880,172 @@ fn adfs_has_no_link_of_either_kind_and_reports_one_name() {
         assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
         assert_eq!(fs.node_info(root).expect("stat").nlink, 1);
     }
+}
+
+/// A stat reads the one directory holding the node, never the tree: a
+/// volume whose every directory is wide costs a deep node's stat no more
+/// than listing its parent does.
+#[test]
+fn a_stat_reads_its_parent_alone() {
+    let disk = MemDisk::new(1600 * 1024, 512);
+    let reads = std::sync::Arc::clone(&disk.reads);
+    let mut fs = Adfs::format(disk, AdfsVariant::FPlus).expect("format");
+    let root = FilesystemRead::root(&fs);
+    let mut deep = root;
+    for level in 0..6u8 {
+        for wide in 0..12u8 {
+            make(&mut fs, deep, &[b'F', b'a' + level, b'a' + wide], b"x");
+        }
+        deep = fs
+            .create(deep, &[b'D', b'a' + level], NodeKind::Directory)
+            .expect("dir");
+    }
+    let target = make(&mut fs, deep, b"Target", b"payload");
+    let device = fs.volume.into_device();
+    let mut fs = Adfs::open(device).expect("reopen");
+    reads.store(0, core::sync::atomic::Ordering::Relaxed);
+    let _ = list(&mut fs, deep);
+    let listing = reads.swap(0, core::sync::atomic::Ordering::Relaxed);
+    let info = fs.node_info(target).expect("stat");
+    let stat = reads.load(core::sync::atomic::Ordering::Relaxed);
+    assert_eq!(info.size, 7);
+    assert!(
+        stat <= listing + 8,
+        "a stat read {stat} blocks; listing the parent reads {listing}"
+    );
+}
+
+/// A directory's node is its address and its parent's, so growing it keeps
+/// the node a listing of it was bound to.
+#[test]
+fn a_directory_keeps_its_node_as_it_grows() {
+    let mut fs = fresh(AdfsVariant::EPlus, 800 * 1024);
+    let root = FilesystemRead::root(&fs);
+    let dir = fs.create(root, b"Grows", NodeKind::Directory).expect("dir");
+    let before = fs.lookup(root, b"Grows").expect("found");
+    assert_eq!(before, dir);
+    for i in 0..120u32 {
+        let name = std::format!("Entry{i:03}");
+        fs.create(dir, name.as_bytes(), NodeKind::RegularFile)
+            .expect("create");
+    }
+    assert_eq!(fs.lookup(root, b"Grows").expect("found"), before);
+    assert_eq!(list(&mut fs, dir).len(), 120);
+}
+
+/// Objects with no allocation share address 0, so each is told apart by its
+/// name: two empty files are two nodes, and setting one's metadata leaves
+/// the other's alone.
+#[test]
+fn empty_files_are_distinct_nodes() {
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        let first = make(&mut fs, root, b"Empty1", b"");
+        let second = make(&mut fs, root, b"Empty2", b"");
+        assert_ne!(first, second, "{variant:?}");
+        let set = acorn::addr_to_value(0x1234_5678);
+        let before = attr(&mut fs, second, b"acorn.loadaddr");
+        assert_ne!(before, Some(set.to_vec()), "{variant:?}");
+        fs.set_attr(first, b"acorn.loadaddr", &set).expect("set");
+        assert_eq!(
+            attr(&mut fs, first, b"acorn.loadaddr"),
+            Some(set.to_vec()),
+            "{variant:?}"
+        );
+        assert_eq!(
+            attr(&mut fs, second, b"acorn.loadaddr"),
+            before,
+            "{variant:?}"
+        );
+        assert_eq!(fs.read_at(second, 0, &mut [0u8; 4]), Ok(0));
+    }
+}
+
+/// `FileCore` folds names to upper case, so `_` sorts after every letter.
+#[test]
+fn names_sort_as_filecore_folds_them() {
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        make(&mut fs, root, b"A_B", b"1");
+        make(&mut fs, root, b"AB", b"2");
+        make(&mut fs, root, b"aa", b"3");
+        let names: Vec<Vec<u8>> = list(&mut fs, root).into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(
+            names,
+            [b"aa".to_vec(), b"AB".to_vec(), b"A_B".to_vec()],
+            "{variant:?}"
+        );
+    }
+}
+
+/// RISC OS finds names by binary search and reports a directory out of
+/// order as broken; so does the driver, rather than resume a listing wrongly
+/// in it.
+#[test]
+fn a_directory_out_of_order_is_rejected() {
+    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let root = FilesystemRead::root(&fs);
+    make(&mut fs, root, b"QQQQ1", b"1");
+    make(&mut fs, root, b"QQQQ2", b"2");
+    let image = fs.volume.into_device().data;
+    let first = image
+        .windows(5)
+        .position(|w| w == b"QQQQ1")
+        .expect("entry present");
+    let dir_start = first - dir::ENTRIES_OFFSET;
+    let check_at = dir_start + dir::NEW_DIR_SIZE - 1;
+    let unchecked = |mut data: Vec<u8>| {
+        data[check_at] = 0;
+        data
+    };
+    let in_order = MemDisk {
+        data: unchecked(image.clone()),
+        block_size: 512,
+        reads: std::sync::Arc::default(),
+    };
+    assert!(
+        Adfs::open(in_order).is_ok(),
+        "an unchecked sorted directory opens"
+    );
+    let mut swapped = unchecked(image);
+    let (a, b) = swapped[first..first + 2 * dir::ENTRY_SIZE].split_at_mut(dir::ENTRY_SIZE);
+    a.swap_with_slice(b);
+    assert_rejected(AdfsVariant::E, swapped, "entries out of order");
+}
+
+/// A fragment two files share is freed with the last of them: the other
+/// sharers can only be its parent's entries, which is all that is read.
+#[test]
+fn a_shared_fragment_is_freed_with_its_last_sharer() {
+    let mut fs = fresh(AdfsVariant::E, 800 * 1024);
+    let root = FilesystemRead::root(&fs);
+    make(&mut fs, root, b"Holder", b"holder bytes");
+    make(&mut fs, root, b"Sharer", b"");
+    let free_before = fs.stats().expect("stats").free_blocks;
+    let (holder_at, mut holder) = fs
+        .dir_lookup(node_addr(root), b"Holder")
+        .expect("io")
+        .expect("found");
+    let fragment = holder.indaddr & !0xFF;
+    holder.indaddr = fragment | 1;
+    fs.dir_update_at(node_addr(root), holder_at, &holder)
+        .expect("share");
+    let (sharer_at, mut sharer) = fs
+        .dir_lookup(node_addr(root), b"Sharer")
+        .expect("io")
+        .expect("found");
+    sharer.indaddr = fragment | 2;
+    sharer.size = 4;
+    fs.dir_update_at(node_addr(root), sharer_at, &sharer)
+        .expect("share");
+    fs.remove(root, b"Sharer").expect("remove a sharer");
+    assert_eq!(
+        fs.stats().expect("stats").free_blocks,
+        free_before,
+        "the holder still uses the fragment"
+    );
+    fs.remove(root, b"Holder").expect("remove the last sharer");
+    assert!(fs.stats().expect("stats").free_blocks > free_before);
 }

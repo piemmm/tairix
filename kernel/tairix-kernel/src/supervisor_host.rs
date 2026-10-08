@@ -31,7 +31,7 @@
 //! on any input (the charter forbids it): a bad argument, an unreadable disk,
 //! or a missing record is a rendered message, never a panic.
 
-use tairix_abi::driver::filesystem::NodeKind;
+use tairix_abi::driver::filesystem::{DirVisit, NodeKind};
 use tairix_abi::driver::{block::Block, DriverError};
 use tairix_abi::hwtree::HwDeviceClass;
 use tairix_kernel_core::{boot_log_tail, supervisor_system};
@@ -290,32 +290,18 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
         let listed = with_system_volume(&mut window, self.audit, |volume| {
             out.line("/System (read-only, pre-mount):");
             let root = volume.root();
-            let mut cursor = 0u64;
-            let mut name = [0u8; 256];
-            loop {
-                match volume.read_dir(root, cursor, &mut name) {
-                    Ok(Some(entry)) => {
-                        out.write_str("  ");
-                        let len = entry.name_len.min(name.len());
-                        out.write_bytes(&name[..len]);
-                        if entry.info.kind == NodeKind::Directory {
-                            out.write_str("/");
-                        }
-                        out.newline();
-                        cursor = entry.next_cursor;
-                    }
-                    // End of the listing.
-                    Ok(None) => break,
-                    // A name that did not fit is skipped rather than aborting
-                    // the whole listing; a device fault ends it fail-soft.
-                    Err(DriverError::BufferTooSmall) => {
-                        cursor = cursor.saturating_add(1);
-                    }
-                    Err(_) => {
-                        out.line("  (listing ended on a read error)");
-                        break;
-                    }
+            let listed = volume.read_dir(root, 0, &[], &mut |entry, name| {
+                out.write_str("  ");
+                out.write_bytes(name);
+                if entry.info.kind == NodeKind::Directory {
+                    out.write_str("/");
                 }
+                out.newline();
+                DirVisit::Take
+            });
+            // A device fault ends the listing fail-soft, after what it read.
+            if listed.is_err() {
+                out.line("  (listing ended on a read error)");
             }
         });
         if listed.is_none() {

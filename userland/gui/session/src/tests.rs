@@ -333,14 +333,16 @@ fn owners(service: &mut AppBarService, windows: &[(ProcId, TaskId)]) -> Vec<Proc
 /// A shell for `config`, with both rasterised-asset caches built through
 /// the shipping desktop policy at normal pressure.
 pub(crate) fn shell_for(config: TaskbarConfig) -> DesktopShell {
+    shell_audited(config, &TEST_SINK)
+}
+
+/// [`shell_for`], recording its security decisions on `audit`.
+pub(crate) fn shell_audited(
+    config: TaskbarConfig,
+    audit: &'static (dyn Sink + Sync),
+) -> DesktopShell {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    DesktopShell::new(
-        config,
-        TEST_SEAT,
-        TEST_FRAME_BYTES,
-        &NORMAL_PRESSURE,
-        &TEST_SINK,
-    )
+    DesktopShell::new(config, TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, audit)
 }
 
 /// A shell and a compositor for `config`, both governed by `pressure`
@@ -4125,6 +4127,7 @@ fn picker_follows_a_reported_change_into_the_listing() {
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     picker.handle_key(&down, &mut shell, &mut comp);
+    picker.handle_key(&down, &mut shell, &mut comp);
     assert_eq!(
         asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
         "/a.txt",
@@ -4152,7 +4155,9 @@ fn picker_leaves_a_folder_gone_from_its_path_for_its_parent() {
     picker
         .begin(7, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
     assert!(
         picker.handle_key(&enter, &mut shell, &mut comp).is_none(),
         "into Docs"
@@ -4164,6 +4169,7 @@ fn picker_leaves_a_folder_gone_from_its_path_for_its_parent() {
             .insert(String::new(), vec![Entry::file("readme.md")]);
     }
     picker.follow(WatchUpdate::Gone, &mut shell, &mut comp);
+    picker.handle_key(&down, &mut shell, &mut comp);
     assert_eq!(
         asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
         "/readme.md",
@@ -4192,8 +4198,9 @@ fn picker_enter_chooses_nothing_once_the_chosen_file_went() {
         &mut comp,
     );
     // Docs, a.txt, b.txt, readme.md: the user chooses b.txt.
-    picker.handle_key(&down, &mut shell, &mut comp);
-    picker.handle_key(&down, &mut shell, &mut comp);
+    for _ in 0..3 {
+        picker.handle_key(&down, &mut shell, &mut comp);
+    }
     picker.follow(
         WatchUpdate::Changes(vec![tairix_browse::EntryChange::Remove(String::from(
             "b.txt",
@@ -4231,28 +4238,55 @@ fn picker_starting_at_opens_at_the_named_directory() {
     picker
         .begin(7, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
-    // `Docs/` holds only `notes.txt`, which is selected first; one Enter
-    // chooses it, so the picker must have opened *in* `Docs`, not the root.
+    // `Docs/` holds only `notes.txt`; Down selects it and Enter chooses it,
+    // so the picker must have opened *in* `Docs`, not the root.
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
     assert_eq!(
         asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
         "/Docs/notes.txt"
     );
 }
 
-/// A `starting_at` directory that cannot be listed falls back to the root
-/// rather than refusing the pick, so the user can still choose a file.
+/// A start refused at once climbs to the nearest folder above it that lists,
+/// not straight to the root: the picker opens in `Docs`, so Down then Enter
+/// chooses `notes.txt`.
 #[test]
-fn picker_starting_at_unlistable_home_falls_back_to_root() {
+fn a_refused_picker_start_climbs_to_its_nearest_listable_folder() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture)
+        .starting_at(vec![String::from("Docs"), String::from("Gone")]);
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("a refused start climbs rather than refusing the pick");
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/Docs/notes.txt"
+    );
+}
+
+/// A start with nothing listable above it but the root opens at the root,
+/// where Down selects `Docs/` and Enter descends rather than choosing.
+#[test]
+fn a_picker_start_with_no_listable_folder_above_it_opens_at_the_root() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture)
         .starting_at(vec![String::from("Nowhere"), String::from("missing")]);
     picker
         .begin(7, &OPEN, &mut shell, &mut comp)
-        .expect("a bad home falls back to the listable root, not a refusal");
-    assert!(
-        picker.wm_id().is_some(),
-        "the picker opened at the root fallback"
+        .expect("the root still lists");
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/Docs/notes.txt"
     );
 }
 
@@ -4268,10 +4302,15 @@ fn picker_keys_navigate_and_choose_the_selected_file() {
         .expect("accepted");
     let wm = picker.wm_id().expect("showing");
 
-    // Enter on the selected `Docs/` descends; Enter on `notes.txt`
-    // asks for it.
+    // A listing opens with nothing chosen, so Enter alone does nothing; the
+    // first Down selects `Docs/`, Enter descends, and Down then Enter on
+    // `notes.txt` asks for it.
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    picker.handle_key(&down, &mut shell, &mut comp);
     let (serial, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(
         (path.as_str(), access),
@@ -4308,6 +4347,7 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
         .begin(7, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
     picker.handle_key(&down, &mut shell, &mut comp);
+    picker.handle_key(&down, &mut shell, &mut comp);
     let (serial, _, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(
         picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
@@ -4318,6 +4358,7 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
     picker
         .begin(9, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
+    picker.handle_key(&down, &mut shell, &mut comp);
     picker.handle_key(&down, &mut shell, &mut comp);
     let Some(PickStep::Open {
         serial,
@@ -4371,6 +4412,8 @@ fn picker_selection_and_climb_track_the_browser() {
 
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    // The first Down selects the entry the focus rests on; the second moves on.
+    assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
     assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
     assert_eq!(
         asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
@@ -4587,13 +4630,14 @@ fn picker_title_carries_the_location_and_follows_a_navigation() {
     assert_eq!(labelled(&shell), "Choose a file: /");
 
     // Descending into `Docs/` moves the title with it.
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
     assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
     assert_eq!(labelled(&shell), "Choose a file: /Docs");
 
     // Moving the selection inside one directory is not a navigation, so the
     // title stands.
-    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
     assert_eq!(labelled(&shell), "Choose a file: /Docs");
 
@@ -4827,6 +4871,30 @@ fn the_picker_witness_waits_for_its_listing_and_is_announced_once() {
     assert_eq!(announcements, 1, "announced on the frame that carries rows");
     picker.report_newly_shown(|| announcements += 1);
     assert_eq!(announcements, 1, "and never again for the same pick");
+}
+
+/// A start whose listing is refused once it is read — a home without the
+/// user-files folder the picker opens at — climbs to the nearest folder above
+/// it that lists, rather than leaving the user an empty pick.
+#[test]
+fn a_picker_start_refused_on_reading_climbs_to_the_nearest_listable_folder() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(DeferredSource::fixture)
+        .starting_at(vec![String::from("Docs"), String::from("Gone")]);
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted while the start is read");
+    // The start is refused, and the climb's own read of `Docs` lands next.
+    picker.resume(&mut shell, &mut comp);
+    picker.resume(&mut shell, &mut comp);
+
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/Docs/notes.txt"
+    );
 }
 
 /// With no pick showing there is nothing to announce, so every present is
@@ -11736,8 +11804,7 @@ fn arriving_icon_artwork_repaints_only_the_icons_it_pictures() {
     let desk = deferred_artwork(&mut shell);
     let desktop = pinboard_desktop();
     shell.present_desktop(&mut comp, &desktop);
-    let kind_of =
-        |index: usize| tairix_browse::media_for_entry(&desktop.entries()[index], &[]).icon();
+    let kind_of = |index: usize| tairix_browse::icon_for_entry(&desktop.entries()[index], &[]);
     let folder = kind_of(0);
     assert_ne!(
         folder,
@@ -11781,6 +11848,253 @@ fn arriving_artwork_over_an_empty_column_repaints_nothing() {
     let mut icons = tairix_controls::damage::sink();
     shell.mark_desktop_artwork(&comp, &desktop, &landed, &mut icons);
     assert!(icons.is_empty(), "no icons, no cells, no repaint");
+}
+
+/// A desktop folder tree whose cues are answered through a probe desk the test
+/// delivers to, standing in for the session's listing worker.
+struct CuedTree {
+    tree: TreeSource,
+    probes: Rc<RefCell<tairix_browse::Probes>>,
+}
+
+impl DirectorySource for CuedTree {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+        self.tree.list(components)
+    }
+
+    fn has_children(&mut self, components: &[String]) -> Result<tairix_browse::Probe, Errno> {
+        self.probes.borrow_mut().ask(components).0
+    }
+}
+
+/// A desktop of `Docs/` (holding a text file), `Empty/` and `readme.md`, with
+/// the probe desk its cues are answered through.
+fn cued_desktop() -> (Desktop<CuedTree>, Rc<RefCell<tairix_browse::Probes>>) {
+    let mut tree = TreeSource::fixture();
+    tree.dirs.insert(
+        String::new(),
+        vec![
+            Entry::directory("Docs"),
+            Entry::directory("Empty"),
+            Entry::file("readme.md"),
+        ],
+    );
+    tree.dirs.insert(String::from("Empty"), Vec::new());
+    let probes = Rc::new(RefCell::new(tairix_browse::Probes::new()));
+    let source = CuedTree {
+        tree,
+        probes: Rc::clone(&probes),
+    };
+    let mut desktop = Desktop::new(source, Vec::new());
+    desktop.relist();
+    (desktop, probes)
+}
+
+/// The sample the fixture's occupied folder is answered with.
+fn docs_sample() -> tairix_icon::FolderSample {
+    tairix_icon::FolderSample::new([IconKind::Text])
+}
+
+/// Answer every folder `probes` was asked about: `Docs` holds text, anything
+/// else is empty.
+fn answer_cues(probes: &RefCell<tairix_browse::Probes>) {
+    let mut probes = probes.borrow_mut();
+    let batch = probes
+        .next_batch()
+        .expect("the shown folders were asked about");
+    let answers = batch
+        .into_iter()
+        .map(|folder| {
+            let answer = if folder == ["Docs"] {
+                tairix_browse::Probe::Holds(docs_sample())
+            } else {
+                tairix_browse::Probe::Empty
+            };
+            (folder, Ok(answer))
+        })
+        .collect();
+    assert!(probes.deliver(answers));
+    assert!(probes.take_landed());
+}
+
+/// The index of the icon named `name`.
+fn icon_named<S: DirectorySource>(desktop: &Desktop<S>, name: &str) -> usize {
+    desktop
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == name)
+        .expect("listed")
+}
+
+/// A desktop folder's cue is asked for without a read on the loop, and lands
+/// as the one cell whose picture it changes: the empty folder draws the plain
+/// folder it already drew, so it costs no repaint.
+#[test]
+fn a_landed_folder_cue_repaints_only_the_icon_it_changes() {
+    let (shell, comp) = headless_desktop();
+    let (mut desktop, probes) = cued_desktop();
+    let layout = shell.desktop_layout(&comp, &desktop);
+
+    let mut cells = tairix_controls::damage::sink();
+    desktop.resolve_occupancy(&layout, &mut cells);
+    assert!(
+        cells.is_empty(),
+        "an ask draws nothing until its answer lands"
+    );
+
+    answer_cues(&probes);
+    desktop.resolve_occupancy(&layout, &mut cells);
+    let (docs, empty) = (icon_named(&desktop, "Docs"), icon_named(&desktop, "Empty"));
+    let cell = |index| layout.shown_rect(0, index).expect("a shown icon");
+    assert_eq!(
+        cells.bounds(),
+        cell(docs),
+        "only the occupied folder repaints"
+    );
+    assert_eq!(
+        tairix_browse::icon_for_entry(&desktop.entries()[docs], &[]),
+        IconKind::FolderFilled
+    );
+    assert_eq!(
+        desktop.entries()[empty].occupancy(),
+        tairix_browse::Occupancy::Empty,
+        "the empty folder is answered too"
+    );
+
+    let mut again = tairix_controls::damage::sink();
+    desktop.resolve_occupancy(&layout, &mut again);
+    assert!(again.is_empty(), "nothing is left to draw");
+    assert_eq!(
+        probes.borrow_mut().next_batch(),
+        None,
+        "and nothing is asked twice"
+    );
+}
+
+/// An occupied desktop folder is drawn as the picture of what it holds,
+/// asked for by its sample, as the file manager's grid draws it.
+#[test]
+fn an_occupied_desktop_folder_asks_for_the_picture_of_its_contents() {
+    let (mut shell, mut comp) = headless_desktop();
+    let artwork = deferred_artwork(&mut shell);
+    let (mut desktop, probes) = cued_desktop();
+    let layout = shell.desktop_layout(&comp, &desktop);
+    desktop.resolve_occupancy(&layout, &mut tairix_controls::damage::sink());
+    answer_cues(&probes);
+    desktop.resolve_occupancy(&layout, &mut tairix_controls::damage::sink());
+    shell.present_desktop(&mut comp, &desktop);
+
+    let mut asked = Vec::new();
+    while let Some(job) = artwork.borrow_mut().next_job() {
+        asked.push(job.key);
+    }
+    assert!(
+        asked.contains(&ArtworkKey::Folder(docs_sample())),
+        "the occupied folder asks for its composite: {asked:?}"
+    );
+}
+
+/// Asking for every icon the desktop shows before a sweep keeps the
+/// thumbnails still on screen and withdraws the one whose file has left it.
+#[test]
+fn a_sweep_after_asking_for_the_shown_icons_withdraws_only_what_left_the_desktop() {
+    let (mut shell, mut comp) = headless_desktop();
+    let artwork = deferred_artwork(&mut shell);
+    let written = tairix_abi::time::Time64::from_secs(1_700_000_000);
+    let picture = |name: &str, node: u64| {
+        Entry::new(name, tairix_browse::EntryKind::File, 640, written).with_id(tairix_abi::FileId {
+            volume: [7; 16],
+            node,
+        })
+    };
+    let tree = Rc::new(RefCell::new(TreeSource::fixture()));
+    tree.borrow_mut().dirs.insert(
+        String::new(),
+        vec![picture("kept.png", 1), picture("gone.png", 2)],
+    );
+    let mut desktop = Desktop::new(SharedTree(Rc::clone(&tree)), Vec::new());
+    desktop.relist();
+    shell.present_desktop(&mut comp, &desktop);
+    artwork.borrow_mut().sweep_thumbnails();
+
+    tree.borrow_mut()
+        .dirs
+        .insert(String::new(), vec![picture("kept.png", 1)]);
+    desktop.relist();
+    shell.want_desktop_artwork(&comp, &desktop);
+    let mut desk = artwork.borrow_mut();
+    desk.sweep_thumbnails();
+    while desk.next_job().is_some() {}
+    let mut thumbnails = Vec::new();
+    while let Some(job) = desk.next_thumbnail() {
+        thumbnails.push(job.key);
+    }
+    assert_eq!(thumbnails.len(), 1, "{thumbnails:?}");
+    assert!(
+        matches!(&thumbnails[0], ArtworkKey::Thumbnail(t) if t.path == "/kept.png"),
+        "{thumbnails:?}"
+    );
+}
+
+/// A picture file on the desktop asks for its own content under the file,
+/// path, size and time its listing reports, behind every icon decode.
+#[test]
+fn a_desktop_picture_file_asks_for_its_own_content_after_the_icons() {
+    let (mut shell, mut comp) = headless_desktop();
+    let artwork = deferred_artwork(&mut shell);
+    let written = tairix_abi::time::Time64::from_secs(1_700_000_000);
+    let id = tairix_abi::FileId {
+        volume: [7; 16],
+        node: 42,
+    };
+    let mut tree = TreeSource::fixture();
+    tree.dirs.insert(
+        String::new(),
+        vec![Entry::new("photo.png", tairix_browse::EntryKind::File, 640, written).with_id(id)],
+    );
+    let mut desktop = Desktop::new(tree, Vec::new());
+    desktop.relist();
+    shell.present_desktop(&mut comp, &desktop);
+
+    let thumbnail = ArtworkKey::Thumbnail(tairix_icon::Thumbnail {
+        path: String::from("/photo.png"),
+        size: 640,
+        modified: written,
+        id,
+        reading: tairix_icon::Reading::Signature,
+    });
+    let mut desk = artwork.borrow_mut();
+    while let Some(job) = desk.next_job() {
+        assert_ne!(job.key, thumbnail, "never handed out as an icon");
+    }
+    assert_eq!(
+        desk.next_thumbnail().map(|job| job.key),
+        Some(thumbnail),
+        "asked for once the icons are drained"
+    );
+}
+
+/// A source that cannot probe leaves every desktop folder plain and asks
+/// nothing again, which is the session with no worker to probe on.
+#[test]
+fn a_desktop_that_cannot_probe_draws_plain_folders_and_asks_once() {
+    let (shell, comp) = headless_desktop();
+    let (mut desktop, probes) = cued_desktop();
+    probes.borrow_mut().stop();
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let mut cells = tairix_controls::damage::sink();
+    desktop.resolve_occupancy(&layout, &mut cells);
+    assert!(cells.is_empty());
+    let docs = icon_named(&desktop, "Docs");
+    assert_eq!(
+        desktop.entries()[docs].occupancy(),
+        tairix_browse::Occupancy::Indeterminate,
+        "latched, so the next resolve asks nothing"
+    );
+    assert_eq!(
+        tairix_browse::icon_for_entry(&desktop.entries()[docs], &[]),
+        IconKind::Folder
+    );
 }
 
 /// Repainting part of the desktop layer must produce the very pixels a whole
@@ -13181,7 +13495,17 @@ fn no_application_menu_opens_under_a_carried_drag() {
         "a press held in content"
     );
     shell
-        .begin_drag(&mut comp, 1, parent, "notes.txt")
+        .begin_drag(
+            &mut comp,
+            1,
+            parent,
+            tairix_abi::window_ipc::DragItems::new(
+                tairix_abi::window_ipc::DocumentName::new("notes.txt").expect("a valid name"),
+                1,
+                true,
+            )
+            .expect("one file"),
+        )
         .expect("carried");
     let mut menu = MenuChain::new();
     let mut picker = SessionPicker::new(TreeSource::fixture);
@@ -14846,6 +15170,38 @@ fn fill_credentials(
         comp,
     );
     type_text(prompt, password, elevator, shell, comp);
+}
+
+/// The seat is held while any one of the lock, the trusted picker, the
+/// elevation prompt or a confirmation is up, and only then.
+#[test]
+fn the_seat_is_held_by_the_lock_the_picker_and_either_prompt() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut lock = ScreenLock::new();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut confirm = ConfirmPrompt::new();
+    let mut elevate = ElevatePrompt::new();
+    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+
+    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    confirm.abandon(&mut shell, &mut comp);
+    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+
+    assert!(elevate.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    elevate.abandon(&mut shell, &mut comp);
+    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    picker.abort_for(7, &mut shell, &mut comp);
+    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
 }
 
 #[test]

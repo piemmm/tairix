@@ -155,7 +155,7 @@ impl SaverOption {
                  Performance traces on every core, so each picture is finished sooner."
             }
             Self::RaytraceSave => {
-                "Whether each finished picture is kept as a PNG in Documents, under Pictures \
+                "Whether each finished picture is kept as a PNG in UserFiles, under Pictures \
                  and then Raytracing."
             }
             Self::RaytraceDetail => {

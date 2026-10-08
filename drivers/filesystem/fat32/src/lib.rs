@@ -53,10 +53,11 @@
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes,
-    VolumeStats,
+    DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
+    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    NodeTimes, VolumeStats,
 };
+use tairix_abi::fs::FS_NAME_MAX;
 use tairix_abi::time::{CivilTime, Time64};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 
@@ -87,6 +88,16 @@ const MAX_BLOCK_SIZE: u32 = 4096;
 
 /// On-disk directory-entry size, frozen by the FAT specification.
 const DIR_ENTRY_LEN: usize = 32;
+
+/// The most 32-byte entries a FAT directory may hold (the specification's
+/// 65,536-entry limit). A walk that would read past it is on a corrupt or
+/// cyclic chain and fails closed rather than looping; a create that would
+/// grow a directory past it is refused.
+const MAX_DIR_SLOTS: u32 = 65_536;
+
+/// The alias tails one walk of a directory examines. A search past them,
+/// which a thousand live aliases of one stem force, walks again.
+const TAIL_WINDOW: u32 = 1024;
 
 /// Attribute byte: the entry describes a subdirectory.
 const ATTR_DIRECTORY: u8 = 0x10;
@@ -250,22 +261,62 @@ struct ParsedEntry {
     /// Device byte offset of the 8.3 short entry (the one carrying the
     /// cluster and size); the write path patches metadata here.
     short_offset: u64,
-    /// Slot index (0-based, in 32-byte units from the directory start)
-    /// of the first physical entry of this logical entry — the first
-    /// long-name fragment, or the short entry when none precede it.
-    first_slot: u64,
+    /// The first slot of this logical entry: its first long-name fragment,
+    /// or the short entry when none precede it.
+    first: SlotPos,
     /// Number of 32-byte slots this logical entry occupies (long-name
     /// fragments plus the short entry).
     slot_span: u64,
 }
 
-/// Cursor walking a directory's cluster chain, 32 bytes at a time.
-struct DirCursor {
+/// A slot's place in its directory: the cluster holding it, its byte within
+/// that cluster, and its index counted from the directory's first slot.
+#[derive(Clone, Copy)]
+struct SlotPos {
     cluster: u32,
     intra: u64,
-    /// Slot index of the next entry to read, counted in 32-byte units
-    /// from the directory's first slot across its whole cluster chain.
     slot: u64,
+}
+
+impl SlotPos {
+    /// The first slot of the directory starting at `cluster`.
+    const fn at(cluster: u32) -> Self {
+        Self {
+            cluster,
+            intra: 0,
+            slot: 0,
+        }
+    }
+}
+
+/// Where a directory seek ended: the directory's first cluster, the index of
+/// a cluster in its chain, and that cluster.
+#[derive(Clone, Copy)]
+struct SeekHint {
+    dir: u32,
+    index: u64,
+    cluster: u32,
+}
+
+/// Cursor walking a directory's cluster chain, 32 bytes at a time.
+struct DirCursor {
+    /// The next slot to read.
+    pos: SlotPos,
+    /// The device block the last slot came from, so a walk reads each block
+    /// once rather than once per slot it holds.
+    held: Option<u64>,
+    block: [u8; MAX_BLOCK_SIZE as usize],
+}
+
+impl DirCursor {
+    /// A walk from the first slot of the directory starting at `cluster`.
+    fn at(cluster: u32) -> Self {
+        Self {
+            pos: SlotPos::at(cluster),
+            held: None,
+            block: [0; MAX_BLOCK_SIZE as usize],
+        }
+    }
 }
 
 /// A FAT32 volume backed by a [`Block`] device.
@@ -288,6 +339,12 @@ pub struct Fat32<B: Block> {
     /// The volume's stable 16-byte identity, derived from the BPB volume
     /// serial and label (see [`Fat32::volume_identity`]).
     identity: [u8; 16],
+    /// Where the last listing batch stopped in its directory's chain, so the
+    /// next batch walks on from there rather than from the first cluster:
+    /// reading a directory a batch at a time costs one walk of its chain. A
+    /// live directory's chain only grows, so the hint holds until a chain is
+    /// freed.
+    seek: Option<SeekHint>,
 }
 
 /// The volume's stable 16-byte identity, derived from the boot sector:
@@ -498,7 +555,7 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
             changed: Time64::UNIX_EPOCH,
         },
         short_offset: 0,
-        first_slot: 0,
+        first: SlotPos::at(0),
         slot_span: 0,
     }
 }
@@ -538,6 +595,11 @@ fn short_name_checksum(short: &[u8; 11]) -> u8 {
         sum = sum.rotate_right(1).wrapping_add(byte);
     }
     sum
+}
+
+/// Whether `raw` is a long-name fragment of an entry that exists.
+fn is_live_long_fragment(raw: &[u8; DIR_ENTRY_LEN]) -> bool {
+    raw[0] != END_OF_DIR && raw[0] != DELETED_ENTRY && raw[11] == ATTR_LONG_NAME
 }
 
 /// Map a name byte to a valid 8.3 short-name byte: ASCII letters are
@@ -587,6 +649,100 @@ fn u32_to_decimal(value: u32, out: &mut [u8; 7]) -> usize {
         out[i] = tmp[len - 1 - i];
     }
     len
+}
+
+/// The part of a new entry's 8.3 alias its `~N` tail leaves alone: the
+/// sanitised base and extension of its name.
+struct AliasStem {
+    base: [u8; 8],
+    base_len: usize,
+    ext: [u8; 3],
+}
+
+impl AliasStem {
+    fn of(name: &[u8]) -> Self {
+        let kept = |&&b: &&u8| b != b' ' && b != b'.';
+        let (base_src, ext_src) = split_name(name);
+        let mut ext = [b' '; 3];
+        for (slot, &b) in ext.iter_mut().zip(ext_src.iter().filter(kept)) {
+            *slot = sanitize_short_char(b);
+        }
+        let mut base = [b'_'; 8];
+        let mut base_len = 0;
+        for (slot, &b) in base.iter_mut().zip(base_src.iter().filter(kept)) {
+            *slot = sanitize_short_char(b);
+            base_len += 1;
+        }
+        Self {
+            base,
+            base_len: base_len.max(1),
+            ext,
+        }
+    }
+
+    /// The alias carrying `tail`, its base cut short to make room.
+    fn alias(&self, tail: u32) -> Option<[u8; 11]> {
+        let mut digits = [0u8; 7];
+        let digit_len = u32_to_decimal(tail, &mut digits);
+        if digit_len > 6 {
+            return None;
+        }
+        let keep = self.base_len.min(7 - digit_len);
+        let mut field = [b' '; 11];
+        field[..keep].copy_from_slice(&self.base[..keep]);
+        field[keep] = b'~';
+        field[keep + 1..=keep + digit_len].copy_from_slice(&digits[..digit_len]);
+        field[8..].copy_from_slice(&self.ext);
+        Some(field)
+    }
+
+    /// The tail `raw` holds, when its name is this stem's alias for one.
+    fn tail_of(&self, raw: &RawEntry) -> Option<u32> {
+        let tilde = raw[..8].iter().rposition(|&b| b == b'~')?;
+        let tail = raw[tilde + 1..8]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .fold(0, |tail, &digit| tail * 10 + u32::from(digit - b'0'));
+        (self.alias(tail)? == raw[..11]).then_some(tail)
+    }
+}
+
+/// Which of [`TAIL_WINDOW`] consecutive alias tails a directory's live
+/// entries hold.
+struct TailWindow {
+    first: u32,
+    held: [u64; TAIL_WINDOW as usize / 64],
+}
+
+impl TailWindow {
+    fn starting_at(first: u32) -> Self {
+        Self {
+            first,
+            held: [0; TAIL_WINDOW as usize / 64],
+        }
+    }
+
+    fn hold(&mut self, tail: u32) {
+        if let Some(index) = tail.checked_sub(self.first).filter(|&i| i < TAIL_WINDOW) {
+            self.held[index as usize / 64] |= 1 << (index % 64);
+        }
+    }
+
+    fn lowest_free(&self) -> Option<u32> {
+        self.held
+            .iter()
+            .zip((self.first..).step_by(64))
+            .find_map(|(word, base)| (*word != u64::MAX).then(|| base + word.trailing_ones()))
+    }
+}
+
+/// A run of free slots a new entry can take.
+#[derive(Clone, Copy)]
+struct FreeRun {
+    start: SlotPos,
+    /// The run begins at the directory's end-of-entries mark, which the
+    /// writer moves past it.
+    at_end: bool,
 }
 
 /// Decode UTF-16LE code `units` into UTF-8 `out`, stopping at the first
@@ -856,6 +1012,7 @@ impl<B: Block> Fat32<B> {
             next_free: 2,
             free_clusters,
             identity,
+            seek: None,
         })
     }
 
@@ -1041,7 +1198,11 @@ impl<B: Block> Fat32<B> {
         let offset = self.layout.fat_start_byte + u64::from(cluster) * 4;
         let mut raw = [0u8; 4];
         self.read_bytes(offset, &mut raw)?;
-        Ok(classify_chain(u32::from_le_bytes(raw)))
+        Ok(match classify_chain(u32::from_le_bytes(raw)) {
+            // A link past the last data cluster points outside the volume.
+            ChainStep::Next(next) if next > self.layout.max_cluster => ChainStep::Bad,
+            step => step,
+        })
     }
 
     /// Write an arbitrary byte range to the backing device.
@@ -1122,6 +1283,7 @@ impl<B: Block> Fat32<B> {
 
     /// Free an entire cluster chain starting at `first`.
     fn free_chain(&mut self, first: u32) -> Result<(), DriverError> {
+        self.seek = None;
         let mut cluster = first;
         let mut min_freed = u32::MAX;
         while (2..=self.layout.max_cluster).contains(&cluster) {
@@ -1142,19 +1304,6 @@ impl<B: Block> Fat32<B> {
         Ok(())
     }
 
-    /// Return the last cluster of the chain starting at `first` (the one
-    /// whose FAT entry is an end-of-chain marker).
-    fn chain_last(&mut self, first: u32) -> Result<u32, DriverError> {
-        let mut cluster = first;
-        loop {
-            match self.next_cluster(cluster)? {
-                ChainStep::Next(next) => cluster = next,
-                ChainStep::End => return Ok(cluster),
-                ChainStep::Bad => return Err(DriverError::DeviceFault),
-            }
-        }
-    }
-
     /// Return the next valid entry at or after `cursor`, advancing the
     /// cursor past it. `Ok(None)` marks end-of-directory.
     ///
@@ -1165,30 +1314,8 @@ impl<B: Block> Fat32<B> {
     /// links are skipped (the VFS resolves `.`/`..` itself).
     fn next_entry(&mut self, cursor: &mut DirCursor) -> Result<Option<ParsedEntry>, DriverError> {
         let mut long = LongName::new();
-        let mut run_start: Option<u64> = None;
-        loop {
-            if cursor.cluster < 2 {
-                return Ok(None);
-            }
-            if cursor.intra >= self.layout.bytes_per_cluster {
-                match self.next_cluster(cursor.cluster)? {
-                    ChainStep::Next(next) => {
-                        cursor.cluster = next;
-                        cursor.intra = 0;
-                    }
-                    ChainStep::End => return Ok(None),
-                    ChainStep::Bad => return Err(DriverError::DeviceFault),
-                }
-                continue;
-            }
-
-            let entry_byte = self.cluster_byte(cursor.cluster) + cursor.intra;
-            let entry_slot = cursor.slot;
-            let mut raw = [0u8; DIR_ENTRY_LEN];
-            self.read_bytes(entry_byte, &mut raw)?;
-            cursor.intra += DIR_ENTRY_LEN as u64;
-            cursor.slot += 1;
-
+        let mut run_start: Option<SlotPos> = None;
+        while let Some((at, raw)) = self.next_slot(cursor)? {
             let first = raw[0];
             if first == END_OF_DIR {
                 return Ok(None);
@@ -1200,9 +1327,7 @@ impl<B: Block> Fat32<B> {
             }
             let attr = raw[11];
             if attr == ATTR_LONG_NAME {
-                if run_start.is_none() {
-                    run_start = Some(entry_slot);
-                }
+                run_start.get_or_insert(at);
                 long.push(&raw);
                 continue;
             }
@@ -1215,13 +1340,197 @@ impl<B: Block> Fat32<B> {
             let mut entry = parse_short_entry(&raw);
             let mut short = [0u8; 11];
             short.copy_from_slice(&raw[0..11]);
-            if let Some(long_len) = long.finish(&short, &mut entry.name) {
+            // A long name past the VFS's name limit (one written by another
+            // system in a script whose characters are three UTF-8 bytes) is
+            // listed and reached by its short alias, so it neither hides the
+            // file nor makes the directory unlistable.
+            if let Some(long_len) = long.finish(&short, &mut entry.name[..FS_NAME_MAX]) {
                 entry.name_len = long_len;
             }
-            entry.short_offset = entry_byte;
-            entry.first_slot = run_start.unwrap_or(entry_slot);
-            entry.slot_span = entry_slot - entry.first_slot + 1;
+            entry.short_offset = self.slot_byte(at);
+            entry.first = run_start.unwrap_or(at);
+            entry.slot_span = at.slot - entry.first.slot + 1;
             return Ok(Some(entry));
+        }
+        Ok(None)
+    }
+
+    /// The slot `walk` stands at, read through its held block, with its
+    /// position; `None` once the directory's chain ends.
+    fn next_slot(
+        &mut self,
+        walk: &mut DirCursor,
+    ) -> Result<Option<(SlotPos, RawEntry)>, DriverError> {
+        // A directory recording no cluster holds no slots, as Linux reads one.
+        if walk.pos.cluster < 2 {
+            return Ok(None);
+        }
+        if walk.pos.cluster > self.layout.max_cluster {
+            return Err(DriverError::DeviceFault);
+        }
+        if !self.settle(&mut walk.pos)? {
+            return Ok(None);
+        }
+        if walk.pos.slot >= u64::from(MAX_DIR_SLOTS) {
+            return Err(DriverError::DeviceFault);
+        }
+        let at = walk.pos;
+        let raw = self.walk_slot(walk, self.slot_byte(at))?;
+        walk.pos.intra += DIR_ENTRY_LEN as u64;
+        walk.pos.slot += 1;
+        Ok(Some((at, raw)))
+    }
+
+    /// Bring `pos` onto a slot of its chain, following the chain once its
+    /// cluster's slots are used up; `false` once the chain ends.
+    fn settle(&mut self, pos: &mut SlotPos) -> Result<bool, DriverError> {
+        if pos.intra < self.layout.bytes_per_cluster {
+            return Ok(true);
+        }
+        match self.next_cluster(pos.cluster)? {
+            ChainStep::Next(next) => {
+                pos.cluster = next;
+                pos.intra = 0;
+                Ok(true)
+            }
+            ChainStep::End => Ok(false),
+            ChainStep::Bad => Err(DriverError::DeviceFault),
+        }
+    }
+
+    /// Device byte offset of the slot at `pos`.
+    fn slot_byte(&self, pos: SlotPos) -> u64 {
+        self.cluster_byte(pos.cluster) + pos.intra
+    }
+
+    /// Write `raw` at `pos` and step past it, chaining a zeroed cluster on
+    /// when the directory's chain ends first.
+    fn put_slot(&mut self, pos: &mut SlotPos, raw: &RawEntry) -> Result<(), DriverError> {
+        if !(2..=self.layout.max_cluster).contains(&pos.cluster) {
+            return Err(DriverError::DeviceFault);
+        }
+        if !self.settle(pos)? {
+            let fresh = self.alloc_cluster(true)?;
+            self.set_fat(pos.cluster, fresh)?;
+            pos.cluster = fresh;
+            pos.intra = 0;
+        }
+        self.write_bytes(self.slot_byte(*pos), raw)?;
+        pos.intra += DIR_ENTRY_LEN as u64;
+        pos.slot += 1;
+        Ok(())
+    }
+
+    /// The 32-byte slot at device byte `byte`, read through the walk's held
+    /// block. A slot never straddles two blocks: blocks are a multiple of 32
+    /// bytes and clusters start on block boundaries.
+    fn walk_slot(
+        &mut self,
+        cursor: &mut DirCursor,
+        byte: u64,
+    ) -> Result<[u8; DIR_ENTRY_LEN], DriverError> {
+        let bs = u64::from(self.block_size);
+        let lba = byte / bs;
+        if cursor.held != Some(lba) {
+            if lba >= self.block_count {
+                return Err(DriverError::DeviceFault);
+            }
+            cursor.held = None;
+            self.block
+                .read_blocks(lba, &mut cursor.block[..self.block_size as usize])?;
+            cursor.held = Some(lba);
+        }
+        let within = usize::try_from(byte % bs).map_err(|_| DriverError::DeviceFault)?;
+        let mut raw = [0u8; DIR_ENTRY_LEN];
+        raw.copy_from_slice(
+            cursor
+                .block
+                .get(within..within + DIR_ENTRY_LEN)
+                .ok_or(DriverError::DeviceFault)?,
+        );
+        Ok(raw)
+    }
+
+    /// Position `walk`, standing at its directory's first slot, at logical
+    /// slot `slot` by following the directory's own chain — from where the
+    /// last batch stopped when that is on the way — answering `false` when
+    /// the chain ends first.
+    fn seek_slot(&mut self, walk: &mut DirCursor, slot: u64) -> Result<bool, DriverError> {
+        let per_cluster = self.slots_per_cluster();
+        let dir = walk.pos.cluster;
+        let target = slot / per_cluster;
+        let (mut index, mut cluster) = match self.seek {
+            Some(hint) if hint.dir == dir && hint.index <= target => (hint.index, hint.cluster),
+            _ => (0, dir),
+        };
+        while index < target {
+            match self.next_cluster(cluster)? {
+                ChainStep::Next(next) => cluster = next,
+                ChainStep::End => return Ok(false),
+                ChainStep::Bad => return Err(DriverError::DeviceFault),
+            }
+            index += 1;
+        }
+        // A listing's batches start ever further on, so the next one seeks
+        // on from here.
+        self.seek = Some(SeekHint {
+            dir,
+            index,
+            cluster,
+        });
+        walk.pos.cluster = cluster;
+        walk.pos.intra = (slot % per_cluster) * DIR_ENTRY_LEN as u64;
+        walk.pos.slot = slot;
+        Ok(true)
+    }
+
+    /// Step `walk`, standing on the slot a batch's last entry took, onto the
+    /// next, past any entry whose long name now runs through that slot: it
+    /// was written after the listing passed, so it was not present throughout
+    /// and is skipped rather than listed by its 8.3 alias. `false` once the
+    /// directory ends.
+    fn step_past_resume(&mut self, walk: &mut DirCursor) -> Result<bool, DriverError> {
+        let Some((_, before)) = self.next_slot(walk)? else {
+            return Ok(false);
+        };
+        if !is_live_long_fragment(&before) {
+            return Ok(true);
+        }
+        let checksum = before[13];
+        loop {
+            let mark = walk.pos;
+            let Some((_, raw)) = self.next_slot(walk)? else {
+                return Ok(false);
+            };
+            if is_live_long_fragment(&raw) {
+                continue;
+            }
+            let mut short = [0u8; 11];
+            short.copy_from_slice(&raw[..11]);
+            // Anything but the run's own short entry — the end, a free slot,
+            // an unrelated entry — is listed as found.
+            if raw[0] == END_OF_DIR
+                || raw[0] == DELETED_ENTRY
+                || short_name_checksum(&short) != checksum
+            {
+                walk.pos = mark;
+            }
+            return Ok(true);
+        }
+    }
+
+    /// The bytes a node's data occupies: its chain, for a directory (whose
+    /// entry records no size), and the clusters its size needs, for a file,
+    /// as Linux reports it — walking a large file's chain per listed entry
+    /// would cost the listing the file's size.
+    fn allocation(&mut self, cluster: u32, is_dir: bool, size: u32) -> Result<u64, DriverError> {
+        let per_cluster = self.layout.bytes_per_cluster;
+        if cluster < 2 {
+            Ok(0)
+        } else if is_dir {
+            Ok(self.chain_len(cluster)?.0 * per_cluster)
+        } else {
+            Ok(u64::from(size).div_ceil(per_cluster) * per_cluster)
         }
     }
 
@@ -1307,69 +1616,6 @@ impl<B: Block> Fat32<B> {
         self.layout.bytes_per_cluster / DIR_ENTRY_LEN as u64
     }
 
-    /// Device byte offset of directory `slot_index` (counted from the
-    /// directory's first slot across its cluster chain), or `None` if the
-    /// chain ends before reaching it.
-    fn dir_slot_offset(
-        &mut self,
-        dir_first_cluster: u32,
-        slot_index: u64,
-    ) -> Result<Option<u64>, DriverError> {
-        let per = self.slots_per_cluster();
-        let cluster_skip = slot_index / per;
-        let intra = (slot_index % per) * DIR_ENTRY_LEN as u64;
-        let mut cluster = dir_first_cluster;
-        for _ in 0..cluster_skip {
-            match self.next_cluster(cluster)? {
-                ChainStep::Next(next) => cluster = next,
-                ChainStep::End => return Ok(None),
-                ChainStep::Bad => return Err(DriverError::DeviceFault),
-            }
-        }
-        Ok(Some(self.cluster_byte(cluster) + intra))
-    }
-
-    /// Append one freshly zeroed cluster to directory `dir_first_cluster`.
-    fn grow_directory(&mut self, dir_first_cluster: u32) -> Result<(), DriverError> {
-        let last = self.chain_last(dir_first_cluster)?;
-        let fresh = self.alloc_cluster(true)?;
-        self.set_fat(last, fresh)?;
-        Ok(())
-    }
-
-    /// Read the raw 32-byte slot at `slot_index`, or `None` past chain end.
-    fn read_slot(
-        &mut self,
-        dir_first_cluster: u32,
-        slot_index: u64,
-    ) -> Result<Option<RawEntry>, DriverError> {
-        match self.dir_slot_offset(dir_first_cluster, slot_index)? {
-            Some(offset) => {
-                let mut raw = [0u8; DIR_ENTRY_LEN];
-                self.read_bytes(offset, &mut raw)?;
-                Ok(Some(raw))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Write the raw 32-byte slot at `slot_index`, growing the directory
-    /// if the slot lies past the current chain end.
-    fn write_slot(
-        &mut self,
-        dir_first_cluster: u32,
-        slot_index: u64,
-        raw: &RawEntry,
-    ) -> Result<(), DriverError> {
-        let offset = loop {
-            match self.dir_slot_offset(dir_first_cluster, slot_index)? {
-                Some(offset) => break offset,
-                None => self.grow_directory(dir_first_cluster)?,
-            }
-        };
-        self.write_bytes(offset, raw)
-    }
-
     /// Look up child `name` in directory `dir_cluster`, returning its
     /// parsed entry (with on-disk slot/offset metadata) if present.
     fn find_child(
@@ -1377,11 +1623,7 @@ impl<B: Block> Fat32<B> {
         dir_cluster: u32,
         name: &[u8],
     ) -> Result<Option<ParsedEntry>, DriverError> {
-        let mut cursor = DirCursor {
-            cluster: dir_cluster,
-            intra: 0,
-            slot: 0,
-        };
+        let mut cursor = DirCursor::at(dir_cluster);
         while let Some(entry) = self.next_entry(&mut cursor)? {
             if entry.name[..entry.name_len].eq_ignore_ascii_case(name) {
                 return Ok(Some(entry));
@@ -1404,128 +1646,58 @@ impl<B: Block> Fat32<B> {
         self.write_bytes(short_offset + 28, &size.to_le_bytes())
     }
 
-    /// Find a contiguous run of `count` free directory slots, growing the
-    /// directory as needed. Returns the start slot and whether the run
-    /// begins at the directory's end-of-entries marker (so the caller
-    /// must re-terminate the directory after writing).
-    fn find_free_slots(
+    /// Choose a new entry's alias, the lowest `~N` tail no live alias holds,
+    /// and the first free run of `count` slots for it. One walk of the
+    /// directory decides both unless its first window of tails is all held.
+    fn place_entry(
         &mut self,
-        dir_first_cluster: u32,
+        dir_cluster: u32,
+        stem: &AliasStem,
         count: u64,
-    ) -> Result<(u64, bool), DriverError> {
-        let mut slot = 0u64;
-        let mut run_start = 0u64;
-        let mut run_len = 0u64;
-        loop {
-            let first = match self.read_slot(dir_first_cluster, slot)? {
-                Some(raw) => raw[0],
-                None => END_OF_DIR,
+    ) -> Result<([u8; 11], FreeRun), DriverError> {
+        let mut run: Option<FreeRun> = None;
+        // A tail for every slot a directory holds: a directory with room for
+        // the entry always leaves one of them free.
+        let mut first_tail = 1;
+        while first_tail <= MAX_DIR_SLOTS {
+            let mut held = TailWindow::starting_at(first_tail);
+            let mut walk = DirCursor::at(dir_cluster);
+            let mut free: Option<(SlotPos, u64)> = None;
+            let end = loop {
+                let Some((at, raw)) = self.next_slot(&mut walk)? else {
+                    break walk.pos;
+                };
+                if raw[0] == END_OF_DIR {
+                    break at;
+                }
+                if raw[0] == DELETED_ENTRY {
+                    let (start, len) = free.get_or_insert((at, 0));
+                    *len += 1;
+                    if *len == count && run.is_none() {
+                        run = Some(FreeRun {
+                            start: *start,
+                            at_end: false,
+                        });
+                    }
+                    continue;
+                }
+                free = None;
+                if raw[11] != ATTR_LONG_NAME && raw[11] & ATTR_VOLUME_ID == 0 {
+                    if let Some(tail) = stem.tail_of(&raw) {
+                        held.hold(tail);
+                    }
+                }
             };
-            if first == END_OF_DIR {
-                // Everything from here on is free; ensure the run reaches
-                // `count`, anchored no earlier than this slot.
-                if run_len == 0 {
-                    run_start = slot;
-                }
-                return Ok((run_start, true));
+            let run = *run.get_or_insert(FreeRun {
+                start: free.map_or(end, |(start, _)| start),
+                at_end: true,
+            });
+            if let Some(tail) = held.lowest_free() {
+                return Ok((stem.alias(tail).ok_or(DriverError::NoSpace)?, run));
             }
-            if first == DELETED_ENTRY {
-                if run_len == 0 {
-                    run_start = slot;
-                }
-                run_len += 1;
-                if run_len == count {
-                    return Ok((run_start, false));
-                }
-            } else {
-                run_len = 0;
-            }
-            slot += 1;
+            first_tail += TAIL_WINDOW;
         }
-    }
-
-    /// Whether the raw 11-byte short-name `candidate` is already used by a
-    /// live entry in directory `dir_first_cluster`.
-    fn short_name_taken(
-        &mut self,
-        dir_first_cluster: u32,
-        candidate: &[u8; 11],
-    ) -> Result<bool, DriverError> {
-        let mut slot = 0u64;
-        while let Some(raw) = self.read_slot(dir_first_cluster, slot)? {
-            let first = raw[0];
-            if first == END_OF_DIR {
-                break;
-            }
-            slot += 1;
-            if first == DELETED_ENTRY || raw[11] == ATTR_LONG_NAME || raw[11] & ATTR_VOLUME_ID != 0
-            {
-                continue;
-            }
-            if &raw[0..11] == candidate.as_slice() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Generate a unique 8.3 short name for `name` within
-    /// `dir_first_cluster`, using a `~N` numeric tail.
-    fn make_short_name(
-        &mut self,
-        dir_first_cluster: u32,
-        name: &[u8],
-    ) -> Result<[u8; 11], DriverError> {
-        let (base_src, ext_src) = split_name(name);
-
-        let mut ext = [b' '; 3];
-        let mut ei = 0;
-        for &b in ext_src {
-            if ei == 3 {
-                break;
-            }
-            if b == b' ' || b == b'.' {
-                continue;
-            }
-            ext[ei] = sanitize_short_char(b);
-            ei += 1;
-        }
-
-        let mut base = [0u8; 8];
-        let mut bn = 0;
-        for &b in base_src {
-            if bn == 8 {
-                break;
-            }
-            if b == b' ' || b == b'.' {
-                continue;
-            }
-            base[bn] = sanitize_short_char(b);
-            bn += 1;
-        }
-        if bn == 0 {
-            base[0] = b'_';
-            bn = 1;
-        }
-
-        for tail in 1..=u32::from(u16::MAX) {
-            let mut digits = [0u8; 7];
-            let digit_len = u32_to_decimal(tail, &mut digits);
-            let suffix_len = 1 + digit_len; // '~' + digits
-            if suffix_len >= 8 {
-                break;
-            }
-            let keep = core::cmp::min(bn, 8 - suffix_len);
-            let mut field = [b' '; 11];
-            field[..keep].copy_from_slice(&base[..keep]);
-            field[keep] = b'~';
-            field[keep + 1..keep + 1 + digit_len].copy_from_slice(&digits[..digit_len]);
-            field[8..11].copy_from_slice(&ext);
-            if !self.short_name_taken(dir_first_cluster, &field)? {
-                return Ok(field);
-            }
-        }
-        Err(DriverError::DeviceFault)
+        Err(DriverError::NoSpace)
     }
 
     /// Build one long-name fragment for sequence `seq` (1-based), covering
@@ -1595,16 +1767,19 @@ impl<B: Block> Fat32<B> {
 
     /// Length (in clusters) and last cluster of the chain at `first`.
     fn chain_len(&mut self, first: u32) -> Result<(u64, u32), DriverError> {
+        // No chain is longer than the volume has clusters; a longer walk is
+        // going round a cycle, and fails closed rather than looping.
+        let most = u64::from(self.layout.max_cluster) - 1;
         let mut cluster = first;
         let mut len = 1u64;
         loop {
             match self.next_cluster(cluster)? {
-                ChainStep::Next(next) => {
+                ChainStep::Next(next) if len < most => {
                     cluster = next;
                     len += 1;
                 }
                 ChainStep::End => return Ok((len, cluster)),
-                ChainStep::Bad => return Err(DriverError::DeviceFault),
+                ChainStep::Next(_) | ChainStep::Bad => return Err(DriverError::DeviceFault),
             }
         }
     }
@@ -1746,27 +1921,46 @@ impl<B: Block> Fat32<B> {
             return Err(DriverError::LengthOutOfRange);
         }
 
-        let short = self.make_short_name(dir_cluster, name)?;
-        let checksum = short_name_checksum(&short);
         let total_slots = frag_count as u64 + 1;
-        let (start_slot, at_end) = self.find_free_slots(dir_cluster, total_slots)?;
+        let (short, run) = self.place_entry(dir_cluster, &AliasStem::of(name), total_slots)?;
+        if run.start.slot + total_slots > u64::from(MAX_DIR_SLOTS) {
+            return Err(DriverError::NoSpace);
+        }
+        let checksum = short_name_checksum(&short);
+
+        // The end-of-entries mark moves to the slot after the entry. It is
+        // found before anything is written, so a broken chain fails the
+        // create cleanly, and written first, so the old mark ends the
+        // directory until the entry is whole. Past the chain's end no mark is
+        // needed: the clusters the entry grows into are zeroed.
+        if run.at_end {
+            let mut after = run.start;
+            let mut in_chain = true;
+            for _ in 0..total_slots {
+                in_chain = self.settle(&mut after)?;
+                if !in_chain {
+                    break;
+                }
+                after.intra += DIR_ENTRY_LEN as u64;
+                after.slot += 1;
+            }
+            if in_chain && after.slot < u64::from(MAX_DIR_SLOTS) && self.settle(&mut after)? {
+                self.write_bytes(self.slot_byte(after), &[0u8; DIR_ENTRY_LEN])?;
+            }
+        }
 
         // Physical order: the highest sequence (flagged last-logical) is
         // written first, descending to sequence 1, then the short entry.
+        let mut pos = run.start;
         for phys in 0..frag_count {
             let seq = frag_count - phys;
             let entry = Self::build_lfn_entry(&units[..unit_count], seq, phys == 0, checksum);
-            self.write_slot(dir_cluster, start_slot + phys as u64, &entry)?;
+            self.put_slot(&mut pos, &entry)?;
         }
-        let short_entry = Self::build_short_entry(&short, attr, cluster, size);
-        self.write_slot(dir_cluster, start_slot + frag_count as u64, &short_entry)?;
-
-        if at_end {
-            let terminator = [0u8; DIR_ENTRY_LEN];
-            self.write_slot(dir_cluster, start_slot + total_slots, &terminator)?;
-        }
-
-        Ok(())
+        self.put_slot(
+            &mut pos,
+            &Self::build_short_entry(&short, attr, cluster, size),
+        )
     }
 
     /// Shared implementation of [`FilesystemWrite::write_at`].
@@ -1867,11 +2061,7 @@ impl<B: Block> Fat32<B> {
             .find_child(dir_cluster, name)?
             .ok_or(DriverError::NotFound)?;
         if entry.is_dir {
-            let mut child = DirCursor {
-                cluster: entry.cluster,
-                intra: 0,
-                slot: 0,
-            };
+            let mut child = DirCursor::at(entry.cluster);
             if self.next_entry(&mut child)?.is_some() {
                 return Err(DriverError::DirectoryNotEmpty);
             }
@@ -1879,60 +2069,70 @@ impl<B: Block> Fat32<B> {
         if entry.cluster >= 2 {
             self.free_chain(entry.cluster)?;
         }
-        self.delete_entry_slots(dir_cluster, entry.first_slot, entry.slot_span)
+        self.delete_entry_slots(entry.first, entry.slot_span)
     }
 
-    /// Mark the `slot_span` physical slots starting at `first_slot` in
-    /// `dir_cluster` as deleted (the long-name fragments plus the short
-    /// entry of one logical entry). Shared by [`Self::remove_child`] and
-    /// [`Self::rename_child`].
-    fn delete_entry_slots(
-        &mut self,
-        dir_cluster: u32,
-        first_slot: u64,
-        slot_span: u64,
-    ) -> Result<(), DriverError> {
-        for i in 0..slot_span {
-            if let Some(offset) = self.dir_slot_offset(dir_cluster, first_slot + i)? {
-                self.write_bytes(offset, &[DELETED_ENTRY])?;
+    /// Mark the `span` slots from `first` deleted: one logical entry's
+    /// long-name fragments and its short entry.
+    fn delete_entry_slots(&mut self, mut pos: SlotPos, span: u64) -> Result<(), DriverError> {
+        for _ in 0..span {
+            if !self.settle(&mut pos)? {
+                return Err(DriverError::DeviceFault);
             }
+            self.write_bytes(self.slot_byte(pos), &[DELETED_ENTRY])?;
+            pos.intra += DIR_ENTRY_LEN as u64;
+            pos.slot += 1;
         }
         Ok(())
     }
 
     /// The cluster of `dir_cluster`'s parent, read from its `..` entry
-    /// (which stores `0` for the root). Returns the real root cluster in
-    /// that case so the walk in [`Self::is_subdir_of`] terminates.
+    /// (which stores `0` for the root).
     fn dir_parent_cluster(&mut self, dir_cluster: u32) -> Result<u32, DriverError> {
         let mut raw = [0u8; DIR_ENTRY_LEN];
         self.read_bytes(
             self.cluster_byte(dir_cluster) + DIR_ENTRY_LEN as u64,
             &mut raw,
         )?;
-        let cl = (u32::from(le16(&raw, 20)) << 16) | u32::from(le16(&raw, 26));
-        Ok(if cl == 0 {
-            self.layout.root_cluster
-        } else {
-            cl
-        })
+        if raw[..11] != *b"..         " || raw[11] & ATTR_DIRECTORY == 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        match (u32::from(le16(&raw, 20)) << 16) | u32::from(le16(&raw, 26)) {
+            0 => Ok(self.layout.root_cluster),
+            cluster if (2..=self.layout.max_cluster).contains(&cluster) => Ok(cluster),
+            _ => Err(DriverError::DeviceFault),
+        }
     }
 
     /// Whether directory `candidate` is `ancestor` itself or lives anywhere
     /// beneath it, walking `..` links up to the root. Refuses moving a
     /// directory into its own subtree (which would detach the cycle).
     fn is_subdir_of(&mut self, mut candidate: u32, ancestor: u32) -> Result<bool, DriverError> {
+        if !(2..=self.layout.max_cluster).contains(&candidate) {
+            return Err(DriverError::DeviceFault);
+        }
+        // Brent's cycle detection: a `..` chain that comes back to a
+        // directory it has passed never reaches the root.
+        let mut mark = candidate;
+        let mut lap = 1u32;
+        let mut steps = 0u32;
         loop {
             if candidate == ancestor {
                 return Ok(true);
             }
-            if candidate == self.layout.root_cluster || candidate < 2 {
+            if candidate == self.layout.root_cluster {
                 return Ok(false);
             }
-            let parent = self.dir_parent_cluster(candidate)?;
-            if parent == candidate {
-                return Ok(false);
+            candidate = self.dir_parent_cluster(candidate)?;
+            if candidate == mark {
+                return Err(DriverError::DeviceFault);
             }
-            candidate = parent;
+            steps += 1;
+            if steps == lap {
+                mark = candidate;
+                lap = lap.saturating_mul(2);
+                steps = 0;
+            }
         }
     }
 
@@ -1994,11 +2194,7 @@ impl<B: Block> Fat32<B> {
                 return Err(DriverError::Unsupported);
             }
             if d.is_dir {
-                let mut cur = DirCursor {
-                    cluster: d.cluster,
-                    intra: 0,
-                    slot: 0,
-                };
+                let mut cur = DirCursor::at(d.cluster);
                 if self.next_entry(&mut cur)?.is_some() {
                     return Err(DriverError::DirectoryNotEmpty);
                 }
@@ -2006,7 +2202,7 @@ impl<B: Block> Fat32<B> {
             if d.cluster >= 2 {
                 self.free_chain(d.cluster)?;
             }
-            self.delete_entry_slots(dst_cluster, d.first_slot, d.slot_span)?;
+            self.delete_entry_slots(d.first, d.slot_span)?;
         }
 
         // Link the moved node under its new name, then unlink the source.
@@ -2017,7 +2213,7 @@ impl<B: Block> Fat32<B> {
             src_entry.cluster,
             src_entry.size,
         )?;
-        self.delete_entry_slots(src_cluster, src_entry.first_slot, src_entry.slot_span)?;
+        self.delete_entry_slots(src_entry.first, src_entry.slot_span)?;
 
         // Repoint the moved directory's `..` at its new parent cluster.
         if moving_dir && src_cluster != dst_cluster && src_entry.cluster >= 2 {
@@ -2043,14 +2239,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
-        // Allocation is the node's real FAT chain, walked from its first
-        // cluster; an empty file has no chain and so no allocation.
-        let cluster = node_cluster(node);
-        let allocated = if cluster == 0 {
-            0
-        } else {
-            self.chain_len(cluster)?.0 * self.layout.bytes_per_cluster
-        };
+        let allocated = self.allocation(node_cluster(node), node_is_dir(node), node_size(node))?;
         // FAT stores timestamps only in the *parent's* directory entry, not
         // in anything addressable by the packed node identity, so a stat by
         // node cannot report them: `read_dir` is the one path that carries a
@@ -2082,11 +2271,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         if name.is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(DriverError::NotFound);
         }
-        let mut cursor = DirCursor {
-            cluster: node_cluster(dir),
-            intra: 0,
-            slot: 0,
-        };
+        let mut cursor = DirCursor::at(node_cluster(dir));
         while let Some(entry) = self.next_entry(&mut cursor)? {
             if entry.name[..entry.name_len].eq_ignore_ascii_case(name) {
                 return Ok(Self::entry_node(&entry));
@@ -2151,75 +2336,68 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         if !node_is_dir(dir) {
             return Err(DriverError::Unsupported);
         }
-        // The cursor packs the resume position as `cluster << 32 |
-        // intra-cluster slot`, so a continued listing seeks straight to the
-        // 32-byte slot after the previously returned entry instead of
-        // rescanning the chain per call; `0` starts at the directory's
-        // first cluster. An arbitrary value that was never returned stays
-        // safe: `next_entry` bounds every cluster step (a reserved or
-        // out-of-range cluster ends the walk or faults closed).
-        let mut walk = if cursor == 0 {
-            DirCursor {
-                cluster: node_cluster(dir),
-                intra: 0,
-                slot: 0,
-            }
-        } else {
-            // A `u64` shifted right by 32 always fits `u32`.
-            let cluster = (cursor >> 32) as u32;
-            let intra = (cursor & u64::from(u32::MAX)) * DIR_ENTRY_LEN as u64;
-            if intra > self.layout.bytes_per_cluster {
-                return Ok(None);
-            }
-            DirCursor {
-                cluster,
-                intra,
-                slot: 0,
-            }
-        };
-        if let Some(entry) = self.next_entry(&mut walk)? {
-            if name_out.len() < entry.name_len {
-                return Err(DriverError::BufferTooSmall);
-            }
-            name_out[..entry.name_len].copy_from_slice(&entry.name[..entry.name_len]);
-            // The chain walk mirrors `node_info`: allocation is the entry's
-            // real FAT chain, and an empty file has no chain.
-            let allocated = if entry.cluster == 0 {
-                0
-            } else {
-                self.chain_len(entry.cluster)?.0 * self.layout.bytes_per_cluster
+        // The cursor is a logical slot index, resolved by walking this
+        // directory's own chain, so no cursor reaches outside it. Slots never
+        // move while in use — a deletion marks its slots in place and an
+        // insertion takes a free run — so an entry present throughout a
+        // listing is reached exactly once.
+        if cursor >= u64::from(MAX_DIR_SLOTS) {
+            return Ok(());
+        }
+        let mut walk = DirCursor::at(node_cluster(dir));
+        // A resumed batch starts on the slot its last entry took, to see
+        // what holds it now.
+        let resumed = cursor > 0;
+        if !self.seek_slot(&mut walk, cursor - u64::from(resumed))? {
+            return Ok(());
+        }
+        if resumed && !self.step_past_resume(&mut walk)? {
+            return Ok(());
+        }
+        self.list_from(&mut walk, visit)
+    }
+}
+
+impl<B: Block> Fat32<B> {
+    /// Hand `visit` the entries from where `walk` stands until it stops or
+    /// the directory ends.
+    fn list_from(
+        &mut self,
+        walk: &mut DirCursor,
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        while let Some(entry) = self.next_entry(walk)? {
+            let info = NodeInfo {
+                kind: if entry.is_dir {
+                    NodeKind::Directory
+                } else {
+                    NodeKind::RegularFile
+                },
+                nlink: NodeInfo::SINGLE_NAME,
+                size: if entry.is_dir {
+                    0
+                } else {
+                    u64::from(entry.size)
+                },
+                allocated: self.allocation(entry.cluster, entry.is_dir, entry.size)?,
+                times: entry.times,
             };
-            let info = if entry.is_dir {
-                NodeInfo {
-                    kind: NodeKind::Directory,
-                    nlink: NodeInfo::SINGLE_NAME,
-                    size: 0,
-                    allocated,
-                    times: entry.times,
-                }
-            } else {
-                NodeInfo {
-                    kind: NodeKind::RegularFile,
-                    nlink: NodeInfo::SINGLE_NAME,
-                    size: u64::from(entry.size),
-                    allocated,
-                    times: entry.times,
-                }
-            };
-            let next_cursor = (u64::from(walk.cluster) << 32) | (walk.intra / DIR_ENTRY_LEN as u64);
-            return Ok(Some(DirEntry {
+            let listed = DirEntry {
                 node: Self::entry_node(&entry),
                 info,
-                name_len: entry.name_len,
-                next_cursor,
-            }));
+                next_cursor: walk.pos.slot,
+            };
+            if visit(&listed, &entry.name[..entry.name_len]) == DirVisit::Stop {
+                break;
+            }
         }
-        Ok(None)
+        Ok(())
     }
 }
 

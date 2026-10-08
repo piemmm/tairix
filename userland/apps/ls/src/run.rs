@@ -101,9 +101,8 @@ mod program {
 
         fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno> {
             // The one shared listing call and stream walker (`lib/rt`'s
-            // grow-to-`FS_IO_MAX` read, `lib/abi`'s `DirEntries`), so the
-            // transfer policy and the record bookkeeping are never
-            // re-derived here.
+            // batched read, `lib/abi`'s `DirEntries`), so the transfer policy
+            // and the record bookkeeping are never re-derived here.
             let stream = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
             let mut entries = Vec::new();
             for item in DirEntries::new(&stream) {

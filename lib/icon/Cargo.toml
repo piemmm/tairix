@@ -8,7 +8,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The production thumbnail document (`RtDocument`): a picture file opened under
+# the caller's own identity and read at an offset, written once here so every
+# surface that draws thumbnails shares it. Enabled only by a freestanding `Run`
+# binary; host tooling builds the library without it.
+rt = ["dep:tairix-rt"]
+
 [dependencies]
+# For the `rt` feature's `RtDocument` only: the userland file wrappers.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # The storage-medium vocabulary a mounted volume reports (`BlkDeviceClass`).
 # The icon library maps a medium onto its drive glyph in one place rather
 # than every desktop consumer restating the mapping.

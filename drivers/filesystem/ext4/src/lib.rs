@@ -27,10 +27,9 @@
 //! or 256-byte inodes, 32- or 64-byte group descriptors (the `64bit`
 //! feature), extent-mapped inodes (the default since ext4) including
 //! multi-level extent trees, and the classic ext2/ext3 indirect block
-//! map (direct + single/double/triple indirect) — and linear
-//! (non-hash-indexed leaf) directory blocks. The root block of a
-//! hash-indexed (`htree`) directory is read through its linear `.`/`..`
-//! view; deeply indexed interior directory nodes are not traversed. A
+//! map (direct + single/double/triple indirect) — and both directory
+//! layouts: linear blocks, and hash-indexed (`htree`) directories read and
+//! written through their index (a root and one interior level). A
 //! [`NodeId`] is the on-disk inode number, so there is no in-memory
 //! inode table.
 //!
@@ -38,7 +37,7 @@
 //! block and inode bitmaps, maintains the group-descriptor and
 //! superblock free counts, and creates new objects with the classic
 //! block map. The write path maintains every on-disk checksum a volume
-//! carries — the first-party crc32c `metadata_csum` feature
+//! carries — the `metadata_csum` crc32c, through `lib/crc32c`
 //! (superblock, group descriptors, block/inode bitmaps, inodes,
 //! directory-leaf and extent-block tails) and the legacy crc16
 //! `gdt_csum`/`uninit_bg` group-descriptor checksum — and the wide
@@ -67,11 +66,15 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes,
-    SecurityAcl, SecuritySubject, VolumeStats,
+    DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
+    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity,
+    NodeTimes, SecurityAcl, SecuritySubject, VolumeStats,
 };
 use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
@@ -184,6 +187,8 @@ const INODE_GENERATION: usize = 0x64;
 const INODE_DTIME: usize = 0x14;
 /// `i_links_count` byte offset within an inode.
 const INODE_LINKS: usize = 0x1A;
+/// Byte offset of `i_flags` within an inode.
+const INODE_FLAGS: usize = 0x20;
 /// `i_blocks_lo` byte offset within an inode.
 const INODE_BLOCKS_LO: usize = 0x1C;
 /// Sentinel `i_dtime` stamped on a removed inode. The driver has no
@@ -210,6 +215,21 @@ const NEW_EXTRA_ISIZE: u16 = 32;
 
 /// `i_flags`: the inode is mapped by an extent tree, not block pointers.
 const INODE_FLAG_EXTENTS: u32 = 0x0008_0000;
+/// `EXT4_INDEX_FL`: a hash-indexed (`htree`) directory.
+const INODE_FLAG_INDEX: u32 = 0x0000_1000;
+/// `s_feature_compat`: directories may be hash-indexed.
+const COMPAT_DIR_INDEX: u32 = 0x0020;
+/// Byte offset of `s_hash_seed`, four little-endian words.
+const SB_HASH_SEED_OFFSET: usize = 0xEC;
+/// Byte offset of `s_flags`.
+const SB_FLAGS_OFFSET: usize = 0x160;
+/// `s_flags`: indexed directories hash names as signed bytes.
+const SB_FLAG_SIGNED_HASH: u32 = 0x0001;
+/// `s_flags`: indexed directories hash names as unsigned bytes.
+const SB_FLAG_UNSIGNED_HASH: u32 = 0x0002;
+/// `s_feature_incompat`: a directory's size is 64 bits and its index may be
+/// three levels deep.
+const INCOMPAT_LARGEDIR: u32 = 0x4000;
 /// `EXT4_INLINE_DATA_FL`: this inode's data lives in the inode's own
 /// extended-attribute area rather than in `i_block` or in data blocks. This
 /// driver decodes no inline data, so an inline-data node's content is a
@@ -240,11 +260,34 @@ const S_IFDIR: u16 = 0x4000;
 const S_IFREG: u16 = 0x8000;
 /// `i_mode` type bits for a symbolic link.
 const S_IFLNK: u16 = 0xA000;
+/// `i_mode` type bits for a FIFO.
+const S_IFIFO: u16 = 0x1000;
+/// `i_mode` type bits for a character device.
+const S_IFCHR: u16 = 0x2000;
+/// `i_mode` type bits for a block device.
+const S_IFBLK: u16 = 0x6000;
+/// `i_mode` type bits for a socket.
+const S_IFSOCK: u16 = 0xC000;
 
 /// Directory-entry `file_type` value for a regular file.
 const FT_REG: u8 = 1;
 /// Directory-entry `file_type` value for a directory.
 const FT_DIR: u8 = 2;
+
+/// The directory-entry `file_type` an inode of `mode` is listed with; `0`,
+/// unknown, for a type the format gives no value.
+fn dirent_file_type(mode: u16) -> u8 {
+    match mode & S_IFMT {
+        S_IFREG => FT_REG,
+        S_IFDIR => FT_DIR,
+        S_IFCHR => 3,
+        S_IFBLK => 4,
+        S_IFIFO => 5,
+        S_IFSOCK => 6,
+        S_IFLNK => 7,
+        _ => 0,
+    }
+}
 
 /// The root directory is always inode 2.
 const ROOT_INODE: u32 = 2;
@@ -360,28 +403,6 @@ fn put_le32(buf: &mut [u8], off: usize, value: u32) {
     }
 }
 
-/// First-party CRC-32C (Castagnoli) over `data`, continuing from `crc`.
-///
-/// Reflected, with the reversed polynomial `0x82F6_3B78` and no final
-/// inversion — the convention the Linux ext4 driver uses for the
-/// `metadata_csum` feature (the seed already carries the `~0`
-/// initialisation). The charter reserves “never roll your own” for
-/// *cryptographic* primitives; a storage checksum is first-party here.
-fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
-    const POLY: u32 = 0x82F6_3B78;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ POLY
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc
-}
-
 /// First-party CRC-16 (reversed polynomial `0xA001`) over `data`,
 /// continuing from `crc` — the checksum the legacy `gdt_csum`/
 /// `uninit_bg` feature stores in each group descriptor.
@@ -397,6 +418,12 @@ fn crc16(mut crc: u16, data: &[u8]) -> u16 {
         }
     }
     crc
+}
+
+/// `len` zeroed bytes of heap scratch. Block-sized buffers live on the heap
+/// rather than the small kernel stack these paths run on, where several nest.
+fn scratch(len: usize) -> Result<Vec<u8>, DriverError> {
+    tairix_util::fallible::filled(len, 0).ok_or(DriverError::NoSpace)
 }
 
 /// Narrow a `u64` to `u32`, mapping overflow to [`DriverError::DeviceFault`].
@@ -468,10 +495,20 @@ struct Layout {
     /// feature: each group descriptor carries a crc16 (and a
     /// `bg_itable_unused` count) the write path must maintain.
     gdt_csum: bool,
-    /// crc32c checksum seed for `metadata_csum`: `crc32c(~0, s_uuid)`.
+    /// crc32c checksum seed for `metadata_csum`: `tairix_crc32c::update(~0, s_uuid)`.
     csum_seed: u32,
     /// The volume UUID, seed for the legacy `gdt_csum` crc16.
     uuid: [u8; 16],
+    /// Whether the volume carries `dir_index`, without which the kernel
+    /// reads a flagged directory linearly.
+    dir_index: bool,
+    /// `s_hash_seed`, the seed every indexed directory hashes names under.
+    hash_seed: [u32; 4],
+    /// Whether indexed directories hash a name's bytes as signed; `None` for
+    /// a volume recording neither, whose indexes cannot be placed into.
+    hash_signed: Option<bool>,
+    /// Whether directories carry a 64-bit size (`largedir`).
+    largedir: bool,
 }
 
 impl Layout {
@@ -515,6 +552,8 @@ struct Inode {
     file_acl: u64,
     /// Raw `i_block` array (extent root or block-pointer map).
     block: [u8; I_BLOCK_LEN],
+    /// `i_generation`, which seeds its blocks' checksums.
+    generation: u32,
 }
 
 impl Inode {
@@ -685,7 +724,14 @@ impl<B: Block> Ext4<B> {
 
         let inodes_per_group = le32(&sb, 0x28);
         let blocks_per_group = le32(&sb, 0x20);
-        if inodes_per_group == 0 || blocks_per_group == 0 {
+        // Each group's bitmaps are one block, so a group holds at most the
+        // bits one block has.
+        let per_bitmap = 8 * block_size;
+        if inodes_per_group == 0
+            || blocks_per_group == 0
+            || inodes_per_group > per_bitmap
+            || blocks_per_group > per_bitmap
+        {
             return Err(DriverError::BadMagic);
         }
 
@@ -737,14 +783,27 @@ impl<B: Block> Ext4<B> {
         let gdt_csum = !metadata_csum && feature_ro_compat & RO_COMPAT_GDT_CSUM != 0;
         // Fail closed: only mutate volumes whose entire feature
         // set the write path can maintain. The `checksum_seed` incompat
-        // (0x2000) would invalidate the `crc32c(~0, uuid)` seed, so it is
+        // (0x2000) would invalidate the `tairix_crc32c::update(~0, uuid)` seed, so it is
         // deliberately outside `SAFE_INCOMPAT`.
         let write_safe =
             feature_incompat & !SAFE_INCOMPAT == 0 && feature_ro_compat & !SAFE_RO_COMPAT == 0;
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&sb[SB_UUID_OFFSET..SB_UUID_OFFSET + 16]);
-        let csum_seed = crc32c(0xFFFF_FFFF, &uuid);
+        let csum_seed = tairix_crc32c::update(0xFFFF_FFFF, &uuid);
         let first_data_block = u64::from(le32(&sb, 0x14));
+        let dir_index = le32(&sb, 0x5C) & COMPAT_DIR_INDEX != 0;
+        let hash_seed = core::array::from_fn(|word| le32(&sb, SB_HASH_SEED_OFFSET + 4 * word));
+        // A writer records the signedness its platform hashed with; a volume
+        // recording neither leaves it unknown, and an unsigned flag wins.
+        let sb_flags = le32(&sb, SB_FLAGS_OFFSET);
+        let hash_signed = if sb_flags & SB_FLAG_UNSIGNED_HASH != 0 {
+            Some(false)
+        } else if sb_flags & SB_FLAG_SIGNED_HASH != 0 {
+            Some(true)
+        } else {
+            None
+        };
+        let largedir = feature_incompat & INCOMPAT_LARGEDIR != 0;
 
         Ok(Self {
             block,
@@ -767,6 +826,10 @@ impl<B: Block> Ext4<B> {
                 gdt_csum,
                 csum_seed,
                 uuid,
+                dir_index,
+                hash_seed,
+                hash_signed,
+                largedir,
             },
         })
     }
@@ -939,8 +1002,14 @@ impl<B: Block> Ext4<B> {
         let uid = u32::from(le16(raw, 0x02)) | (u32::from(le16(raw, 0x78)) << 16);
         let gid = u32::from(le16(raw, 0x18)) | (u32::from(le16(raw, 0x7A)) << 16);
         let size_lo = u64::from(le32(raw, 0x04));
-        let size_hi = u64::from(le32(raw, 0x6C));
-        let flags = le32(raw, 0x20);
+        // A directory's size is the low word alone unless `largedir` widens
+        // it; the high word is then not a size at all.
+        let size_hi = if mode & S_IFMT == S_IFDIR && !self.layout.largedir {
+            0
+        } else {
+            u64::from(le32(raw, 0x6C))
+        };
+        let flags = le32(raw, INODE_FLAGS);
         let links = le16(raw, INODE_LINKS);
         let blocks =
             u64::from(le32(raw, INODE_BLOCKS_LO)) | (u64::from(le16(raw, INODE_BLOCKS_HI)) << 32);
@@ -988,6 +1057,7 @@ impl<B: Block> Ext4<B> {
             blocks,
             file_acl,
             block,
+            generation: le32(raw, INODE_GENERATION),
         })
     }
 
@@ -1134,37 +1204,48 @@ fn nonzero(ptr: u32) -> Option<u64> {
     }
 }
 
-/// How a directory walk selects the entry it returns.
-#[derive(Copy, Clone)]
-enum DirQuery<'a> {
-    /// The entry whose name matches these raw bytes exactly.
-    ByName(&'a [u8]),
-    /// The first real child (skipping `.` / `..` and unused slots) whose
-    /// on-disk byte offset within the directory is at or past this
-    /// cursor. `0` starts the listing; the offset after a returned entry
-    /// ([`FoundEntry::next_cursor`]) resumes it in O(1). The walk starts
-    /// at the containing block's first record and skips forward, so a
-    /// cursor that does not name a record boundary — including an
-    /// arbitrary value that was never returned — can only skip entries,
-    /// never mis-parse mid-record.
-    ByCursor(u64),
+/// One directory record, parsed in place from its block.
+struct Record {
+    /// The inode it names; `0` for an unused record.
+    ino: u32,
+    /// Bytes to the next record.
+    rec_len: usize,
+    /// The name's length in bytes.
+    name_len: usize,
 }
 
-/// A directory entry located by [`Ext4::find_entry`].
-struct FoundEntry {
-    /// The child inode number.
-    ino: u32,
-    /// Number of name bytes written into the caller's output buffer.
-    name_len: usize,
-    /// Byte offset within the directory of the record *after* this one:
-    /// the [`DirQuery::ByCursor`] value that resumes the listing there.
-    next_cursor: u64,
+impl Record {
+    /// The name of the child this record lists, or `None` for an unused
+    /// record and for `.` and `..`, which the VFS resolves itself.
+    fn child_name<'b>(&self, block: &'b [u8], at: usize) -> Option<&'b [u8]> {
+        if self.ino == 0 || self.name_len == 0 || DIRENT_HEADER + self.name_len > self.rec_len {
+            return None;
+        }
+        let name = block.get(at + DIRENT_HEADER..at + DIRENT_HEADER + self.name_len)?;
+        (name != b"." && name != b"..").then_some(name)
+    }
 }
 
 /// Minimum on-disk directory-entry header length: the four fixed header
 /// fields (inode number, record length, name length, and file type)
 /// that precede the name bytes.
 const DIRENT_HEADER: usize = 8;
+
+/// A named record found in a directory block: where it lies, the record
+/// before it, and the inode it names.
+struct Located {
+    at: usize,
+    prev: Option<usize>,
+    ino: u32,
+}
+
+/// What a new directory entry carries.
+#[derive(Copy, Clone)]
+struct Child<'a> {
+    name: &'a [u8],
+    ino: u32,
+    file_type: u8,
+}
 
 impl<B: Block> Ext4<B> {
     /// Read up to `buf.len()` bytes of `inode`'s data starting at byte
@@ -1205,76 +1286,90 @@ impl<B: Block> Ext4<B> {
         Ok(done)
     }
 
-    /// Walk the linear directory blocks of `dir`, returning the entry
-    /// selected by `query`. The matched entry's name is written into
-    /// `name_out` (only when an entry is returned).
-    fn find_entry(
+    /// The child of directory `dir_ino` named exactly `name`: through its
+    /// index when it has one this driver uses, else by a walk of its blocks.
+    fn find_name(
         &mut self,
+        dir_ino: u32,
         dir: &Inode,
-        query: DirQuery<'_>,
-        name_out: &mut [u8],
-    ) -> Result<Option<FoundEntry>, DriverError> {
+        name: &[u8],
+    ) -> Result<Option<u32>, DriverError> {
+        // The VFS resolves the self-links itself.
+        if name == b"." || name == b".." {
+            return Ok(None);
+        }
         let bs = self.layout.block_size as usize;
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
-        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        // A cursor resume seeks straight to its containing block; the
-        // in-block scan below still starts at the block's first record so
-        // parsing always begins on a record boundary.
-        let start_block = match query {
-            DirQuery::ByCursor(cursor) => cursor / u64::from(self.layout.block_size),
-            DirQuery::ByName(_) => 0,
-        };
-        for logical in start_block..total_blocks {
+        let mut block = self.block_scratch()?;
+        let kind = self.index_use(dir_ino, dir, &mut block[..bs])?;
+        if let IndexUse::Indexed(ix) = &kind {
+            return self.find_indexed(dir, ix, name, &mut block[..bs]);
+        }
+        let (scan, checked) = (self.scan_end(&kind), self.scan_seed(dir_ino, dir, &kind));
+        for logical in 0..dir.size.div_ceil(u64::from(self.layout.block_size)) {
             let Some(phys) = self.map_block(dir, logical)? else {
                 continue;
             };
-            self.read_fs_block(phys, &mut block_buf)?;
-            let mut pos = 0usize;
-            while pos + DIRENT_HEADER <= bs {
-                let ino = le32(&block_buf, pos);
-                let rec_len = usize::from(le16(&block_buf, pos + 4));
-                if rec_len < DIRENT_HEADER || rec_len % 4 != 0 || pos + rec_len > bs {
-                    return Err(DriverError::DeviceFault);
-                }
-                let name_len = if self.layout.filetype {
-                    usize::from(block_buf[pos + 6])
-                } else {
-                    usize::from(le16(&block_buf, pos + 6))
-                };
-                if ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
-                    let name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
-                    if name != b"." && name != b".." {
-                        let entry_offset = logical * u64::from(self.layout.block_size) + pos as u64;
-                        match query {
-                            DirQuery::ByName(target) => {
-                                if name == target {
-                                    return Ok(Some(FoundEntry {
-                                        ino,
-                                        name_len: 0,
-                                        next_cursor: entry_offset + rec_len as u64,
-                                    }));
-                                }
-                            }
-                            DirQuery::ByCursor(cursor) => {
-                                if entry_offset >= cursor {
-                                    if name_len > name_out.len() {
-                                        return Err(DriverError::BufferTooSmall);
-                                    }
-                                    name_out[..name_len].copy_from_slice(name);
-                                    return Ok(Some(FoundEntry {
-                                        ino,
-                                        name_len,
-                                        next_cursor: entry_offset + rec_len as u64,
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-                pos += rec_len;
+            self.read_dir_block(checked, phys, &mut block[..bs])?;
+            if let Some(found) = self.locate(&block[..scan], name)? {
+                return Ok(Some(found.ino));
             }
         }
         Ok(None)
+    }
+
+    /// Hand `visit` the children of `dir`, read linearly, from byte offset
+    /// `cursor` on, its blocks checked under `seed` when it names one.
+    ///
+    /// A cursor is the offset of a record, and in a directory read linearly
+    /// a record never moves while it is in use: removal folds it into its
+    /// predecessor and insertion splits a record's slack, so an entry present
+    /// throughout a listing is reached exactly once. Parsing starts at the
+    /// cursor's block's first record, so a cursor that is not a record
+    /// boundary — including one never returned — can only skip, never
+    /// misparse.
+    fn list_from(
+        &mut self,
+        dir: &Inode,
+        seed: Option<u32>,
+        cursor: u64,
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        let block_size = u64::from(self.layout.block_size);
+        let bs = self.layout.block_size as usize;
+        let mut block = self.block_scratch()?;
+        let total_blocks = dir.size.div_ceil(block_size);
+        for logical in cursor / block_size..total_blocks {
+            let Some(phys) = self.map_block(dir, logical)? else {
+                continue;
+            };
+            self.read_dir_block(seed, phys, &mut block[..bs])?;
+            let base = logical * block_size;
+            let mut pos = 0usize;
+            while pos + DIRENT_HEADER <= bs {
+                let record = self.record_at(&block[..bs], pos)?;
+                let at = pos;
+                pos += record.rec_len;
+                let Some(name) = record.child_name(&block, at) else {
+                    continue;
+                };
+                if base + (at as u64) < cursor {
+                    continue;
+                }
+                // The child inode is read once here and its metadata handed
+                // over with the entry, so a listing consumer never re-resolves
+                // the child by path to learn its kind or sizes.
+                let child = self.read_inode(record.ino)?;
+                let entry = DirEntry {
+                    node: NodeId::from_raw(u64::from(record.ino)),
+                    info: self.inode_info(&child)?,
+                    next_cursor: base + pos as u64,
+                };
+                if visit(&entry, name) == DirVisit::Stop {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1334,7 +1429,7 @@ impl<B: Block> Ext4<B> {
         self.update_sb_checksum()
     }
 
-    /// Recompute and persist `s_checksum` (`crc32c(~0, sb[..0x3FC])`) when
+    /// Recompute and persist `s_checksum` (`tairix_crc32c::update(~0, sb[..0x3FC])`) when
     /// the volume carries `metadata_csum`; a no-op otherwise.
     fn update_sb_checksum(&mut self) -> Result<(), DriverError> {
         if !self.layout.metadata_csum {
@@ -1348,7 +1443,7 @@ impl<B: Block> Ext4<B> {
             SUPERBLOCK_OFFSET,
             &mut sb,
         )?;
-        let csum = crc32c(0xFFFF_FFFF, &sb[..SB_CHECKSUM_OFFSET]);
+        let csum = tairix_crc32c::update(0xFFFF_FFFF, &sb[..SB_CHECKSUM_OFFSET]);
         device_write(
             &mut self.block,
             self.block_size,
@@ -1404,11 +1499,11 @@ impl<B: Block> Ext4<B> {
         let len = self.layout.desc_size as usize;
         let group_le = u32_le_truncate(group);
         if self.layout.metadata_csum {
-            let mut c = crc32c(self.layout.csum_seed, &group_le);
-            c = crc32c(c, &desc[..GD_CHECKSUM]);
-            c = crc32c(c, &[0, 0]);
+            let mut c = tairix_crc32c::update(self.layout.csum_seed, &group_le);
+            c = tairix_crc32c::update(c, &desc[..GD_CHECKSUM]);
+            c = tairix_crc32c::update(c, &[0, 0]);
             if len > GD_CHECKSUM + 2 {
-                c = crc32c(c, &desc[GD_CHECKSUM + 2..len]);
+                c = tairix_crc32c::update(c, &desc[GD_CHECKSUM + 2..len]);
             }
             put_le16(desc, GD_CHECKSUM, (c & 0xFFFF) as u16);
         } else if self.layout.gdt_csum {
@@ -1434,18 +1529,18 @@ impl<B: Block> Ext4<B> {
         if !self.layout.metadata_csum {
             return;
         }
-        let c = crc32c(self.layout.csum_seed, bitmap);
+        let c = tairix_crc32c::update(self.layout.csum_seed, bitmap);
         put_le16(desc, lo_off, (c & 0xFFFF) as u16);
         if self.layout.wide_desc() {
             put_le16(desc, hi_off, ((c >> 16) & 0xFFFF) as u16);
         }
     }
 
-    /// The per-inode crc32c seed: `crc32c(crc32c(fs_seed, ino), gen)`,
+    /// The per-inode crc32c seed: `tairix_crc32c::update(tairix_crc32c::update(fs_seed, ino), gen)`,
     /// used for both the inode checksum and its extent-block tails.
     fn inode_csum_seed(&self, ino: u32, generation: u32) -> u32 {
-        let c = crc32c(self.layout.csum_seed, &ino.to_le_bytes());
-        crc32c(c, &generation.to_le_bytes())
+        let c = tairix_crc32c::update(self.layout.csum_seed, &ino.to_le_bytes());
+        tairix_crc32c::update(c, &generation.to_le_bytes())
     }
 
     /// Read inode `ino`'s full on-disk record into `raw[..inode_size]`.
@@ -1475,7 +1570,7 @@ impl<B: Block> Ext4<B> {
                 put_le16(raw, INODE_CHECKSUM_HI, 0);
             }
             let seed = self.inode_csum_seed(ino, generation);
-            let c = crc32c(seed, &raw[..len]);
+            let c = tairix_crc32c::update(seed, &raw[..len]);
             put_le16(raw, INODE_CHECKSUM_LO, (c & 0xFFFF) as u16);
             if has_hi {
                 put_le16(raw, INODE_CHECKSUM_HI, ((c >> 16) & 0xFFFF) as u16);
@@ -1499,6 +1594,7 @@ impl<B: Block> Ext4<B> {
     fn alloc_block(&mut self) -> Result<u64, DriverError> {
         let bpg = u64::from(self.layout.blocks_per_group);
         let bs = self.layout.block_size as usize;
+        let mut bm = self.block_scratch()?;
         for group in 0..self.layout.group_count {
             let mut desc = self.read_group_desc(group)?;
             let free = le16(&desc, 0x0C);
@@ -1508,7 +1604,6 @@ impl<B: Block> Ext4<B> {
                 continue;
             }
             let bitmap_block = u64::from(le32(&desc, 0x00));
-            let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
             self.read_fs_block(bitmap_block, &mut bm)?;
             for bit in 0..bpg {
                 let abs = self.layout.first_data_block + group * bpg + bit;
@@ -1534,8 +1629,8 @@ impl<B: Block> Ext4<B> {
                     self.write_group_desc(group, &mut desc)?;
                     let sb_free = self.sb_u32(0x0C)?;
                     self.set_sb_u32(0x0C, sb_free.saturating_sub(1))?;
-                    let zero = [0u8; MAX_BLOCK_SIZE as usize];
-                    self.write_fs_block(abs, &zero)?;
+                    bm.fill(0);
+                    self.write_fs_block(abs, &bm)?;
                     return Ok(abs);
                 }
             }
@@ -1558,15 +1653,23 @@ impl<B: Block> Ext4<B> {
         }
         let mut desc = self.read_group_desc(group)?;
         let bitmap_block = u64::from(le32(&desc, 0x00));
-        let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut bm = self.block_scratch()?;
         self.read_fs_block(bitmap_block, &mut bm)?;
         let byte = (bit / 8) as usize;
         let mask = 1u8 << (bit % 8);
         if bm[byte] & mask != 0 {
+            // A count already at its ceiling is damage, not a block to free:
+            // refused before anything is written.
+            let free = le16(&desc, 0x0C)
+                .checked_add(1)
+                .ok_or(DriverError::DeviceFault)?;
+            let sb_free = self
+                .sb_u32(0x0C)?
+                .checked_add(1)
+                .ok_or(DriverError::DeviceFault)?;
             bm[byte] &= !mask;
             self.write_fs_block(bitmap_block, &bm)?;
-            let free = le16(&desc, 0x0C);
-            put_le16(&mut desc, 0x0C, free + 1);
+            put_le16(&mut desc, 0x0C, free);
             let nbytes = self.bitmap_csum_bytes(self.layout.blocks_per_group);
             self.set_bitmap_csum(
                 &mut desc,
@@ -1575,8 +1678,7 @@ impl<B: Block> Ext4<B> {
                 GD_BLOCK_BITMAP_CSUM_HI,
             );
             self.write_group_desc(group, &mut desc)?;
-            let sb_free = self.sb_u32(0x0C)?;
-            self.set_sb_u32(0x0C, sb_free + 1)?;
+            self.set_sb_u32(0x0C, sb_free)?;
         }
         Ok(())
     }
@@ -1588,6 +1690,7 @@ impl<B: Block> Ext4<B> {
         let ipg = u64::from(self.layout.inodes_per_group);
         let total = u64::from(self.sb_u32(0x00)?);
         let bs = self.layout.block_size as usize;
+        let mut bm = self.block_scratch()?;
         for group in 0..self.layout.group_count {
             let mut desc = self.read_group_desc(group)?;
             let free = le16(&desc, 0x0E);
@@ -1597,7 +1700,6 @@ impl<B: Block> Ext4<B> {
                 continue;
             }
             let bitmap_block = u64::from(le32(&desc, 0x04));
-            let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
             self.read_fs_block(bitmap_block, &mut bm)?;
             for bit in 0..ipg {
                 let ino = group * ipg + bit + 1;
@@ -1614,8 +1716,10 @@ impl<B: Block> Ext4<B> {
                     self.write_fs_block(bitmap_block, &bm)?;
                     put_le16(&mut desc, 0x0E, free - 1);
                     if is_dir {
-                        let dirs = le16(&desc, 0x10);
-                        put_le16(&mut desc, 0x10, dirs + 1);
+                        let dirs = le16(&desc, 0x10)
+                            .checked_add(1)
+                            .ok_or(DriverError::DeviceFault)?;
+                        put_le16(&mut desc, 0x10, dirs);
                     }
                     self.update_itable_unused(&mut desc, bit);
                     let nbytes = self.bitmap_csum_bytes(self.layout.inodes_per_group);
@@ -1667,22 +1771,30 @@ impl<B: Block> Ext4<B> {
     /// free counts. `is_dir` decrements the group's directory count.
     fn free_inode(&mut self, ino: u32, is_dir: bool) -> Result<(), DriverError> {
         let ipg = u64::from(self.layout.inodes_per_group);
-        let group = u64::from(ino - 1) / ipg;
-        let bit = u64::from(ino - 1) % ipg;
+        let index = u64::from(ino.checked_sub(1).ok_or(DriverError::DeviceFault)?);
+        let (group, bit) = (index / ipg, index % ipg);
         if group >= self.layout.group_count {
             return Err(DriverError::DeviceFault);
         }
         let mut desc = self.read_group_desc(group)?;
         let bitmap_block = u64::from(le32(&desc, 0x04));
-        let mut bm = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut bm = self.block_scratch()?;
         self.read_fs_block(bitmap_block, &mut bm)?;
         let byte = (bit / 8) as usize;
         let mask = 1u8 << (bit % 8);
         if bm[byte] & mask != 0 {
+            // A count already at its ceiling is damage: refused before
+            // anything is written.
+            let free = le16(&desc, 0x0E)
+                .checked_add(1)
+                .ok_or(DriverError::DeviceFault)?;
+            let sb_free = self
+                .sb_u32(0x10)?
+                .checked_add(1)
+                .ok_or(DriverError::DeviceFault)?;
             bm[byte] &= !mask;
             self.write_fs_block(bitmap_block, &bm)?;
-            let free = le16(&desc, 0x0E);
-            put_le16(&mut desc, 0x0E, free + 1);
+            put_le16(&mut desc, 0x0E, free);
             if is_dir {
                 let dirs = le16(&desc, 0x10);
                 put_le16(&mut desc, 0x10, dirs.saturating_sub(1));
@@ -1695,8 +1807,7 @@ impl<B: Block> Ext4<B> {
                 GD_INODE_BITMAP_CSUM_HI,
             );
             self.write_group_desc(group, &mut desc)?;
-            let sb_free = self.sb_u32(0x10)?;
-            self.set_sb_u32(0x10, sb_free + 1)?;
+            self.set_sb_u32(0x10, sb_free)?;
         }
         Ok(())
     }
@@ -1729,7 +1840,7 @@ impl<B: Block> Ext4<B> {
             let eh_max = usize::from(le16(buf, 4));
             let off = 12 + eh_max * 12;
             if off + EXTENT_TAIL_LEN <= self.layout.block_size as usize {
-                let csum = crc32c(seed, &buf[..off]);
+                let csum = tairix_crc32c::update(seed, &buf[..off]);
                 put_le32(buf, off, csum);
             }
         }
@@ -1748,7 +1859,7 @@ impl<B: Block> Ext4<B> {
         logical: u64,
         allocated: &mut u64,
     ) -> Result<u64, DriverError> {
-        if le32(raw, 0x20) & INODE_FLAG_EXTENTS != 0 {
+        if le32(raw, INODE_FLAGS) & INODE_FLAG_EXTENTS != 0 {
             self.map_or_alloc_extent(ino, raw, logical, allocated)
         } else {
             self.map_or_alloc_classic(raw, logical, allocated)
@@ -1756,8 +1867,10 @@ impl<B: Block> Ext4<B> {
     }
 
     /// Classic block-map allocation: 12 direct pointers plus the single
-    /// indirect block. Double/triple indirect growth is not written
-    /// (`DeviceFault`); files this driver creates never reach it.
+    /// indirect block. Growth past them through the double and triple
+    /// indirect blocks is refused as `DeviceFault` (`plans/OPEN-DEFECTS.md`
+    /// D804), and every file and directory this driver creates is mapped this
+    /// way.
     fn map_or_alloc_classic(
         &mut self,
         raw: &mut [u8],
@@ -1792,7 +1905,7 @@ impl<B: Block> Ext4<B> {
             ind = u32::try_from(blk).map_err(|_| DriverError::DeviceFault)?;
             put_le32(raw, ib + 48, ind);
         }
-        let mut ind_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut ind_buf = self.block_scratch()?;
         self.read_fs_block(u64::from(ind), &mut ind_buf)?;
         let off = usize_of(rem)? * 4;
         let ptr = le32(&ind_buf, off);
@@ -1866,7 +1979,7 @@ impl<B: Block> Ext4<B> {
         let entries = usize::from(le16(raw, ib + 2));
         let leaf = self.alloc_block()?;
         *allocated += 1;
-        let mut leaf_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut leaf_buf = self.block_scratch()?;
         put_le16(&mut leaf_buf, 0, EXTENT_MAGIC);
         put_le16(&mut leaf_buf, 2, u16_of(entries)?);
         put_le16(&mut leaf_buf, 4, u16_of(leaf_cap)?);
@@ -1929,7 +2042,7 @@ impl<B: Block> Ext4<B> {
         }
         let coff = ib + 12 + chosen * 12;
         let leaf_ptr = (u64::from(le16(raw, coff + 8)) << 32) | u64::from(le32(raw, coff + 4));
-        let mut leaf_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut leaf_buf = self.block_scratch()?;
         self.read_fs_block(leaf_ptr, &mut leaf_buf)?;
         if le16(&leaf_buf, 0) != EXTENT_MAGIC || le16(&leaf_buf, 6) != 0 {
             return Err(DriverError::DeviceFault);
@@ -1950,7 +2063,7 @@ impl<B: Block> Ext4<B> {
         }
         let new_leaf = self.alloc_block()?;
         *allocated += 1;
-        let mut nb = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut nb = self.block_scratch()?;
         put_le16(&mut nb, 0, EXTENT_MAGIC);
         put_le16(&mut nb, 4, u16_of(leaf_cap)?);
         if !leaf_place(&mut nb, 0, leaf_cap, logical, blk, false)? {
@@ -2128,6 +2241,16 @@ fn decode_posix_acl(value: &[u8], sec: &mut NodeSecurity) {
 }
 
 impl<B: Block> Ext4<B> {
+    /// Heap scratch for one filesystem block.
+    fn block_scratch(&self) -> Result<Vec<u8>, DriverError> {
+        scratch(self.layout.block_size as usize)
+    }
+
+    /// Heap scratch for one raw inode record.
+    fn inode_scratch(&self) -> Result<Vec<u8>, DriverError> {
+        scratch(self.layout.inode_size as usize)
+    }
+
     /// Sectors (512-byte `i_blocks` units) per filesystem block.
     fn sectors_per_block(&self) -> u32 {
         self.layout.block_size / 512
@@ -2145,38 +2268,134 @@ impl<B: Block> Ext4<B> {
             }
     }
 
-    /// The crc32c seed for directory `dir_ino`'s leaf-block tails
-    /// (`crc32c(crc32c(fs_seed, ino), i_generation)`); `0` when the
-    /// volume carries no `metadata_csum` (the seed is then unused).
-    fn dir_block_seed(&mut self, dir_ino: u32) -> Result<u32, DriverError> {
-        if !self.layout.metadata_csum {
-            return Ok(0);
-        }
-        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
-        self.read_inode_raw(dir_ino, &mut raw)?;
-        Ok(self.inode_csum_seed(dir_ino, le32(&raw, INODE_GENERATION)))
+    /// The checksum seed of directory `ino`'s blocks on a `metadata_csum`
+    /// volume: its inode's seed.
+    fn dir_seed(&self, ino: u32, dir: &Inode) -> Option<u32> {
+        self.layout
+            .metadata_csum
+            .then(|| self.inode_csum_seed(ino, dir.generation))
     }
 
-    /// Write directory block `phys` from `block`, first writing the
-    /// `ext4_dir_entry_tail` and stamping its crc32c on a `metadata_csum`
-    /// volume. `seed` is [`Self::dir_block_seed`] of the owning directory.
-    fn write_dir_block(
+    /// Check the tail closing leaf `block` under `seed`: the empty record the
+    /// format reserves for it, holding the checksum of the block before it.
+    fn check_leaf(seed: u32, block: &[u8]) -> Result<(), DriverError> {
+        let tail = block
+            .len()
+            .checked_sub(DIR_TAIL_LEN)
+            .ok_or(DriverError::DeviceFault)?;
+        let intact = le32(block, tail) == 0
+            && usize::from(le16(block, tail + 4)) == DIR_TAIL_LEN
+            && block[tail + 6] == 0
+            && block[tail + 7] == DIR_TAIL_FT
+            && le32(block, tail + 8) == tairix_crc32c::update(seed, &block[..tail]);
+        if intact {
+            Ok(())
+        } else {
+            Err(DriverError::DeviceFault)
+        }
+    }
+
+    /// Lay the tail closing leaf `block` and stamp its checksum under `seed`.
+    fn seal_leaf(seed: u32, block: &mut [u8]) -> Result<(), DriverError> {
+        let tail = block
+            .len()
+            .checked_sub(DIR_TAIL_LEN)
+            .ok_or(DriverError::DeviceFault)?;
+        put_le32(block, tail, 0);
+        put_le16(block, tail + 4, u16_of(DIR_TAIL_LEN)?);
+        block[tail + 6] = 0;
+        block[tail + 7] = DIR_TAIL_FT;
+        let csum = tairix_crc32c::update(seed, &block[..tail]);
+        put_le32(block, tail + 8, csum);
+        Ok(())
+    }
+
+    /// Write leaf `block` to `phys`, sealed under `seed` on a `metadata_csum`
+    /// volume.
+    fn write_leaf(
         &mut self,
-        seed: u32,
+        seed: Option<u32>,
         phys: u64,
         block: &mut [u8],
     ) -> Result<(), DriverError> {
-        if self.layout.metadata_csum {
-            let end = self.layout.block_size as usize;
-            let tail = end - DIR_TAIL_LEN;
-            put_le32(block, tail, 0);
-            put_le16(block, tail + 4, u16_of(DIR_TAIL_LEN)?);
-            block[tail + 6] = 0;
-            block[tail + 7] = DIR_TAIL_FT;
-            let csum = crc32c(seed, &block[..tail]);
-            put_le32(block, end - EXTENT_TAIL_LEN, csum);
+        if let Some(seed) = seed {
+            Self::seal_leaf(seed, block)?;
         }
         self.write_fs_block(phys, block)
+    }
+
+    /// Read directory block `phys` into `block`; a leaf of a linear
+    /// directory has its tail checked under `seed` on a `metadata_csum`
+    /// volume. A directory with an index this driver cannot use mixes index
+    /// blocks among its leaves, so `seed` is `None` there.
+    fn read_dir_block(
+        &mut self,
+        seed: Option<u32>,
+        phys: u64,
+        block: &mut [u8],
+    ) -> Result<(), DriverError> {
+        self.read_fs_block(phys, block)?;
+        match seed {
+            Some(seed) => Self::check_leaf(seed, block),
+            None => Ok(()),
+        }
+    }
+
+    /// Where a linear scan of a directory read as `kind` finds records: a
+    /// leaf's data area, or the whole block where index blocks lie among the
+    /// leaves.
+    fn scan_end(&self, kind: &IndexUse) -> usize {
+        match kind {
+            IndexUse::Linear => self.dir_data_end(),
+            IndexUse::Indexed(_) | IndexUse::Unusable(_) => self.layout.block_size as usize,
+        }
+    }
+
+    /// The checksum seed a linear scan of directory `ino` checks its blocks
+    /// under: only a linear directory's blocks are all leaves.
+    fn scan_seed(&self, ino: u32, dir: &Inode, kind: &IndexUse) -> Option<u32> {
+        match kind {
+            IndexUse::Linear => self.dir_seed(ino, dir),
+            IndexUse::Indexed(_) | IndexUse::Unusable(_) => None,
+        }
+    }
+
+    /// The record naming `name` in `block`, scanned over the whole slice:
+    /// where it is, the record before it, and the inode it names.
+    fn locate(&self, block: &[u8], name: &[u8]) -> Result<Option<Located>, DriverError> {
+        let (mut pos, mut prev) = (0usize, None);
+        while pos + DIRENT_HEADER <= block.len() {
+            let record = self.record_at(block, pos)?;
+            if record.ino != 0
+                && record.name_len > 0
+                && DIRENT_HEADER + record.name_len <= record.rec_len
+                && block.get(pos + DIRENT_HEADER..pos + DIRENT_HEADER + record.name_len)
+                    == Some(name)
+            {
+                return Ok(Some(Located {
+                    at: pos,
+                    prev,
+                    ino: record.ino,
+                }));
+            }
+            prev = Some(pos);
+            pos += record.rec_len;
+        }
+        Ok(None)
+    }
+
+    /// Drop the record `found` from `block`: folded into the record before
+    /// it, or freed in place when it is the first.
+    fn unlink_record(&self, block: &mut [u8], found: &Located) -> Result<(), DriverError> {
+        match found.prev {
+            Some(prev) => {
+                let merged =
+                    self.record_at(block, prev)?.rec_len + self.record_at(block, found.at)?.rec_len;
+                put_le16(block, prev + 4, u16_of(merged)?);
+            }
+            None => put_le32(block, found.at, 0),
+        }
+        Ok(())
     }
 
     /// Write a directory entry header + name at `pos` of `block`,
@@ -2205,15 +2424,10 @@ impl<B: Block> Ext4<B> {
 
     /// Read a directory entry's `(inode, rec_len, name_len)` triple at
     /// `pos`, validating `rec_len` against the block size `bs`.
-    fn read_dirent_header(
-        &self,
-        block: &[u8],
-        pos: usize,
-        bs: usize,
-    ) -> Result<(u32, usize, usize), DriverError> {
+    fn record_at(&self, block: &[u8], pos: usize) -> Result<Record, DriverError> {
         let ino = le32(block, pos);
         let rec_len = usize::from(le16(block, pos + 4));
-        if rec_len < DIRENT_HEADER || rec_len % 4 != 0 || pos + rec_len > bs {
+        if rec_len < DIRENT_HEADER || rec_len % 4 != 0 || pos + rec_len > block.len() {
             return Err(DriverError::DeviceFault);
         }
         let name_len = if self.layout.filetype {
@@ -2221,7 +2435,11 @@ impl<B: Block> Ext4<B> {
         } else {
             usize::from(le16(block, pos + 6))
         };
-        Ok((ino, rec_len, name_len))
+        Ok(Record {
+            ino,
+            rec_len,
+            name_len,
+        })
     }
 
     /// Try to place a `needed`-byte entry into directory block `block`,
@@ -2238,7 +2456,11 @@ impl<B: Block> Ext4<B> {
         let bs = block.len();
         let mut pos = 0usize;
         while pos + DIRENT_HEADER <= bs {
-            let (slot_ino, rec_len, name_len) = self.read_dirent_header(block, pos, bs)?;
+            let Record {
+                ino: slot_ino,
+                rec_len,
+                name_len,
+            } = self.record_at(block, pos)?;
             let used = if slot_ino == 0 {
                 0
             } else {
@@ -2263,114 +2485,189 @@ impl<B: Block> Ext4<B> {
         Ok(false)
     }
 
-    /// Insert child `(child_ino, name, file_type)` into directory inode
-    /// `dir_ino`, growing the directory by one block when no existing
-    /// block has room.
-    fn insert_dirent(
-        &mut self,
-        dir_ino: u32,
-        name: &[u8],
-        child_ino: u32,
-        file_type: u8,
-    ) -> Result<(), DriverError> {
-        let needed = align4(DIRENT_HEADER + name.len());
-        let end = self.dir_data_end();
-        let seed = self.dir_block_seed(dir_ino)?;
+    /// Add `child` to directory `dir_ino`, refused for a directory whose
+    /// index this driver cannot use.
+    fn insert_child(&mut self, dir_ino: u32, child: Child<'_>) -> Result<(), DriverError> {
         let dir = self.read_inode(dir_ino)?;
-        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
-        for logical in 0..total_blocks {
-            let Some(phys) = self.map_block(&dir, logical)? else {
-                continue;
-            };
-            self.read_fs_block(phys, &mut block_buf)?;
-            if self.place_in_block(&mut block_buf[..end], needed, child_ino, name, file_type)? {
-                self.write_dir_block(seed, phys, &mut block_buf)?;
-                return Ok(());
-            }
+        if !self.layout.dir_index && dir.flags & INODE_FLAG_INDEX != 0 {
+            // Without `dir_index` the kernel reads a flagged directory
+            // linearly, and a linear insert may land where the index was, so
+            // the stale flag goes rather than be trusted later.
+            let mut raw = self.inode_scratch()?;
+            self.read_inode_raw(dir_ino, &mut raw)?;
+            let flags = le32(&raw, INODE_FLAGS) & !INODE_FLAG_INDEX;
+            put_le32(&mut raw, INODE_FLAGS, flags);
+            self.write_inode_raw(dir_ino, &mut raw)?;
         }
-        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
-        self.read_inode_raw(dir_ino, &mut raw)?;
-        let mut allocated = 0u64;
-        let phys = self.map_or_alloc(dir_ino, &mut raw, total_blocks, &mut allocated)?;
-        let mut new_block = [0u8; MAX_BLOCK_SIZE as usize];
-        self.write_dirent(&mut new_block, 0, child_ino, u16_of(end)?, name, file_type)?;
-        self.write_dir_block(seed, phys, &mut new_block)?;
-        let new_size = (total_blocks + 1) * u64::from(self.layout.block_size);
-        put_le32(&mut raw, 0x04, u32_of(new_size)?);
-        let blocks = le32(&raw, 0x1C);
-        put_le32(
-            &mut raw,
-            0x1C,
-            blocks + u32_of(allocated)? * self.sectors_per_block(),
-        );
-        self.write_inode_raw(dir_ino, &mut raw)?;
-        Ok(())
+        let bs = self.layout.block_size as usize;
+        let mut index = self.block_scratch()?;
+        match self.index_use(dir_ino, &dir, &mut index[..bs])? {
+            IndexUse::Linear => self.insert_linear(dir_ino, &dir, child),
+            IndexUse::Indexed(ix) => {
+                self.insert_indexed(dir_ino, &dir, ix, child, &mut index[..bs])
+            }
+            IndexUse::Unusable(err) => Err(err),
+        }
     }
 
-    /// Remove the entry named `name` from directory inode `dir_ino`,
-    /// returning the child inode number. The freed slot is merged into
-    /// the preceding entry (or zeroed when it is first in its block).
-    fn remove_dirent(&mut self, dir_ino: u32, name: &[u8]) -> Result<u32, DriverError> {
+    /// Refuse, before anything changes, a directory no name can be added to:
+    /// one whose index this driver cannot use.
+    fn check_insertable(&mut self, dir_ino: u32, dir: &Inode) -> Result<(), DriverError> {
+        let bs = self.layout.block_size as usize;
+        let mut index = self.block_scratch()?;
+        match self.index_use(dir_ino, dir, &mut index[..bs])? {
+            IndexUse::Unusable(err) => Err(err),
+            IndexUse::Linear | IndexUse::Indexed(_) => Ok(()),
+        }
+    }
+
+    /// Add `child` to linear directory `dir_ino`: into the first block with
+    /// room, else a block appended for it. Records never move, which a linear
+    /// listing's cursor relies on.
+    fn insert_linear(
+        &mut self,
+        dir_ino: u32,
+        dir: &Inode,
+        child: Child<'_>,
+    ) -> Result<(), DriverError> {
+        let bs = self.layout.block_size as usize;
         let end = self.dir_data_end();
-        let seed = self.dir_block_seed(dir_ino)?;
+        let needed = align4(DIRENT_HEADER + child.name.len());
+        let seed = self.dir_seed(dir_ino, dir);
+        let mut blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
+        let mut block = self.block_scratch()?;
+        for logical in 0..blocks {
+            let Some(phys) = self.map_block(dir, logical)? else {
+                continue;
+            };
+            self.read_dir_block(seed, phys, &mut block[..bs])?;
+            if self.place_in_block(
+                &mut block[..end],
+                needed,
+                child.ino,
+                child.name,
+                child.file_type,
+            )? {
+                return self.write_leaf(seed, phys, &mut block[..bs]);
+            }
+        }
+        block.fill(0);
+        self.write_dirent(
+            &mut block,
+            0,
+            child.ino,
+            u16_of(end)?,
+            child.name,
+            child.file_type,
+        )?;
+        if let Some(seed) = seed {
+            Self::seal_leaf(seed, &mut block[..bs])?;
+        }
+        self.append_dir_block(dir_ino, &mut blocks, &block[..bs])
+            .map(drop)
+    }
+
+    /// Append `block` to directory `dir_ino` as logical block `blocks`, which
+    /// then counts it: written, then mapped by the inode, which is written
+    /// last. Answers where it lives.
+    fn append_dir_block(
+        &mut self,
+        dir_ino: u32,
+        blocks: &mut u64,
+        block: &[u8],
+    ) -> Result<u64, DriverError> {
+        let block_size = u64::from(self.layout.block_size);
+        // A directory's size is 32 bits wide without `largedir`.
+        let size = (*blocks + 1)
+            .checked_mul(block_size)
+            .and_then(|size| u32::try_from(size).ok())
+            .ok_or(DriverError::NoSpace)?;
+        let mut raw = self.inode_scratch()?;
+        self.read_inode_raw(dir_ino, &mut raw)?;
+        let mut allocated = 0u64;
+        let phys = self.map_or_alloc(dir_ino, &mut raw, *blocks, &mut allocated)?;
+        if allocated == 0 {
+            // The size put this block past the end, yet it is mapped.
+            return Err(DriverError::DeviceFault);
+        }
+        if let Err(err) = self.write_fs_block(phys, block) {
+            // Nothing names the block yet, so it goes back.
+            let _ = self.free_block(phys);
+            return Err(err);
+        }
+        put_le32(&mut raw, 0x04, size);
+        let sectors = u32_of(allocated)?
+            .checked_mul(self.sectors_per_block())
+            .and_then(|added| le32(&raw, 0x1C).checked_add(added))
+            .ok_or(DriverError::NoSpace)?;
+        put_le32(&mut raw, 0x1C, sectors);
+        self.write_inode_raw(dir_ino, &mut raw)?;
+        *blocks += 1;
+        Ok(phys)
+    }
+
+    /// Remove the entry named `name` from directory `dir_ino`, answering the
+    /// inode it named. The freed record joins the one before it, or is freed
+    /// in place when first in its block.
+    fn remove_dirent(&mut self, dir_ino: u32, name: &[u8]) -> Result<u32, DriverError> {
         let dir = self.read_inode(dir_ino)?;
-        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
-        for logical in 0..total_blocks {
+        let bs = self.layout.block_size as usize;
+        let mut block = self.block_scratch()?;
+        let kind = self.index_use(dir_ino, &dir, &mut block[..bs])?;
+        if let IndexUse::Indexed(ix) = &kind {
+            return self.remove_indexed(&dir, ix, name, &mut block[..bs]);
+        }
+        let end = self.dir_data_end();
+        let seed = self.dir_seed(dir_ino, &dir);
+        let (scan, checked) = (self.scan_end(&kind), self.scan_seed(dir_ino, &dir, &kind));
+        for logical in 0..dir.size.div_ceil(u64::from(self.layout.block_size)) {
             let Some(phys) = self.map_block(&dir, logical)? else {
                 continue;
             };
-            self.read_fs_block(phys, &mut block_buf)?;
-            let mut pos = 0usize;
-            let mut prev: Option<usize> = None;
-            while pos + DIRENT_HEADER <= end {
-                let (slot_ino, rec_len, name_len) =
-                    self.read_dirent_header(&block_buf, pos, end)?;
-                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
-                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
-                    if slot_name == name {
-                        match prev {
-                            Some(pp) => {
-                                let (_, prev_rec, _) =
-                                    self.read_dirent_header(&block_buf, pp, end)?;
-                                put_le16(&mut block_buf, pp + 4, u16_of(prev_rec + rec_len)?);
-                            }
-                            None => put_le32(&mut block_buf, pos, 0),
-                        }
-                        self.write_dir_block(seed, phys, &mut block_buf)?;
-                        return Ok(slot_ino);
-                    }
+            self.read_dir_block(checked, phys, &mut block[..bs])?;
+            let Some(found) = self.locate(&block[..scan], name)? else {
+                continue;
+            };
+            let found = if scan == end {
+                found
+            } else {
+                // Among index blocks, the one naming a child is a leaf:
+                // checked, and parsed, as one before it changes.
+                if let Some(seed) = seed {
+                    Self::check_leaf(seed, &block[..bs])?;
                 }
-                prev = Some(pos);
-                pos += rec_len;
-            }
+                self.locate(&block[..end], name)?
+                    .ok_or(DriverError::DeviceFault)?
+            };
+            self.unlink_record(&mut block[..bs], &found)?;
+            self.write_leaf(seed, phys, &mut block[..bs])?;
+            return Ok(found.ino);
         }
         Err(DriverError::NotFound)
     }
 
-    /// Whether directory inode `dir_ino` holds only `.` / `..`.
+    /// Whether directory `dir_ino` names no child.
     fn dir_is_empty(&mut self, dir_ino: u32) -> Result<bool, DriverError> {
-        let end = self.dir_data_end();
         let dir = self.read_inode(dir_ino)?;
-        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
-        for logical in 0..total_blocks {
+        let bs = self.layout.block_size as usize;
+        let mut block = self.block_scratch()?;
+        let kind = self.index_use(dir_ino, &dir, &mut block[..bs])?;
+        if let IndexUse::Indexed(ix) = &kind {
+            return self.indexed_is_empty(&dir, ix, &mut block[..bs]);
+        }
+        let (scan, checked) = (self.scan_end(&kind), self.scan_seed(dir_ino, &dir, &kind));
+        for logical in 0..dir.size.div_ceil(u64::from(self.layout.block_size)) {
             let Some(phys) = self.map_block(&dir, logical)? else {
                 continue;
             };
-            self.read_fs_block(phys, &mut block_buf)?;
+            self.read_dir_block(checked, phys, &mut block[..bs])?;
             let mut pos = 0usize;
-            while pos + DIRENT_HEADER <= end {
-                let (slot_ino, rec_len, name_len) =
-                    self.read_dirent_header(&block_buf, pos, end)?;
-                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
-                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
-                    if slot_name != b"." && slot_name != b".." {
-                        return Ok(false);
-                    }
+            while pos + DIRENT_HEADER <= scan {
+                let record = self.record_at(&block[..scan], pos)?;
+                if record.child_name(&block[..scan], pos).is_some() {
+                    return Ok(false);
                 }
-                pos += rec_len;
+                pos += record.rec_len;
             }
         }
         Ok(true)
@@ -2382,18 +2679,15 @@ impl<B: Block> Ext4<B> {
         if dir.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
-        let mut scratch = [0u8; 0];
-        match self.find_entry(&dir, DirQuery::ByName(name), &mut scratch)? {
-            Some(found) => Ok(found.ino),
-            None => Err(DriverError::NotFound),
-        }
+        self.find_name(dir_ino, &dir, name)?
+            .ok_or(DriverError::NotFound)
     }
 
     /// Add `delta` to inode `ino`'s `i_links_count`, saturating at the
     /// `u16` bounds. Used to maintain a directory's link count as child
     /// directories (each contributing a `..` back-link) move in and out.
     fn adjust_links(&mut self, ino: u32, delta: i16) -> Result<(), DriverError> {
-        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut raw = self.inode_scratch()?;
         self.read_inode_raw(ino, &mut raw)?;
         let links = le16(&raw, INODE_LINKS);
         let magnitude = delta.unsigned_abs();
@@ -2436,70 +2730,74 @@ impl<B: Block> Ext4<B> {
         self.free_inode(ino, is_dir)
     }
 
-    /// Repoint the directory entry named `name` in directory `dir_ino` at
-    /// `new_ino`, leaving its name and record length untouched. Used to
-    /// rewrite a moved directory's `..` link to its new parent.
-    fn set_dirent_inode(
+    /// Directory `dir_ino`'s block 0, read into `block` and checked as what it
+    /// is — an index root or a leaf — with where it lives and how the
+    /// directory is read.
+    fn first_block(
         &mut self,
         dir_ino: u32,
-        name: &[u8],
-        new_ino: u32,
-    ) -> Result<(), DriverError> {
-        let end = self.dir_data_end();
-        let seed = self.dir_block_seed(dir_ino)?;
-        let dir = self.read_inode(dir_ino)?;
-        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
-        for logical in 0..total_blocks {
-            let Some(phys) = self.map_block(&dir, logical)? else {
-                continue;
-            };
-            self.read_fs_block(phys, &mut block_buf)?;
-            let mut pos = 0usize;
-            while pos + DIRENT_HEADER <= end {
-                let (slot_ino, rec_len, name_len) =
-                    self.read_dirent_header(&block_buf, pos, end)?;
-                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
-                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
-                    if slot_name == name {
-                        put_le32(&mut block_buf, pos, new_ino);
-                        self.write_dir_block(seed, phys, &mut block_buf)?;
-                        return Ok(());
-                    }
-                }
-                pos += rec_len;
-            }
+        dir: &Inode,
+        block: &mut [u8],
+    ) -> Result<(u64, IndexUse), DriverError> {
+        let kind = self.index_use(dir_ino, dir, block)?;
+        let phys = self.map_block(dir, 0)?.ok_or(DriverError::DeviceFault)?;
+        if let IndexUse::Linear = kind {
+            self.read_dir_block(self.dir_seed(dir_ino, dir), phys, block)?;
         }
-        Err(DriverError::NotFound)
+        Ok((phys, kind))
     }
 
-    /// The parent inode of directory `dir_ino`, read straight from its
-    /// `..` entry. The directory reader does not surface `.`/`..`, so the
-    /// `..` back-link is read raw here rather than through `lookup_child`.
-    fn dir_parent_ino(&mut self, dir_ino: u32) -> Result<u32, DriverError> {
-        let end = self.dir_data_end();
-        let dir = self.read_inode(dir_ino)?;
-        let total_blocks = dir.size.div_ceil(u64::from(self.layout.block_size));
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
-        for logical in 0..total_blocks {
-            let Some(phys) = self.map_block(&dir, logical)? else {
-                continue;
-            };
-            self.read_fs_block(phys, &mut block_buf)?;
-            let mut pos = 0usize;
-            while pos + DIRENT_HEADER <= end {
-                let (slot_ino, rec_len, name_len) =
-                    self.read_dirent_header(&block_buf, pos, end)?;
-                if slot_ino != 0 && name_len > 0 && DIRENT_HEADER + name_len <= rec_len {
-                    let slot_name = &block_buf[pos + DIRENT_HEADER..pos + DIRENT_HEADER + name_len];
-                    if slot_name == b".." {
-                        return Ok(slot_ino);
-                    }
-                }
-                pos += rec_len;
+    /// Where the `..` record lies in a directory's block 0, `block`, and the
+    /// parent it names. The format puts `.` first and `..` second in every
+    /// directory, indexed or not.
+    fn dot_dot(&self, block: &[u8]) -> Result<(usize, u32), DriverError> {
+        let named = |at: usize, want: &[u8]| -> Result<Record, DriverError> {
+            let record = self.record_at(block, at)?;
+            let fits = record.ino != 0 && DIRENT_HEADER + record.name_len <= record.rec_len;
+            if fits
+                && block.get(at + DIRENT_HEADER..at + DIRENT_HEADER + record.name_len) == Some(want)
+            {
+                Ok(record)
+            } else {
+                Err(DriverError::DeviceFault)
             }
+        };
+        let at = named(0, b".")?.rec_len;
+        Ok((at, named(at, b"..")?.ino))
+    }
+
+    /// The parent of directory `dir_ino`, from its `..` record.
+    fn dir_parent_ino(&mut self, dir_ino: u32) -> Result<u32, DriverError> {
+        let dir = self.read_inode(dir_ino)?;
+        let bs = self.layout.block_size as usize;
+        let mut block = self.block_scratch()?;
+        self.first_block(dir_ino, &dir, &mut block[..bs])?;
+        Ok(self.dot_dot(&block[..bs])?.1)
+    }
+
+    /// Point directory `dir_ino`'s `..` record at `parent`, resealing block 0
+    /// as the root or leaf it is.
+    fn set_parent(&mut self, dir_ino: u32, parent: u32) -> Result<(), DriverError> {
+        let dir = self.read_inode(dir_ino)?;
+        let bs = self.layout.block_size as usize;
+        let mut block = self.block_scratch()?;
+        let (phys, kind) = self.first_block(dir_ino, &dir, &mut block[..bs])?;
+        let (at, _) = self.dot_dot(&block[..bs])?;
+        put_le32(&mut block, at, parent);
+        match kind {
+            IndexUse::Linear => {
+                self.write_leaf(self.dir_seed(dir_ino, &dir), phys, &mut block[..bs])
+            }
+            IndexUse::Indexed(ix) => self.rewrite_root(&ix, &mut block[..bs]),
+            IndexUse::Unusable(err) => Err(err),
         }
-        Err(DriverError::DeviceFault)
+    }
+
+    /// Refuse, before anything changes, moving directory `dir_ino` to another
+    /// parent when its `..` record could not then be rewritten.
+    fn check_reparentable(&mut self, dir_ino: u32) -> Result<(), DriverError> {
+        let dir = self.read_inode(dir_ino)?;
+        self.check_insertable(dir_ino, &dir)
     }
 
     /// Whether directory `candidate` is `ancestor` itself or lives anywhere
@@ -2540,23 +2838,32 @@ impl<B: Block> Ext4<B> {
         validate_name(dst_name)?;
         let src_dir_ino = node_inode(src_dir)?;
         let dst_dir_ino = node_inode(dst_dir)?;
+        let dst_dir_inode = self.read_inode(dst_dir_ino)?;
         if self.read_inode(src_dir_ino)?.kind() != Some(NodeKind::Directory)
-            || self.read_inode(dst_dir_ino)?.kind() != Some(NodeKind::Directory)
+            || dst_dir_inode.kind() != Some(NodeKind::Directory)
         {
             return Err(DriverError::Unsupported);
         }
+        // Before the destination's old entry is dropped, so a refusal loses
+        // nothing.
+        self.check_insertable(dst_dir_ino, &dst_dir_inode)?;
 
         if src_dir_ino == dst_dir_ino && src_name == dst_name {
             return Ok(());
         }
 
         let src_ino = self.lookup_child(src_dir_ino, src_name)?;
-        let mut src_raw = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut src_raw = self.inode_scratch()?;
         self.read_inode_raw(src_ino, &mut src_raw)?;
-        let moving_dir = le16(&src_raw, 0) & S_IFMT == S_IFDIR;
+        let src_mode = le16(&src_raw, 0);
+        let moving_dir = src_mode & S_IFMT == S_IFDIR;
+        let reparenting = moving_dir && src_dir_ino != dst_dir_ino;
 
         if moving_dir && self.is_subdir_of(dst_dir_ino, src_ino)? {
             return Err(DriverError::DirectoryCycle);
+        }
+        if reparenting {
+            self.check_reparentable(src_ino)?;
         }
 
         let dst_existing = match self.lookup_child(dst_dir_ino, dst_name) {
@@ -2568,7 +2875,7 @@ impl<B: Block> Ext4<B> {
             if dst_ino == src_ino {
                 return Ok(());
             }
-            let mut dst_raw = [0u8; MAX_BLOCK_SIZE as usize];
+            let mut dst_raw = self.inode_scratch()?;
             self.read_inode_raw(dst_ino, &mut dst_raw)?;
             let dst_is_dir = le16(&dst_raw, 0) & S_IFMT == S_IFDIR;
             if dst_is_dir != moving_dir {
@@ -2577,19 +2884,27 @@ impl<B: Block> Ext4<B> {
             if dst_is_dir && !self.dir_is_empty(dst_ino)? {
                 return Err(DriverError::DirectoryNotEmpty);
             }
-            self.drop_one_name(dst_ino, &mut dst_raw, dst_is_dir)?;
+            // The name goes before the inode it names, so nothing is ever
+            // left naming a freed inode a later create could reuse.
             self.remove_dirent(dst_dir_ino, dst_name)?;
+            self.drop_one_name(dst_ino, &mut dst_raw, dst_is_dir)?;
             if dst_is_dir {
                 self.adjust_links(dst_dir_ino, -1)?;
             }
         }
 
-        let file_type = if moving_dir { FT_DIR } else { FT_REG };
-        self.insert_dirent(dst_dir_ino, dst_name, src_ino, file_type)?;
+        self.insert_child(
+            dst_dir_ino,
+            Child {
+                name: dst_name,
+                ino: src_ino,
+                file_type: dirent_file_type(src_mode),
+            },
+        )?;
         self.remove_dirent(src_dir_ino, src_name)?;
 
-        if moving_dir && src_dir_ino != dst_dir_ino {
-            self.set_dirent_inode(src_ino, b"..", dst_dir_ino)?;
+        if reparenting {
+            self.set_parent(src_ino, dst_dir_ino)?;
             self.adjust_links(src_dir_ino, -1)?;
             self.adjust_links(dst_dir_ino, 1)?;
         }
@@ -2678,11 +2993,10 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         if inode.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
-        let mut scratch = [0u8; 0];
-        match self.find_entry(&inode, DirQuery::ByName(name), &mut scratch)? {
-            Some(found) => Ok(NodeId::from_raw(u64::from(found.ino))),
-            None => Err(DriverError::NotFound),
-        }
+        let ino = self
+            .find_name(ino, &inode, name)?
+            .ok_or(DriverError::NotFound)?;
+        Ok(NodeId::from_raw(u64::from(ino)))
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
@@ -2738,26 +3052,23 @@ impl<B: Block> FilesystemRead for Ext4<B> {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
         let ino = node_inode(dir)?;
         let inode = self.read_inode(ino)?;
         if inode.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
-        let Some(found) = self.find_entry(&inode, DirQuery::ByCursor(cursor), name_out)? else {
-            return Ok(None);
-        };
-        // The child inode is read once here and its metadata returned with
-        // the entry, so a listing consumer never re-resolves the child by
-        // path to learn its kind or sizes.
-        let child = self.read_inode(found.ino)?;
-        Ok(Some(DirEntry {
-            node: NodeId::from_raw(u64::from(found.ino)),
-            info: self.inode_info(&child)?,
-            name_len: found.name_len,
-            next_cursor: found.next_cursor,
-        }))
+        let bs = self.layout.block_size as usize;
+        let mut index = self.block_scratch()?;
+        match self.index_use(ino, &inode, &mut index[..bs])? {
+            IndexUse::Indexed(ix) => self.list_indexed(&inode, &ix, after, &mut index[..bs], visit),
+            kind => {
+                let seed = self.scan_seed(ino, &inode, &kind);
+                self.list_from(&inode, seed, cursor, visit)
+            }
+        }
     }
 }
 
@@ -2906,7 +3217,7 @@ impl<B: Block> Ext4<B> {
     /// the classic map and the inline depth-0 extent root; anything else
     /// is refused (`Unsupported`).
     fn truncate_blocks(&mut self, ino: u32, raw: &mut [u8], keep: u64) -> Result<u64, DriverError> {
-        if le32(raw, 0x20) & INODE_FLAG_EXTENTS != 0 {
+        if le32(raw, INODE_FLAGS) & INODE_FLAG_EXTENTS != 0 {
             self.truncate_extent_blocks(ino, raw, keep)
         } else {
             self.truncate_classic_blocks(raw, keep)
@@ -3019,7 +3330,7 @@ impl<B: Block> Ext4<B> {
         }
         let mut freed = 0u64;
         let mut kept = 0usize;
-        let mut leaf_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut leaf_buf = self.block_scratch()?;
         for i in 0..entries {
             let off = ib + 12 + i * 12;
             let ei_block = u64::from(le32(raw, off));
@@ -3075,7 +3386,7 @@ impl<B: Block> Ext4<B> {
         }
         let ind = le32(raw, ib + 48);
         if ind != 0 {
-            let mut ind_buf = [0u8; MAX_BLOCK_SIZE as usize];
+            let mut ind_buf = self.block_scratch()?;
             self.read_fs_block(u64::from(ind), &mut ind_buf)?;
             let ppb = usize_of(self.pointers_per_block())?;
             let mut remaining = false;
@@ -3111,16 +3422,52 @@ impl<B: Block> Ext4<B> {
 
     /// Read a regular-file inode's raw record for mutation, rejecting a
     /// directory (`Unsupported`).
-    fn open_regular_for_write(
-        &mut self,
-        ino: u32,
-    ) -> Result<[u8; MAX_BLOCK_SIZE as usize], DriverError> {
-        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+    fn open_regular_for_write(&mut self, ino: u32) -> Result<Vec<u8>, DriverError> {
+        let mut raw = self.inode_scratch()?;
         self.read_inode_raw(ino, &mut raw)?;
         if le16(&raw, 0) & S_IFMT != S_IFREG {
             return Err(DriverError::Unsupported);
         }
         Ok(raw)
+    }
+}
+
+impl<B: Block> Ext4<B> {
+    /// Lay down new inode `ino` of `mode` in `raw` and write it: a directory
+    /// gets its first block, holding `.` and `..` (naming `parent`), recorded
+    /// in `raw` before it is written so a failure can give it back.
+    fn lay_new_inode(
+        &mut self,
+        parent: u32,
+        ino: u32,
+        mode: u16,
+        raw: &mut [u8],
+    ) -> Result<(), DriverError> {
+        let is_dir = mode & S_IFMT == S_IFDIR;
+        put_le16(raw, 0, mode);
+        put_le16(raw, INODE_LINKS, if is_dir { 2 } else { 1 });
+        // Match the mke2fs default so the inode checksum's high half is
+        // covered on an enlarged-inode volume.
+        if self.layout.inode_size > 128 {
+            put_le16(raw, I_EXTRA_ISIZE_OFFSET, NEW_EXTRA_ISIZE);
+        }
+        if is_dir {
+            let bs = self.layout.block_size as usize;
+            let block = self.alloc_block()?;
+            put_le32(raw, I_BLOCK_OFFSET, u32_of(block)?);
+            let end = self.dir_data_end();
+            let mut first = self.block_scratch()?;
+            self.write_dirent(&mut first, 0, ino, 12, b".", FT_DIR)?;
+            self.write_dirent(&mut first, 12, parent, u16_of(end - 12)?, b"..", FT_DIR)?;
+            let seed = self
+                .layout
+                .metadata_csum
+                .then(|| self.inode_csum_seed(ino, le32(raw, INODE_GENERATION)));
+            self.write_leaf(seed, block, &mut first[..bs])?;
+            put_le32(raw, 0x04, self.layout.block_size);
+            put_le32(raw, 0x1C, self.sectors_per_block());
+        }
+        self.write_inode_raw(ino, raw)
     }
 }
 
@@ -3139,63 +3486,38 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         if dir_inode.kind() != Some(NodeKind::Directory) {
             return Err(DriverError::Unsupported);
         }
-        let mut scratch = [0u8; 0];
-        if self
-            .find_entry(&dir_inode, DirQuery::ByName(name), &mut scratch)?
-            .is_some()
-        {
+        self.check_insertable(dir_ino, &dir_inode)?;
+        if self.find_name(dir_ino, &dir_inode, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
 
         let is_dir = kind == NodeKind::Directory;
+        let mode = if is_dir { NEW_DIR_MODE } else { NEW_FILE_MODE };
         let new_ino = self.alloc_inode(is_dir)?;
-        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
-        let bs = self.layout.block_size as usize;
-        if is_dir {
-            put_le16(&mut raw, 0, NEW_DIR_MODE);
-            put_le16(&mut raw, 0x1A, 2);
-            let blk = match self.alloc_block() {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = self.free_inode(new_ino, true);
-                    return Err(e);
+        let mut raw = self.inode_scratch()?;
+        if let Err(err) = self.lay_new_inode(dir_ino, new_ino, mode, &mut raw) {
+            // Nothing names the inode yet, so it and any block it took go
+            // back.
+            if is_dir {
+                let block = le32(&raw, I_BLOCK_OFFSET);
+                if block != 0 {
+                    let _ = self.free_block(u64::from(block));
                 }
-            };
-            let end = self.dir_data_end();
-            let mut dir_block = [0u8; MAX_BLOCK_SIZE as usize];
-            self.write_dirent(&mut dir_block, 0, new_ino, 12, b".", FT_DIR)?;
-            self.write_dirent(
-                &mut dir_block,
-                12,
-                dir_ino,
-                u16_of(end - 12)?,
-                b"..",
-                FT_DIR,
-            )?;
-            let seed = self.inode_csum_seed(new_ino, 0);
-            self.write_dir_block(seed, blk, &mut dir_block)?;
-            put_le32(&mut raw, I_BLOCK_OFFSET, u32_of(blk)?);
-            put_le32(&mut raw, 0x04, u32_of(bs as u64)?);
-            put_le32(&mut raw, 0x1C, self.sectors_per_block());
-        } else {
-            put_le16(&mut raw, 0, NEW_FILE_MODE);
-            put_le16(&mut raw, 0x1A, 1);
+            }
+            let _ = self.free_inode(new_ino, is_dir);
+            return Err(err);
         }
-        // Match the mke2fs default so the inode checksum's high half is
-        // covered on an enlarged-inode volume.
-        if self.layout.inode_size > 128 {
-            put_le16(&mut raw, I_EXTRA_ISIZE_OFFSET, NEW_EXTRA_ISIZE);
+        let child = Child {
+            name,
+            ino: new_ino,
+            file_type: dirent_file_type(mode),
+        };
+        if let Err(err) = self.insert_child(dir_ino, child) {
+            let _ = self.drop_one_name(new_ino, &mut raw, is_dir);
+            return Err(err);
         }
-        self.write_inode_raw(new_ino, &mut raw)?;
-
-        let file_type = if is_dir { FT_DIR } else { FT_REG };
-        self.insert_dirent(dir_ino, name, new_ino, file_type)?;
         if is_dir {
-            let mut draw = [0u8; MAX_BLOCK_SIZE as usize];
-            self.read_inode_raw(dir_ino, &mut draw)?;
-            let links = le16(&draw, 0x1A);
-            put_le16(&mut draw, 0x1A, links + 1);
-            self.write_inode_raw(dir_ino, &mut draw)?;
+            self.adjust_links(dir_ino, 1)?;
         }
         Ok(NodeId::from_raw(u64::from(new_ino)))
     }
@@ -3218,7 +3540,7 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         let size = (u64::from(le32(&raw, 0x6C)) << 32) | u64::from(le32(&raw, 0x04));
         let mut allocated = 0u64;
         let mut written = 0usize;
-        let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut block_buf = self.block_scratch()?;
         while written < data.len() {
             let cursor = offset + written as u64;
             let logical = cursor / bs;
@@ -3270,7 +3592,7 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         if size < cur && within != 0 {
             let inode = self.read_inode(child)?;
             if let Some(phys) = self.map_block(&inode, size / bs)? {
-                let mut block_buf = [0u8; MAX_BLOCK_SIZE as usize];
+                let mut block_buf = self.block_scratch()?;
                 self.read_fs_block(phys, &mut block_buf)?;
                 for b in &mut block_buf[within..self.layout.block_size as usize] {
                     *b = 0;
@@ -3289,21 +3611,19 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
             return Err(DriverError::Unsupported);
         }
         let child = self.lookup_child(dir_ino, name)?;
-        let mut raw = [0u8; MAX_BLOCK_SIZE as usize];
+        let mut raw = self.inode_scratch()?;
         self.read_inode_raw(child, &mut raw)?;
         let mode = le16(&raw, 0);
         let is_dir = mode & S_IFMT == S_IFDIR;
         if is_dir && !self.dir_is_empty(child)? {
             return Err(DriverError::DirectoryNotEmpty);
         }
-        self.drop_one_name(child, &mut raw, is_dir)?;
+        // The name goes before the inode it names, so nothing is ever left
+        // naming a freed inode a later create could reuse.
         self.remove_dirent(dir_ino, name)?;
+        self.drop_one_name(child, &mut raw, is_dir)?;
         if is_dir {
-            let mut draw = [0u8; MAX_BLOCK_SIZE as usize];
-            self.read_inode_raw(dir_ino, &mut draw)?;
-            let links = le16(&draw, 0x1A);
-            put_le16(&mut draw, 0x1A, links.saturating_sub(1));
-            self.write_inode_raw(dir_ino, &mut draw)?;
+            self.adjust_links(dir_ino, -1)?;
         }
         Ok(())
     }
@@ -3333,6 +3653,10 @@ fn node_inode(node: NodeId) -> Result<u32, DriverError> {
 }
 
 mod format;
+mod htree;
+mod indexed;
+
+use indexed::IndexUse;
 
 #[cfg(test)]
 mod tests;

@@ -10,7 +10,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{Channel, Sampler};
-use crate::{decode, probe, DecodeError, DecodeLimits, ImageFormat, Sequence, SequenceKind};
+use crate::{
+    decode, decode_fitted, probe, DecodeError, DecodeLimits, FitBox, ImageFormat, Sequence,
+    SequenceKind,
+};
 
 /// The DIB header versions, by their declared length.
 const CORE: u32 = 12;
@@ -1033,5 +1036,80 @@ fn what_a_bmp_holds_beside_its_picture_is_said_when_it_opens() {
         native(&file(&Header::new(INFO, 1, 1, 16), &[], &high))
             .1
             .extras
+    );
+}
+
+/// What `bmp` decodes to, reduced to `size` by the shared resampler: what a
+/// fitted decode must produce byte for byte.
+fn reduced(bmp: &[u8], size: (u32, u32)) -> Vec<u8> {
+    let whole = decode(bmp, &limits()).expect("decodes");
+    let source = tairix_raster::Rgba8Image::new(whole.width(), whole.height(), whole.pixels())
+        .expect("image");
+    tairix_raster::resample(&source, source.whole(), size.0, size.1).expect("resamples")
+}
+
+/// A fitted decode streams rows in the order the file stores them — bottom up
+/// or top down, uncompressed or run-length — into exactly the whole decode,
+/// reduced.
+#[test]
+fn a_fitted_decode_is_the_whole_decode_reduced_in_either_row_order() {
+    let words: Vec<u32> = (0..35u32).map(|at| at * 0x0003_0507).collect();
+    let rows: Vec<&[u32]> = words.chunks(7).collect();
+    for top_down in [false, true] {
+        let height = if top_down { -5 } else { 5 };
+        let bmp = file(
+            &Header::new(INFO, 7, height, 24),
+            &[],
+            &packed_pixels(3, top_down, &rows),
+        );
+        let fitted = decode_fitted(&bmp, &limits(), FitBox::new(3, 3)).expect("decodes");
+        assert_eq!((fitted.width(), fitted.height()), (5, 3));
+        assert_eq!(
+            fitted.pixels(),
+            reduced(&bmp, (5, 3)).as_slice(),
+            "top down {top_down}"
+        );
+    }
+
+    let indexed: [&[u8]; 4] = [
+        &[0, 1, 2, 3, 0],
+        &[1, 2, 3, 0, 1],
+        &[2, 3, 0, 1, 2],
+        &[3, 0, 1, 2, 3],
+    ];
+    let bmp = file(
+        &Header::new(INFO, 5, -4, 8),
+        &quads(256),
+        &indexed_pixels(8, true, &indexed),
+    );
+    let fitted = decode_fitted(&bmp, &limits(), FitBox::new(2, 2)).expect("decodes");
+    assert_eq!(fitted.pixels(), reduced(&bmp, (3, 2)).as_slice());
+
+    // Runs covering the bottom row and part of the next, the last row left
+    // to the end of the bitmap.
+    let runs = [2, 1, 3, 2, 0, 0, 1, 3, 0, 1];
+    let rle = file(
+        &Header::new(INFO, 5, 3, 8).compressed(BI_RLE8),
+        &quads(256),
+        &runs,
+    );
+    let fitted = decode_fitted(&rle, &limits(), FitBox::new(2, 2)).expect("decodes");
+    assert_eq!(fitted.pixels(), reduced(&rle, (4, 2)).as_slice());
+}
+
+/// A fitted decode admits only the pictures a decode admits.
+#[test]
+fn a_fitted_decode_refuses_a_picture_past_the_limits() {
+    let tight = DecodeLimits::new(4, 4, 16, 0);
+    let words = [0u32; 8 * 8];
+    let rows: Vec<&[u32]> = words.chunks(8).collect();
+    let bmp = file(
+        &Header::new(INFO, 8, 8, 24),
+        &[],
+        &packed_pixels(3, false, &rows),
+    );
+    assert_eq!(
+        decode_fitted(&bmp, &tight, FitBox::new(2, 2)),
+        Err(DecodeError::WidthExceedsLimit)
     );
 }

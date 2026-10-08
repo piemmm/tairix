@@ -71,22 +71,12 @@ mod rt_source {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntry, FileKind, FS_IO_MAX};
+    use tairix_abi::fs::{DirEntries, FileKind};
     use tairix_abi::{BundleEntry, Errno};
     use tairix_cmdres::{bundle_candidates, CommandEnv};
 
     use crate::doc::MAX_DOC_LEN;
     use crate::locale::{HelpSource, SourceError};
-
-    /// Initial byte size of the locale-directory listing buffer: one page
-    /// covers a bundle's handful of locale directories; `BufferTooSmall`
-    /// grows it (below).
-    const DIR_BUF_INITIAL: usize = 4096;
-
-    /// Ceiling for the directory-listing buffer: the kernel's own per-call
-    /// staging cap ([`FS_IO_MAX`]), so the buffer grows exactly as far as
-    /// one `fs_readdir` transfer can ever fill and no further.
-    const DIR_BUF_MAX: usize = FS_IO_MAX;
 
     /// A program's own bundle `Help/` tree, scoped to one command word at
     /// construction.
@@ -115,25 +105,6 @@ mod rt_source {
                 .map(|bundle| format!("{bundle}/{}", BundleEntry::Help.as_str()))
                 .collect()
         }
-
-        /// Read a directory's raw entry stream, growing the buffer up to
-        /// the kernel's per-call cap.
-        fn read_dir_bytes(dir: &tairix_rt::Dir) -> Result<Vec<u8>, SourceError> {
-            let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-            let used = loop {
-                match dir.read(&mut buf) {
-                    Ok(used) => break used,
-                    Err(ret) => match Errno::from_syscall(ret) {
-                        Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                            buf.resize((buf.len() * 2).min(DIR_BUF_MAX), 0);
-                        }
-                        _ => return Err(SourceError),
-                    },
-                }
-            };
-            buf.truncate(used);
-            Ok(buf)
-        }
     }
 
     impl HelpSource for BundleHelp {
@@ -148,12 +119,10 @@ mod rt_source {
             else {
                 return Ok(Vec::new());
             };
-            let bytes = Self::read_dir_bytes(&dir)?;
+            let bytes = dir.read_all().map_err(|_| SourceError)?;
             let mut dirs = Vec::new();
-            let mut rest = bytes.as_slice();
-            while !rest.is_empty() {
-                let (entry, consumed) = DirEntry::decode(rest).map_err(|_| SourceError)?;
-                rest = &rest[consumed..];
+            for entry in DirEntries::new(&bytes) {
+                let entry = entry.map_err(|_| SourceError)?;
                 if entry.kind != FileKind::Directory {
                     continue;
                 }

@@ -16,8 +16,9 @@
 
 use alloc::string::String;
 
-use tairix_abi::fs::FileKind;
+use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
+use tairix_icon::FolderSample;
 
 /// What a listed symbolic link's target resolves to.
 ///
@@ -226,15 +227,13 @@ pub fn is_bundle_name(name: &str) -> bool {
             .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
 }
 
-/// Whether a listed directory holds anything, as far as the browser knows.
+/// Whether a listed directory holds anything, and what, as far as the
+/// browser knows.
 ///
-/// No VFS surface reports a child count — a directory's `size` is `0` and
-/// there is no link count — so occupancy is only knowable by *reading* the
-/// directory. That read is a syscall the browser must not make for every
-/// listed child, so the state is four-valued and honest rather than a `bool`
-/// that would have to guess: a child starts [`Unprobed`](Self::Unprobed), and
-/// a probe that is refused or fails records
-/// [`Indeterminate`](Self::Indeterminate) so the refusal is never retried.
+/// No VFS surface reports a child count, so occupancy is only knowable by
+/// reading the directory: a child starts [`Unprobed`](Self::Unprobed), a
+/// probe reads one batch of its entries, and a probe that is refused or fails
+/// records [`Indeterminate`](Self::Indeterminate) so it is never asked again.
 ///
 /// Only a plain directory has a meaningful occupancy: a bundle is a sealed
 /// unit that draws its own icon and a file has no children, so neither is
@@ -246,11 +245,24 @@ pub enum Occupancy {
     Unprobed,
     /// The directory was read and has no children.
     Empty,
-    /// The directory was read and has at least one child.
-    NonEmpty,
+    /// The directory was read and has at least one child; what its first
+    /// batch of entries shows of it is what its picture draws.
+    NonEmpty(FolderSample),
     /// The probe was refused or failed; the answer is unknown and the entry
     /// is not probed again.
     Indeterminate,
+}
+
+impl Occupancy {
+    /// What a folder's picture shows of this answer: the sample it draws its
+    /// contents from, or `None` for the plain folder every other answer draws.
+    #[must_use]
+    pub(crate) const fn pictured(self) -> Option<FolderSample> {
+        match self {
+            Self::NonEmpty(sample) => Some(sample),
+            Self::Unprobed | Self::Empty | Self::Indeterminate => None,
+        }
+    }
 }
 
 /// One child of the directory currently shown.
@@ -261,6 +273,7 @@ pub struct Entry {
     target: Option<String>,
     size: u64,
     modified: Time64,
+    id: FileId,
     occupancy: Occupancy,
     /// The occupancy shown is from before a change to this folder: it stays
     /// drawn, so the icon does not blink, until a fresh probe replaces it.
@@ -277,9 +290,18 @@ impl Entry {
             target: None,
             size,
             modified,
+            id: FileId::NONE,
             occupancy: Occupancy::Unprobed,
             stale: false,
         }
+    }
+
+    /// This entry, naming the file it lists: what a thumbnail checks an open
+    /// against, so a name replaced since the listing is never drawn as it.
+    #[must_use]
+    pub const fn with_id(mut self, id: FileId) -> Self {
+        self.id = id;
+        self
     }
 
     /// This entry with the target a symbolic link stores attached.
@@ -348,6 +370,13 @@ impl Entry {
         self.modified
     }
 
+    /// The file the entry lists, or [`FileId::NONE`] when the listing named
+    /// none.
+    #[must_use]
+    pub const fn id(&self) -> FileId {
+        self.id
+    }
+
     /// `true` if the entry is a directory the browser can descend into (never
     /// true for a [`Bundle`](EntryKind::Bundle)).
     #[must_use]
@@ -395,6 +424,7 @@ impl Entry {
             && self.target == other.target
             && self.size == other.size
             && self.modified == other.modified
+            && self.id == other.id
     }
 
     /// Carry `previous`'s occupancy over to this, its replacement after a

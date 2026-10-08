@@ -1022,6 +1022,30 @@ impl Plane {
         }
     }
 
+    /// Make row `last` the bordering row above, so the next macroblock row
+    /// predicts from it as it was reconstructed.
+    fn carry(&mut self, last: usize) {
+        let from = (last + 1) * self.stride;
+        if from + self.stride <= self.samples.len() {
+            self.samples.copy_within(from..from + self.stride, 0);
+        }
+    }
+
+    /// The samples of rows `rows`, border column and spare columns included.
+    fn rows(&self, rows: core::ops::Range<usize>) -> &[u8] {
+        self.samples
+            .get((rows.start + 1) * self.stride..(rows.end + 1) * self.stride)
+            .unwrap_or(&[])
+    }
+
+    /// The samples of rows `rows`, writable.
+    fn rows_mut(&mut self, rows: core::ops::Range<usize>) -> &mut [u8] {
+        let stride = self.stride;
+        self.samples
+            .get_mut((rows.start + 1) * stride..(rows.end + 1) * stride)
+            .unwrap_or(&mut [])
+    }
+
     /// Copy the rightmost sample of row `y` into the spare columns, so the
     /// rightmost macroblock of the row below predicts from it.
     fn extend_row(&mut self, y: isize) {
@@ -1086,35 +1110,75 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 }
 
 /// An upper bound of the bytes decoding a `width`×`height` keyframe holds at
-/// once: its partitions, its three planes and per-macroblock state, and the
-/// RGBA picture it is converted into while they are still held.
+/// once: what reconstructing it holds, and the RGBA picture it is converted
+/// into while that is still held.
 pub(crate) fn peak_bytes(width: u32, height: u32) -> u64 {
+    frame_peak_bytes(width).saturating_add(u64::from(width) * u64::from(height) * RGBA_BYTES as u64)
+}
+
+/// An upper bound of the bytes decoding a keyframe `width` wide holds,
+/// whatever its height: its partitions, the macroblock row it reconstructs
+/// and the rows its loop filter and colours still need, per-macroblock state
+/// for one row, and the colour row it hands over.
+pub(crate) fn frame_peak_bytes(width: u32) -> u64 {
     use core::mem::size_of;
     let columns = usize::try_from(width.div_ceil(16)).unwrap_or(usize::MAX);
-    let rows = usize::try_from(height.div_ceil(16)).unwrap_or(usize::MAX);
-    let plane = |width: Option<usize>, height: Option<usize>| {
+    let plane = |width: Option<usize>, rows: usize| {
         width
-            .zip(height)
-            .and_then(|(width, height)| Plane::len(width, height))
+            .and_then(|width| Plane::len(width, rows))
             .map_or(u64::MAX, |len| len as u64)
     };
+    let (luma, chroma) = (columns.checked_mul(16), columns.checked_mul(8));
     let planes = [
-        plane(columns.checked_mul(16), rows.checked_mul(16)),
-        plane(columns.checked_mul(8), rows.checked_mul(8)),
-        plane(columns.checked_mul(8), rows.checked_mul(8)),
+        plane(luma, 16),
+        plane(chroma, 8),
+        plane(chroma, 8),
+        plane(luma, LUMA_HELD + 16),
+        plane(chroma, CHROMA_HELD + 8),
+        plane(chroma, CHROMA_HELD + 8),
     ];
-    let blocks = columns as u64 * rows as u64;
+    let per_column =
+        size_of::<Macroblock>() + size_of::<bool>() + size_of::<Nonzero>() + 4 * size_of::<usize>();
     let state = [
-        blocks.saturating_mul((size_of::<Macroblock>() + size_of::<bool>()) as u64),
-        columns as u64 * (size_of::<Nonzero>() + 4 * size_of::<usize>()) as u64,
+        (columns as u64).saturating_mul(per_column as u64),
         (MAX_PARTITIONS * size_of::<Bool<'static>>()) as u64,
-        u64::from(width) * u64::from(height) * RGBA_BYTES as u64,
+        u64::from(width) * RGBA_BYTES as u64,
     ];
     planes.into_iter().chain(state).fold(0, u64::saturating_add)
 }
 
 /// Decode a `VP8 ` keyframe into opaque straight-alpha RGBA8.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+    let (width, height) = dimensions(bytes)?;
+    limits.check(width, height)?;
+    let len = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|count| count.checked_mul(RGBA_BYTES as u64))
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let mut rgba = Vec::new();
+    if !fallible::reserve(&mut rgba, len) {
+        return Err(DecodeError::OutOfMemory);
+    }
+    decode_rows(bytes, limits, |row| {
+        rgba.extend_from_slice(row);
+        Ok(())
+    })?;
+    Ok(RasterImage::from_parts(width, height, rgba))
+}
+
+/// Decode a `VP8 ` keyframe, handing its opaque RGBA8 rows to `row` top
+/// first.
+///
+/// A macroblock row is reconstructed against the unfiltered bottom row of the
+/// one above — what the format predicts from — and filtered once it is whole,
+/// one row behind, so neither the picture nor a whole plane is ever held: only
+/// the row being built and the rows the filter and the colours still need.
+pub(crate) fn decode_rows(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    mut row: impl FnMut(&[u8]) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
     let (width, height) = dimensions(bytes)?;
     limits.check(width, height)?;
     let size = first_partition(bytes)?;
@@ -1124,18 +1188,16 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     let head = rest.get(..size).ok_or(DecodeError::WebpLossyTruncated)?;
     let mut reader = Bool::new(head);
     let header = read_header(&mut reader, width, height)?;
-    let tokens = split_partitions(
+    let mut tokens = split_partitions(
         rest.get(size..).ok_or(DecodeError::WebpLossyTruncated)?,
         header.partitions,
     )?;
-    let mut tokens = tokens;
     let mut frame = Frame::new(&header)?;
-    frame.decode(&header, &mut reader, &mut tokens)?;
+    frame.decode(&header, &mut reader, &mut tokens, &mut row)?;
     if reader.exhausted() {
         return Err(DecodeError::WebpLossyTruncated);
     }
-    frame.filter(&header);
-    frame.to_rgba(width, height)
+    Ok(())
 }
 
 /// Read the compressed frame header.
@@ -1221,18 +1283,32 @@ fn split_partitions(bytes: &[u8], count: usize) -> Result<Vec<Bool<'_>>, DecodeE
     Ok(partitions)
 }
 
+/// Luma rows the filter window keeps above the macroblock row it filters:
+/// the four the row's top edge reads, widened to the six whose colours still
+/// wait on chroma, which settles three of its rows behind and covers two of
+/// luma's each.
+const LUMA_HELD: usize = 6;
+
+/// Chroma rows the filter window keeps above the macroblock row it filters:
+/// the four the row's top edge reads.
+const CHROMA_HELD: usize = 4;
+
 /// The planes a frame reconstructs into, and the contexts its walk carries.
 struct Frame {
+    /// The macroblock row being reconstructed, unfiltered. Its bordering row
+    /// is the unfiltered bottom row of the row above, which is what the
+    /// format predicts from.
     luma: Plane,
     blue_chroma: Plane,
     red_chroma: Plane,
+    window: Window,
     columns: usize,
     rows: usize,
-    /// Per-macroblock coding decisions, kept because the loop filter runs
-    /// once the whole frame is reconstructed.
+    /// The current row's coding decisions, which its loop filter reads once
+    /// the row is whole.
     blocks: Vec<Macroblock>,
-    /// Whether each macroblock coded any non-zero coefficient, which decides
-    /// whether its interior edges are filtered.
+    /// Whether each of the current row's macroblocks coded any non-zero
+    /// coefficient, which decides whether its interior edges are filtered.
     coded: Vec<bool>,
     above: Vec<Nonzero>,
     left: Nonzero,
@@ -1242,25 +1318,39 @@ struct Frame {
     left_modes: [usize; 4],
 }
 
+/// The rows the loop filter and the colour conversion still need: the
+/// filtered tail of the macroblock row above, then the row being filtered.
+struct Window {
+    luma: Plane,
+    blue_chroma: Plane,
+    red_chroma: Plane,
+}
+
 impl Frame {
     fn new(header: &Header) -> Result<Self, DecodeError> {
         let columns = usize::try_from(header.width.div_ceil(16)).unwrap_or(0);
         let rows = usize::try_from(header.height.div_ceil(16)).unwrap_or(0);
-        let count = columns
-            .checked_mul(rows)
+        let luma = columns
+            .checked_mul(16)
             .ok_or(DecodeError::DimensionsOverflow)?;
+        let chroma = luma / 2;
         let mut blocks = Vec::new();
-        if !fallible::reserve(&mut blocks, count) {
+        if !fallible::reserve(&mut blocks, columns) {
             return Err(DecodeError::OutOfMemory);
         }
         Ok(Self {
-            luma: Plane::new(columns * 16, rows * 16)?,
-            blue_chroma: Plane::new(columns * 8, rows * 8)?,
-            red_chroma: Plane::new(columns * 8, rows * 8)?,
+            luma: Plane::new(luma, 16)?,
+            blue_chroma: Plane::new(chroma, 8)?,
+            red_chroma: Plane::new(chroma, 8)?,
+            window: Window {
+                luma: Plane::new(luma, LUMA_HELD + 16)?,
+                blue_chroma: Plane::new(chroma, CHROMA_HELD + 8)?,
+                red_chroma: Plane::new(chroma, CHROMA_HELD + 8)?,
+            },
             columns,
             rows,
             blocks,
-            coded: fallible::filled(count, false).ok_or(DecodeError::OutOfMemory)?,
+            coded: fallible::filled(columns, false).ok_or(DecodeError::OutOfMemory)?,
             above: fallible::filled(columns, Nonzero::default()).ok_or(DecodeError::OutOfMemory)?,
             left: Nonzero::default(),
             above_modes: fallible::filled(columns * 4, B_DC_PRED)
@@ -1269,12 +1359,15 @@ impl Frame {
         })
     }
 
-    /// Read every macroblock's modes and residuals and reconstruct it.
+    /// Read every macroblock's modes and residuals, reconstruct and filter it
+    /// a row at a time, and hand each picture row to `out` once it is
+    /// settled.
     fn decode(
         &mut self,
         header: &Header,
         modes: &mut Bool<'_>,
         tokens: &mut [Bool<'_>],
+        out: &mut impl FnMut(&[u8]) -> Result<(), DecodeError>,
     ) -> Result<(), DecodeError> {
         let mut factors = [Dequant::default(); SEGMENTS];
         for (segment, factor) in factors.iter_mut().enumerate() {
@@ -1282,9 +1375,14 @@ impl Frame {
                 .quant
                 .factors(header.segmentation.quant_index(header.quant.index, segment));
         }
+        let height = usize::try_from(header.height).unwrap_or(0);
+        let width = usize::try_from(header.width).unwrap_or(0);
+        let mut line = fallible::filled(width * RGBA_BYTES, 0u8).ok_or(DecodeError::OutOfMemory)?;
+        let mut handed = 0;
         for row in 0..self.rows {
             self.left = Nonzero::default();
             self.left_modes = [B_DC_PRED; 4];
+            self.blocks.clear();
             let partition = row % tokens.len().max(1);
             for column in 0..self.columns {
                 let block = self.read_modes(header, modes, column);
@@ -1301,18 +1399,40 @@ impl Frame {
                 if reader.exhausted() {
                     return Err(DecodeError::WebpLossyTruncated);
                 }
-                self.reconstruct(&block, column, row, &coeffs);
-                let index = row * self.columns + column;
-                if let Some(slot) = self.coded.get_mut(index) {
+                self.reconstruct(&block, column, row > 0, &coeffs);
+                if let Some(slot) = self.coded.get_mut(column) {
                     *slot = coded;
                 }
                 self.blocks.push(block);
             }
-            let last = isize::try_from(row * 16 + 15).unwrap_or(0);
-            self.luma.extend_row(last);
-            let chroma_last = isize::try_from(row * 8 + 7).unwrap_or(0);
-            self.blue_chroma.extend_row(chroma_last);
-            self.red_chroma.extend_row(chroma_last);
+            self.luma.extend_row(15);
+            self.blue_chroma.extend_row(7);
+            self.red_chroma.extend_row(7);
+            self.window
+                .take(&self.luma, &self.blue_chroma, &self.red_chroma);
+            self.luma.carry(15);
+            self.blue_chroma.carry(7);
+            self.red_chroma.carry(7);
+            self.filter_row(header, row);
+            // Filtering the next row moves this one's last three luma rows and
+            // last three chroma rows, so its colours are settled to its ninth
+            // luma row; the last row settles whole.
+            let settled = if row + 1 == self.rows {
+                height
+            } else {
+                (row * 16 + 10).min(height)
+            };
+            while handed < settled {
+                let luma_row = (handed + LUMA_HELD).checked_sub(row * 16);
+                let chroma_row = (handed / 2 + CHROMA_HELD).checked_sub(row * 8);
+                let (Some(luma_row), Some(chroma_row)) = (luma_row, chroma_row) else {
+                    return Err(DecodeError::DimensionsOverflow);
+                };
+                self.window.rgba_row(luma_row, chroma_row, &mut line);
+                out(&line)?;
+                handed += 1;
+            }
+            self.window.advance();
         }
         Ok(())
     }
@@ -1732,8 +1852,16 @@ fn add_residual(plane: &mut Plane, x0: isize, y0: isize, coeffs: &[i16; BLOCK_CO
 }
 
 /// Predict a whole 16x16 or 8x8 block from its above row and left column.
-fn predict_block(plane: &mut Plane, x0: isize, y0: isize, size: isize, mode: usize) {
-    let has_above = y0 > 0;
+/// `has_above` says whether a macroblock row lies above it, which the plane
+/// cannot: it holds one macroblock row.
+fn predict_block(
+    plane: &mut Plane,
+    x0: isize,
+    y0: isize,
+    size: isize,
+    mode: usize,
+    has_above: bool,
+) {
     let has_left = x0 > 0;
     match mode {
         V_PRED => {
@@ -2028,12 +2156,13 @@ fn predict_shallow_diagonal(
 }
 
 impl Frame {
-    /// Predict one macroblock and add its residual.
+    /// Predict one macroblock of the row being reconstructed and add its
+    /// residual. `has_above` says whether a macroblock row lies above it.
     fn reconstruct(
         &mut self,
         block: &Macroblock,
         column: usize,
-        row: usize,
+        has_above: bool,
         coeffs: &[[i16; BLOCK_COEFFS]; MB_BLOCKS],
     ) {
         let mut luma = *coeffs;
@@ -2044,7 +2173,7 @@ impl Frame {
             }
         }
         let x0 = isize::try_from(column * 16).unwrap_or(0);
-        let y0 = isize::try_from(row * 16).unwrap_or(0);
+        let y0 = 0;
         if block.ymode == B_PRED {
             // The rightmost subblocks of a macroblock predict from the four
             // samples above and to the right of the macroblock, because
@@ -2079,7 +2208,7 @@ impl Frame {
                 add_residual(&mut self.luma, x, y, residual);
             }
         } else {
-            predict_block(&mut self.luma, x0, y0, 16, block.ymode);
+            predict_block(&mut self.luma, x0, y0, 16, block.ymode, has_above);
             for (index, residual) in luma.iter().enumerate().take(16) {
                 let x = x0 + isize::try_from((index % 4) * 4).unwrap_or(0);
                 let y = y0 + isize::try_from((index / 4) * 4).unwrap_or(0);
@@ -2087,9 +2216,9 @@ impl Frame {
             }
         }
         let cx = isize::try_from(column * 8).unwrap_or(0);
-        let cy = isize::try_from(row * 8).unwrap_or(0);
-        predict_block(&mut self.blue_chroma, cx, cy, 8, block.uvmode);
-        predict_block(&mut self.red_chroma, cx, cy, 8, block.uvmode);
+        let cy = 0;
+        predict_block(&mut self.blue_chroma, cx, cy, 8, block.uvmode, has_above);
+        predict_block(&mut self.red_chroma, cx, cy, 8, block.uvmode, has_above);
         for index in 0..4 {
             let x = cx + isize::try_from((index % 2) * 4).unwrap_or(0);
             let y = cy + isize::try_from((index / 2) * 4).unwrap_or(0);
@@ -2098,62 +2227,88 @@ impl Frame {
         }
     }
 
-    /// Apply the loop filter over the whole reconstructed frame.
-    fn filter(&mut self, header: &Header) {
+    /// Apply the loop filter over the macroblock row just reconstructed,
+    /// which the window now holds below the filtered tail of the row above.
+    fn filter_row(&mut self, header: &Header, row: usize) {
         if header.filter_level == 0 {
             return;
         }
-        for row in 0..self.rows {
-            for column in 0..self.columns {
-                let index = row * self.columns + column;
-                let Some(block) = self.blocks.get(index) else {
-                    continue;
-                };
-                let subblocks = block.ymode == B_PRED;
-                let coded = self.coded.get(index).copied().unwrap_or(false);
-                let inner = subblocks || coded;
-                let mut level = header
-                    .segmentation
-                    .filter_level(header.filter_level, block.segment);
-                if header.deltas.enabled {
-                    level += header.deltas.intra;
-                    if subblocks {
-                        level += header.deltas.subblock;
-                    }
-                }
-                let level = level.clamp(0, 63);
-                if level == 0 {
-                    continue;
-                }
-                let mut interior = level;
-                if header.sharpness > 0 {
-                    interior >>= if header.sharpness > 4 { 2 } else { 1 };
-                    interior = interior.min(9 - i32::try_from(header.sharpness).unwrap_or(0));
-                }
-                let interior = interior.max(1);
-                let edge = 2 * (level + 2) + interior;
-                let inside = 2 * level + interior;
-                let hev = i32::from(level >= 40) + i32::from(level >= 15);
-                let strength = Strength {
-                    edge,
-                    inside,
-                    interior,
-                    hev,
-                    inner,
-                };
-                if header.simple_filter {
-                    self.filter_simple(column, row, &strength);
-                } else {
-                    self.filter_normal(column, row, &strength);
+        for (column, block) in self.blocks.iter().enumerate() {
+            let subblocks = block.ymode == B_PRED;
+            let coded = self.coded.get(column).copied().unwrap_or(false);
+            let inner = subblocks || coded;
+            let mut level = header
+                .segmentation
+                .filter_level(header.filter_level, block.segment);
+            if header.deltas.enabled {
+                level += header.deltas.intra;
+                if subblocks {
+                    level += header.deltas.subblock;
                 }
             }
+            let level = level.clamp(0, 63);
+            if level == 0 {
+                continue;
+            }
+            let mut interior = level;
+            if header.sharpness > 0 {
+                interior >>= if header.sharpness > 4 { 2 } else { 1 };
+                interior = interior.min(9 - i32::try_from(header.sharpness).unwrap_or(0));
+            }
+            let interior = interior.max(1);
+            let edge = 2 * (level + 2) + interior;
+            let inside = 2 * level + interior;
+            let hev = i32::from(level >= 40) + i32::from(level >= 15);
+            let strength = Strength {
+                edge,
+                inside,
+                interior,
+                hev,
+                inner,
+            };
+            if header.simple_filter {
+                self.window.filter_simple(column, row > 0, &strength);
+            } else {
+                self.window.filter_normal(column, row > 0, &strength);
+            }
+        }
+    }
+}
+
+impl Window {
+    /// Take the macroblock row just reconstructed below the rows held.
+    fn take(&mut self, luma: &Plane, blue_chroma: &Plane, red_chroma: &Plane) {
+        self.luma
+            .rows_mut(LUMA_HELD..LUMA_HELD + 16)
+            .copy_from_slice(luma.rows(0..16));
+        self.blue_chroma
+            .rows_mut(CHROMA_HELD..CHROMA_HELD + 8)
+            .copy_from_slice(blue_chroma.rows(0..8));
+        self.red_chroma
+            .rows_mut(CHROMA_HELD..CHROMA_HELD + 8)
+            .copy_from_slice(red_chroma.rows(0..8));
+    }
+
+    /// Keep the filtered rows the next macroblock row still needs, moving
+    /// them to the top.
+    fn advance(&mut self) {
+        for (plane, rows, held) in [
+            (&mut self.luma, 16, LUMA_HELD),
+            (&mut self.blue_chroma, 8, CHROMA_HELD),
+            (&mut self.red_chroma, 8, CHROMA_HELD),
+        ] {
+            let stride = plane.stride;
+            let from = (rows + 1) * stride;
+            plane
+                .samples
+                .copy_within(from..from + held * stride, stride);
         }
     }
 
     /// The simple filter, which covers luma edges only.
-    fn filter_simple(&mut self, column: usize, row: usize, strength: &Strength) {
+    fn filter_simple(&mut self, column: usize, top: bool, strength: &Strength) {
         let x0 = isize::try_from(column * 16).unwrap_or(0);
-        let y0 = isize::try_from(row * 16).unwrap_or(0);
+        let y0 = isize::try_from(LUMA_HELD).unwrap_or(0);
         if column > 0 {
             simple_edge(&mut self.luma, x0, y0, 16, true, strength.edge);
         }
@@ -2162,7 +2317,7 @@ impl Frame {
                 simple_edge(&mut self.luma, x0 + offset, y0, 16, true, strength.inside);
             }
         }
-        if row > 0 {
+        if top {
             simple_edge(&mut self.luma, x0, y0, 16, false, strength.edge);
         }
         if strength.inner {
@@ -2173,11 +2328,11 @@ impl Frame {
     }
 
     /// The normal filter, which covers luma and both chroma planes.
-    fn filter_normal(&mut self, column: usize, row: usize, strength: &Strength) {
+    fn filter_normal(&mut self, column: usize, top: bool, strength: &Strength) {
         let x0 = isize::try_from(column * 16).unwrap_or(0);
-        let y0 = isize::try_from(row * 16).unwrap_or(0);
+        let y0 = isize::try_from(LUMA_HELD).unwrap_or(0);
         let cx = isize::try_from(column * 8).unwrap_or(0);
-        let cy = isize::try_from(row * 8).unwrap_or(0);
+        let cy = isize::try_from(CHROMA_HELD).unwrap_or(0);
         if column > 0 {
             macroblock_edge(&mut self.luma, x0, y0, 16, true, strength);
             macroblock_edge(&mut self.blue_chroma, cx, cy, 8, true, strength);
@@ -2190,7 +2345,7 @@ impl Frame {
             subblock_edge(&mut self.blue_chroma, cx + 4, cy, 8, true, strength);
             subblock_edge(&mut self.red_chroma, cx + 4, cy, 8, true, strength);
         }
-        if row > 0 {
+        if top {
             macroblock_edge(&mut self.luma, x0, y0, 16, false, strength);
             macroblock_edge(&mut self.blue_chroma, cx, cy, 8, false, strength);
             macroblock_edge(&mut self.red_chroma, cx, cy, 8, false, strength);
@@ -2204,32 +2359,20 @@ impl Frame {
         }
     }
 
-    /// Convert the reconstructed planes to straight-alpha RGBA8, cropping
-    /// the padding the macroblock grid added.
-    fn to_rgba(&self, width: u32, height: u32) -> Result<RasterImage, DecodeError> {
-        let pixels = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|count| count.checked_mul(RGBA_BYTES as u64))
-            .ok_or(DecodeError::DimensionsOverflow)?;
-        let len = usize::try_from(pixels).map_err(|_| DecodeError::DimensionsOverflow)?;
-        let mut rgba = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-        let mut at = 0usize;
-        for y in 0..isize::try_from(height).unwrap_or(0) {
-            for x in 0..isize::try_from(width).unwrap_or(0) {
-                let luma = (i32::from(self.luma.get(x, y)) * 19077) >> 8;
-                let blue = i32::from(self.blue_chroma.get(x / 2, y / 2));
-                let red = i32::from(self.red_chroma.get(x / 2, y / 2));
-                let Some(pixel) = rgba.get_mut(at..at + RGBA_BYTES) else {
-                    break;
-                };
-                pixel[0] = to_channel(luma + ((red * 26149) >> 8) - 14234);
-                pixel[1] = to_channel(luma - ((blue * 6419) >> 8) - ((red * 13320) >> 8) + 8708);
-                pixel[2] = to_channel(luma + ((blue * 33050) >> 8) - 17685);
-                pixel[3] = u8::MAX;
-                at += RGBA_BYTES;
-            }
+    /// Convert window luma row `luma_row`, over chroma row `chroma_row`, into
+    /// `line`'s opaque RGBA8 pixels.
+    fn rgba_row(&self, luma_row: usize, chroma_row: usize, line: &mut [u8]) {
+        let y = isize::try_from(luma_row).unwrap_or(0);
+        let cy = isize::try_from(chroma_row).unwrap_or(0);
+        for (x, pixel) in (0..).zip(line.as_chunks_mut::<RGBA_BYTES>().0) {
+            let luma = (i32::from(self.luma.get(x, y)) * 19077) >> 8;
+            let blue = i32::from(self.blue_chroma.get(x / 2, cy));
+            let red = i32::from(self.red_chroma.get(x / 2, cy));
+            pixel[0] = to_channel(luma + ((red * 26149) >> 8) - 14234);
+            pixel[1] = to_channel(luma - ((blue * 6419) >> 8) - ((red * 13320) >> 8) + 8708);
+            pixel[2] = to_channel(luma + ((blue * 33050) >> 8) - 17685);
+            pixel[3] = u8::MAX;
         }
-        Ok(RasterImage::from_parts(width, height, rgba))
     }
 }
 

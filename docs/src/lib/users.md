@@ -171,25 +171,32 @@ rather than carrying private copies.
 ### The shape of a home
 
 A home is not just its top directory. `HOME_SUBDIRS` is the fixed set the
-installed-system contract requires inside `/Users/<name>` — `Apps`,
-`Desktop`, `Documents`, `Library`, `Settings` (`AGENTS.md` §16.3) — and
-`HOME_MODE` (`0o700`) is the owner-only mode the home and each of those
-directories is stamped with, so an account's storage is private by
-construction rather than by per-file hardening.
+installed-system contract requires inside `/Users/<name>` —
+`Applications`, `Commands`, `Desktop`, `Library`, `Settings`, `UserFiles`
+(`AGENTS.md` §16.3) — and `UserFiles` holds its own fixed folders,
+`Documents`, `Music`, `Pictures` and `Videos`. The names are defined once in
+`tairix_abi::home`. `HOME_MODE` (`0o700`) is the owner-only mode the home
+and each of those directories is stamped with, so an account's storage is
+private by construction rather than by per-file hardening.
 
 They are created **with the account**, not on first use, because the
 per-user paths the system writes to sit one level deeper — a settings
 store under `Settings/<App>/`, an app cache under `Library/<App>/`, the
-user's own bundles under `Apps/` — and a writer that creates only its
-immediate parent would fail on a brand-new account the first time anything
-was saved. Every route that lays a home down reads this one definition:
-the `CAP_USER_ADMIN` provisioning path (`RootAdminBacking::provision_home`,
-which also fills in a missing directory on a later provisioning and never
-rewrites what the account itself put there), the image builder's seeded
-home, and the QEMU users-root fixture. Provisioning fills in the shape
-only inside a home the account **owns**: an administrator pointing a new
-account at an existing directory never has one principal's storage laid
-out inside another's.
+user's own bundles under `Commands/` and `Applications/` — and a writer that
+creates only its immediate parent would fail on a brand-new account the
+first time anything was saved. Every route that lays a home down takes the
+one walk, `provision_home_shape`, over the small `HomeTree` seam every volume
+offers: the `CAP_USER_ADMIN` provisioning path
+(`RootAdminBacking::provision_home`), the image builder's seeded home, and
+the QEMU users-root fixture. The walk fills in a missing folder on a later
+run and never rewrites what the account itself put there — a file where the
+shape wants a folder is left alone and not descended into — while the per-app
+data parents and their gated root, which are OS shape, are re-stamped every
+run; a per-app data parent that is not a folder is refused
+(`HomeShapeError::Occupied`). Provisioning fills in the shape only inside a
+home the account **owns**: an administrator pointing a new account at an
+existing directory never has one principal's storage laid out inside
+another's.
 
 The compiled-in **system identity** (`plans/USERS.md`) is defined here
 too: `system_accounts()` — the no-login `system` record (uid 0, group

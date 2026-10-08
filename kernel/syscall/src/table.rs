@@ -2462,8 +2462,10 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// List open directory `fd` into the user buffer `buf`, returning the
-    /// number of bytes written as a packed [`tairix_abi::DirEntry`] stream
+    /// Read the next batch of open directory `fd` into the user buffer
+    /// `buf`, from where the open description's listing stands (or its
+    /// start, for `from` = [`tairix_abi::ReaddirFrom::Start`]), returning the
+    /// bytes written as a packed [`tairix_abi::DirEntry`] stream
     /// (`PREREQUISITES.md` P-A).
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
@@ -2473,6 +2475,7 @@ pub trait SyscallHandlers {
         _fd: u32,
         _buf: u64,
         _len: usize,
+        _from: u32,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -3928,8 +3931,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::FS_READDIR => {
                 let len = decode_len(args.0[2])?;
-                self.handlers
-                    .fs_readdir(caller, decode_u32(args.0[0]), args.0[1], len)
+                self.handlers.fs_readdir(
+                    caller,
+                    decode_u32(args.0[0]),
+                    args.0[1],
+                    len,
+                    decode_u32(args.0[3]),
+                )
             }
             SyscallNumber::FS_WATCH => {
                 self.handlers
@@ -5540,6 +5548,7 @@ mod tests {
             _fd: u32,
             _buf: u64,
             _len: usize,
+            _from: u32,
         ) -> SyscallResult {
             self.record("fs_readdir");
             Ok(0)

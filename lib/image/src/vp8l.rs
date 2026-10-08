@@ -1261,10 +1261,7 @@ pub(crate) fn peak_ceiling(width: u32, height: u32, input_len: usize) -> u64 {
 
 /// Decode a `VP8L` chunk into straight-alpha RGBA8.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-    let mut bits = Bits::new(bytes);
-    let (width, height) = header(&mut bits)?;
-    limits.check(width, height)?;
-    let pixels = spatially_coded_image(&mut bits, width, height)?;
+    let (pixels, width, height) = decoded(bytes, limits)?;
     let mut rgba = fallible::filled(
         pixels
             .len()
@@ -1273,27 +1270,56 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
         0u8,
     )
     .ok_or(DecodeError::OutOfMemory)?;
-    for (pixel, out) in pixels.iter().zip(rgba.as_chunks_mut::<RGBA_BYTES>().0) {
+    to_rgba(&pixels, &mut rgba);
+    Ok(RasterImage::from_parts(width, height, rgba))
+}
+
+/// Decode a lossless stream, handing its RGBA8 rows to `row` top first so
+/// its picture is never held: its words are, since a back-reference may
+/// reach any earlier pixel.
+pub(crate) fn decode_rows(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    mut row: impl FnMut(&[u8]) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
+    let (pixels, width, _) = decoded(bytes, limits)?;
+    let mut line =
+        fallible::filled(width as usize * RGBA_BYTES, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    for words in pixels.chunks_exact((width as usize).max(1)) {
+        to_rgba(words, &mut line);
+        row(&line)?;
+    }
+    Ok(())
+}
+
+/// A lossless stream's decoded ARGB words, with its size.
+fn decoded(bytes: &[u8], limits: &DecodeLimits) -> Result<(Vec<u32>, u32, u32), DecodeError> {
+    let mut bits = Bits::new(bytes);
+    let (width, height) = header(&mut bits)?;
+    limits.check(width, height)?;
+    let pixels = spatially_coded_image(&mut bits, width, height)?;
+    Ok((pixels, width, height))
+}
+
+/// ARGB words as straight-alpha RGBA8.
+fn to_rgba(words: &[u32], rgba: &mut [u8]) {
+    for (pixel, out) in words.iter().zip(rgba.as_chunks_mut::<RGBA_BYTES>().0) {
         out[0] = u8::try_from((pixel >> 16) & 0xFF).unwrap_or(0);
         out[1] = u8::try_from((pixel >> 8) & 0xFF).unwrap_or(0);
         out[2] = u8::try_from(pixel & 0xFF).unwrap_or(0);
         out[3] = u8::try_from((pixel >> 24) & 0xFF).unwrap_or(0);
     }
-    Ok(RasterImage::from_parts(width, height, rgba))
 }
 
-/// Decode a compressed `ALPH` plane, whose geometry its picture supplies and
-/// whose samples are the green channel.
-pub(crate) fn decode_alpha(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, DecodeError> {
-    let mut bits = Bits::new(bytes);
-    let pixels = spatially_coded_image(&mut bits, width, height)?;
-    fallible::collected(
-        pixels.len(),
-        pixels
-            .iter()
-            .map(|pixel| u8::try_from((pixel >> 8) & 0xFF).unwrap_or(0)),
-    )
-    .ok_or(DecodeError::OutOfMemory)
+/// Decode a compressed `ALPH` plane, whose geometry its picture supplies, to
+/// its pixels: each sample is its pixel's green channel ([`alpha_sample`]).
+pub(crate) fn decode_alpha(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u32>, DecodeError> {
+    spatially_coded_image(&mut Bits::new(bytes), width, height)
+}
+
+/// The alpha sample a decoded `ALPH` pixel carries: its green channel.
+pub(crate) const fn alpha_sample(pixel: u32) -> u8 {
+    pixel.to_le_bytes()[1]
 }
 
 /// Decode the transform chain, the prefix codes, and the pixels a level-zero

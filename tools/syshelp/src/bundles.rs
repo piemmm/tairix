@@ -96,6 +96,15 @@ pub fn program_crates(userland: &Path, mut read: impl FnMut(&Path)) -> io::Resul
     Ok(found)
 }
 
+/// Whether `name` is a file a host's file manager leaves beside the files it
+/// shows — Finder's `.DS_Store` and `._` resource forks, Explorer's
+/// `Thumbs.db` and `desktop.ini` — which belong to no payload and are passed
+/// over, so browsing a source folder neither breaks the build nor ships one.
+#[must_use]
+pub fn is_host_metadata(name: &str) -> bool {
+    matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini") || name.starts_with("._")
+}
+
 /// The immediate subdirectories of `root`, sorted, so the walk is the same
 /// on every filesystem.
 fn sorted_dirs(root: &Path, read: &mut impl FnMut(&Path)) -> io::Result<Vec<PathBuf>> {
@@ -116,7 +125,25 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use super::{is_command_word, manifest_entries, quoted_string, string_entry};
+    use super::{is_command_word, is_host_metadata, manifest_entries, quoted_string, string_entry};
+
+    /// The files a host's file manager drops beside the ones it shows are
+    /// passed over; a name that merely resembles one is not.
+    #[test]
+    fn host_metadata_is_passed_over_and_nothing_else_is() {
+        for name in [".DS_Store", "._icon.png", "._", "Thumbs.db", "desktop.ini"] {
+            assert!(is_host_metadata(name), "{name}");
+        }
+        for name in [
+            "DS_Store",
+            "_icon.png",
+            "icon.png",
+            ".hidden.md",
+            "thumbs.db.md",
+        ] {
+            assert!(!is_host_metadata(name), "{name}");
+        }
+    }
 
     /// Blank and comment lines are skipped, entries are numbered by their
     /// line and trimmed, and a line that is not `key = value` says so.

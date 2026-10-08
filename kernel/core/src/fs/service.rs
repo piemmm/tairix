@@ -24,6 +24,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::delegate::FinalLink;
+use super::listing::Listing;
+use tairix_abi::driver::filesystem::DirVisit;
 
 use tairix_abi::sysinfo::{
     MountRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
@@ -71,6 +73,37 @@ pub struct ReaddirEntry {
 }
 
 impl ReaddirEntry {
+    /// The owned form of the streamed `entry`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::DeviceFault`] for a name that is not UTF-8, which the VFS has
+    /// already refused, and [`Errno::OutOfMemory`] when the name cannot be
+    /// held.
+    pub fn from_wire(entry: &DirEntry<'_>) -> Result<Self, Errno> {
+        let name = core::str::from_utf8(entry.name).map_err(|_| Errno::DeviceFault)?;
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(name.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        owned.push_str(name);
+        Ok(Self::named(entry, owned))
+    }
+
+    /// `entry`'s record under the owned `name`.
+    #[must_use]
+    pub fn named(entry: &DirEntry<'_>, name: String) -> Self {
+        Self {
+            kind: entry.kind,
+            size: entry.size,
+            allocated: entry.allocated,
+            modified: entry.modified,
+            id: entry.id,
+            nlink: entry.nlink,
+            name,
+        }
+    }
+
     /// This entry as the `fs_readdir` stream carries it.
     #[must_use]
     pub fn wire(&self) -> DirEntry<'_> {
@@ -173,8 +206,12 @@ pub trait FilesystemService: Send + Sync {
         data: &[u8],
     ) -> Result<usize, Errno>;
 
-    /// List the entries of the directory at `path`, each with the kind and
-    /// sizes the mounted filesystem reports for it.
+    /// Hand `each` the entries of the directory at `path` from where `at`
+    /// stands — its own entries, then the covered mount points beneath it
+    /// that the volume holds no entry for — until it answers
+    /// [`DirVisit::Stop`] or the listing ends, moving `at` past every entry
+    /// it takes. Each entry carries the kind and sizes the mounted
+    /// filesystem reports for it.
     ///
     /// `final_link` is the resolution posture of the descriptor the listing
     /// is served for: under [`FinalLink::Keep`] a `path` whose final
@@ -184,14 +221,66 @@ pub trait FilesystemService: Send + Sync {
     /// # Errors
     ///
     /// The stable [`Errno`] for the VFS refusal (not a directory, permission
-    /// denied), or [`Errno::NotImplemented`] when no filesystem is mounted.
+    /// denied), [`Errno::Stale`] when `path` now names another directory than
+    /// the one `at` began on, or [`Errno::NotImplemented`] when no filesystem
+    /// is mounted.
     fn readdir(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
         final_link: FinalLink,
-    ) -> Result<Vec<ReaddirEntry>, Errno>;
+        at: &mut Listing,
+        each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+    ) -> Result<(), Errno>;
+
+    /// Every entry of the directory at `path`, owned, for a kernel walk that
+    /// acts on each once the listing is read.
+    ///
+    /// # Errors
+    ///
+    /// As [`readdir`](Self::readdir), and [`Errno::LimitExceeded`] past
+    /// `limit` entries, so no directory makes the kernel hold more than its
+    /// caller budgeted.
+    fn readdir_bounded(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        final_link: FinalLink,
+        limit: usize,
+    ) -> Result<Vec<ReaddirEntry>, Errno> {
+        let mut entries = Vec::new();
+        let mut failed = None;
+        self.readdir(
+            uid,
+            caps,
+            path,
+            final_link,
+            &mut Listing::default(),
+            &mut |entry| {
+                if entries.len() == limit {
+                    failed = Some(Errno::LimitExceeded);
+                    return DirVisit::Stop;
+                }
+                match entries
+                    .try_reserve(1)
+                    .map_err(|_| Errno::OutOfMemory)
+                    .and_then(|()| ReaddirEntry::from_wire(entry))
+                {
+                    Ok(owned) => {
+                        entries.push(owned);
+                        DirVisit::Take
+                    }
+                    Err(err) => {
+                        failed = Some(err);
+                        DirVisit::Stop
+                    }
+                }
+            },
+        )?;
+        failed.map_or(Ok(entries), Err)
+    }
 
     /// For each of `names`, what [`readdir`](Self::readdir) of the directory
     /// at `path` would report for it now, or [`None`] where no such entry
@@ -681,7 +770,9 @@ impl FilesystemService for NullFilesystemService {
         _caps: &dyn CapabilityQuery,
         _path: &str,
         _final_link: FinalLink,
-    ) -> Result<Vec<ReaddirEntry>, Errno> {
+        _at: &mut Listing,
+        _each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+    ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
 

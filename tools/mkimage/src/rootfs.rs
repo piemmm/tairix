@@ -31,10 +31,7 @@ use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{
     plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
 };
-use tairix_users::{
-    appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS, HOME_MODE,
-    HOME_SUBDIRS,
-};
+use tairix_users::provision_home_shape;
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -199,16 +196,9 @@ pub fn build_root_partition(
         .into_bytes())
 }
 
-/// Create `/Users/<username>` owned by `(uid, gid)`, owner-only
-/// ([`HOME_MODE`]) and carrying the fixed home shape ([`HOME_SUBDIRS`]) —
-/// the very layout `users_admin` provisions a new account's home with, read
-/// from the one shared definition so a seeded account and a created one can
-/// never get different homes.
-///
-/// The two [`APPDATA_ROOT_PARENTS`] additionally carry the gated per-app data
-/// root, created here rather than on first use: it is owned by the app-data
-/// service, so nothing that runs as the user could ever create it, and an
-/// account whose home lacked it would have no store at all.
+/// Create `/Users/<username>` for `(uid, gid)` with the fixed home shape,
+/// through the one walk `users_admin` provisions a new account's home with,
+/// so a seeded account and a created one can never get different homes.
 fn create_home_dir(
     fs: &mut ARXFS<MemBlock>,
     users: NodeId,
@@ -216,30 +206,10 @@ fn create_home_dir(
     uid: u32,
     gid: u32,
 ) -> Result<(), MkimageError> {
-    let transit = appdata_transit_security(uid, gid).map_err(MkimageError::RootPartition)?;
     let home = fs
         .create(users, username.as_bytes(), NodeKind::Directory)
         .map_err(MkimageError::RootPartition)?;
-    fs.set_security(home, transit)
-        .map_err(MkimageError::RootPartition)?;
-    for name in HOME_SUBDIRS {
-        let node = fs
-            .create(home, name.as_bytes(), NodeKind::Directory)
-            .map_err(MkimageError::RootPartition)?;
-        if APPDATA_ROOT_PARENTS.contains(&name) {
-            fs.set_security(node, transit)
-                .map_err(MkimageError::RootPartition)?;
-            let root = fs
-                .create(node, APPDATA_ROOT.as_bytes(), NodeKind::Directory)
-                .map_err(MkimageError::RootPartition)?;
-            fs.set_security(root, appdata_root_security())
-                .map_err(MkimageError::RootPartition)?;
-        } else {
-            fs.set_security(node, Security::new(HOME_MODE, uid, gid))
-                .map_err(MkimageError::RootPartition)?;
-        }
-    }
-    Ok(())
+    provision_home_shape(fs, home, uid, gid).map_err(MkimageError::HomeShape)
 }
 
 /// Author the read-only, signed-bundle `/System` partition, sized by
@@ -568,6 +538,11 @@ fn write_key_file(
 mod tests {
     use super::*;
     use crate::device::SECTOR_BYTES;
+    use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
+    use tairix_users::{
+        appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS,
+        HOME_MODE, HOME_SUBDIRS,
+    };
 
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
     const TEST_KEY: VolumeKey = [0x42; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
@@ -913,6 +888,20 @@ mod tests {
             assert_eq!(sec.mode, HOME_MODE, "{name} is owner-only");
             assert_eq!(sec.uid, TEST_HOMES[0].1, "{name} belongs to the account");
             assert_eq!(sec.gid, TEST_HOMES[0].2, "{name} carries its group");
+        }
+        let files = fs
+            .lookup(home, HOME_USER_FILES_DIR.as_bytes())
+            .expect("UserFiles exists");
+        for name in USER_FILES_SUBDIRS {
+            let node = fs
+                .lookup(files, name.as_bytes())
+                .unwrap_or_else(|_| panic!("{name} exists in a seeded UserFiles"));
+            let sec = fs.security(node).expect("security present");
+            assert_eq!(
+                (sec.mode, sec.uid, sec.gid),
+                (HOME_MODE, TEST_HOMES[0].1, TEST_HOMES[0].2),
+                "{name} is the account's own, owner-only"
+            );
         }
     }
 

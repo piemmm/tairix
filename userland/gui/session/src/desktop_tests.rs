@@ -360,6 +360,28 @@ fn a_reported_change_merges_in_place_and_repaints_only_the_cells_it_moved() {
     );
 }
 
+/// A merge that moves the icons carries the lit drop folder with its icon and
+/// revises the icons, so a drag place held on an index is resolved again.
+#[test]
+fn a_reported_change_moves_the_drop_folder_with_its_icon_and_revises_the_icons() {
+    let mut desktop = desktop_of(vec![folder("b"), folder("c")]);
+    let layout = layout_of(&desktop);
+    desktop.set_drop_target(Some(1), &layout, &mut Region::new());
+    let before = desktop.revision();
+    assert!(desktop.apply_changes(
+        vec![EntryChange::Upsert(folder("a"))],
+        layout_of,
+        &mut Region::new(),
+    ));
+    assert_ne!(desktop.revision(), before);
+    let after = layout_of(&desktop);
+    let relit = damage_of(|damage| desktop.set_drop_target(Some(2), &after, damage));
+    assert!(
+        relit.rects().is_empty(),
+        "the lit folder followed c: {relit:?}"
+    );
+}
+
 #[test]
 fn a_reported_change_moving_the_icons_ends_a_double_click_in_progress() {
     let mut desktop = desktop_of(vec![file("b.txt"), file("c.txt")]);

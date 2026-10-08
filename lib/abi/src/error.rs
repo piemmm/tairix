@@ -420,6 +420,19 @@ pub enum Errno {
     /// [`Busy`](Self::Busy), which says a resource is in use by someone who
     /// will finish with it.
     Deadlock = 46,
+
+    /// The object a handle was part-way through is no longer the one its
+    /// path names, so the operation cannot continue where it stopped.
+    ///
+    /// Reported by `fs_readdir` when the directory the listing began on was
+    /// removed or replaced since its last batch, even by one that took its
+    /// number, so one directory's position is never applied to another. A
+    /// directory renamed away with nothing in its place is
+    /// [`NotFound`](Self::NotFound). Restarting the listing
+    /// (`ReaddirFrom::Start`) reads whatever the path names now.
+    /// Distinct from [`NotFound`](Self::NotFound): something may well be at
+    /// the path, it is just not what the handle was reading.
+    Stale = 47,
 }
 
 impl Errno {
@@ -533,6 +546,7 @@ impl Errno {
             44 => Some(Self::TooManyLinks),
             45 => Some(Self::NotAttached),
             46 => Some(Self::Deadlock),
+            47 => Some(Self::Stale),
             _ => None,
         }
     }
@@ -587,6 +601,7 @@ impl fmt::Display for Errno {
             Self::TooManyLinks => "too many links",
             Self::NotAttached => "resource released; re-attach and retry",
             Self::Deadlock => "waiting would deadlock",
+            Self::Stale => "object changed beneath the handle",
         };
         f.write_str(message)
     }
@@ -696,11 +711,12 @@ mod tests {
             Errno::TooManyLinks,
             Errno::NotAttached,
             Errno::Deadlock,
+            Errno::Stale,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(47), None);
+        assert_eq!(Errno::from_i32(48), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

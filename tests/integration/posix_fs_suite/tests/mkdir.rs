@@ -34,12 +34,12 @@ fn mkdir_creates_nested_directories() {
         .expect("mkdir a/b");
 
     let names: Vec<(NodeKind, String)> = vfs
-        .list_via_secured(
+        .list_all_via_secured(
             &owner,
             &vol_path("a"),
             &mut fs,
             FinalLink::Follow,
-            |entry| entry,
+            usize::MAX,
         )
         .expect("list a")
         .into_iter()

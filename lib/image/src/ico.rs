@@ -266,7 +266,7 @@ pub(crate) fn peak_bytes(
     if picture.starts_with(&crate::PNG_SIGNATURE) {
         return png::peak_bytes(picture, limits);
     }
-    Ok(area(width, height) * RGBA_BYTES as u64 + crate::bmp::RESOLVED_PALETTE_BYTES)
+    Ok(crate::bmp::picture_peak_bytes(width, height))
 }
 
 /// An icon container's directory, as the pages a walk decodes.

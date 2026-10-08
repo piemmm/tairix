@@ -8,15 +8,16 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
 use tairix_abi::SYSTEM_SERVICE_STORE;
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, IconRequest, Reading};
 
 use super::{
-    ancestry, media_for_entry, media_for_name, name_endings, Ending, MediaType, ALL,
-    EXTENSION_TABLE,
+    ancestry, entry_icon, media_for_entry, media_for_name, name_endings, BlankDocument, Ending,
+    MediaType, ALL, EXTENSION_TABLE,
 };
-use crate::entry::{Entry, EntryKind};
+use crate::entry::{Entry, EntryKind, LinkTarget};
 
 /// The root-first components of a directory path, as a listing carries them.
 fn components(path: &str) -> Vec<String> {
@@ -89,6 +90,20 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("new.zst", MediaType::ArchiveZstd, IconKind::Archive),
     ("pack.7z", MediaType::Archive7z, IconKind::Archive),
     ("disk.rar", MediaType::ArchiveRar, IconKind::Archive),
+    ("song.mp3", MediaType::AudioMpeg, IconKind::Audio),
+    ("song.flac", MediaType::AudioFlac, IconKind::Audio),
+    ("song.ogg", MediaType::AudioOgg, IconKind::Audio),
+    ("song.oga", MediaType::AudioOgg, IconKind::Audio),
+    ("song.opus", MediaType::AudioOgg, IconKind::Audio),
+    ("song.wav", MediaType::AudioWav, IconKind::Audio),
+    ("song.aac", MediaType::AudioAac, IconKind::Audio),
+    ("song.m4a", MediaType::AudioMp4, IconKind::Audio),
+    ("film.mp4", MediaType::VideoMp4, IconKind::Video),
+    ("film.m4v", MediaType::VideoMp4, IconKind::Video),
+    ("film.webm", MediaType::VideoWebm, IconKind::Video),
+    ("film.mkv", MediaType::VideoMatroska, IconKind::Video),
+    ("film.mov", MediaType::VideoQuicktime, IconKind::Video),
+    ("film.avi", MediaType::VideoAvi, IconKind::Video),
 ];
 
 #[test]
@@ -515,5 +530,183 @@ fn distinct_types_deliberately_share_one_icon() {
         for other in &archives[position + 1..] {
             assert_ne!(media.as_str(), other.as_str());
         }
+    }
+}
+
+#[test]
+fn every_type_that_starts_empty_has_an_extension_to_name_it_by() {
+    for media in ALL.iter().copied() {
+        assert_eq!(
+            BlankDocument::of(media).is_some(),
+            media.blank_noun().is_some(),
+            "{media:?}"
+        );
+    }
+    let text = BlankDocument::of(MediaType::TextPlain).expect("text starts empty");
+    assert_eq!(text.noun(), "Text Document");
+    assert_eq!(text.extension(), "txt");
+    assert_eq!(
+        media_for_name("New Text Document.txt"),
+        Some(MediaType::TextPlain)
+    );
+}
+
+#[test]
+fn a_type_whose_empty_file_is_not_a_document_makes_none() {
+    for media in [
+        MediaType::Json,
+        MediaType::Xml,
+        MediaType::TextHtml,
+        MediaType::TextC,
+        MediaType::ImagePng,
+        MediaType::ImageSvg,
+        MediaType::ArchiveZip,
+        MediaType::InodeDirectory,
+        MediaType::ApplicationOctetStream,
+    ] {
+        assert_eq!(BlankDocument::of(media), None, "{media:?}");
+    }
+}
+
+#[test]
+fn every_blank_noun_is_distinct_and_fits_a_menu_row_and_a_name() {
+    use tairix_abi::window_ipc::APP_MENU_LABEL_MAX;
+    use tairix_abi::FS_NAME_MAX;
+
+    let documents: Vec<BlankDocument> = ALL
+        .iter()
+        .filter_map(|media| BlankDocument::of(*media))
+        .collect();
+    for (at, document) in documents.iter().enumerate() {
+        assert!(document.noun().len() <= APP_MENU_LABEL_MAX, "{document:?}");
+        let longest = alloc::format!(
+            "New {} {}.{}",
+            document.noun(),
+            usize::MAX,
+            document.extension()
+        );
+        assert!(longest.len() <= FS_NAME_MAX, "{document:?}");
+        assert!(
+            documents[..at]
+                .iter()
+                .all(|earlier| earlier.noun() != document.noun()),
+            "{document:?}"
+        );
+    }
+}
+
+/// Every type but a directory and content of no recognised type belongs to a
+/// family, so every file a folder's picture could show a card for has one.
+#[test]
+fn every_type_but_a_directory_and_unknown_content_has_a_family() {
+    for media in ALL {
+        let none = matches!(
+            media,
+            MediaType::InodeDirectory | MediaType::ApplicationOctetStream
+        );
+        assert_eq!(media.family().is_none(), none, "{media:?}");
+    }
+}
+
+const PICTURES: &str = "/Users/ann/UserFiles/Pictures";
+
+/// The file every listed picture names.
+const LISTED: FileId = FileId {
+    volume: [7; 16],
+    node: 42,
+};
+
+/// `entry`'s icon, and how the thumbnail it asks for under its own path is
+/// read, or `None` when it asks for none — listed out of [`PICTURES`].
+fn pictured(entry: &Entry) -> (IconKind, Option<Reading>) {
+    let mut scratch = String::new();
+    let (kind, request) = entry_icon(PICTURES, &components(PICTURES), entry, &mut scratch);
+    let path = alloc::format!("{PICTURES}/{}", entry.name());
+    let reading = [Reading::Signature, Reading::Sprite]
+        .into_iter()
+        .find(|&reading| {
+            request
+                == IconRequest::thumbnail(
+                    kind,
+                    &path,
+                    entry.size(),
+                    entry.modified(),
+                    entry.id(),
+                    reading,
+                )
+        });
+    (kind, reading)
+}
+
+/// A picture file asks for its own content, keyed by the file, path, size and
+/// time its listing reports, so a changed or replaced file is decoded afresh.
+#[test]
+fn a_picture_file_asks_for_its_own_content() {
+    let written = Time64::from_secs(1_700_000_000);
+    let photo = Entry::new("cat.jpg", EntryKind::File, 4096, written).with_id(LISTED);
+    let (kind, reading) = pictured(&photo);
+    assert_eq!(
+        kind,
+        MediaType::ImageJpeg.icon(),
+        "drawn as its class meanwhile"
+    );
+    assert_eq!(reading, Some(Reading::Signature));
+}
+
+/// A sprite area carries no signature, so it is read as one only because its
+/// name says it is.
+#[test]
+fn a_sprite_area_is_read_as_its_name_says() {
+    let sprites =
+        Entry::new("Sprites,ff9", EntryKind::File, 64, Time64::UNIX_EPOCH).with_id(LISTED);
+    let (_, reading) = pictured(&sprites);
+    assert_eq!(reading, Some(Reading::Sprite));
+}
+
+/// Only a picture the shared raster decoders read has a thumbnail; a link's
+/// listed size and time are its own, so it draws its class picture.
+#[test]
+fn only_a_listed_picture_the_decoders_read_has_a_thumbnail() {
+    let readable = [
+        MediaType::ImagePng,
+        MediaType::ImageJpeg,
+        MediaType::ImageGif,
+        MediaType::ImageBmp,
+        MediaType::ImageIcon,
+        MediaType::ImageWebp,
+        MediaType::ImageTiff,
+        MediaType::ImageOpenRaster,
+        MediaType::ImageSprite,
+    ];
+    for media in ALL {
+        assert_eq!(
+            media.thumbnail().is_some(),
+            readable.contains(media),
+            "{}",
+            media.as_str()
+        );
+    }
+    let mut scratch = String::new();
+    for entry in [
+        Entry::new("notes.txt", EntryKind::File, 10, Time64::UNIX_EPOCH),
+        Entry::new("logo.svg", EntryKind::File, 10, Time64::UNIX_EPOCH),
+        Entry::new(
+            "cat.jpg",
+            EntryKind::Link(LinkTarget::File),
+            10,
+            Time64::UNIX_EPOCH,
+        ),
+        // A listing that named no file gives the open nothing to check.
+        Entry::new("dog.jpg", EntryKind::File, 10, Time64::UNIX_EPOCH),
+    ]
+    .map(|entry| {
+        if entry.name() == "dog.jpg" {
+            entry
+        } else {
+            entry.with_id(LISTED)
+        }
+    }) {
+        let (kind, request) = entry_icon(PICTURES, &components(PICTURES), &entry, &mut scratch);
+        assert_eq!(request, IconRequest::kind(kind), "{}", entry.name());
     }
 }

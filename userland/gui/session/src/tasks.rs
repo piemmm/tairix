@@ -157,6 +157,26 @@ impl TaskBridge {
         true
     }
 
+    /// Show the tracked `window` beneath `front` — the window holding the
+    /// keyboard, if any — without moving the keyboard or the bar's
+    /// highlight. Returns `false`, changing nothing, for a window the bridge
+    /// does not track.
+    pub fn map_behind(
+        &self,
+        compositor: &mut Compositor,
+        front: Option<WindowId>,
+        window: WindowId,
+    ) -> bool {
+        if self.task_for(window).is_none() {
+            return false;
+        }
+        compositor.set_visible(window, true);
+        if let Some(front) = front {
+            compositor.stack_below(window, front);
+        }
+        true
+    }
+
     /// Mint the next task id, or `None` when the id space is exhausted.
     fn mint(&mut self) -> Option<TaskId> {
         let task = TaskId(self.next);

@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
+use tairix_abi::home::HOME_USER_FILES_DIR;
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_users::{
@@ -91,9 +92,10 @@ pub const NEW_FILE_NAME: &[u8] = b"written.txt";
 /// Contents the guest tail writes to [`NEW_FILE_NAME`] and reads back.
 pub const NEW_FILE_CONTENT: &[u8] = b"TAIRiX wrote this file to arxfs over virtio-blk.\n";
 
-/// A document planted in the fixture account's home (`/Users/root`) on the
-/// users-root volume, so the desktop session's trusted file picker — which
-/// opens at the user's home — has a real regular file to choose. Choosing it
+/// A document planted among the fixture account's own files
+/// (`/Users/root/UserFiles`) on the users-root volume, so the desktop
+/// session's trusted file picker — which opens there — has a real regular
+/// file to choose. Choosing it
 /// drives the CU6 one-shot `fd_grant`/`fd_redeem` delegation into `view`
 /// (`plans/NEW-FILEMANAGER.md` FM9-b).
 pub const HOME_DOC_NAME: &[u8] = b"Welcome.txt";
@@ -105,8 +107,8 @@ pub const HOME_DOC_NAME: &[u8] = b"Welcome.txt";
 pub const HOME_DOC_CONTENT: &[u8] =
     b"Welcome to TAIRiX.\nThis document was opened through the trusted file picker.\n";
 
-/// A picture planted beside [`HOME_DOC_NAME`] in the fixture account's home,
-/// so a gesture in the **file manager's** window has a document whose type an
+/// A picture planted beside [`HOME_DOC_NAME`] among the fixture account's own
+/// files, so a gesture in the **file manager's** window has a document whose type an
 /// installed application claims. `view` declares `image/svg+xml`, so
 /// activating this resolves to that bundle and drives the three-principal
 /// hand-over — the manager mints the delegation, the session relays it, and
@@ -348,7 +350,8 @@ fn create_service_overrides_dir(
     .map(drop)
 }
 
-/// Plant the regular file `name` holding `content` in the account's `home`.
+/// Plant the regular file `name` holding `content` in `dir`, a folder of the
+/// account's home.
 ///
 /// Owned by the account and world-unreadable-but-owner-readable (0644 under
 /// the owner-only home), so only a process running as the user reaches it —
@@ -357,11 +360,11 @@ fn create_service_overrides_dir(
 /// access.
 fn plant_home_file(
     fs: &mut ARXFS<VecBlock>,
-    home: NodeId,
+    dir: NodeId,
     name: &[u8],
     content: &[u8],
 ) -> Result<(), DriverError> {
-    let node = fs.create(home, name, NodeKind::RegularFile)?;
+    let node = fs.create(dir, name, NodeKind::RegularFile)?;
     fs.set_security(
         node,
         Security::new(
@@ -370,7 +373,7 @@ fn plant_home_file(
             tairix_users::FIRST_USER_GID,
         ),
     )?;
-    if fs.write_at(home, name, 0, content)? != content.len() {
+    if fs.write_at(dir, name, 0, content)? != content.len() {
         return Err(DriverError::DeviceFault);
     }
     Ok(())
@@ -437,53 +440,30 @@ pub fn build_users_root_image_with_key(
             create_service_overrides_dir(&mut fs, settings)?;
         }
         if name == "Users" {
-            // The planted account's recorded home directory, owned by the
-            // account and owner-only exactly as `tools/mkimage` provisions
-            // it, so a logged-in session's `cd /Users/root` (and a write
-            // into it) resolves against a real inode the account owns.
-            let transit = tairix_users::appdata_transit_security(
+            // The planted account's recorded home directory with the fixed
+            // home shape, through the one walk the real provisioning path
+            // takes, so a fixture home is not a shape no installed system
+            // would ever have.
+            let home = fs.create(node, b"root", NodeKind::Directory)?;
+            tairix_users::provision_home_shape(
+                &mut fs,
+                home,
                 tairix_users::FIRST_USER_UID,
                 tairix_users::FIRST_USER_GID,
-            )?;
-            let home = fs.create(node, b"root", NodeKind::Directory)?;
-            fs.set_security(home, transit)?;
-            // …and the fixed home shape inside it, from the same shared
-            // definition the real provisioning path reads, so a fixture
-            // home is not a shape no installed system would ever have:
-            // the per-user stores a session writes (its settings, an app
-            // cache, the user's own bundles) live a level below these, and
-            // a writer creates only its immediate parent. The two that hold
-            // an app-data root also carry the gated root itself, owned by
-            // the app-data service — nothing running as the account could
-            // create it, so a fixture without it would have no store.
-            for subdir in tairix_users::HOME_SUBDIRS {
-                let node = fs.create(home, subdir.as_bytes(), NodeKind::Directory)?;
-                if tairix_users::APPDATA_ROOT_PARENTS.contains(&subdir) {
-                    fs.set_security(node, transit)?;
-                    let gated = fs.create(
-                        node,
-                        tairix_users::APPDATA_ROOT.as_bytes(),
-                        NodeKind::Directory,
-                    )?;
-                    fs.set_security(gated, tairix_users::appdata_root_security())?;
-                } else {
-                    fs.set_security(
-                        node,
-                        Security::new(
-                            tairix_users::HOME_MODE,
-                            tairix_users::FIRST_USER_UID,
-                            tairix_users::FIRST_USER_GID,
-                        ),
-                    )?;
-                }
-            }
-            // Two readable documents in the account's home, so both
-            // user-mediated routes to a file have something real to reach:
-            // the session's trusted picker (which opens at the home) shows a
-            // regular file to choose, and the file manager's own window has a
-            // picture whose type an installed application claims.
-            plant_home_file(&mut fs, home, HOME_DOC_NAME, HOME_DOC_CONTENT)?;
-            plant_home_file(&mut fs, home, HOME_PICTURE_NAME, HOME_PICTURE_CONTENT)?;
+            )
+            .map_err(|err| match err {
+                tairix_users::HomeShapeError::Driver(err) => err,
+                tairix_users::HomeShapeError::Occupied => DriverError::Unsupported,
+            })?;
+            // Two readable documents among the account's own files, where a
+            // bare file-manager window and the trusted picker both open, so
+            // both user-mediated routes to a file have something real to
+            // reach: the picker shows a regular file to choose, and the file
+            // manager's window has a picture whose type an installed
+            // application claims.
+            let files = fs.lookup(home, HOME_USER_FILES_DIR.as_bytes())?;
+            plant_home_file(&mut fs, files, HOME_DOC_NAME, HOME_DOC_CONTENT)?;
+            plant_home_file(&mut fs, files, HOME_PICTURE_NAME, HOME_PICTURE_CONTENT)?;
         }
         if name == "System" {
             let security = fs.create(node, b"Security", NodeKind::Directory)?;
@@ -624,18 +604,26 @@ mod tests {
         assert_eq!(sec.uid, tairix_users::FIRST_USER_UID);
         assert_eq!(sec.gid, tairix_users::FIRST_USER_GID);
 
-        // Both planted documents exist, are owner-readable, and read back
-        // their known contents: the text one the trusted picker delegates
-        // into the viewer, and the picture an installed application claims
-        // so the file manager's own activation has somewhere to hand it.
+        // The account's own files hold their fixed folders and, beside them,
+        // both planted documents, owner-readable and reading back their known
+        // contents: the text one the trusted picker delegates into the viewer,
+        // and the picture an installed application claims so the file
+        // manager's own activation has somewhere to hand it.
+        let files = fs
+            .lookup(home, HOME_USER_FILES_DIR.as_bytes())
+            .expect("/Users/root/UserFiles present");
+        for folder in tairix_abi::home::USER_FILES_SUBDIRS {
+            fs.lookup(files, folder.as_bytes())
+                .unwrap_or_else(|_| panic!("/Users/root/UserFiles/{folder} present"));
+        }
         for (name, content) in [
             (HOME_DOC_NAME, HOME_DOC_CONTENT),
             (HOME_PICTURE_NAME, HOME_PICTURE_CONTENT),
         ] {
             let spelling = core::str::from_utf8(name).expect("a planted name is UTF-8");
             let node = fs
-                .lookup(home, name)
-                .unwrap_or_else(|_| panic!("/Users/root/{spelling} present"));
+                .lookup(files, name)
+                .unwrap_or_else(|_| panic!("/Users/root/UserFiles/{spelling} present"));
             let sec = fs.security(node).expect("document security present");
             assert_eq!(sec.mode, 0o644, "{spelling}");
             assert_eq!(sec.uid, tairix_users::FIRST_USER_UID, "{spelling}");

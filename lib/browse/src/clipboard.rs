@@ -215,6 +215,34 @@ pub fn plan_paste(clipboard: &Clipboard, target: &[String]) -> Result<PastePlan,
     })
 }
 
+/// What dropping the dragged `items` into the folder `target` does: a copy,
+/// or a move when `shift` is held — or `None` when the drop would put a folder
+/// inside itself, or would leave every item where it already is.
+///
+/// The one policy every drop of a drag decides through, so a window and the
+/// desktop can never disagree about what a drop means.
+#[must_use]
+pub fn drop_operation(
+    items: &[Vec<String>],
+    target: &[String],
+    shift: bool,
+) -> Option<ClipboardOp> {
+    let mut moves_one = false;
+    for item in items {
+        if is_within(target, item) {
+            return None;
+        }
+        moves_one |= item
+            .split_last()
+            .is_some_and(|(_, parent)| parent != target);
+    }
+    moves_one.then_some(if shift {
+        ClipboardOp::Cut
+    } else {
+        ClipboardOp::Copy
+    })
+}
+
 /// Whether `path` is `ancestor` itself or lies inside it — an exact root-first
 /// component-prefix test (so `/a/b` is within `/a`, but `/ab` is not).
 fn is_within(path: &[String], ancestor: &[String]) -> bool {

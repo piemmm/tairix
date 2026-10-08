@@ -780,7 +780,8 @@ fn layers_painted(icon: &crate::vector::VectorIcon, color: tairix_raster::Color)
 }
 
 /// The folder masters are the designer's own drawings rather than traced
-/// approximations, and they are the vector class tier's whole shipped set.
+/// approximations, and with the back and front a folder's picture of what it
+/// holds is composed from, they are the vector class tier's whole shipped set.
 /// Pinning what they decode to is what would catch the decoder quietly
 /// dropping a shape and leaving a wrong picture on every folder on screen.
 ///
@@ -808,6 +809,16 @@ fn the_folder_icons_draw_the_artwork_they_were_authored_with() {
         assert_eq!(layers_painted(&filled, ink), 1);
     }
     assert_eq!(layers_painted(&filled, paper), 3, "one fill per paper");
+
+    // The back alone, and the low front pocket with its accent.
+    let back = shipped_vector("folder-back.svg");
+    assert_eq!(crate::tests::fills(&back).len(), 1);
+    assert_eq!(layers_painted(&back, plate), 1);
+    let front = shipped_vector("folder-front.svg");
+    assert_eq!(crate::tests::fills(&front).len(), 2);
+    for ink in [body, accent] {
+        assert_eq!(layers_painted(&front, ink), 1);
+    }
 
     // Each covers a substantial part of its slot: a silhouette that decoded
     // but drew almost nothing would still pass a "not empty" check.

@@ -1426,12 +1426,8 @@ impl<A: DocumentApp> Host<A> {
                 ..
             } => {
                 let at = pointer_point(*x, *y);
-                self.point(
-                    index,
-                    at,
-                    *modifiers,
-                    pinch_input_events(at, *phase, *scale),
-                );
+                let pinch = pinch_input_events(at, *phase, *scale);
+                self.point(index, at, *modifiers, pinch);
             }
             WindowEvent::Minimized { .. }
             | WindowEvent::AppBarDefault
@@ -1439,6 +1435,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. } => {}
         }

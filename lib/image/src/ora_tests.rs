@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use super::{composed, encode_ora, OraDocument, OraLayer, OraLayerSource};
 use crate::zip::Writer;
 use crate::{
-    decode_as, open_native, probe_as, sniff, DecodeError, DecodeLimits, ImageFormat,
+    decode_as, open_native, probe_as, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat,
     NativeDocument, Picture,
 };
 
@@ -282,7 +282,7 @@ fn a_canvas_past_the_limits_is_refused_by_the_decode_and_its_estimate() {
         &[],
     );
     assert_eq!(
-        super::peak_bytes(&ora, &limits()),
+        estimate(&ora, &limits()),
         Err(DecodeError::WidthExceedsLimit)
     );
     assert_eq!(
@@ -353,8 +353,7 @@ fn the_estimate_counts_no_layer_a_fitting_merged_picture_answers_for() {
     let mut document = document();
     let merged = flat(4, 3, [255, 0, 0, 255]);
     let thumbnail = flat(1, 1, [0; 4]);
-    let few =
-        super::peak_bytes(&written(&document, &merged, &thumbnail), &limits()).expect("estimated");
+    let few = estimate(&written(&document, &merged, &thumbnail), &limits()).expect("estimated");
     document.layers.push(OraLayer {
         name: String::from("Wide"),
         picture: flat(512, 512, [1, 2, 3, 255]),
@@ -363,12 +362,12 @@ fn the_estimate_counts_no_layer_a_fitting_merged_picture_answers_for() {
         visible: true,
     });
     let ora = written(&document, &merged, &thumbnail);
-    let more = super::peak_bytes(&ora, &limits()).expect("estimated");
+    let more = estimate(&ora, &limits()).expect("estimated");
     // The archive it holds grows by the layer's PNG; its pixels are not held.
     let decoded = 512 * 512 * 4;
     assert!(more < few + decoded, "{few} then {more}");
     let passed_over = written(&document, &flat(2, 2, [0; 4]), &thumbnail);
-    let layered = super::peak_bytes(&passed_over, &limits()).expect("estimated");
+    let layered = estimate(&passed_over, &limits()).expect("estimated");
     assert!(layered > few + decoded, "{layered}");
 }
 
@@ -466,18 +465,18 @@ fn a_layer_nothing_of_shows_is_not_read_for_the_picture() {
 fn the_estimate_counts_no_layer_nothing_of_shows() {
     let small = crate::encode_png(&flat(1, 1, [9, 8, 7, 255])).expect("encodes");
     let wide = crate::encode_png(&flat(512, 512, [1, 2, 3, 255])).expect("encodes");
-    let estimate = |shows: &str| {
+    let costed = |shows: &str| {
         let stack = alloc::format!(
             r#"<image w="1" h="1"><stack><layer src="data/wide.png"{shows}/><layer src="data/l.png"/></stack></image>"#
         );
         let ora = archive(&stack, &[("data/l.png", &small), ("data/wide.png", &wide)]);
-        super::peak_bytes(&ora, &limits()).expect("estimated")
+        estimate(&ora, &limits()).expect("estimated")
     };
     let decoded = 512 * 512 * 4;
-    let shown = estimate("");
+    let shown = costed("");
     assert!(shown > decoded, "{shown}");
     for nothing in [r#" visibility="hidden""#, r#" opacity="0""#] {
-        let passed_over = estimate(nothing);
+        let passed_over = costed(nothing);
         assert!(
             passed_over + decoded <= shown,
             "{nothing}: {passed_over} of {shown}"
@@ -492,8 +491,123 @@ fn the_estimate_of_a_small_document_does_not_follow_the_widest_admitted() {
     let png = crate::encode_png(&flat(1, 1, [9, 8, 7, 255])).expect("encodes");
     let ora = archive(&lone_stack("", ""), &[("data/l.png", &png)]);
     let wider = DecodeLimits::new(1 << 20, 16, 4096 * 4096, 0);
+    assert_eq!(estimate(&ora, &wider), estimate(&ora, &limits()));
+}
+
+/// What a caller admitting a natural-size decode of `ora` accounts for.
+fn estimate(ora: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    super::fitted_peak_bytes(ora, limits, FitBox::new(u32::MAX, u32::MAX))
+}
+
+/// A fitted decode shows the thumbnail where it previews the document and
+/// covers the box, and the merged image reduced where the box asks for more.
+#[test]
+fn a_fitted_decode_reads_the_thumbnail_or_reduces_the_merged_image() {
+    let mut document = document();
+    document.width = 40;
+    document.height = 30;
+    let merged = flat(40, 30, [200, 10, 10, 255]);
+    let thumbnail = flat(8, 6, [10, 200, 10, 255]);
+    let ora = written(&document, &merged, &thumbnail);
+    let small = super::decode_fitted(&ora, &limits(), FitBox::new(4, 4)).expect("decodes");
     assert_eq!(
-        super::peak_bytes(&ora, &wider),
-        super::peak_bytes(&ora, &limits())
+        (small.width(), small.height()),
+        (6, 4),
+        "the thumbnail, reduced"
+    );
+    assert_eq!(&small.pixels()[..4], &[10, 200, 10, 255]);
+    let large = super::decode_fitted(&ora, &limits(), FitBox::new(20, 20)).expect("decodes");
+    assert_eq!(
+        (large.width(), large.height()),
+        (27, 20),
+        "the merged image, reduced"
+    );
+    assert_eq!(&large.pixels()[..4], &[200, 10, 10, 255]);
+}
+
+/// A thumbnail of another shape is no preview of the document.
+#[test]
+fn a_thumbnail_of_another_shape_is_passed_over() {
+    let mut document = document();
+    document.width = 40;
+    document.height = 30;
+    let merged = flat(40, 30, [200, 10, 10, 255]);
+    let ora = written(&document, &merged, &flat(8, 8, [10, 200, 10, 255]));
+    let image = super::decode_fitted(&ora, &limits(), FitBox::new(4, 4)).expect("decodes");
+    assert_eq!(&image.pixels()[..4], &[200, 10, 10, 255]);
+}
+
+/// `ora` with every member but the mimetype deflated, as most writers store
+/// them.
+fn deflated(ora: &[u8]) -> Vec<u8> {
+    let archive = crate::zip::Archive::open(ora).expect("readable");
+    let mut zip = Writer::new();
+    for name in archive.names() {
+        let name = core::str::from_utf8(name).expect("a name");
+        let data = archive
+            .read(name, usize::MAX)
+            .expect("good")
+            .expect("present");
+        if name == "mimetype" {
+            zip.store(name, &data)
+        } else {
+            zip.store_deflated(name, &data)
+        }
+        .expect("room");
+    }
+    zip.finish().expect("room")
+}
+
+/// A compressed member is costed from its own PNG header, inflated alone, not
+/// at the largest picture the limits admit: a deflated document is forecast
+/// within the stored one's tables of it, and decodes alike.
+#[test]
+fn a_compressed_document_is_forecast_from_its_members_headers() {
+    let mut document = document();
+    document.width = 40;
+    document.height = 30;
+    let ora = written(
+        &document,
+        &flat(40, 30, [200, 10, 10, 255]),
+        &flat(8, 6, [10, 200, 10, 255]),
+    );
+    let packed = deflated(&ora);
+    let tables = 256 * 3 + 256;
+    for fit in [
+        FitBox::new(4, 4),
+        FitBox::new(20, 20),
+        FitBox::new(u32::MAX, u32::MAX),
+    ] {
+        let stored = super::fitted_peak_bytes(&ora, &limits(), fit).expect("forecast");
+        let compressed = super::fitted_peak_bytes(&packed, &limits(), fit).expect("forecast");
+        assert!(
+            stored <= compressed && compressed <= stored + 2 * tables,
+            "{stored} then {compressed}"
+        );
+        let (whole, fitted) = (
+            super::decode_fitted(&ora, &limits(), fit).expect("decodes"),
+            super::decode_fitted(&packed, &limits(), fit).expect("decodes"),
+        );
+        assert_eq!(whole.pixels(), fitted.pixels());
+    }
+}
+
+/// The layered path costs each compressed layer from its header too.
+#[test]
+fn compressed_layers_are_forecast_from_their_headers() {
+    let mut document = document();
+    document.layers.push(OraLayer {
+        name: String::from("Wide"),
+        picture: flat(512, 512, [1, 2, 3, 255]),
+        at: (0, 0),
+        opacity: 255,
+        visible: true,
+    });
+    let ora = written(&document, &flat(2, 2, [0; 4]), &flat(1, 1, [0; 4]));
+    let stored = estimate(&ora, &limits()).expect("estimated");
+    let compressed = estimate(&deflated(&ora), &limits()).expect("estimated");
+    assert!(
+        compressed < stored + (1 << 20),
+        "{stored} then {compressed}"
     );
 }

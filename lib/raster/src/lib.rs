@@ -76,7 +76,10 @@ pub use paint::{
     MAX_TILE_FOLD,
 };
 pub use reorient::Reorient;
-pub use resample::{resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image};
+pub use resample::{
+    resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image, RowOrder,
+    RowReducer,
+};
 pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::{Coverage, CoverageRows, FillRule, ScanScratch, MAX_DRAWING_EXTENT};

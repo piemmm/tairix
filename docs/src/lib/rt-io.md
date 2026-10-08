@@ -105,9 +105,13 @@ caller, so no reader shares one bound across files of different kinds:
 - A refused read surfaces the kernel's `-errno` unchanged, and an answer that
   cannot be reserved is `-OutOfMemory` rather than an abort.
 
-Directory listings have their own shared policy (`read_dir_all` over
-`read_all_growing`), because the kernel delivers a listing whole-or-not and so
-grows a buffer rather than streaming chunks.
+Directory listings have their own shared policy. `Dir::read` is one batch
+from the open description's listing position; `Dir::read_all` and
+`read_dir_all` join `READDIR_BATCH_MAX` batches from the start
+(`read_batches`). The kernel fills a batch until the next record does not fit,
+so a batch with room for the longest record ends the listing without a further
+call. `Dir::read_all_within` refuses a listing past a caller's byte bound with
+`-LimitExceeded`.
 
 ## Buffering
 

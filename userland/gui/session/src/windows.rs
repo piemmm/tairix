@@ -4,7 +4,7 @@
 //! [`SessionWindows`] owns the session's window bookkeeping — the map
 //! between the window channel's session-minted ids and the compositor's
 //! [`WindowId`]s, plus each window's persistent content surface — and
-//! [`ShellWindowHost`] is the [`WindowHost`](tairix_window::WindowHost) bridge the
+//! [`ShellWindowHost`] is the [`WindowHost`] bridge the
 //! `tairix_window::WindowServer` drives: an accepted `Create` opens a
 //! desktop window (cascaded, focused, listed on the taskbar), a
 //! validated `Present` converts exactly the damaged pixels of the app's
@@ -23,18 +23,21 @@ use tairix_abi::desktop::{DesktopInfo, Motion};
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, HandOverDocument,
-    HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose, PointerAction, TerrainPlate,
-    WindowEvent, WindowRegion,
+    AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation,
+    HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose, PointerAction,
+    TerrainPlate, WindowEvent, WindowRegion,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
+use tairix_browse::DirectorySource;
 use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::{EventId, Field, FieldValue};
 use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
-use tairix_window::{ClientRegion, CursorSetName, HandOverDesk, PreviewSize, WallpaperName};
+use tairix_window::{
+    Activation, ClientRegion, CursorSetName, HandOverDesk, PreviewSize, WallpaperName, WindowHost,
+};
 
 use crate::launch::{
     open_entry, resolve_launch, DocumentAuthority, DocumentRelay, Launch, LaunchHost, LaunchTarget,
@@ -48,12 +51,15 @@ use tairix_wm::{
 
 use crate::apps::{AppBarBridge, BundleIndex};
 use crate::clipboard::ClipboardService;
+use crate::confirm::ConfirmPrompt;
+use crate::elevate::ElevatePrompt;
 use crate::layer::{
     apply_participation, clamped_origin, fits_layer_bound, stack_at_depth, terrain_into,
     LayerDecision, LayerState, LayerSurface,
 };
+use crate::lock::ScreenLock;
 use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
-use crate::picker::PickerSlot;
+use crate::picker::{PickerSlot, SessionPicker};
 use crate::session::DesktopSession;
 use crate::shell::DesktopShell;
 use crate::wallpaper::WallpaperService;
@@ -102,6 +108,22 @@ pub const WINDOW_SIZED: EventId = EventId(20_018);
 /// The exact message [`WINDOW_SIZED`] is emitted with. A log consumer matches
 /// on this constant rather than on a copy of its text.
 pub const WINDOW_SIZED_MESSAGE: &str = "served window on screen at its new size";
+
+/// Event id of an application's request to bring its own window forward,
+/// refused: the seat was held, or the keyboard had moved since anything the
+/// user did let it.
+pub const RAISE_REFUSED: EventId = EventId(20_020);
+
+/// The exact message [`RAISE_REFUSED`] is emitted with.
+pub const RAISE_REFUSED_MESSAGE: &str = "window raise refused";
+
+/// Event id of a hand-over that reached a running instance but may bring
+/// nothing forward, because the user was not working in the caller or the
+/// seat was held.
+pub const HAND_OVER_WITHHELD: EventId = EventId(20_021);
+
+/// The exact message [`HAND_OVER_WITHHELD`] is emitted with.
+pub const HAND_OVER_WITHHELD_MESSAGE: &str = "hand-over raise withheld";
 
 /// The name [`WINDOW_SIZED`] records `state` under.
 #[must_use]
@@ -357,6 +379,12 @@ impl SessionWindows {
     #[must_use]
     pub fn worked_in(&self, ipc: u64) -> bool {
         self.worked_in == Some(ipc)
+    }
+
+    /// The served window holding `shell`'s keyboard, as its channel id.
+    #[must_use]
+    pub fn focused(&self, shell: &DesktopShell) -> Option<u64> {
+        shell.router().focused().and_then(|wm| self.ipc_id(wm))
     }
 
     /// The compositor window showing the served window `ipc`, if it is live.
@@ -860,7 +888,7 @@ pub struct ShellWindowHost<'a> {
     /// The session's served-window bookkeeping.
     pub windows: &'a mut SessionWindows,
     /// The session's single trusted-picker slot
-    /// ([`SessionPicker`](crate::SessionPicker) in production): a
+    /// ([`SessionPicker`] in production): a
     /// validated `PickFile` opens it, and a closing window takes its own
     /// pick down with it.
     pub picker: &'a mut dyn PickerSlot,
@@ -909,6 +937,8 @@ pub struct ShellWindowHost<'a> {
 struct DeskReach<'a, 'b> {
     desk: &'a mut dyn HandOverDesk,
     host: &'a mut ShellWindowHost<'b>,
+    /// What the instance reached may bring forward.
+    activation: Activation,
 }
 
 impl LaunchHost for DeskReach<'_, '_> {
@@ -917,11 +947,11 @@ impl LaunchHost for DeskReach<'_, '_> {
         // fresh process, which still has the document.
         let relay = &mut *self.host.relay;
         self.desk
-            .hand_over(app, &mut || open_entry(target, relay, app))
+            .hand_over(app, self.activation, &mut || open_entry(target, relay, app))
     }
 
     fn ask_default(&mut self, app: ProcId) -> bool {
-        self.desk.ask_default(app)
+        self.desk.ask_default(app, self.activation)
     }
 
     fn raise_recent_window(&mut self, app: ProcId) -> bool {
@@ -932,7 +962,10 @@ impl LaunchHost for DeskReach<'_, '_> {
         else {
             return false;
         };
-        self.host.shell.raise_window(self.host.compositor, wm)
+        // Reached either way: a withheld raise must not read as an instance
+        // missing, or the caller would start a second one.
+        self.activation == Activation::Withheld
+            || self.host.shell.raise_window(self.host.compositor, wm)
     }
 }
 
@@ -941,16 +974,54 @@ impl ShellWindowHost<'_> {
     /// user last pressed a key or a button in: a window that took the
     /// keyboard by opening has had nothing from the user yet.
     fn require_user(&self, window_id: u64) -> Result<(), Errno> {
-        let focused = self
-            .shell
-            .router()
-            .focused()
-            .and_then(|wm| self.windows.ipc_id(wm));
-        if focused == Some(window_id) && self.windows.worked_in(window_id) {
+        if self.windows.focused(self.shell) == Some(window_id) && self.windows.worked_in(window_id)
+        {
             Ok(())
         } else {
             Err(Errno::PermissionDenied)
         }
+    }
+
+    /// What a hand-over `caller` asked for may bring forward: one raise, while
+    /// the user is working in one of the caller's windows and nothing holds
+    /// the seat.
+    fn hand_over_activation(&self, caller: ProcId) -> Activation {
+        let focus = self.focused_window();
+        let working = focus.is_some_and(|window| {
+            self.windows.owner_of(window) == Some(caller) && self.windows.worked_in(window)
+        });
+        if working && !self.seat_held && !self.shell.drag_active() {
+            Activation::Granted { focus }
+        } else {
+            Activation::Withheld
+        }
+    }
+
+    /// Record a refused raise of `window_id`, asked for by `caller`.
+    fn note_raise_refused(&self, caller: Option<ProcId>, window_id: u64, reason: &'static str) {
+        let caller = caller.and_then(|caller| self.apps.attested_identity(caller));
+        tairix_log::log(
+            self.shell.audit(),
+            &tairix_log::Event {
+                level: tairix_log::Level::Warn,
+                id: RAISE_REFUSED,
+                message: RAISE_REFUSED_MESSAGE,
+                fields: &[
+                    Field {
+                        key: "caller",
+                        value: FieldValue::Str(caller.as_ref().map_or("", |app| app.name.as_str())),
+                    },
+                    Field {
+                        key: "window",
+                        value: FieldValue::UnsignedInt(window_id),
+                    },
+                    Field {
+                        key: "reason",
+                        value: FieldValue::Str(reason),
+                    },
+                ],
+            },
+        );
     }
 
     /// Why the seat cannot carry a chain right now, if it cannot.
@@ -981,6 +1052,25 @@ pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
         return Some(MenuRefusal::SeatBusy);
     }
     None
+}
+
+/// Whether a surface the seat may not be taken from holds it: the screen
+/// lock, the trusted picker, or a system-modal prompt.
+///
+/// One definition, because every request to come forward, take the keyboard,
+/// open a menu, start a drag or open a popup consults it, whichever direction
+/// it arrives from.
+#[must_use]
+pub fn seat_held<S: DirectorySource, F: FnMut() -> S>(
+    lock: &ScreenLock,
+    picker: &SessionPicker<S, F>,
+    confirm: &ConfirmPrompt,
+    elevate: &ElevatePrompt,
+) -> bool {
+    lock.is_locked()
+        || picker.wm_id().is_some()
+        || confirm.wm_id().is_some()
+        || elevate.wm_id().is_some()
 }
 
 /// Where a window's own menu opens against the press `anchor` its application
@@ -1199,6 +1289,11 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         offset_y: i32,
         surface: &DisplayMode,
     ) -> Result<(), Errno> {
+        // A popup takes the keyboard as it opens, so none opens while a lock,
+        // the picker or a prompt holds the seat.
+        if self.seat_held {
+            return Err(Errno::SeatBusy);
+        }
         // An app is never told where its own window sits, so the offset it
         // asked for is relative to its parent's client origin and the
         // absolute point is the session's to resolve. A parent the session
@@ -1318,8 +1413,15 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                 }
                 unpresented
             });
+        // A window first shown while the seat is held goes beneath the
+        // surface holding it and takes no keyboard, so nothing can open its
+        // way into the keys typed at a prompt.
         if map {
-            self.shell.map_window(self.compositor, wm);
+            if self.seat_held {
+                self.shell.map_window_behind(self.compositor, wm);
+            } else {
+                self.shell.map_window(self.compositor, wm);
+            }
         }
         Ok(())
     }
@@ -1598,15 +1700,43 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
+        // The picker takes the keyboard as it opens, so none opens over the
+        // lock, a prompt, or another pick.
+        if self.seat_held {
+            return Err(Errno::SeatBusy);
+        }
         // The engine already validated ownership and the per-window
-        // single-pending rule; the slot enforces the session's own
-        // modality (one picker at a time) and brings the UI up under the
+        // single-pending rule; the slot brings the UI up under the
         // session's authority, refusing fail-closed when it cannot.
         self.picker
             .begin(window_id, purpose, self.shell, self.compositor)
     }
 
-    fn drag_requested(&mut self, window_id: u64, name: &DocumentName) -> Result<(), Errno> {
+    fn focused_window(&self) -> Option<u64> {
+        self.windows.focused(self.shell)
+    }
+
+    fn raise_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+        // Nothing comes forward over the lock, the picker, a prompt, or a
+        // drag the user is still carrying.
+        if self.seat_held || self.shell.drag_active() {
+            let owner = self.windows.owner_of(window_id);
+            self.note_raise_refused(owner, window_id, "seat held");
+            return Err(Errno::SeatBusy);
+        }
+        let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
+        if self.shell.raise_window(self.compositor, wm) {
+            Ok(())
+        } else {
+            Err(Errno::NotFound)
+        }
+    }
+
+    fn raise_refused(&mut self, caller: ProcId, window_id: u64) {
+        self.note_raise_refused(Some(caller), window_id, "not the user's doing");
+    }
+
+    fn drag_requested(&mut self, window_id: u64, items: &DragItems) -> Result<(), Errno> {
         // A drag may not take the pointer from the lock, the picker, or a
         // prompt, any more than a menu may.
         if self.seat_held {
@@ -1614,7 +1744,20 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         }
         let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
         self.shell
-            .begin_drag(self.compositor, window_id, wm, name.as_str())
+            .begin_drag(self.compositor, window_id, wm, *items)
+    }
+
+    fn drag_verdict(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        // An answer to a report the pointer has moved on from is not shown;
+        // the application is answering a newer one too.
+        self.shell
+            .drag_verdict(self.compositor, window_id, serial, verdict);
+        Ok(())
     }
 
     fn hand_over_requested(
@@ -1643,7 +1786,35 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             },
             writable: doc.writable,
         });
-        let mut reach = DeskReach { desk, host: self };
+        let activation = self.hand_over_activation(caller);
+        if activation == Activation::Withheld && running.is_some() {
+            let caller = self.apps.attested_identity(caller);
+            tairix_log::log(
+                self.shell.audit(),
+                &tairix_log::Event {
+                    level: tairix_log::Level::Info,
+                    id: HAND_OVER_WITHHELD,
+                    message: HAND_OVER_WITHHELD_MESSAGE,
+                    fields: &[
+                        Field {
+                            key: "caller",
+                            value: FieldValue::Str(
+                                caller.as_ref().map_or("", |app| app.name.as_str()),
+                            ),
+                        },
+                        Field {
+                            key: "bundle",
+                            value: FieldValue::Str(bundle),
+                        },
+                    ],
+                },
+            );
+        }
+        let mut reach = DeskReach {
+            desk,
+            host: self,
+            activation,
+        };
         match resolve_launch(&mut reach, running, one_instance, target) {
             Launch::Reused { .. } => Ok(HandOverOutcome::Reached),
             // Nothing took it, so the caller launches the bundle itself — and
@@ -1764,7 +1935,7 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
 mod tests {
     use super::*;
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-    use tairix_abi::window_ipc::PreviewSubject;
+    use tairix_abi::window_ipc::{DocumentName, PreviewSubject};
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
@@ -1924,6 +2095,8 @@ mod tests {
     struct RecordingDesk {
         handed: alloc::vec::Vec<(ProcId, OpenEntry)>,
         defaults: alloc::vec::Vec<ProcId>,
+        /// What each hand-over or default ask let its instance bring forward.
+        activations: alloc::vec::Vec<Activation>,
         /// Whether a hand-over is taken.
         takes: bool,
         /// The window each application most recently opened, if a test says.
@@ -1934,6 +2107,7 @@ mod tests {
         fn hand_over(
             &mut self,
             app: ProcId,
+            activation: Activation,
             make: &mut dyn FnMut() -> Result<OpenEntry, Errno>,
         ) -> bool {
             // The engine's contract: nothing is produced for a hand-over it
@@ -1941,11 +2115,13 @@ mod tests {
             if !self.takes {
                 return false;
             }
+            self.activations.push(activation);
             make().map(|entry| self.handed.push((app, entry))).is_ok()
         }
 
-        fn ask_default(&mut self, app: ProcId) -> bool {
+        fn ask_default(&mut self, app: ProcId, activation: Activation) -> bool {
             self.defaults.push(app);
+            self.activations.push(activation);
             false
         }
 
@@ -2014,6 +2190,9 @@ mod tests {
         bar: RecordingBar,
         desk: RecordingDesk,
         relay: WiredRelay,
+        seat_held: bool,
+        gallery: RecordingGallery,
+        clipboard: crate::clipboard::NoClipboard,
     }
 
     impl HandOverBench {
@@ -2034,6 +2213,9 @@ mod tests {
                     mints: Some(77),
                     ..WiredRelay::default()
                 },
+                seat_held: false,
+                gallery: RecordingGallery::default(),
+                clipboard: crate::clipboard::NoClipboard,
             }
         }
 
@@ -2047,8 +2229,26 @@ mod tests {
             bench
         }
 
+        fn host(&mut self) -> ShellWindowHost<'_> {
+            ShellWindowHost {
+                shell: &mut self.shell,
+                compositor: &mut self.compositor,
+                windows: &mut self.windows,
+                picker: &mut self.picker,
+                apps: &mut self.bar,
+                menu: &mut self.menu,
+                seat_held: self.seat_held,
+                screensaver: None,
+                relay: &mut self.relay,
+                wallpapers: &mut self.gallery,
+                cursor_sets: &[],
+                clipboard: &mut self.clipboard,
+            }
+        }
+
         /// Ask the session to hand `document` over for [`caller`].
         fn ask(&mut self, document: Option<&HandOverDocument>) -> Result<HandOverOutcome, Errno> {
+            let run_path = alloc::format!("{HAND_OVER_BUNDLE}/Run");
             let mut host = ShellWindowHost {
                 shell: &mut self.shell,
                 compositor: &mut self.compositor,
@@ -2056,16 +2256,83 @@ mod tests {
                 picker: &mut self.picker,
                 apps: &mut self.bar,
                 menu: &mut self.menu,
-                seat_held: false,
+                seat_held: self.seat_held,
                 screensaver: None,
                 relay: &mut self.relay,
-                wallpapers: &mut RecordingGallery::default(),
+                wallpapers: &mut self.gallery,
                 cursor_sets: &[],
-                clipboard: &mut crate::clipboard::NoClipboard,
+                clipboard: &mut self.clipboard,
             };
-            let run_path = alloc::format!("{HAND_OVER_BUNDLE}/Run");
             host.hand_over_requested(&mut self.desk, caller(), &run_path, document)
         }
+
+        /// Open and show window `id` for `owner`, which takes the keyboard.
+        fn open(&mut self, owner: ProcId, id: u64) {
+            let m = mode(4, 4, DisplayFormat::Rgba8888);
+            let mut host = self.host();
+            host.window_opened(owner, id, &m, "open", WindowSizing::default())
+                .expect("opens");
+            host.window_presented(id, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                .expect("presents");
+        }
+
+        /// The user presses a key in window `id`.
+        fn work_in(&mut self, id: u64) {
+            self.windows.note_delivered(&WindowEvent::Key {
+                window_id: id,
+                key: KeyInput::Pressed {
+                    key: tairix_abi::input::KeyValue::Char('a'),
+                    modifiers: tairix_abi::input::Modifiers::default(),
+                },
+            });
+        }
+    }
+
+    /// A hand-over lends the instance it reaches one raise only while the user
+    /// is working in one of the caller's windows and nothing holds the seat:
+    /// one from a window that has the keyboard but nothing from the user, or
+    /// from an application with no window at all, still reaches the instance
+    /// but brings nothing forward.
+    #[test]
+    fn a_hand_over_lends_a_raise_only_from_the_window_the_user_works_in() {
+        let mut bench = HandOverBench::with_resident();
+        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        bench.open(caller(), 9);
+        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        bench.work_in(9);
+        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        bench.seat_held = true;
+        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.desk.activations,
+            [
+                Activation::Withheld,
+                Activation::Withheld,
+                Activation::Granted { focus: Some(9) },
+                Activation::Withheld,
+            ]
+        );
+        assert_eq!(bench.desk.handed.len(), 4, "every document still arrived");
+    }
+
+    /// An instance reachable only by raising its window is reached, not
+    /// raised, when the hand-over may bring nothing forward: the caller is
+    /// told it is running rather than starting a second one.
+    #[test]
+    fn a_withheld_hand_over_reaches_a_windowed_instance_without_raising_it() {
+        let mut bench = HandOverBench::with_resident();
+        bench.open(resident(), 5);
+        bench.open(caller(), 9);
+        bench.desk.recent.push((resident(), 5));
+        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(
+            bench.host().focused_window(),
+            Some(9),
+            "nothing came forward"
+        );
+        bench.work_in(9);
+        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(bench.host().focused_window(), Some(5));
     }
 
     /// With no resident instance nothing is relayed or queued, so the caller
@@ -2606,6 +2873,133 @@ mod tests {
                 .expect("presents");
         }
         assert_eq!(shown(&mut windows), alloc::vec![2]);
+    }
+
+    /// A window the engine authorised is raised and takes the keyboard; a raise
+    /// asked while the seat is held, or for a window the session never served,
+    /// is refused and changes nothing.
+    #[test]
+    fn an_authorised_raise_brings_a_window_forward_with_the_keyboard() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        let owner = window_owner(1);
+        let mut with_host = |held: bool, act: &mut dyn FnMut(&mut ShellWindowHost<'_>)| {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: held,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+            };
+            act(&mut host);
+        };
+        with_host(false, &mut |host| {
+            for (id, title) in [(1, "one"), (2, "two")] {
+                host.window_opened(owner, id, &m, title, WindowSizing::default())
+                    .expect("opens");
+                host.window_presented(id, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                    .expect("presents");
+            }
+            assert_eq!(
+                host.focused_window(),
+                Some(2),
+                "the newest took the keyboard"
+            );
+            assert_eq!(host.raise_requested(1), Ok(()));
+            assert_eq!(host.focused_window(), Some(1));
+            assert_eq!(host.raise_requested(99), Err(Errno::NotFound));
+        });
+        with_host(true, &mut |host| {
+            assert_eq!(host.raise_requested(2), Err(Errno::SeatBusy));
+            assert_eq!(host.focused_window(), Some(1), "nothing moved");
+        });
+    }
+
+    /// Counts the raise refusals and withheld hand-overs it records.
+    struct RaiseAudit {
+        refused: core::sync::atomic::AtomicUsize,
+        withheld: core::sync::atomic::AtomicUsize,
+    }
+
+    impl tairix_log::Sink for RaiseAudit {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
+            let counter = match event.id {
+                RAISE_REFUSED => &self.refused,
+                HAND_OVER_WITHHELD => &self.withheld,
+                _ => return,
+            };
+            counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A raise refused for a held seat or for no standing, and a hand-over
+    /// that may bring nothing forward, are each on the audit trail.
+    #[test]
+    fn a_refused_raise_and_a_withheld_hand_over_are_recorded() {
+        static AUDIT: RaiseAudit = RaiseAudit {
+            refused: core::sync::atomic::AtomicUsize::new(0),
+            withheld: core::sync::atomic::AtomicUsize::new(0),
+        };
+        let count = |counter: &core::sync::atomic::AtomicUsize| {
+            counter.load(core::sync::atomic::Ordering::Relaxed)
+        };
+        let mut bench = HandOverBench::with_resident();
+        bench.shell = crate::tests::shell_audited(TaskbarConfig::bottom_bar(640, 480), &AUDIT);
+        bench.open(resident(), 5);
+        bench.desk.recent.push((resident(), 5));
+        bench.open(caller(), 9);
+        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(count(&AUDIT.withheld), 1);
+        bench.work_in(9);
+        assert_eq!(bench.ask(None), Ok(HandOverOutcome::Reached));
+        assert_eq!(count(&AUDIT.withheld), 1, "a raise lent is not withheld");
+
+        bench.host().raise_refused(caller(), 9);
+        assert_eq!(count(&AUDIT.refused), 1);
+        bench.seat_held = true;
+        assert_eq!(bench.host().raise_requested(9), Err(Errno::SeatBusy));
+        assert_eq!(count(&AUDIT.refused), 2);
+    }
+
+    /// While the seat is held a window's first frame puts it on screen
+    /// beneath the window holding the keyboard, which keeps it, and a popup
+    /// is refused.
+    #[test]
+    fn nothing_takes_the_keyboard_while_the_seat_is_held() {
+        let mut bench = HandOverBench::new();
+        bench.open(caller(), 1);
+        assert_eq!(bench.host().focused_window(), Some(1));
+        bench.seat_held = true;
+        bench.open(caller(), 2);
+        let m = mode(4, 4, DisplayFormat::Rgba8888);
+        let mut host = bench.host();
+        assert_eq!(
+            host.focused_window(),
+            Some(1),
+            "the new window took nothing"
+        );
+        let shown = host.windows.wm_id(2).expect("served");
+        assert!(
+            host.compositor
+                .window(shown)
+                .is_some_and(tairix_wm::Window::is_visible),
+            "but it is on screen"
+        );
+        assert_eq!(host.popup_opened(3, 1, 0, 0, &m), Err(Errno::SeatBusy));
+        assert_eq!(
+            host.pick_requested(1, &tairix_abi::window_ipc::PickPurpose::Open),
+            Err(Errno::SeatBusy)
+        );
+        assert_eq!(host.focused_window(), Some(1));
     }
 
     /// A refused present leaves the window unseen: nothing was drawn, so a

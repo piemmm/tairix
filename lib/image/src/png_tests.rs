@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use super::{decode, ColourType, IDAT, IEND, IHDR, PLTE, SIGNATURE, TRNS};
 use crate::png_fixture::{build_png, chunk, ihdr_payload, zlib_wrap};
-use crate::{sniff, DecodeError, DecodeLimits, ImageFormat};
+use crate::{decode_fitted, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
 
 /// Generous limits for every fixture in this file (none exercises the
 /// limit-refusal paths, which are tested against a deliberately tight
@@ -620,15 +620,11 @@ fn undersized_decompressed_stream_is_refused() {
 #[test]
 fn oversized_decompressed_stream_is_refused() {
     // Declares a 1x1 image (needs 2 raw bytes) but the IDAT supplies two
-    // full rows: the fixed-size output buffer refuses the overflow the
-    // moment the extra bytes would be written, one layer down in the
-    // wrapped deflate decoder.
+    // full rows: the stream still yields bytes after the last row is read.
     let png = build_png(1, 1, 8, 0, 0, None, None, &[0, 1, 0, 2]);
     assert_eq!(
         decode(&png, &ROOMY),
-        Err(DecodeError::CompressedData(
-            tairix_compress::zlib::Error::Body(tairix_compress::inflate::Error::OutputOverflow)
-        ))
+        Err(DecodeError::CompressedSizeMismatch)
     );
 }
 
@@ -761,4 +757,121 @@ fn colour_type_reports_the_right_channel_count() {
 fn sniff_recognises_a_built_fixture() {
     let png = build_png(1, 1, 8, 0, 0, None, None, &[0, 0]);
     assert_eq!(sniff(&png), Some(ImageFormat::Png));
+}
+
+/// The grey level the fitted-decode fixtures give pixel `(x, y)`.
+fn level(x: u32, y: u32) -> u8 {
+    u8::try_from((x * 13 + y * 7) % 251).expect("below 251")
+}
+
+/// The raw scanlines of a `side`-square 8-bit greyscale image drawn with
+/// [`level`], in Adam7 pass order, one byte vector per pass.
+fn adam7_scanlines(side: u32) -> Vec<Vec<u8>> {
+    super::ADAM7
+        .iter()
+        .map(|&(row_start, col_start, row_step, col_step)| {
+            let mut pass = Vec::new();
+            for y in (row_start..side).step_by(row_step as usize) {
+                pass.push(0);
+                for x in (col_start..side).step_by(col_step as usize) {
+                    pass.push(level(x, y));
+                }
+            }
+            pass
+        })
+        .collect()
+}
+
+/// A sequential 8-bit RGBA PNG whose channels vary with position.
+fn rgba_gradient(width: u32, height: u32) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..width {
+            raw.extend_from_slice(&[level(x, y), level(y, x), level(x + y, 0), level(x, 3) | 1]);
+        }
+    }
+    build_png(width, height, 8, 6, 0, None, None, &raw)
+}
+
+/// A fitted decode of a sequential image is the whole decode reduced to the
+/// size covering the box, byte for byte.
+#[test]
+fn a_fitted_decode_is_the_whole_decode_reduced() {
+    let png = rgba_gradient(37, 23);
+    let whole = decode(&png, &ROOMY).expect("decodes");
+    let fitted = decode_fitted(&png, &ROOMY, FitBox::new(10, 10)).expect("decodes");
+    assert_eq!((fitted.width(), fitted.height()), (17, 10));
+    let source = tairix_raster::Rgba8Image::new(37, 23, whole.pixels()).expect("image");
+    let reduced = tairix_raster::resample(&source, source.whole(), 17, 10).expect("resamples");
+    assert_eq!(fitted.pixels(), reduced.as_slice());
+
+    let natural = decode_fitted(&png, &ROOMY, FitBox::new(64, 64)).expect("decodes");
+    assert_eq!(
+        natural, whole,
+        "a box larger than the picture keeps it whole"
+    );
+}
+
+/// An interlaced image decodes the grid its first passes complete, and never
+/// reads the stream past them.
+#[test]
+fn an_interlaced_fitted_decode_reads_only_the_passes_it_needs() {
+    let passes = adam7_scanlines(16);
+    let raw: Vec<u8> = passes.concat();
+    let png = build_png(16, 16, 8, 0, 1, None, None, &raw);
+    let whole = decode(&png, &ROOMY).expect("decodes");
+    for (fit, step) in [(2, 8), (4, 4), (8, 2), (16, 1)] {
+        let fitted = decode_fitted(&png, &ROOMY, FitBox::new(fit, fit)).expect("decodes");
+        assert_eq!((fitted.width(), fitted.height()), (16 / step, 16 / step));
+        for y in 0..16 / step {
+            for x in 0..16 / step {
+                assert_eq!(
+                    rgba(fitted.pixels(), 16 / step, x, y),
+                    rgba(whole.pixels(), 16, x * step, y * step),
+                    "step {step} at {x},{y}"
+                );
+            }
+        }
+    }
+
+    // A stream holding only the first pass, in a block that does not end it.
+    let first = &passes[0];
+    let mut stream = vec![0x78, 0x9C, 0x00];
+    let len = u16::try_from(first.len()).expect("fits");
+    stream.extend_from_slice(&len.to_le_bytes());
+    stream.extend_from_slice(&(!len).to_le_bytes());
+    stream.extend_from_slice(first);
+    let mut cut = SIGNATURE.to_vec();
+    cut.extend(chunk(IHDR, &ihdr_payload(16, 16, 8, 0, 1)));
+    cut.extend(chunk(IDAT, &stream));
+    cut.extend(chunk(IEND, &[]));
+    assert_eq!(
+        decode(&cut, &ROOMY),
+        Err(DecodeError::CompressedSizeMismatch)
+    );
+    let thumbnail = decode_fitted(&cut, &ROOMY, FitBox::new(2, 2)).expect("decodes");
+    assert_eq!(
+        rgba(thumbnail.pixels(), 2, 1, 1),
+        rgba(whole.pixels(), 16, 8, 8)
+    );
+}
+
+/// A fitted decode admits what a decode admits: a picture past the limits is
+/// refused however small the box, so the work stays bounded with the memory.
+#[test]
+fn a_fitted_decode_admits_only_what_a_decode_admits() {
+    let tight = DecodeLimits::new(16, 16, 256, 0);
+    let raw: Vec<u8> = (0..64u32)
+        .flat_map(|y| core::iter::once(0).chain((0..64).map(move |x| level(x, y))))
+        .collect();
+    let sequential = build_png(64, 64, 8, 0, 0, None, None, &raw);
+    let interlaced = build_png(64, 64, 8, 0, 1, None, None, &[0]);
+    for png in [&sequential, &interlaced] {
+        assert_eq!(decode(png, &tight), Err(DecodeError::WidthExceedsLimit));
+        assert_eq!(
+            decode_fitted(png, &tight, FitBox::new(8, 8)),
+            Err(DecodeError::WidthExceedsLimit)
+        );
+    }
 }

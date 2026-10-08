@@ -365,6 +365,8 @@ This crate owns:
   rectangle a caller names. A caller reasoning about
   *where* a shape's corners are — which rows carry an arc at all, as the
   compositor asks per window row — reads the clamp rather than restating it.
+- `RowReducer` — the reducing arm of that resampler fed a source a row at a
+  time, so a decoder reduces a picture it never holds (see "The resampler").
 - `resample` / `resample_window` / `Surface::resampled` — the single image
   resampler the whole desktop scales through: the icon pipeline fitting a
   bundle's artwork into a slot, the wallpaper pipeline placing a photograph
@@ -489,6 +491,13 @@ a whole destination builds the part it needs. Windows are computed from the
 source and the filter plan alone, never from a previous one, so assembling
 them yields byte-for-byte what one call would have produced and two windows
 agree exactly where they meet.
+
+`RowReducer` is the reducing arm fed a source a row at a time, in the order
+a decoder produces the rows, top down or bottom up: it holds the destination
+and two rows of sums, never the source, and produces byte for byte what
+`resample` makes of the whole source. It only reduces, since with no axis
+enlarged a source row reaches at most two destination rows, which is what
+bounds it; `RowReducer::peak_bytes` states what one holds before it is built.
 
 A caller that resamples every frame holds a `ResampleScratch` — the two
 axis plans, the filtered-row cache and the accumulator row — and hands it to

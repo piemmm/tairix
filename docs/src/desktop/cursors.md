@@ -85,9 +85,12 @@ Degenerate cursors and scales fail closed with `None` rather than panicking
 A `CursorTheme` binds one `VectorCursor` to each `tairix_theme::CursorKind`
 (`Arrow`, `Text`, `Pointer`, `Move`, `Busy`, `Crosshair` — four arms that stop
 short of a clear centre, the hotspot, so the pixel under it is never hidden —
-and the four resize double arrows
+the four resize double arrows
 `ResizeHorizontal`, `ResizeVertical`, `ResizeDiagonalRising`,
-`ResizeDiagonalFalling`). `tairix_theme::CURSOR_KINDS` is that closed
+`ResizeDiagonalFalling`, and `DragCopy` and `DragMove`: the arrow wearing a
+badge below and right of it, a plus or an arrow on the busy arc's blue, which
+the session holds the pointer in while a carried drag's answer is a copy or a
+move). `tairix_theme::CURSOR_KINDS` is that closed
 vocabulary as a table, so a loader, a cache, or a test iterates every kind
 without restating the list. The fields are fixed and `CursorTheme::from_cursors`
 asks for the artwork *by kind* rather than by argument position, so a set can

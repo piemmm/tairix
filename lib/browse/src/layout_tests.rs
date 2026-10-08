@@ -832,3 +832,144 @@ fn a_rail_with_no_height_or_no_rows_shows_no_range() {
     let unmeasured = SidebarView::new(Rect::new(0, 0, WIDTH, 95), WIDTH, (0, 4), 8, None, (0, 6));
     assert_eq!(unmeasured.visible_range(), 0..0);
 }
+
+/// Bands of every placement and size over `area`: corners inside, on, and
+/// outside it, so the edges, the gaps and the margins are all crossed.
+fn bands(area: Rect) -> Vec<Rect> {
+    let xs = [
+        area.left() - 3,
+        area.left(),
+        area.left() + 7,
+        area.center().x,
+        area.right() - 1,
+        area.right() + 4,
+    ];
+    let ys = [
+        area.top() - 3,
+        area.top(),
+        area.top() + 9,
+        area.center().y,
+        area.bottom() - 1,
+        area.bottom() + 4,
+    ];
+    let mut out = Vec::new();
+    for &x0 in &xs {
+        for &x1 in &xs {
+            for &y0 in &ys {
+                for &y1 in &ys {
+                    if x0 <= x1 && y0 <= y1 {
+                        let width = u32::try_from(x1 - x0 + 1).expect("ordered");
+                        let height = u32::try_from(y1 - y0 + 1).expect("ordered");
+                        out.push(Rect::new(x0, y0, width, height));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether `band` takes exactly the entries whose laid-out rectangle it
+/// shares a pixel with.
+fn band_matches_the_layout(
+    band: Rect,
+    cells: &super::BandCells,
+    count: usize,
+    rect: impl Fn(usize) -> Option<Rect>,
+) -> bool {
+    (0..count + 2).all(|index| {
+        let touched = rect(index).is_some_and(|laid| !laid.intersection(&band).is_empty());
+        cells.contains(index) == touched
+    })
+}
+
+#[test]
+fn a_list_band_takes_exactly_the_rows_it_shares_a_pixel_with() {
+    let list = view(8, 30);
+    for band in bands(list.list_area()) {
+        let cells = list.band_cells(band);
+        assert!(
+            band_matches_the_layout(band, &cells, 30, |index| list.row_rect(index)),
+            "{band:?}"
+        );
+    }
+}
+
+#[test]
+fn a_grid_band_takes_exactly_the_tiles_it_shares_a_pixel_with_in_every_flow() {
+    for flow in [
+        GridFlow::RowsFromLeading,
+        GridFlow::ColumnsFromLeading,
+        GridFlow::ColumnsFromTrailing,
+    ] {
+        for fill in FILLS {
+            let grid = grid_with_flow_and_slack(flow, fill);
+            for band in bands(grid.tile_area()) {
+                let cells = grid.band_cells(band);
+                assert!(
+                    band_matches_the_layout(band, &cells, 23, |index| grid.cell_rect(index)),
+                    "{flow:?} {fill:?} {band:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A grid of 23 tiles whose lines do not divide the view, in `flow`.
+fn grid_with_flow_and_slack(flow: GridFlow, fill: GridFill) -> GridView {
+    grid_sized(
+        CELL * 4 + GAP * 3 + 11,
+        CELL * 3 + GAP * 2 + 7,
+        23,
+        flow,
+        fill,
+    )
+}
+
+#[test]
+fn the_cells_one_band_holds_beyond_another_are_exactly_its_own() {
+    let grid = grid_with_flow_and_slack(GridFlow::RowsFromLeading, GridFill::Spread);
+    let list = view(8, 30);
+    let pairs: [(&dyn Fn(Rect) -> super::BandCells, Rect); 2] = [
+        (&|band| grid.band_cells(band), grid.tile_area()),
+        (&|band| list.band_cells(band), list.list_area()),
+    ];
+    for (cells_of, area) in pairs {
+        let all = bands(area);
+        for (at, first) in all.iter().enumerate().step_by(7) {
+            for second in all.iter().skip(at % 5).step_by(11) {
+                let (a, b) = (cells_of(*first), cells_of(*second));
+                let mut visited = Vec::new();
+                a.each_not_in(&b, |index| visited.push(index));
+                let expected: Vec<usize> = a.iter().filter(|index| !b.contains(*index)).collect();
+                visited.sort_unstable();
+                assert_eq!(visited, expected, "{first:?} minus {second:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn bands_over_different_layouts_are_compared_entry_by_entry() {
+    let narrow = grid_sized(
+        CELL * 2 + GAP,
+        CELL * 3 + GAP * 2,
+        9,
+        GridFlow::RowsFromLeading,
+        GridFill::FixedPitch,
+    );
+    let wide = grid_sized(
+        CELL * 3 + GAP * 2,
+        CELL * 3 + GAP * 2,
+        9,
+        GridFlow::RowsFromLeading,
+        GridFill::FixedPitch,
+    );
+    let a = narrow.band_cells(narrow.tile_area());
+    let b = wide.band_cells(Rect::new(0, wide.tile_area().top(), CELL, CELL));
+    let mut visited = Vec::new();
+    a.each_not_in(&b, |index| visited.push(index));
+    let expected: Vec<usize> = a.iter().filter(|index| !b.contains(*index)).collect();
+    assert_eq!(visited, expected);
+    assert!(!visited.contains(&0));
+}

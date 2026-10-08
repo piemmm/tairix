@@ -93,12 +93,10 @@ speculative:
   `Err` (the caller refuses the whole listing, never a partial one).
   Unit-tested beside the codec; the `fuzz_decode` harness walks arbitrary
   streams (termination, fail-closed refusal, no panic).
-- `lib/rt` grows the shared directory-read call: `read_all_growing`
-  (the pure retry policy — grow a buffer on `BufferTooSmall`, doubling to
-  a hard ceiling, host-tested with closures) and `read_dir_all(path)`
-  (open-as-directory + grow loop against the kernel's `FS_IO_MAX`
-  transfer cap). `ls`'s private copy of that loop is deleted and its
-  `read_dir` re-built on the shared pair — one definition (§2.2).
+- `lib/rt` carries the shared directory-read call: `read_batches` (the pure
+  batch loop over `fs_readdir`, host-tested with closures) behind
+  `Dir::read_all` and `read_dir_all(path)`. Every tool's listing is built on
+  it — one definition.
 - `userland/apps/files::vfs` — the production `DirectorySource` engine:
   `absolute_path` (root-first components → a bounded, validated absolute
   path; refuses an empty/`/`-bearing/NUL-bearing component or a path over

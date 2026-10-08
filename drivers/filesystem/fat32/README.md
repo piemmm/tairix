@@ -44,14 +44,15 @@ separately resolvable.
 `FilesystemWrite` addresses a target as a `(dir, name)` pair, because a
 FAT file's length and starting cluster live in its parent directory
 entry, not in a self-describing `NodeId`. `create`/`mkdir` write a VFAT
-long-name set bound to a generated, directory-unique `~N` 8.3 short alias
-(so arbitrary, case-preserving names round-trip); `write_at` allocates
+long-name set bound to an 8.3 short alias taking the lowest `~N` tail no
+live alias holds (so arbitrary, case-preserving names round-trip), chosen
+with the free run of slots it takes in one walk of the directory; `write_at` allocates
 and chains clusters, zero-fills sparse gaps and updates the entry;
 `truncate` frees the tail chain (shrink) or zero-extends (grow); and
 `remove` frees the chain and marks the entry plus its long-name run
 deleted. Free clusters are found by scanning the FAT, directories grow a
-zeroed cluster at a time, and every FAT mutation is mirrored across all
-FAT copies.
+zeroed cluster at a time up to the format's 65,536 entries, and every FAT
+mutation is mirrored across all FAT copies.
 
 ## Limitations
 
@@ -99,8 +100,11 @@ allocation-free in-memory FAT32 image and exercises:
   `truncate` shrink and grow, `remove` + name reuse, `mkdir` with a
   nested file, and the `AlreadyExists`/`DirectoryNotEmpty`/`DirectoryCycle`/
   `Unsupported`/`NotFound` guards.
-
-38/38 host-side tests pass.
+- Placement: the lowest free alias tail, past a thousand held ones, found
+  in one pass; a full directory refusing a name and reusing freed slots;
+  an entry deleted across a cluster boundary; a create refused before it
+  writes when its end mark lies past a broken link; a move refused over a
+  `..` chain that loops or names no parent.
 
 An **end-to-end QEMU vertical** drives the driver against a real
 (emulated) virtio-blk-pci device:

@@ -213,9 +213,9 @@ wraps into a grid only when the screen cannot hold it, so a grid where a row
 would do never reads as a list. `Escape` returns to the chooser and wipes
 whatever had been typed.
 
-A tile's height comes from `IconTile::label_lines`, sized so the band under
-the disc holds three whole lines at the reference density and at a doubled
-one. That is capacity rather than layout — a one-word name still draws a
+A tile states three whole name lines under the disc (`ACCOUNT_TILE`, a
+`TileLayout`), and its height seats an 80-pixel disc above them at the
+reference density. That is capacity rather than layout — a one-word name still draws a
 single line — but "System Administrator" wraps instead of being cut, and a
 face wider than the reference one has a line to fall onto rather than being
 broken mid-word.

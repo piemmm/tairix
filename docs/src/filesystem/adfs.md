@@ -70,6 +70,17 @@ Fixed directories never resize (their 47/77-entry capacity is a format
 bound); big directories grow in place and never relocate, keeping
 directory node ids stable.
 
+## Listing
+
+Directory entries are kept in case-insensitive sorted order, so an
+insertion or removal shifts every entry after it. A listing therefore loads
+the directory once per call and resumes by name rather than position: its
+cursor carries the index and the volume's write generation, which every
+insertion and removal bumps. While the generation is unchanged the index
+holds; once it has moved, the listing resumes just past the name it last
+returned, by binary search, a place no insertion or removal moves — so an
+entry present throughout a listing is listed exactly once.
+
 ## Test surface
 
 Per-variant unit tests cover round-trips (with remount), listings,

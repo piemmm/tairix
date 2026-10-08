@@ -105,8 +105,8 @@ This crate is pure theme *data*. A `Theme` is a table of:
   control carries a second reduced-motion path.
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, referencing
   faces under `/System/Fonts`. A theme sizes text by the *job* it does
-  (`Display`, `Heading`, `ItemTitle`, `WindowTitle`, `Body`, `Metric`,
-  `Caption`, `SectionHeader`, `Monospace`), and every role's size is a
+  (`Display`, `Heading`, `ItemTitle`, `WindowTitle`, `Body`, `ItemLabel`,
+  `Metric`, `Caption`, `SectionHeader`, `Monospace`), and every role's size is a
   percentage of one authored base size measured from the design boards, so a
   theme states one number and the whole scale follows (`AGENTS.md` §2.2).
   `Fonts::ladder` clamps that base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`,

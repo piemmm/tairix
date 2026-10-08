@@ -37,7 +37,7 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::fs::{DirEntry, OpenFlags, FS_IO_MAX, FS_MODE_MASK};
+    use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK};
     use tairix_abi::Errno;
     use tairix_chmod::{
         parse, run, ChmodError, Entry, EntryKind, FileSystem, Metadata, Output, USAGE,
@@ -46,36 +46,13 @@ mod program {
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_rt::File;
 
-    /// Initial byte size of the directory-listing buffer: one page covers a
-    /// typical directory; `BufferTooSmall` grows it (below).
-    const DIR_BUF_INITIAL: usize = 4096;
-
-    /// Ceiling for the directory-listing buffer: the kernel's own per-call
-    /// staging cap ([`FS_IO_MAX`]), so the buffer grows exactly as far as
-    /// one `fs_readdir` transfer can ever fill and no further.
-    const DIR_BUF_MAX: usize = FS_IO_MAX;
-
     /// Read every entry of the directory at `path` into one snapshot, the
-    /// same grow-on-`BufferTooSmall` read `ls` and `rm` use.
+    /// one batched listing read `ls` and `rm` use.
     fn read_entries(path: &str) -> Result<Vec<Entry>, Errno> {
-        let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
-        let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-        let used = loop {
-            match dir.read(&mut buf) {
-                Ok(used) => break used,
-                Err(ret) => match Errno::from_syscall(ret) {
-                    Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                        buf.resize((buf.len() * 2).min(DIR_BUF_MAX), 0);
-                    }
-                    other => return Err(other),
-                },
-            }
-        };
+        let buf = tairix_rt::read_dir_all(path.as_bytes()).map_err(Errno::from_syscall)?;
         let mut entries = Vec::new();
-        let mut rest = &buf[..used];
-        while !rest.is_empty() {
-            let (entry, consumed) = DirEntry::decode(rest)?;
-            rest = &rest[consumed..];
+        for entry in DirEntries::new(&buf) {
+            let entry = entry?;
             // The ABI contract makes every entry name UTF-8; a name that is
             // not is a corrupt or hostile stream, refused whole rather than
             // silently dropped — `OutOfRange`, the same errno the entry

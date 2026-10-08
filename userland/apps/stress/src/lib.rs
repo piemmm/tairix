@@ -56,7 +56,7 @@ pub mod worker;
 #[cfg(test)]
 mod tests;
 
-pub use command::{parse, Command, RunSpec, Workers, USAGE};
+pub use command::{default_scratch, parse, Command, RunSpec, Workers, USAGE};
 pub use ctrl::{Action, Controller, Event, Tally};
 pub use error::StressError;
 pub use load::{

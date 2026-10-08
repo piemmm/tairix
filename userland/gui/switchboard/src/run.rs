@@ -791,6 +791,7 @@ mod program {
             // file association, so no open target can name anything here.
             | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::Pinch { .. } => return,

@@ -76,7 +76,7 @@ fn a_traversal_argument_is_refused_and_falls_back_to_home() {
         "names the offending segment: {refused}"
     );
     assert!(
-        refused.contains("opening the home directory instead"),
+        refused.contains(super::FALLBACK),
         "states the fallback: {refused}"
     );
     // A lone `.` is refused by the same rule, so a spelling can never mean a
@@ -129,7 +129,7 @@ fn a_relative_or_alias_rooted_argument_is_refused() {
             start
                 .refused
                 .as_deref()
-                .is_some_and(|refused| refused.contains("opening the home directory instead")),
+                .is_some_and(|refused| refused.contains(super::FALLBACK)),
             "{spelling:?} must state the fallback"
         );
     }
@@ -258,14 +258,15 @@ fn end_of_options_lets_a_dash_leading_directory_through() {
 
 #[test]
 fn an_unlistable_location_states_the_place_and_the_fallback() {
-    let reason = unlistable_reason(&["Users".to_string(), "ada".to_string()]);
+    let home = ["Users".to_string(), "ada".to_string()];
+    let files = ["Users", "ada", "UserFiles"].map(String::from);
     assert_eq!(
-        reason,
-        "could not list /Users/ada; opening the home directory instead"
+        unlistable_reason(&files, &home),
+        "could not list /Users/ada/UserFiles; opening /Users/ada instead"
     );
     // The root view spells as `/` rather than as nothing.
     assert_eq!(
-        unlistable_reason(&[]),
-        "could not list /; opening the home directory instead"
+        unlistable_reason(&home, &[]),
+        "could not list /Users/ada; opening / instead"
     );
 }

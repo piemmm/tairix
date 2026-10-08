@@ -60,14 +60,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::render::{grid_metrics, grid_tile};
+use tairix_browse::render::{grid_metrics, grid_tile, TILE_LAYOUT};
 use tairix_browse::{
-    applications_for, entry_icon_request, media_for_entry, merge_changes, sort_entries,
-    suggest_new_dir_name, AppAssociation, DirectorySource, Entry, EntryChange, EntryKind, GridFlow,
-    GridView, LinkTarget, Listing, SortDirection, SortKey, SortMode,
+    applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
+    DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, LinkTarget, Listing,
+    NewEntry, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
-use tairix_controls::IconTile;
 use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, Landed};
 use tairix_proglib::{Catalog, EntryId};
@@ -311,6 +310,12 @@ pub struct Desktop<S: DirectorySource> {
     entries: Vec<Entry>,
     selected: Option<usize>,
     hovered: Option<usize>,
+    /// The folder icon a carried drag would drop into, while its application
+    /// accepts it there.
+    drop_target: Option<usize>,
+    /// Bumped whenever the icons change place, so an index into them names
+    /// the same icon only at the revision it was taken at.
+    revision: u64,
     focused: bool,
     clicks: DoubleClickTracker,
     /// Whether a source that reads elsewhere still owes the listing the last
@@ -336,6 +341,8 @@ impl<S: DirectorySource> Desktop<S> {
             entries: Vec::new(),
             selected: None,
             hovered: None,
+            drop_target: None,
+            revision: 0,
             focused: false,
             clicks: DoubleClickTracker::new(),
             listing_owed: false,
@@ -358,6 +365,12 @@ impl<S: DirectorySource> Desktop<S> {
     #[must_use]
     pub fn folder_path(&self) -> String {
         tairix_browse::vfs::spell_absolute_path(&self.folder)
+    }
+
+    /// Root-first components of the folder the desktop shows.
+    #[must_use]
+    pub fn folder(&self) -> &[String] {
+        &self.folder
     }
 
     /// What creating a shortcut to the catalogued program `entry` asks for.
@@ -487,6 +500,27 @@ impl<S: DirectorySource> Desktop<S> {
         Self::mark_cell(layout, self.selected, damage);
     }
 
+    /// Ask `want` for every shown icon's picture at the side it is drawn at,
+    /// drawing nothing: what tells the artwork producer which pictures are on
+    /// screen after a pass that repainted only some cells.
+    pub fn want_shown_artwork(
+        &self,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        mut want: impl FnMut(IconRequest<'_>, u32),
+    ) {
+        self.visit_icons(
+            layout,
+            scale,
+            theme,
+            |_| true,
+            |icon| {
+                want(icon.request, icon.side);
+            },
+        );
+    }
+
     /// Add to `damage` the cell of every shown icon whose picture the
     /// `landed` decodes moved, with `layout`, `scale` and `theme` the ones the
     /// column is painted at.
@@ -589,6 +623,7 @@ impl<S: DirectorySource> Desktop<S> {
         }
         let chosen = self.selected_name();
         self.entries = entries;
+        self.revision = self.revision.wrapping_add(1);
         self.follow_name(chosen);
         true
     }
@@ -610,6 +645,7 @@ impl<S: DirectorySource> Desktop<S> {
                 .position(|entry| entry.name() == name.as_str())
         });
         self.hovered = None;
+        self.drop_target = None;
         self.clicks.reset();
     }
 
@@ -640,7 +676,9 @@ impl<S: DirectorySource> Desktop<S> {
             if !moved {
                 return false;
             }
+            desktop.revision = desktop.revision.wrapping_add(1);
             desktop.selected = desktop.selected.and_then(|index| placement.place(index));
+            desktop.drop_target = desktop.drop_target.and_then(|index| placement.place(index));
             // A hover is the pointer's cell, so it stays only while that cell
             // still shows the icon it did.
             desktop.hovered = desktop
@@ -665,6 +703,24 @@ impl<S: DirectorySource> Desktop<S> {
     /// snapshot of every shown icon to compare against.
     pub fn resume_into(&mut self, layout: impl Fn(&Self) -> GridView, damage: &mut Region) -> bool {
         self.listing_owed && self.marking(layout, damage, Self::resume)
+    }
+
+    /// Latch every folder cue the shown icons now have an answer for, asking
+    /// about each shown folder not yet known, and add to `damage` each cell
+    /// whose picture moved.
+    ///
+    /// Only the icons `layout` shows are asked about, so the cost is bounded
+    /// by the screen rather than the folder. A source that probes elsewhere
+    /// answers "not yet" without reading, so the embedder resolves again when
+    /// its batch lands.
+    pub fn resolve_occupancy(&mut self, layout: &GridView, damage: &mut Region) {
+        resolve_occupancy(
+            &mut self.source,
+            &mut self.folder,
+            &mut self.entries,
+            layout.visible_range(DESKTOP_SCROLL),
+            |index| Self::mark_cell(layout, Some(index), damage),
+        );
     }
 
     /// Whether the folder's listing follows it, so a change the session made
@@ -792,10 +848,10 @@ impl<S: DirectorySource> Desktop<S> {
         wanted: impl Fn(Rect) -> bool,
         mut visit: impl FnMut(ShownIcon<'_>),
     ) {
-        // Spelled once for the whole walk; a bundle icon appends its own leaf
-        // into this one buffer rather than allocating a path per tile.
+        // Spelled once for the whole walk; an icon that names its own file
+        // appends its leaf into this one buffer rather than allocating a path.
         let dir = tairix_browse::vfs::spell_absolute_path(&self.folder);
-        let mut bundle = String::new();
+        let mut scratch = String::new();
         for index in layout.visible_range(DESKTOP_SCROLL) {
             let Some(entry) = self.entries.get(index) else {
                 break;
@@ -803,14 +859,14 @@ impl<S: DirectorySource> Desktop<S> {
             let Some(bounds) = shown_whole(layout, index).filter(|&bounds| wanted(bounds)) else {
                 continue;
             };
-            let kind = media_for_entry(entry, &self.folder).icon();
+            let (kind, request) = entry_icon(&dir, &self.folder, entry, &mut scratch);
             visit(ShownIcon {
                 index,
                 entry,
                 bounds,
                 kind,
-                side: IconTile::icon_side(bounds, scale, theme),
-                request: entry_icon_request(&dir, entry, kind, &mut bundle),
+                side: TILE_LAYOUT.icon_side(bounds, scale, theme),
+                request,
             });
         }
     }
@@ -829,7 +885,50 @@ impl<S: DirectorySource> Desktop<S> {
         if self.hovered == Some(index) {
             state.pointer = PointerState::Hover;
         }
+        if self.drop_target == Some(index) {
+            state.pointer = PointerState::DragTarget;
+        }
         state
+    }
+
+    /// The folder icon a drop at screen position `at` lands in, or `None`
+    /// for the desktop's own folder.
+    #[must_use]
+    pub fn drop_icon_at(&self, at: Point, layout: &GridView) -> Option<usize> {
+        index_at(layout, at).filter(|&index| {
+            self.entries
+                .get(index)
+                .is_some_and(|entry| entry.kind().resolved() == Some(EntryKind::Directory))
+        })
+    }
+
+    /// The folder a drop on `icon` lands in: that folder icon's, or the
+    /// desktop's own for `None` or an icon that is not a folder.
+    #[must_use]
+    pub fn drop_folder(&self, icon: Option<usize>) -> String {
+        match icon.and_then(|index| self.entries.get(index)) {
+            Some(entry) if entry.kind().resolved() == Some(EntryKind::Directory) => {
+                self.path_of(entry.name())
+            }
+            _ => self.folder_path(),
+        }
+    }
+
+    /// The revision of the icons' places [`drop_icon_at`](Self::drop_icon_at)
+    /// indexes.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Light `icon` as where a carried drag would drop, or none, adding the
+    /// cells that changed to `damage`.
+    pub fn set_drop_target(&mut self, icon: Option<usize>, layout: &GridView, damage: &mut Region) {
+        if self.drop_target != icon {
+            Self::mark_cell(layout, self.drop_target, damage);
+            Self::mark_cell(layout, icon, damage);
+            self.drop_target = icon;
+        }
     }
 
     /// Pointer motion to screen position `at`, which drives the hover
@@ -919,7 +1018,7 @@ impl<S: DirectorySource> Desktop<S> {
         match command {
             PinboardCommand::Open => self.activate_selection(apps),
             PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
-                path: self.path_of(&suggest_new_dir_name(&self.entries)),
+                path: self.path_of(&NewEntry::Folder.suggest_name(&self.entries)),
             }),
             PinboardCommand::SortBy(sort) => self.adopt(DesktopSettings {
                 sort,

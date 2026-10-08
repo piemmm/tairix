@@ -607,3 +607,15 @@ fn the_summary_record_is_a_bounded_jsonl_summary() {
     assert!(text.contains("\"elapsed_secs\":7"));
     assert!(text.ends_with('\n'));
 }
+
+/// The default scratch sits in the home's per-user cache directory, made
+/// first, whatever trailing slashes `HOME` carries.
+#[test]
+fn the_default_scratch_is_in_the_homes_cache_directory() {
+    for home in ["/Users/x", "/Users/x/", "/Users/x//"] {
+        assert_eq!(
+            crate::default_scratch(home),
+            ["/Users/x/Library", "/Users/x/Library/stress"]
+        );
+    }
+}

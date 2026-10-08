@@ -60,9 +60,9 @@ use tairix_abi::{
     LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountRecord, NamedKeyCode,
     NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PointerButtonCode,
     PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader, ProcessState,
-    RandomFlags, RealpathMode, ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority,
-    Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot,
-    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
+    RandomFlags, ReaddirFrom, RealpathMode, ResourceLimit, ResourceLimitRecord, RxePermission,
+    SchedPriority, Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp, StdInfoKind,
+    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
     UserDirectoryRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
     APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
     BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
@@ -84,12 +84,13 @@ use tairix_abi::{
     POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED,
     PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
-    RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
-    SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT,
-    STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
-    SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-    SYSINFO_REPLY_PAYLOAD_MAX, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
-    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
+    READDIR_BATCH_MAX, RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY,
+    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD,
+    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
+    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
+    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX, SYSINFO_REPLY_STATUS_LEN,
+    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
+    THREAD_STACK_DEFAULT,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -154,6 +155,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("TOO_MANY_LINKS", Errno::TooManyLinks),
     ("NOT_ATTACHED", Errno::NotAttached),
     ("DEADLOCK", Errno::Deadlock),
+    ("STALE", Errno::Stale),
 ];
 
 /// The `abi-v1` driver-ABI error codes, paired with the
@@ -2701,12 +2703,11 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          } tairix_node_info_t;\n\n",
     "/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the\n\
          * child's full tairix_node_info_t (including its timestamps) and the opaque\n\
-         * cursor that resumes the listing after it (pass it back to read_dir; 0\n\
-         * starts a listing). */\n\
+         * cursor that resumes the listing after it (pass it back to read_dir with\n\
+         * the entry's name; 0 starts a listing). */\n\
          typedef struct tairix_dir_entry {\n\
          \x20   uint64_t node;\n\
          \x20   tairix_node_info_t info;\n\
-         \x20   uintptr_t name_len;\n\
          \x20   uint64_t next_cursor;\n\
          } tairix_dir_entry_t;\n\n",
     "/* A mounted volume's space accounting, in whole blocks of block_size bytes.\n\
@@ -2757,6 +2758,7 @@ fn generate_syscall() -> String {
     emit_wait_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
+    emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
     emit_filelock_contract(&mut out);
@@ -3341,6 +3343,22 @@ fn emit_dir_watch_contract(out: &mut String) {
     out.push('\n');
 }
 
+/// Emit the `fs_readdir()` contract into `tairix_syscall.h`: the per-call
+/// fill bound and where a batch starts, read from `lib/abi`.
+fn emit_readdir_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* fs_readdir() reads a directory a batch at a time from the open description's\n\
+         * position: whole records of at most TAIRIX_READDIR_BATCH_MAX bytes per call,\n\
+         * 0 at the end. `from` is NEXT, or START to restart the listing. */\n",
+    );
+    let _ = writeln!(out, "#define TAIRIX_READDIR_BATCH_MAX {READDIR_BATCH_MAX}u");
+    for (name, from) in [("NEXT", ReaddirFrom::Next), ("START", ReaddirFrom::Start)] {
+        let _ = writeln!(out, "#define TAIRIX_READDIR_FROM_{name} {}u", from.as_u32());
+    }
+    out.push('\n');
+}
+
 /// Emit the `fd_grant()` contract item into `tairix_syscall.h`: the
 /// write ceiling that passes on the grantor's own reach, read from `lib/abi`.
 fn emit_grant_contract(out: &mut String) {
@@ -3825,6 +3843,24 @@ mod tests {
                 "#define TAIRIX_FS_ATTR_VALUE_MAX {FS_ATTR_VALUE_MAX}u"
             )),
             "fs_attr value bound: {h}"
+        );
+    }
+
+    /// The listing's batch bound and start words are read from `lib/abi`, so
+    /// a C caller resumes and restarts exactly as the kernel reads them.
+    #[test]
+    fn syscall_header_carries_the_readdir_contract() {
+        let h = generate_syscall();
+        for line in [
+            format!("#define TAIRIX_READDIR_BATCH_MAX {READDIR_BATCH_MAX}u"),
+            String::from("#define TAIRIX_READDIR_FROM_NEXT 0u"),
+            String::from("#define TAIRIX_READDIR_FROM_START 1u"),
+        ] {
+            assert!(h.contains(&line), "{line} missing: {h}");
+        }
+        assert!(
+            h.contains("tairix_sys_fs_readdir(uint32_t a0, void * a1, uintptr_t a2, uint32_t a3);"),
+            "fs_readdir takes its start: {h}"
         );
     }
 
@@ -5480,7 +5516,7 @@ mod tests {
             ("tairix_driver.h", "} tairix_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
             ("tairix_driver.h", "} tairix_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
             ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 88, align_of::<NodeInfo>(), 8),
-            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 112, align_of::<DirEntry>(), 8),
+            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 104, align_of::<DirEntry>(), 8),
             ("tairix_driver.h", "} tairix_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("tairix_driver.h", "} tairix_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("tairix_driver.h", "} tairix_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),

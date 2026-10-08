@@ -216,6 +216,43 @@ pub(crate) const MAX_ANIMATION_FRAMES: u32 = 16_384;
 /// picture is malformed rather than merely large.
 pub(crate) const PROBE_LIMITS: DecodeLimits = DecodeLimits::new(u32::MAX, u32::MAX, u64::MAX, 0);
 
+/// The refusal a streamed reduction answers: want of memory, or geometry the
+/// decoder validated before feeding it, which no sane picture reaches.
+pub(crate) fn reduction_refused(err: tairix_raster::ResampleError) -> DecodeError {
+    match err {
+        tairix_raster::ResampleError::OutOfMemory => DecodeError::OutOfMemory,
+        _ => DecodeError::DimensionsOverflow,
+    }
+}
+
+/// `image` reduced to the size covering `fit`, fed through the streaming
+/// reduction a row at a time: for a picture a decoder must hold whole before
+/// it can be reduced.
+pub(crate) fn reduce_held(image: RasterImage, fit: FitBox) -> Result<RasterImage, DecodeError> {
+    let (width, height) = (image.width(), image.height());
+    let target = fit.reduction(width, height);
+    if target == (width, height) {
+        return Ok(image);
+    }
+    let mut stream =
+        tairix_raster::RowReducer::new((width, height), target, tairix_raster::RowOrder::TopDown)
+            .map_err(reduction_refused)?;
+    for row in image.pixels().chunks_exact(width as usize * RGBA_BYTES) {
+        stream.push_row(row).map_err(reduction_refused)?;
+    }
+    let pixels = stream.finish().map_err(reduction_refused)?;
+    Ok(RasterImage::from_parts(target.0, target.1, pixels))
+}
+
+/// Whether a picture of `shape` is one of `canvas` scaled, to within the
+/// pixel its scaling rounds to: how a stored preview or reduced copy is told
+/// from a picture of something else.
+pub(crate) fn same_shape(shape: (u32, u32), canvas: (u32, u32)) -> bool {
+    let skew = (u64::from(shape.0) * u64::from(canvas.1))
+        .abs_diff(u64::from(shape.1) * u64::from(canvas.0));
+    skew <= u64::from(canvas.0.max(canvas.1))
+}
+
 /// The little-endian 16-bit value at `at`, or `None` where the input holds
 /// fewer than two bytes there.
 ///
@@ -1367,6 +1404,26 @@ impl FitBox {
     pub const fn height(&self) -> u32 {
         self.height
     }
+
+    /// The size a `width`×`height` picture reduces to for this box: the
+    /// smallest with its aspect that covers the box on both axes, and never
+    /// larger than the picture.
+    pub(crate) fn reduction(self, width: u32, height: u32) -> (u32, u32) {
+        let (width, height) = (u64::from(width.max(1)), u64::from(height.max(1)));
+        let (wide, high) = (u64::from(self.width.max(1)), u64::from(self.height.max(1)));
+        // Each side rounds up from the one scale the box asks for, set by the
+        // side the picture is relatively shorter in; a scale of one or more
+        // leaves the picture whole.
+        let (across, down) = if wide * height >= high * width {
+            (wide, (height * wide).div_ceil(width))
+        } else {
+            ((width * high).div_ceil(height), high)
+        };
+        (
+            u32::try_from(across.min(width)).unwrap_or(u32::MAX),
+            u32::try_from(down.min(height)).unwrap_or(u32::MAX),
+        )
+    }
 }
 
 /// Decode `bytes` into a [`RasterImage`] at its natural (full) size,
@@ -1454,17 +1511,18 @@ pub fn decode_as(
 /// is already the picture at that size, so nothing is scaled and nothing is
 /// resampled.
 ///
-/// # Every other format
+/// # Every other format streams its rows into a reduction
 ///
-/// PNG, GIF, BMP, a sprite area, a TIFF's grid of strips and tiles, and both
-/// WEBP codecs have no reduced-scale decode process — entropy coding, a
-/// padded row array, and a tile grid do not separate into scale-selectable
-/// passes the way a block transform does — so for those this is exactly
-/// [`decode`], always at natural size, and the degradation above cannot
-/// apply. For WEBP the reason is sharper: both its codecs read
-/// full-resolution neighbours, so a coarser transform would decode a
-/// *different* picture rather than a softer one. That is an honest property
-/// of those formats, not a gap this crate is missing.
+/// A PNG, GIF, BMP, sprite area, TIFF, OpenRaster document or WEBP feeds its
+/// rows, in the order its file stores them, through the shared area-average
+/// reduction to the size covering `fit`, so what the decode holds is set by
+/// the result: byte for byte what [`tairix_raster::resample()`] makes of the
+/// whole decode at that size. An interlaced PNG or GIF reads only the passes
+/// the box needs, a TIFF the smallest reduced copy of its page covering it,
+/// and an OpenRaster document its thumbnail where that previews it. These
+/// admit what [`decode`] admits, so a picture past `limits` is refused
+/// however small the box; a box that does not reduce the picture is
+/// [`decode`].
 ///
 /// The format is chosen by [`sniff`]; an unrecognised signature is refused
 /// as [`DecodeError::UnknownFormat`] before any format-specific parsing
@@ -1478,10 +1536,36 @@ pub fn decode_fitted(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<RasterImage, DecodeError> {
-    match sniff(bytes).ok_or(DecodeError::UnknownFormat)? {
+    decode_fitted_as(
+        sniff(bytes).ok_or(DecodeError::UnknownFormat)?,
+        bytes,
+        limits,
+        fit,
+    )
+}
+
+/// [`decode_fitted`] of `bytes` as `format`, rather than as whichever format
+/// its signature names: how a format [`sniff`] cannot recognise is reached.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub fn decode_fitted_as(
+    format: ImageFormat,
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    match format {
         ImageFormat::Jpeg => jpeg::decode_fitted(bytes, limits, fit),
         ImageFormat::Ico => ico::decode_fitted(bytes, limits, fit),
-        format => decode_as(format, bytes, limits),
+        ImageFormat::Png => png::decode_fitted(bytes, limits, fit),
+        ImageFormat::OpenRaster => ora::decode_fitted(bytes, limits, fit),
+        ImageFormat::Bmp => bmp::decode_fitted(bytes, limits, fit),
+        ImageFormat::Sprite => sprite::decode_fitted(bytes, limits, fit),
+        ImageFormat::Gif => gif::decode_fitted(bytes, limits, fit),
+        ImageFormat::Tiff => tiff::decode_fitted(bytes, limits, fit),
+        ImageFormat::Webp => webp::decode_fitted(bytes, limits, fit),
     }
 }
 
@@ -1505,17 +1589,35 @@ pub fn decode_peak_bytes(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<u64, DecodeError> {
-    match sniff(bytes).ok_or(DecodeError::UnknownFormat)? {
+    decode_peak_bytes_as(
+        sniff(bytes).ok_or(DecodeError::UnknownFormat)?,
+        bytes,
+        limits,
+        fit,
+    )
+}
+
+/// [`decode_peak_bytes`] for a [`decode_fitted_as`] of `bytes` as `format`.
+///
+/// # Errors
+///
+/// What [`decode_fitted_as`] would refuse from the header.
+pub fn decode_peak_bytes_as(
+    format: ImageFormat,
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    match format {
         ImageFormat::Jpeg => jpeg::decode_peak_bytes(bytes, limits, fit),
-        ImageFormat::Png => png::peak_bytes(bytes, limits),
-        ImageFormat::Gif => gif::peak_bytes(bytes, limits),
-        ImageFormat::Bmp => bmp::peak_bytes(bytes, limits),
+        ImageFormat::Png => png::fitted_peak_bytes(bytes, limits, fit),
+        ImageFormat::Gif => gif::fitted_peak_bytes(bytes, limits, fit),
+        ImageFormat::Bmp => bmp::fitted_peak_bytes(bytes, limits, fit),
         ImageFormat::Ico => ico::peak_bytes(bytes, limits, fit),
-        ImageFormat::Tiff => tiff::peak_bytes(bytes, limits),
-        ImageFormat::Webp => webp::peak_bytes(bytes, limits),
-        ImageFormat::OpenRaster => ora::peak_bytes(bytes, limits),
-        // Carries no signature, so a fitted decode never reaches one either.
-        ImageFormat::Sprite => Err(DecodeError::UnknownFormat),
+        ImageFormat::Tiff => tiff::fitted_peak_bytes(bytes, limits, fit),
+        ImageFormat::Webp => webp::fitted_peak_bytes(bytes, limits, fit),
+        ImageFormat::OpenRaster => ora::fitted_peak_bytes(bytes, limits, fit),
+        ImageFormat::Sprite => sprite::fitted_peak_bytes(bytes, limits, fit),
     }
 }
 
@@ -2250,7 +2352,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{decode, decode_fitted, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
+    use super::{decode, sniff, DecodeError, DecodeLimits, ImageFormat};
 
     #[test]
     fn sniff_recognises_the_png_signature() {
@@ -2348,16 +2450,5 @@ mod tests {
         out.extend(chunk(*b"IDAT", &idat));
         out.extend(chunk(*b"IEND", &[]));
         out
-    }
-
-    #[test]
-    fn decode_fitted_is_exactly_decode_for_png() {
-        // PNG has no reduced-scale decode process at all: `decode_fitted`
-        // must be identical to `decode`, whatever box is requested.
-        let png = minimal_png();
-        let limits = DecodeLimits::new(64, 64, 64 * 64, 0);
-        let natural = decode(&png, &limits).expect("decodes");
-        let fitted = decode_fitted(&png, &limits, FitBox::new(1, 1)).expect("decodes");
-        assert_eq!(natural, fitted);
     }
 }

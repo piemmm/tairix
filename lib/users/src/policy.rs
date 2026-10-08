@@ -16,7 +16,10 @@ use alloc::string::String;
 
 use tairix_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
 use tairix_abi::driver::DriverError;
-use tairix_abi::CapabilityId;
+use tairix_abi::home::{
+    HOME_DESKTOP_DIR, HOME_LIBRARY_DIR, HOME_SETTINGS_DIR, HOME_USER_FILES_DIR,
+};
+use tairix_abi::{CapabilityId, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR};
 
 use crate::provision::{CONFD_UID, SERVICES_GID};
 
@@ -61,17 +64,18 @@ pub const HOME_MODE: u32 = 0o700;
 /// The user's own two program stores are the third and fourth directories a
 /// bare command word is resolved against (`tairix_cmdres`), so provisioning
 /// them with the account is what makes a user's own commands typeable
-/// without any `PATH` edit. Their names are pinned to the shared store
-/// definitions by a unit test below.
+/// without any `PATH` edit. `UserFiles` holds its own fixed folders
+/// ([`USER_FILES_SUBDIRS`](tairix_abi::home::USER_FILES_SUBDIRS)), which the
+/// one provisioning walk ([`crate::provision_home_shape`]) creates with it.
 ///
 /// Sorted and duplicate-free, so a fresh home lists deterministically.
 pub const HOME_SUBDIRS: [&str; 6] = [
-    "Applications",
-    "Commands",
-    "Desktop",
-    "Documents",
-    "Library",
-    "Settings",
+    HOME_APPLICATION_STORE_DIR,
+    HOME_COMMAND_STORE_DIR,
+    HOME_DESKTOP_DIR,
+    HOME_LIBRARY_DIR,
+    HOME_SETTINGS_DIR,
+    HOME_USER_FILES_DIR,
 ];
 
 /// Directory name of the **gated per-app data root** inside each of
@@ -114,8 +118,8 @@ impl AppDataTree {
     #[must_use]
     pub const fn parent(self) -> &'static str {
         match self {
-            Self::Bulk => "Library",
-            Self::Config => "Settings",
+            Self::Bulk => HOME_LIBRARY_DIR,
+            Self::Config => HOME_SETTINGS_DIR,
         }
     }
 }

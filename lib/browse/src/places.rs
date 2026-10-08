@@ -2,7 +2,7 @@
 //! draws down the left edge of its window.
 //!
 //! Two kinds of row share one list. The **user's own places** — Home, Desktop,
-//! Documents, and the machine's application and system roots — are fixed: they
+//! `UserFiles`, and the machine's application and system roots — are fixed: they
 //! are always offered, in one order, because they are where a session's work
 //! lives. The **volumes** are whatever is mounted right now, learned from the
 //! live mount table and each carrying the storage medium it actually sits on
@@ -31,6 +31,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_USER_FILES_DIR};
 use tairix_icon::{disk_icon, IconKind};
 
 use crate::column::ScrollColumn;
@@ -46,11 +47,11 @@ use crate::vfs::components_from_absolute_path;
 /// draw.
 pub const MAX_PLACE_LABEL: usize = 64;
 
-/// The leaf name of the user's desktop directory within their home.
-const DESKTOP_DIR: &str = "Desktop";
+/// The label of the row that opens the user's home.
+const HOME_LABEL: &str = "Home";
 
-/// The leaf name of the user's documents directory within their home.
-const DOCUMENTS_DIR: &str = "Documents";
+/// The folders inside the user's home the rail offers, in rail order.
+const USER_FOLDERS: [&str; 2] = [HOME_DESKTOP_DIR, HOME_USER_FILES_DIR];
 
 /// The machine-wide application store's root component.
 const APPS_ROOT: &str = "Apps";
@@ -58,13 +59,29 @@ const APPS_ROOT: &str = "Apps";
 /// The OS-provided system tree's root component.
 const SYSTEM_ROOT: &str = "System";
 
-/// The longest label among the fixed user places.
+/// Every fixed row's label.
 ///
-/// The rail derives its width by measuring this in the theme's body face at
-/// the desktop scale, so every fixed row's label fits without truncation at
-/// any UI density. A volume whose label is longer simply truncates in its row,
-/// as any over-long label does.
-pub const WIDEST_FIXED_LABEL: &str = DOCUMENTS_DIR;
+/// The rail derives its width by measuring the widest of these in the theme's
+/// body face at the desktop scale, so every fixed row's label fits without
+/// truncation at any UI density. A volume whose label is longer simply
+/// truncates in its row, as any over-long label does.
+pub const FIXED_LABELS: [&str; 5] = [
+    HOME_LABEL,
+    USER_FOLDERS[0],
+    USER_FOLDERS[1],
+    APPS_ROOT,
+    SYSTEM_ROOT,
+];
+
+/// The places a bare open — one naming no location — tries in turn for the
+/// user whose home is `home`: their `UserFiles`, then the home itself. A
+/// caller falls back to the root view when neither can be listed.
+#[must_use]
+pub fn bare_open_places(home: &[String]) -> [Vec<String>; 2] {
+    let mut files = home.to_vec();
+    files.push(String::from(HOME_USER_FILES_DIR));
+    [files, home.to_vec()]
+}
 
 /// What one sidebar row is, and therefore how it was learned.
 ///
@@ -76,7 +93,7 @@ pub const WIDEST_FIXED_LABEL: &str = DOCUMENTS_DIR;
 pub enum PlaceKind {
     /// The user's own home directory.
     Home,
-    /// A fixed folder inside the user's home (Desktop, Documents).
+    /// A fixed folder inside the user's home (`Desktop`, `UserFiles`).
     UserFolder,
     /// A machine-wide root (the application store, the system tree).
     SystemRoot,
@@ -155,7 +172,7 @@ pub struct Volume {
 
 /// The ordered rail: the user's fixed places, then every accepted volume.
 ///
-/// The order is fixed and deterministic — Home, Desktop, Documents, the
+/// The order is fixed and deterministic — Home, Desktop, `UserFiles`, the
 /// application root, the system root, then the volumes sorted by label — so
 /// the rail never reshuffles under the user between two paints of the same
 /// state.
@@ -193,13 +210,13 @@ impl Places {
         let mut rows: Vec<Place> = Vec::new();
         if !home.is_empty() {
             rows.push(Place {
-                label: String::from("Home"),
+                label: String::from(HOME_LABEL),
                 icon: IconKind::Folder,
                 components: home.to_vec(),
                 kind: PlaceKind::Home,
                 available: true,
             });
-            for leaf in [DESKTOP_DIR, DOCUMENTS_DIR] {
+            for leaf in USER_FOLDERS {
                 let mut components = home.to_vec();
                 components.push(String::from(leaf));
                 rows.push(Place {

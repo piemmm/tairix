@@ -8,6 +8,7 @@
 //! `--background`, `--temp-path` — are additive and spelled so they cannot
 //! collide with the GNU set.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 
 use crate::error::StressError;
@@ -76,6 +77,19 @@ pub struct RunSpec {
     /// disk-touching workers; `None` uses the app-scoped per-user cache
     /// directory (`$HOME/Library/stress`).
     pub temp_path: Option<String>,
+}
+
+/// The default scratch directory under `home`, after the per-user cache home
+/// it is made in: `<home>/Library`, then `<home>/Library/stress`.
+#[must_use]
+pub fn default_scratch(home: &str) -> [String; 2] {
+    let library = format!(
+        "{}/{}",
+        home.trim_end_matches('/'),
+        tairix_abi::home::HOME_LIBRARY_DIR
+    );
+    let dir = format!("{library}/stress");
+    [library, dir]
 }
 
 /// One thing the `stress` tool can do.

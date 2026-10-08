@@ -10,9 +10,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{
-    decode, decode_as, desktop_palette, open_native, probe_as, sniff, DecodeError, DecodeLimits,
-    ImageFormat, IndexDepth, NativeDocument, Pixels, RasterImage, Sequence, SequenceKind,
-    SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode, SpriteName, SpritePalette,
+    decode, decode_as, decode_fitted_as, desktop_palette, open_native, probe_as, sniff,
+    DecodeError, DecodeLimits, FitBox, ImageFormat, IndexDepth, NativeDocument, Pixels,
+    RasterImage, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode,
+    SpriteName, SpritePalette,
 };
 
 /// Limits generous enough for every fixture here.
@@ -1406,4 +1407,28 @@ fn a_mode_restated_at_another_shape_keeps_its_layout() {
             "{mode:?}"
         );
     }
+}
+
+/// A fitted decode streams the largest sprite's rows into exactly its whole
+/// decode reduced, and admits only what a decode admits.
+#[test]
+fn a_fitted_decode_is_the_whole_decode_reduced() {
+    let values: Vec<u32> = (0..9 * 7).map(|at| at % 16).collect();
+    let bytes = area(&[
+        Sprite::new(MODE_16, 4, 2, 2),
+        Sprite::new(MODE_16, 4, 9, 7).pixels(&values),
+    ]);
+    let whole = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("decodes");
+    let fitted = decode_fitted_as(ImageFormat::Sprite, &bytes, &limits(), FitBox::new(3, 3))
+        .expect("decodes");
+    assert_eq!((fitted.width(), fitted.height()), (4, 3));
+    let source = tairix_raster::Rgba8Image::new(9, 7, whole.pixels()).expect("image");
+    let reduced = tairix_raster::resample(&source, source.whole(), 4, 3).expect("resamples");
+    assert_eq!(fitted.pixels(), reduced.as_slice());
+
+    let tight = DecodeLimits::new(4, 4, 16, 0);
+    assert_eq!(
+        decode_fitted_as(ImageFormat::Sprite, &bytes, &tight, FitBox::new(2, 2)),
+        Err(DecodeError::WidthExceedsLimit)
+    );
 }

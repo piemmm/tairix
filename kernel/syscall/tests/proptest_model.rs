@@ -833,6 +833,7 @@ impl SyscallHandlers for CountingHandlers {
         _fd: u32,
         _buf: u64,
         _len: usize,
+        _from: u32,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

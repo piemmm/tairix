@@ -252,6 +252,17 @@ sandboxes a parse imports it:
   path. Either a typed refusal (unsupported format, a decode failure, or
   an unrenderable result) or a sandbox failure simply means the desktop
   session falls back to its own built-in glyph — never a crash.
+- **Thumbnails** (also `imagerender`, the same worker): a picture file the
+  file manager or the desktop shows is uploaded through the one chunked
+  document upload and drawn as its own content by `OP_THUMBNAIL`. Its peak
+  decode is forecast from the header and held to `MAX_THUMBNAIL_PEAK_BYTES`
+  before a pixel buffer exists, it decodes straight to the size the square
+  needs (`tairix_image::decode_fitted`), and it is centred in the square on
+  transparent padding, never enlarged. The source is held to the bounds the
+  viewer opens; a format with no signature is read only when named. The
+  worker lets the file go once it is drawn, and the caller-side
+  `render_thumbnail` validates the reply exactly as `rasterise_icon` does. A
+  refusal draws the file's class picture.
 - **Wallpaper placement** (also `imagerender`, the same worker): a
   desktop wallpaper — a shipped master or a file the user picked, never
   parsed outside the sandbox — is sniffed, decoded, and placed onto the

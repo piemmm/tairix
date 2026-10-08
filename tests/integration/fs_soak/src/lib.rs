@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod check;
 mod exercise;
 mod ramblock;
 mod random;

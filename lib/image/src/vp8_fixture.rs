@@ -8,6 +8,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_fuzzseed::Prng;
+
 use super::{
     BMODE_TREE, COEFF_BANDS, COEFF_TREE, COEFF_UPDATE_PROBS, DEFAULT_COEFF_PROBS, KF_BMODE_PROBS,
     KF_UV_MODE_PROBS, KF_YMODE_PROBS, KF_YMODE_TREE, START_CODE, UV_MODE_TREE,
@@ -260,5 +262,85 @@ pub(crate) fn keyframe(width: u32, height: u32, block: Block) -> Vec<u8> {
     bytes.extend_from_slice(&u16::try_from(height).expect("a small height").to_le_bytes());
     bytes.extend_from_slice(&first_part);
     bytes.extend_from_slice(&residual);
+    bytes
+}
+
+/// How a drawn keyframe's loop filter is set.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Filter {
+    pub(crate) simple: bool,
+    pub(crate) level: u32,
+    pub(crate) sharpness: u32,
+}
+
+/// A `width`×`height` keyframe with its loop filter set as `filter` says,
+/// coded over `partitions` residual partitions (one, two, four or eight), and
+/// whose modes and residuals are whatever `rng` draws.
+///
+/// Not a picture anyone encoded, but a bitstream any decoder of the format
+/// reads the same way: every partition carries far more than its macroblocks
+/// read, so none runs out.
+pub(crate) fn drawn_keyframe(
+    width: u32,
+    height: u32,
+    filter: Filter,
+    partitions: usize,
+    rng: &mut Prng,
+) -> Vec<u8> {
+    let macroblocks = (width.div_ceil(16) * height.div_ceil(16)) as usize;
+    let mut head = Writer::new();
+    head.flag(false);
+    head.flag(false);
+    head.flag(false);
+    head.flag(filter.simple);
+    head.literal(filter.level, 6);
+    head.literal(filter.sharpness, 3);
+    head.flag(false);
+    head.literal(partitions.trailing_zeros(), 2);
+    head.literal(u32::from(rng.next_u8() & 0x7F), 7);
+    for _ in 0..5 {
+        head.flag(false);
+    }
+    head.flag(true);
+    for plane in &COEFF_UPDATE_PROBS {
+        for band in plane {
+            for context in band {
+                for &update in context {
+                    head.bit(update, false);
+                }
+            }
+        }
+    }
+    let skipping = rng.next_u8() & 1 == 1;
+    head.flag(skipping);
+    if skipping {
+        head.literal(u32::from(rng.next_u8()), 8);
+    }
+    for _ in 0..macroblocks * 512 {
+        head.bit(rng.next_u8().max(1), rng.next_u8() & 1 == 1);
+    }
+    let first_part = head.finish();
+    let bodies: Vec<Vec<u8>> = (0..partitions)
+        .map(|_| {
+            let mut body = alloc::vec![0u8; macroblocks * 4096];
+            rng.fill(&mut body);
+            body
+        })
+        .collect();
+
+    let mut bytes = Vec::new();
+    let tag = u32::try_from(first_part.len()).expect("a small partition") << 5;
+    bytes.extend_from_slice(&tag.to_le_bytes()[..3]);
+    bytes.extend_from_slice(&START_CODE);
+    bytes.extend_from_slice(&u16::try_from(width).expect("a small width").to_le_bytes());
+    bytes.extend_from_slice(&u16::try_from(height).expect("a small height").to_le_bytes());
+    bytes.extend_from_slice(&first_part);
+    for body in &bodies[..partitions - 1] {
+        let size = u32::try_from(body.len()).expect("a small partition");
+        bytes.extend_from_slice(&size.to_le_bytes()[..3]);
+    }
+    for body in &bodies {
+        bytes.extend_from_slice(body);
+    }
     bytes
 }

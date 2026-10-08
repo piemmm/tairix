@@ -66,6 +66,12 @@ pub enum IconKind {
     /// least one entry — the occupancy cue beside the empty
     /// [`Folder`](Self::Folder).
     FolderFilled,
+    /// A folder's back and tab, which a folder's picture of what it holds
+    /// draws its cards in front of. Never the icon of an entry.
+    FolderBack,
+    /// A folder's front pocket, drawn over the cards standing in it. Never
+    /// the icon of an entry.
+    FolderFront,
     /// A generic document, for a regular file of no recognised class.
     File,
     /// An application tile, for a `<Name>.app` bundle.
@@ -76,6 +82,10 @@ pub enum IconKind {
     Image,
     /// A package, for an archive file.
     Archive,
+    /// A pair of notes, for a sound file.
+    Audio,
+    /// A film camera, for a video file.
+    Video,
     /// A run/bolt mark, for an executable.
     Executable,
     /// A left arrow, for the file manager's Back navigation command.
@@ -275,6 +285,10 @@ impl IconKind {
     /// [`Generic`](Self::Generic) for an unknown id so an unexpected
     /// notification still draws a placeholder.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a kind; splitting it would part the kinds from the one table they are spelled by"
+    )]
     pub fn for_asset(asset: &str) -> Self {
         match asset {
             "network" => Self::Network,
@@ -284,6 +298,10 @@ impl IconKind {
             "folder" => Self::Folder,
             "folder-open" => Self::FolderOpen,
             "folder-filled" => Self::FolderFilled,
+            "folder-back" => Self::FolderBack,
+            "folder-front" => Self::FolderFront,
+            "audio" => Self::Audio,
+            "video" => Self::Video,
             "file" => Self::File,
             "app-bundle" => Self::AppBundle,
             "text" => Self::Text,
@@ -386,6 +404,10 @@ impl IconKind {
     /// [`ICON_KINDS`]: crate::load::ICON_KINDS
     /// [`IconSet`]: crate::load::IconSet
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a kind; splitting it would part the kinds from the one table they are spelled by"
+    )]
     pub const fn index(self) -> usize {
         match self {
             Self::Network => 0,
@@ -486,6 +508,10 @@ impl IconKind {
             Self::ToolCrop => 95,
             Self::ToolHand => 96,
             Self::ToolZoom => 97,
+            Self::FolderBack => 98,
+            Self::FolderFront => 99,
+            Self::Audio => 100,
+            Self::Video => 101,
         }
     }
 
@@ -497,6 +523,10 @@ impl IconKind {
     /// load site. The round trip holds for every kind:
     /// `IconKind::for_asset(kind.asset_id()) == kind`.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm a kind; splitting it would part the kinds from the one table they are spelled by"
+    )]
     pub fn asset_id(self) -> &'static str {
         match self {
             Self::Network => "network",
@@ -597,6 +627,10 @@ impl IconKind {
             Self::ToolCrop => "tool-crop",
             Self::ToolHand => "tool-hand",
             Self::ToolZoom => "tool-zoom",
+            Self::FolderBack => "folder-back",
+            Self::FolderFront => "folder-front",
+            Self::Audio => "audio",
+            Self::Video => "video",
         }
     }
 }
@@ -633,6 +667,8 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Folder => folder(color),
         IconKind::FolderOpen => folder_open(color),
         IconKind::FolderFilled => folder_filled(color),
+        IconKind::FolderBack => folder_back(color),
+        IconKind::FolderFront => folder_front(color),
         IconKind::File => file(color),
         // The app-bundle, text, and image families each share one built-in
         // glyph: the fine-grained kinds differ only in their shipped raster
@@ -651,6 +687,8 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::ImageSvg
         | IconKind::ImageSprite => image(color),
         IconKind::Archive => archive(color),
+        IconKind::Audio => audio(color),
+        IconKind::Video => video(color),
         IconKind::Executable => executable(color),
         IconKind::NavBack => nav_back(color),
         IconKind::NavForward => nav_forward(color),
@@ -811,6 +849,19 @@ fn folder_filled(color: Color) -> alloc::vec::Vec<IconLayer> {
     ]
 }
 
+/// A folder's back plate and tab, standing taller than its front so what the
+/// folder holds shows between them.
+fn folder_back(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BACK: &[(i32, i32)] = &[(3, 6), (9, 6), (11, 8), (21, 8), (21, 14), (3, 14)];
+    vec![IconLayer::from_points(color, BACK)]
+}
+
+/// A folder's low front pocket.
+fn folder_front(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FRONT: &[(i32, i32)] = &[(3, 13), (21, 13), (21, 20), (3, 20)];
+    vec![IconLayer::from_points(color, FRONT)]
+}
+
 /// A generic document: a page with a folded top-trailing corner.
 fn file(color: Color) -> alloc::vec::Vec<IconLayer> {
     const PAGE: &[(i32, i32)] = &[(6, 3), (15, 3), (19, 7), (19, 21), (6, 21)];
@@ -860,6 +911,32 @@ fn archive(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, KNOB),
         IconLayer::from_points(color, LID),
         IconLayer::from_points(color, BODY),
+    ]
+}
+
+/// Sound: two notes joined by a beam.
+fn audio(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BEAM: &[(i32, i32)] = &[(8, 5), (19, 2), (19, 5), (8, 8)];
+    const LEFT_STEM: &[(i32, i32)] = &[(8, 6), (10, 6), (10, 17), (8, 17)];
+    const RIGHT_STEM: &[(i32, i32)] = &[(17, 3), (19, 3), (19, 15), (17, 15)];
+    const LEFT_HEAD: &[(i32, i32)] = &[(4, 17), (6, 15), (9, 15), (10, 17), (8, 19), (5, 19)];
+    const RIGHT_HEAD: &[(i32, i32)] = &[(13, 15), (15, 13), (18, 13), (19, 15), (17, 17), (14, 17)];
+    vec![
+        IconLayer::from_points(color, BEAM),
+        IconLayer::from_points(color, LEFT_STEM),
+        IconLayer::from_points(color, RIGHT_STEM),
+        IconLayer::from_points(color, LEFT_HEAD),
+        IconLayer::from_points(color, RIGHT_HEAD),
+    ]
+}
+
+/// Video: a film camera, its body and the lens flaring out of it.
+fn video(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BODY: &[(i32, i32)] = &[(3, 7), (15, 7), (15, 17), (3, 17)];
+    const LENS: &[(i32, i32)] = &[(16, 10), (21, 7), (21, 17), (16, 14)];
+    vec![
+        IconLayer::from_points(color, BODY),
+        IconLayer::from_points(color, LENS),
     ]
 }
 

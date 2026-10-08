@@ -242,6 +242,9 @@ pub fn cursor_cache(
 pub struct CursorController {
     registry: CursorRegistry,
     kind: CursorKind,
+    /// The shape the seat holds the pointer in, whatever is under it: a drag
+    /// the desktop carries shows its verdict wherever the pointer goes.
+    held: Option<CursorKind>,
     /// What is installed: the epoch the kind was drawn for and how enlarged.
     shown: Option<(CursorEpoch, u16)>,
     /// The pointer's side in *logical* pixels: the reference side magnified
@@ -287,6 +290,7 @@ impl CursorController {
         Self {
             registry,
             kind: CursorKind::Arrow,
+            held: None,
             shown: None,
             logical_side: CURSOR_BASE_SIDE_PX,
             shadow: false,
@@ -302,6 +306,13 @@ impl CursorController {
     #[must_use]
     pub const fn logical_side(&self) -> u32 {
         self.logical_side
+    }
+
+    /// Hold the pointer in `kind` wherever it goes, or with `None` let it
+    /// follow what is under it again; the next [`refresh`](Self::refresh)
+    /// shows the change.
+    pub fn hold(&mut self, kind: Option<CursorKind>) {
+        self.held = kind;
     }
 
     /// Draw the pointer from the registered set `id` and immediately
@@ -478,7 +489,9 @@ impl CursorController {
         router: &InputRouter,
         compositor: &mut Compositor,
     ) -> bool {
-        let kind = desired_cursor(at, router, compositor);
+        let kind = self
+            .held
+            .unwrap_or_else(|| desired_cursor(at, router, compositor));
         let epoch = self.epoch(compositor);
         if kind == self.kind
             && self.shown == Some((epoch, self.enlargement))

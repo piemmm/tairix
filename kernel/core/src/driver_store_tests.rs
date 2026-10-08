@@ -8,8 +8,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes,
+    DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, NodeTimes,
 };
 use tairix_abi::driver::DriverError;
 
@@ -207,29 +207,27 @@ impl FilesystemRead for MockStore {
         &mut self,
         dir: NodeId,
         cursor: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        let n = self.nodes.get(&dir.raw()).ok_or(DriverError::NotFound)?;
-        let Ok(index) = usize::try_from(cursor) else {
-            return Ok(None);
-        };
-        let Some((name, child_id)) = n.children.get(index) else {
-            return Ok(None);
-        };
-        let bytes = name.as_bytes();
-        if bytes.len() > name_out.len() {
-            return Err(DriverError::LengthOutOfRange);
+        _after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        let children = self
+            .nodes
+            .get(&dir.raw())
+            .ok_or(DriverError::NotFound)?
+            .children
+            .clone();
+        let from = usize::try_from(cursor).unwrap_or(usize::MAX);
+        for (at, (name, child_id)) in children.into_iter().enumerate().skip(from) {
+            let entry = DirEntry {
+                node: NodeId::from_raw(child_id),
+                info: self.node_info(NodeId::from_raw(child_id))?,
+                next_cursor: at as u64 + 1,
+            };
+            if visit(&entry, name.as_bytes()) == DirVisit::Stop {
+                break;
+            }
         }
-        let name_len = bytes.len();
-        name_out[..name_len].copy_from_slice(bytes);
-        let child_id = *child_id;
-        let info = self.node_info(NodeId::from_raw(child_id))?;
-        Ok(Some(DirEntry {
-            node: NodeId::from_raw(child_id),
-            info,
-            name_len,
-            next_cursor: cursor + 1,
-        }))
+        Ok(())
     }
 }
 

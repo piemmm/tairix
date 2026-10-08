@@ -1017,15 +1017,22 @@ impl SyscallNumber {
     /// write through the secured VFS; a read-only mount, a handle without
     /// write access, or a standard descriptor fails closed.
     pub const FS_WRITE: Self = Self(49);
-    /// List the entries of an open directory into a caller buffer
-    /// (`PREREQUISITES.md` P-A).
+    /// Read the next batch of an open directory's entries into a caller
+    /// buffer (`PREREQUISITES.md` P-A).
     ///
     /// Arguments: `fd: u32` (an open directory handle), `buf: *mut u8` (user
-    /// pointer), and `len: usize`. Returns the number of bytes written: a
-    /// packed stream of [`crate::DirEntry`] records. A buffer too small to
-    /// hold the whole listing fails closed with [`Errno::BufferTooSmall`]
-    /// (the listing is never truncated); the caller grows its buffer and
-    /// retries. A handle that does not name a directory fails closed.
+    /// pointer), `len: usize`, and `from: u32` (a [`crate::ReaddirFrom`]).
+    /// Writes as many whole [`crate::DirEntry`] records as fit, from the open
+    /// description's listing position, and advances it; returns the bytes
+    /// written, `0` at the end of the directory. At most
+    /// [`crate::READDIR_BATCH_MAX`] bytes are filled per call.
+    ///
+    /// [`Errno::BufferTooSmall`] means the next record alone does not fit, and
+    /// leaves the position unchanged. [`Errno::Stale`] means the path now
+    /// names a different directory from the one this listing began on;
+    /// `from = Start` restarts it. An entry present for the whole listing is
+    /// returned exactly once; one added or removed meanwhile may or may not
+    /// be. A handle that does not name a directory fails closed.
     pub const FS_READDIR: Self = Self(50);
     /// Report the structural metadata of an open file or directory
     /// (`PREREQUISITES.md` P-A).
@@ -1687,8 +1694,8 @@ impl SyscallNumber {
     pub const FS_ATTR_SET: Self = Self(85);
 
     /// Enumerate the extended-attribute keys of the file or directory at
-    /// an absolute path, one key per call (the `fs_readdir` iteration
-    /// shape rather than `listxattr(2)`'s packed buffer).
+    /// an absolute path, one key per call by index, rather than
+    /// `listxattr(2)`'s packed buffer.
     ///
     /// Arguments: `path`/`path_len`, `index: u64` (the position to yield),
     /// and `key_out: *mut u8` + `key_out_len: usize`. Returns the key's

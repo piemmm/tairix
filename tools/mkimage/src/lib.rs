@@ -99,6 +99,8 @@ pub enum MkimageError {
     SystemPartition(DriverError),
     /// Authoring the `ARXFS` root partition failed.
     RootPartition(DriverError),
+    /// Giving a seeded account's home its fixed shape failed.
+    HomeShape(tairix_users::HomeShapeError),
     /// Host randomness for the volume key is unavailable.
     Entropy(String),
     /// Provisioning or encoding the passphrase-unlock descriptor failed.
@@ -126,6 +128,7 @@ impl fmt::Display for MkimageError {
             Self::BootPartition(err) => write!(f, "boot partition: driver error {err:?}"),
             Self::SystemPartition(err) => write!(f, "system partition: driver error {err:?}"),
             Self::RootPartition(err) => write!(f, "root partition: driver error {err:?}"),
+            Self::HomeShape(err) => write!(f, "home shape: {err:?}"),
             Self::Entropy(msg) => write!(f, "host entropy: {msg}"),
             Self::Unlock(err) => write!(f, "unlock descriptor: driver error {err:?}"),
             Self::NetworkConfig => {

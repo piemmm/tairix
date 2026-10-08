@@ -9,11 +9,12 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
 use tairix_abi::ProgramKind;
 use tairix_abi::{
-    BundleFileDigest, CapabilityId, CapabilityQuery, Errno, FileId, FileKind, FileStat, NodeTimes,
-    OpenFlags, RealpathMode, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
+    BundleFileDigest, CapabilityId, CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat,
+    NodeTimes, OpenFlags, RealpathMode, UnlinkFlags, ABI_VERSION_CURRENT, LOAD_MAGIC,
 };
 use tairix_appload::{AppError, AppLoader, AppLoaderConfig, Clock, LoadedApp};
 use tairix_caps::CapabilitySet;
@@ -21,7 +22,7 @@ use tairix_itest_harness::app_image::{compose_signed_appinfo, AppManifestSource,
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
 use crate::appspawn::{AnchorVerifier, FsBundleStore};
-use crate::fs::{FilesystemService, FinalLink, ReaddirEntry};
+use crate::fs::{FilesystemService, FinalLink, Listing, ReaddirEntry};
 use crate::test_sink::TestSink;
 
 extern crate std;
@@ -191,12 +192,15 @@ impl FilesystemService for MemFs {
         _caps: &dyn CapabilityQuery,
         path: &str,
         _final_link: FinalLink,
-    ) -> Result<Vec<ReaddirEntry>, Errno> {
+        at: &mut Listing,
+        each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+    ) -> Result<(), Errno> {
         let children = self.children(path);
         if children.is_empty() {
             return Err(Errno::NotFound);
         }
-        Ok(children)
+        crate::fs::listing::serve_fixed(&children, at, each);
+        Ok(())
     }
 
     fn stat(

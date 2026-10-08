@@ -30,6 +30,9 @@ the cryptographic content hash — so a first-party implementation is permitted.
 - `checksum` — the hot-path entry; reads the set-once resolved function pointer
   (no code patching, W^X-clean) and falls closed to the portable baseline
   before `resolve` runs.
+- `update` — the same resolved implementation as a raw-register continuation,
+  inverting neither side, for a checksum carried across buffers from a seed
+  (ext4's `metadata_csum`); `portable_update` is its baseline.
 
 ## Selection is capability-only
 

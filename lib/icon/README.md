@@ -26,8 +26,10 @@ over a resolution-independent design grid, so the same glyph is
   `VectorIcon`: the vector representation and `rasterise(side) -> Surface`.
 - `glyph` — `IconKind` (the closed glyph set: the taskbar's network, volume,
   battery, and bell, its program-library launcher, and the user bust behind
-  its account capsule; the file manager's folder, folder-open, generic file, app-bundle,
-  text, image, archive, and executable; the file manager's toolbar commands
+  its account capsule; the file manager's folder, folder-open, the folder
+  back and front a folder's picture of what it holds is composed between,
+  generic file, app-bundle, text, image, archive, executable, audio, and
+  video; the file manager's toolbar commands
   nav-back, nav-forward, nav-up, refresh, view-toggle, sort, new-folder,
   trash, and empty-trash; the viewer's pause and resume; the painter's
   tools — select, pencil, brush, spray, eraser, fill, colour picker, line,
@@ -126,6 +128,10 @@ over a resolution-independent design grid, so the same glyph is
   A decode the cache *refused* is held as declined instead, which is what stops
   a landing chasing its own tail; `retry_declined` re-offers it on the pressure
   band's own wake.
+- `folder` — `FolderSample`, what a folder holds as its picture draws it (up to
+  three kinds, most frequent family first), and the card placement and
+  fixed-ink paper card the folder composite (`IconRequest::folder`) is built
+  from (`plans/FILES-INTERACTION.md` FI11).
 
 ## Asset model
 
@@ -141,7 +147,8 @@ its broad family's built-in glyph, so a system without the class artwork
 still shows a meaningful icon.
 
 A kind ships **one** class master, in whichever format suits the artwork: the
-folders are vector (`folder.svg`, `folder-filled.svg`), the illustrative
+folders are vector (`folder.svg`, `folder-filled.svg`, `folder-back.svg`,
+`folder-front.svg`), the illustrative
 file-class, application and disk pictures are raster masters. Shipping one id in both formats is a packaging defect the
 image build refuses, since the raster tier would always win and the vector
 could never be selected.

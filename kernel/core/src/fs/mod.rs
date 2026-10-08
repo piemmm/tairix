@@ -49,6 +49,7 @@ pub mod blkmeter;
 mod changelog;
 mod delegate;
 mod fscache;
+pub mod listing;
 #[cfg(any(test, feature = "fs-conformance"))]
 pub mod memfs;
 pub mod mount;
@@ -68,10 +69,11 @@ pub mod writeback;
 
 pub use blkclient::BlkClient;
 pub use delegate::{
-    DelegatedEntry, DelegatedFs, DelegatedInfo, FinalLink, MetaPolicy, MountProjection, PerInode,
-    Uniform,
+    DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, FinalLink, MetaPolicy,
+    MountProjection, PerInode, Uniform,
 };
 pub use fscache::CachedFs;
+pub use listing::{DirPosition, ListEnd, Listing, ListingRegistry, ResumeName};
 pub use mount::{ChildMounts, MountBacking, MountPoint, MountTable};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
@@ -293,6 +295,11 @@ pub enum VfsError {
     TooManyLinks,
     /// The kernel heap could not hold what the operation needed to build.
     OutOfMemory,
+    /// A listing's later batch found a different directory at the path its
+    /// first batch read, so its position names a place in another directory.
+    Stale,
+    /// A bounded kernel walk met more entries than its caller budgeted.
+    LimitExceeded,
 }
 
 impl VfsError {
@@ -335,6 +342,8 @@ impl VfsError {
             Self::LinkLoop => Errno::LinkLoop,
             Self::TooManyLinks => Errno::TooManyLinks,
             Self::OutOfMemory => Errno::OutOfMemory,
+            Self::Stale => Errno::Stale,
+            Self::LimitExceeded => Errno::LimitExceeded,
         }
     }
 }
@@ -361,6 +370,8 @@ impl fmt::Display for VfsError {
             Self::NoSpace => "no space left on device",
             Self::NotSupported => "attributes not supported by the mounted format",
             Self::OutOfMemory => "out of memory",
+            Self::Stale => "directory replaced during its listing",
+            Self::LimitExceeded => "more entries than the walk allows",
         };
         f.write_str(message)
     }

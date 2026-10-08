@@ -78,11 +78,13 @@ use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_sync::{OnceCell, RwLock};
 
 use crate::filelock::OwnerId;
+use crate::fs::Listing;
 use crate::pipe::PipeEnd;
 use crate::procspace::ProcessSpace;
 use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
 use crate::rlimit::LimitSet;
+use crate::sleeplock::SleepLock;
 use crate::waitq::WakeKey;
 
 /// One thread's reserved user-stack span, with the process that owns it.
@@ -708,6 +710,11 @@ pub struct Description {
     /// The change watch armed on this directory description
     /// (`docs/src/filesystem/watch.md`), released with it.
     watch: OnceCell<crate::fswatch::ArmedWatch>,
+    /// Where this directory description's `fs_readdir` listing stands, made
+    /// by its first batch. Boxed, so a description that never lists pays one
+    /// pointer; a one-element slice, because that is the box a failed
+    /// allocation can refuse as a value.
+    listing: OnceCell<Box<[SleepLock<Listing>]>>,
 }
 
 /// Releasing the last descriptor on a description releases the locks it
@@ -771,6 +778,7 @@ impl OpenFile {
                 cursor: AtomicU64::new(0),
                 lock_owner: crate::filelock::mint_owner(),
                 watch: OnceCell::new(),
+                listing: OnceCell::new(),
             }),
         }
     }
@@ -936,6 +944,32 @@ impl OpenFile {
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
+    }
+
+    /// Where this directory description's listing stands, made on its first
+    /// `fs_readdir` and shared by every descriptor on the description.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] when the position cannot be allocated; nothing
+    /// is recorded, so a later call may succeed. [`Errno::DeviceFault`] if an
+    /// earlier first call was abandoned mid-publish.
+    pub fn listing(&self) -> Result<&SleepLock<Listing>, Errno> {
+        if let Ok(Some(made)) = self.description.listing.get() {
+            return made.first().ok_or(Errno::OutOfMemory);
+        }
+        let mut slot = Vec::new();
+        slot.try_reserve_exact(1).map_err(|_| Errno::OutOfMemory)?;
+        slot.push(SleepLock::new(Listing::default()));
+        // Allocated before publishing, so publishing cannot fail and poison
+        // the cell; a racing first batch that wins is waited for, and its
+        // listing serves both.
+        let made = self
+            .description
+            .listing
+            .get_or_try_init(|| Ok::<_, core::convert::Infallible>(slot.into_boxed_slice()))
+            .map_err(|_| Errno::DeviceFault)?;
+        made.first().ok_or(Errno::OutOfMemory)
     }
 
     /// The change watch armed on this descriptor's open file description.

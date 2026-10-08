@@ -27,12 +27,12 @@ use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, Color, DitherRow, Pixel, Surface, ROUND_NEAREST};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
-    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
+    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
 };
 use crate::damage::sink;
 use crate::state::{
@@ -1614,6 +1614,14 @@ const TH: u32 = 88;
 
 const TILE: Rect = Rect::new(0, 0, TW, TH);
 
+/// The layout [`IconTile::new`] divides a tile by: one name line.
+const ONE_LINE: TileLayout = TileLayout::new(1);
+
+/// The face a tile's name is set in.
+fn name_font() -> BitmapFont {
+    crate::paint::role_font(&Theme::dark(), Scale::ONE, TextRole::ItemLabel)
+}
+
 /// Paint a tile with the given state over a surface pre-filled with a colour no
 /// palette uses, so any pixel still carrying it is one the tile left alone.
 /// That is how "a resting tile paints no plate" is checked: the backdrop
@@ -1650,15 +1658,16 @@ fn behind_pixels(surface: &Surface) -> usize {
 #[test]
 fn icon_tile_label_rect_is_the_band_the_name_is_drawn_in() {
     let theme = Theme::dark();
-    let band = IconTile::label_rect(TILE, Scale::ONE, &theme).expect("the tile seats a name");
+    let band = ONE_LINE
+        .label_rect(TILE, Scale::ONE, &theme)
+        .expect("the tile seats a name");
     assert!(
         band.top() > TILE.top() && band.bottom() <= TILE.bottom(),
         "the band lies beneath the picture and inside the tile"
     );
     assert_eq!(
-        IconTile::label_lines(TILE, Scale::ONE, &theme),
-        usize::try_from(band.height / control_font(&theme, Scale::ONE).line_height())
-            .expect("a line count"),
+        ONE_LINE.label_lines(TILE, Scale::ONE, &theme),
+        usize::try_from(band.height / name_font().line_height()).expect("a line count"),
         "the band holds exactly the lines the tile says it draws"
     );
 
@@ -1690,7 +1699,31 @@ fn icon_tile_label_rect_is_the_band_the_name_is_drawn_in() {
     assert!(differing > 0, "the tile drew its name");
 
     // A tile with no room for a whole line draws no name and reports none.
-    assert!(IconTile::label_rect(Rect::new(0, 0, 4, 4), Scale::ONE, &theme).is_none());
+    assert!(ONE_LINE
+        .label_rect(Rect::new(0, 0, 4, 4), Scale::ONE, &theme)
+        .is_none());
+}
+
+/// A cell sized for a picture draws exactly that picture, with its one name
+/// line half an inset below it: the tile is as tall as what it holds.
+#[test]
+fn a_tile_sized_for_a_picture_draws_that_picture_above_a_half_inset_gap() {
+    let theme = Theme::dark();
+    let pad = Scale::ONE.scale_length(theme.metrics().control_inset);
+    for side in [24, 42, 64] {
+        let height = ONE_LINE.height_for(side, Scale::ONE, &theme);
+        assert_eq!(
+            height,
+            pad + side + pad / 2 + name_font().line_height() + pad / 2
+        );
+        let bounds = Rect::new(0, 0, side + pad * 2, height);
+        assert_eq!(ONE_LINE.icon_side(bounds, Scale::ONE, &theme), side);
+        let band = ONE_LINE
+            .label_rect(bounds, Scale::ONE, &theme)
+            .expect("a name line");
+        assert_eq!(band.top(), xi(pad + side + pad / 2));
+        assert_eq!(ONE_LINE.label_lines(bounds, Scale::ONE, &theme), 1);
+    }
 }
 
 /// A resting tile is a picture and a label over whatever is behind it — no
@@ -1881,7 +1914,7 @@ fn fill_at(theme: &Theme, x: u32, y: u32) -> Pixel {
 /// the picture slot and the label band. Checked against a resting tile, which
 /// leaves such a row exactly as it found it, rather than trusted.
 fn clear_row(theme: &Theme) -> u32 {
-    let row = IconTile::icon_side(TILE, Scale::ONE, theme)
+    let row = ONE_LINE.icon_side(TILE, Scale::ONE, theme)
         + Scale::ONE.scale_length(theme.metrics().control_inset);
     let resting = tile_over_backdrop(ControlState::idle(), theme, None);
     for x in 0..TW {
@@ -2349,7 +2382,7 @@ fn tile_artwork_bbox(theme: &Theme, art: &Surface) -> (u32, u32, u32, u32) {
 #[test]
 fn a_tile_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
     let theme = Theme::dark();
-    let side = IconTile::icon_side(TILE, Scale::ONE, &theme);
+    let side = ONE_LINE.icon_side(TILE, Scale::ONE, &theme);
     assert!(side > 0, "the tile reserves a picture slot");
 
     // Slot-sized artwork fills exactly the slot the tile advertised, so an
@@ -2368,7 +2401,7 @@ fn a_tile_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
 #[test]
 fn tile_artwork_sized_differently_from_the_slot_is_centred_in_it() {
     let theme = Theme::dark();
-    let side = IconTile::icon_side(TILE, Scale::ONE, &theme);
+    let side = ONE_LINE.icon_side(TILE, Scale::ONE, &theme);
     assert!(side > 8, "the slot has room to be over- and under-shot");
 
     // The slot itself, then artwork four pixels smaller and four larger.
@@ -2393,18 +2426,29 @@ fn tile_artwork_sized_differently_from_the_slot_is_centred_in_it() {
     }
 }
 
-/// The tile leaves the label the lower part of its bounds: the picture never
-/// grows into the space the name needs, however tall the tile is.
+/// The picture never grows into the band the layout reserves, however tall the
+/// tile is: every line the owner stated stays seated beneath it.
 #[test]
-fn the_picture_slot_leaves_the_label_its_share_of_the_tile() {
+fn the_picture_slot_leaves_the_band_its_stated_lines() {
     let theme = Theme::dark();
-    for height in [40, TH, 200] {
-        let bounds = Rect::new(0, 0, TW, height);
-        let side = IconTile::icon_side(bounds, Scale::ONE, &theme);
-        assert!(
-            side * 5 <= height * 3,
-            "a {height}-pixel tile gave its picture {side} pixels"
-        );
+    for lines in [1, 2, 3] {
+        let layout = TileLayout::new(lines);
+        for height in [40, TH, 200] {
+            let bounds = Rect::new(0, 0, TW, height);
+            let side = layout.icon_side(bounds, Scale::ONE, &theme);
+            if side == 0 {
+                continue;
+            }
+            assert!(
+                layout.height_for(side, Scale::ONE, &theme) <= height,
+                "a {height}-pixel tile gave its picture {side} pixels"
+            );
+            assert_eq!(
+                layout.label_lines(bounds, Scale::ONE, &theme),
+                usize::try_from(lines).expect("small"),
+                "a {height}-pixel tile lost a stated line"
+            );
+        }
     }
 }
 
@@ -2422,7 +2466,7 @@ fn a_degenerate_tile_draws_nothing() {
         s.fill(BEHIND);
         IconTile::new("x", IconKind::Text).render(&mut s, bounds, Scale::ONE, &theme, None);
         assert_eq!(
-            IconTile::icon_side(bounds, Scale::ONE, &theme),
+            ONE_LINE.icon_side(bounds, Scale::ONE, &theme),
             0,
             "a degenerate tile claimed a picture slot"
         );
@@ -2448,7 +2492,8 @@ fn a_tile_paints_only_within_its_bounds() {
         .with_selection(SelectionState::Selected)
         .with_focus(FocusState::FOCUSED);
     let want = BEHIND.premultiply();
-    for height in [TH, font().line_height() * 2, font().line_height() + 2, 12] {
+    let line = name_font().line_height();
+    for height in [TH, line * 2, line + 2, 12] {
         let mut s = Surface::new(TW * 3, height * 3).expect("surface");
         s.fill(BEHIND);
         let inner = Rect::new(
@@ -2475,13 +2520,21 @@ fn a_tile_paints_only_within_its_bounds() {
     }
 }
 
-/// Paint `label` on a tile of `bounds` over the sentinel backdrop, with slot
-/// artwork in its picture so the only ink on the surface is the name's.
-fn label_surface(label: &str, state: ControlState, theme: &Theme, bounds: Rect) -> Surface {
+/// Paint `label` on a tile of `bounds` divided by `layout` over the sentinel
+/// backdrop, with slot artwork in its picture so the only ink on the surface is
+/// the name's.
+fn label_surface(
+    label: &str,
+    state: ControlState,
+    theme: &Theme,
+    bounds: Rect,
+    layout: TileLayout,
+) -> Surface {
     let mut s = Surface::new(bounds.width, bounds.height).expect("surface");
     s.fill(BEHIND);
-    let art = artwork(IconTile::icon_side(bounds, Scale::ONE, theme).max(1), ART);
+    let art = artwork(layout.icon_side(bounds, Scale::ONE, theme).max(1), ART);
     IconTile::new(label, IconKind::Text)
+        .with_layout(layout)
         .with_state(state)
         .render(
             &mut s,
@@ -2510,7 +2563,7 @@ fn row_span(surface: &Surface, ink: Pixel, y: u32) -> Option<(u32, u32)> {
 /// the lines sit one line-height apart from the first inked row and each has
 /// ink on its own top row.
 fn ink_lines(surface: &Surface, ink: Pixel) -> Vec<(u32, u32)> {
-    let step = font().line_height().max(1);
+    let step = name_font().line_height().max(1);
     let Some(top) = (0..surface.height()).find(|y| row_span(surface, ink, *y).is_some()) else {
         return Vec::new();
     };
@@ -2522,19 +2575,24 @@ fn ink_lines(surface: &Surface, ink: Pixel) -> Vec<(u32, u32)> {
 }
 
 /// A tile whose label column is exactly `column` pixels wide and whose band
-/// holds `lines` whole lines — the height found by asking the tile itself
-/// rather than re-deriving its band geometry.
-fn tile_fitting(column: u32, lines: usize, theme: &Theme) -> Rect {
+/// holds `lines` whole lines under a small picture — the height asked of the
+/// layout rather than re-derived.
+fn tile_fitting(column: u32, lines: u32, theme: &Theme) -> (Rect, TileLayout) {
     let pad = Scale::ONE
         .scale_length(theme.metrics().control_inset)
         .max(1);
-    let width = column + pad * 2;
-    let bounds = (1..1000)
-        .map(|h| Rect::new(0, 0, width, h))
-        .find(|b| IconTile::label_lines(*b, Scale::ONE, theme) >= lines)
-        .expect("some height holds the lines");
-    assert_eq!(IconTile::label_lines(bounds, Scale::ONE, theme), lines);
-    bounds
+    let layout = TileLayout::new(lines);
+    let bounds = Rect::new(
+        0,
+        0,
+        column + pad * 2,
+        layout.height_for(16, Scale::ONE, theme),
+    );
+    assert_eq!(
+        layout.label_lines(bounds, Scale::ONE, theme),
+        usize::try_from(lines).expect("small")
+    );
+    (bounds, layout)
 }
 
 /// Each line is centred in the tile, to within the odd pixel of a width that
@@ -2554,9 +2612,15 @@ fn assert_centred(lines: &[(u32, u32)], tile_width: u32) {
 #[test]
 fn a_long_two_word_name_wraps_onto_two_centred_lines() {
     let theme = Theme::dark();
-    let f = font();
-    let bounds = tile_fitting(f.text_width("Administrator"), 2, &theme);
-    let s = label_surface("System Administrator", ControlState::idle(), &theme, bounds);
+    let f = name_font();
+    let (bounds, layout) = tile_fitting(f.text_width("Administrator"), 2, &theme);
+    let s = label_surface(
+        "System Administrator",
+        ControlState::idle(),
+        &theme,
+        bounds,
+        layout,
+    );
 
     let lines = ink_lines(&s, premul(theme.palette().on_surface));
     assert_eq!(lines.len(), 2, "{lines:?}");
@@ -2574,10 +2638,10 @@ fn a_name_longer_than_the_band_elides_only_its_last_line() {
     const NAME: &str = "System Administrator Account";
 
     let theme = Theme::dark();
-    let f = font();
+    let f = name_font();
     let column = f.text_width("Administrator");
-    let bounds = tile_fitting(column, 2, &theme);
-    let s = label_surface(NAME, ControlState::idle(), &theme, bounds);
+    let (bounds, layout) = tile_fitting(column, 2, &theme);
+    let s = label_surface(NAME, ControlState::idle(), &theme, bounds, layout);
 
     // What the shared wrap engine says the two lines are…
     let wrapped: Vec<_> = f
@@ -2607,10 +2671,10 @@ fn one_unbreakable_word_is_broken_and_elided_rather_than_overflowing() {
     const WORD: &str = "Supercalifragilisticexpialidocious";
 
     let theme = Theme::dark();
-    let f = font();
+    let f = name_font();
     let column = f.text_width("Administrator");
-    let bounds = tile_fitting(column, 2, &theme);
-    let s = label_surface(WORD, ControlState::idle(), &theme, bounds);
+    let (bounds, layout) = tile_fitting(column, 2, &theme);
+    let s = label_surface(WORD, ControlState::idle(), &theme, bounds, layout);
 
     // The word has no break in it, so the shared engine splits it mid-word and
     // marks the last line…
@@ -2638,8 +2702,8 @@ fn one_unbreakable_word_is_broken_and_elided_rather_than_overflowing() {
 }
 
 /// The budget an owner reads is the budget the render lays out to: for every
-/// tile height, the number of lines actually drawn is the number
-/// [`IconTile::label_lines`] promised.
+/// layout and tile height, the number of lines actually drawn is the number
+/// [`TileLayout::label_lines`] promised.
 #[test]
 fn label_lines_agrees_with_the_lines_the_render_draws() {
     // A name long enough to fill any budget, so the drawn count is the budget
@@ -2648,12 +2712,17 @@ fn label_lines_agrees_with_the_lines_the_render_draws() {
          Of The Second Machine Room On The Left Past The Coffee";
 
     let theme = Theme::dark();
-    for height in 8..(TH * 2) {
-        let bounds = Rect::new(0, 0, TW, height);
-        let promised = IconTile::label_lines(bounds, Scale::ONE, &theme);
-        let s = label_surface(NAME, ControlState::idle(), &theme, bounds);
-        let drawn = ink_lines(&s, premul(theme.palette().on_surface)).len();
-        assert_eq!(drawn, promised, "a {height}-pixel tile drew {drawn} lines");
+    for layout in [TileLayout::new(1), TileLayout::new(2), TileLayout::new(3)] {
+        for height in 8..(TH * 2) {
+            let bounds = Rect::new(0, 0, TW, height);
+            let promised = layout.label_lines(bounds, Scale::ONE, &theme);
+            let s = label_surface(NAME, ControlState::idle(), &theme, bounds, layout);
+            let drawn = ink_lines(&s, premul(theme.palette().on_surface)).len();
+            assert_eq!(
+                drawn, promised,
+                "a {height}-pixel tile of {layout:?} drew {drawn} lines"
+            );
+        }
     }
 }
 
@@ -2665,13 +2734,14 @@ fn label_lines_agrees_with_the_lines_the_render_draws() {
 fn a_selected_name_reads_over_the_selection_fill_on_both_themes() {
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
-        let bounds = tile_fitting(font().text_width("Administrator"), 2, &theme);
+        let (bounds, layout) = tile_fitting(name_font().text_width("Administrator"), 2, &theme);
         // Painted over the theme's own surface, which is what a selected item
         // actually sits on.
         let mut s = Surface::new(bounds.width, bounds.height).expect("surface");
         s.fill(Color::from(p.surface));
-        let art = artwork(IconTile::icon_side(bounds, Scale::ONE, &theme).max(1), ART);
+        let art = artwork(layout.icon_side(bounds, Scale::ONE, &theme).max(1), ART);
         IconTile::new("System Administrator", IconKind::Text)
+            .with_layout(layout)
             .with_state(ControlState::idle().with_selection(SelectionState::Selected))
             .render(
                 &mut s,
@@ -3552,4 +3622,45 @@ fn a_table_or_panel_text_too_long_for_its_room_is_elided_with_the_mark() {
         marks_elision(|text| panel_surface(&Panel::new(text), &theme)),
         "a panel title"
     );
+}
+
+/// A drop target washes as a hover does and wears the accent outline, on a
+/// tile and on a row alike, so where a carried drag would land reads the
+/// same in every collection; a hover alone draws no accent edge.
+#[test]
+fn a_drop_target_washes_and_wears_the_accent_outline_in_every_collection() {
+    let theme = Theme::dark();
+    let accent = premul(theme.palette().accent);
+    let target = ControlState::idle().with_pointer(PointerState::DragTarget);
+    let tile = tile_over_backdrop(target, &theme, None);
+    assert_eq!(
+        tile.get(0, TH / 2),
+        Some(accent),
+        "the tile's edge is outlined"
+    );
+    assert!(has_pixel(&tile, premul(theme.palette().surface_hover)));
+    let hovered = tile_over_backdrop(
+        ControlState::idle().with_pointer(PointerState::Hover),
+        &theme,
+        None,
+    );
+    assert_ne!(
+        hovered.get(0, TH / 2),
+        Some(accent),
+        "a hover draws no accent edge"
+    );
+
+    let row = TableRow::new(vec![TableCell::new("Work")]).with_state(target);
+    let drawn = table_surface(&row, &theme, &COLUMNS);
+    assert_eq!(
+        drawn.get(W - 1, H / 2),
+        Some(accent),
+        "the row's edge is outlined"
+    );
+    let plain = table_surface(
+        &TableRow::new(vec![TableCell::new("Work")]),
+        &theme,
+        &COLUMNS,
+    );
+    assert_ne!(plain.get(W - 1, H / 2), Some(accent));
 }

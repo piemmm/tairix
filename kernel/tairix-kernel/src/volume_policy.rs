@@ -26,9 +26,9 @@
 //! their on-disk owners, modes, and ACLs keep governing access.
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, VolumeStats, WritebackHost,
+    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -138,10 +138,11 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
     fn read_dir(
         &mut self,
         dir: NodeId,
-        index: u64,
-        name_out: &mut [u8],
-    ) -> Result<Option<DirEntry>, DriverError> {
-        self.inner.read_dir(dir, index, name_out)
+        cursor: u64,
+        after: &[u8],
+        visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
+    ) -> Result<(), DriverError> {
+        self.inner.read_dir(dir, cursor, after, visit)
     }
 }
 

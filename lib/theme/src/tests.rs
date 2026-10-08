@@ -1019,6 +1019,11 @@ fn the_ladder_derives_every_role_from_one_base_size() {
     assert!(fonts.spec(TextRole::Heading).size_px > fonts.spec(TextRole::ItemTitle).size_px);
     assert!(fonts.spec(TextRole::ItemTitle).size_px > fonts.spec(TextRole::Body).size_px);
     assert!(fonts.spec(TextRole::Body).size_px > fonts.spec(TextRole::Caption).size_px);
+    // Item names and window titles sit a point below body: two pixels of line
+    // box at this base, since a point is about 1.6 px of the shipped face's.
+    for role in [TextRole::ItemLabel, TextRole::WindowTitle] {
+        assert_eq!(fonts.spec(role).size_px, 16, "{role:?}");
+    }
     // A header is the interface size and carries its hierarchy on weight
     // alone: a group header set smaller than the rows it heads reads as a
     // caption, which is what a smaller rung made of it.
@@ -1056,6 +1061,7 @@ fn the_ladder_carries_the_boards_weights_and_families() {
     assert_eq!(rung(TextRole::SectionHeader), lifted(FontWeight::BOLD));
     assert_eq!(rung(TextRole::Metric), lifted(FontWeight::BOLD));
     assert_eq!(rung(TextRole::Body), lifted(FontWeight::REGULAR));
+    assert_eq!(rung(TextRole::ItemLabel), lifted(FontWeight::REGULAR));
     assert_eq!(rung(TextRole::Caption), lifted(FontWeight::REGULAR));
     assert_eq!(rung(TextRole::Monospace), lifted(FontWeight::REGULAR));
 
@@ -1406,6 +1412,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             resize_diagonal_rising: String::from("c.resize-rising"),
             resize_diagonal_falling: String::from("c.resize-falling"),
             crosshair: String::from("c.crosshair"),
+            drag_copy: String::from("c.drag-copy"),
+            drag_move: String::from("c.drag-move"),
         },
         MotionTheme::new([
             90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,

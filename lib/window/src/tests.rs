@@ -18,12 +18,12 @@ use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuRowView, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName,
-    DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
-    PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, TerrainPlate,
-    TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
-    DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS,
-    WINDOW_TITLE_MAX,
+    AppMenuRowView, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt,
+    DragItems, DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
+    MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
+    SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -35,12 +35,17 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, CallerIdentity, ClientRegion, CursorSetName, EventSink,
-    HandOverDesk, LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, WallpaperName,
-    WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, Activation, CallerIdentity, ClientRegion, CursorSetName,
+    DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry, PickedFile,
+    PopupSpec, PreviewSize, WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing,
+    WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
+/// An activation minted while none of the engine's windows held the keyboard,
+/// which is where the test host's keyboard starts.
+const GRANTED: Activation = Activation::Granted { focus: None };
+
 const SURFACE: DisplayMode = DisplayMode {
     width_px: 4,
     height_px: 3,
@@ -213,6 +218,12 @@ struct RecordingHost {
     tooltips: Vec<(u64, WindowRegion, String)>,
     refuse_tooltip: Option<Errno>,
     cursors: Vec<(u64, CursorShape)>,
+    /// Every window the engine asked the host to raise, and the window the
+    /// host reports holding the keyboard.
+    raised: Vec<u64>,
+    focused: Option<u64>,
+    /// Every raise the engine refused, as `(caller, window)`.
+    raises_refused: Vec<(ProcId, u64)>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
     resized_range: Vec<(u64, WindowSizing)>,
@@ -231,6 +242,7 @@ struct RecordingHost {
     /// instead.
     drags: Vec<(u64, String)>,
     refuse_drag: Option<Errno>,
+    verdicts: Vec<(u64, u32, Option<DropOperation>)>,
     refuse_menu_open: Option<Errno>,
     hand_overs: Vec<(ProcId, String, Option<HandOverDocument>)>,
     /// What the host answers a hand-over with: `NotRunning` unless a test
@@ -284,6 +296,9 @@ impl Default for RecordingHost {
             tooltips: Vec::new(),
             refuse_tooltip: None,
             cursors: Vec::new(),
+            raised: Vec::new(),
+            focused: None,
+            raises_refused: Vec::new(),
             blur_sets: Vec::new(),
             retitled: Vec::new(),
             resized_range: Vec::new(),
@@ -300,6 +315,7 @@ impl Default for RecordingHost {
             refuse_pick: None,
             drags: Vec::new(),
             refuse_drag: None,
+            verdicts: Vec::new(),
             refuse_menu_open: None,
             hand_overs: Vec::new(),
             hand_over: Ok(HandOverOutcome::NotRunning),
@@ -449,11 +465,22 @@ impl WindowHost for RecordingHost {
         Ok(())
     }
 
-    fn drag_requested(&mut self, window_id: u64, name: &DocumentName) -> Result<(), Errno> {
+    fn drag_requested(&mut self, window_id: u64, items: &DragItems) -> Result<(), Errno> {
         if let Some(err) = self.refuse_drag {
             return Err(err);
         }
-        self.drags.push((window_id, String::from(name.as_str())));
+        self.drags
+            .push((window_id, String::from(items.first().as_str())));
+        Ok(())
+    }
+
+    fn drag_verdict(
+        &mut self,
+        window_id: u64,
+        serial: u32,
+        verdict: Option<DropOperation>,
+    ) -> Result<(), Errno> {
+        self.verdicts.push((window_id, serial, verdict));
         Ok(())
     }
 
@@ -477,7 +504,7 @@ impl WindowHost for RecordingHost {
                 },
                 None => OpenEntry::Path(String::from(run_path)),
             };
-            if !desk.hand_over(caller, &mut || Ok(entry.clone())) {
+            if !desk.hand_over(caller, GRANTED, &mut || Ok(entry.clone())) {
                 return Ok(HandOverOutcome::NotRunning);
             }
         }
@@ -514,6 +541,19 @@ impl WindowHost for RecordingHost {
     fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
         self.cursors.push((window_id, shape));
         Ok(())
+    }
+
+    fn focused_window(&self) -> Option<u64> {
+        self.focused
+    }
+
+    fn raise_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+        self.raised.push(window_id);
+        Ok(())
+    }
+
+    fn raise_refused(&mut self, caller: ProcId, window_id: u64) {
+        self.raises_refused.push((caller, window_id));
     }
 
     fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
@@ -2727,8 +2767,18 @@ fn the_chosen_name_is_the_owners_to_take_once() {
     assert_eq!(client.take_picked_name(window), Err(Errno::NotFound));
 }
 
+/// One openable file named `notes.txt`.
+fn one_file() -> DragItems {
+    DragItems::new(
+        DocumentName::new("notes.txt").expect("a valid name"),
+        1,
+        true,
+    )
+    .expect("one openable file")
+}
+
 /// A drag is the owner's, one at a time, concluded once — and only a drop
-/// leaves a target, which the owner takes once.
+/// on an application leaves a target, which the owner takes once.
 #[test]
 fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
@@ -2741,22 +2791,22 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     };
 
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.begin_drag(window, "notes.txt"), Err(Errno::NotFound));
+    assert_eq!(client.begin_drag(window, one_file()), Err(Errno::NotFound));
     loopback.borrow_mut().ticket = TICKET_A;
     loopback.borrow_mut().host.refuse_drag = Some(Errno::PermissionDenied);
     assert_eq!(
-        client.begin_drag(window, "notes.txt"),
+        client.begin_drag(window, one_file()),
         Err(Errno::PermissionDenied),
         "a gesture the host cannot carry records nothing"
     );
     loopback.borrow_mut().host.refuse_drag = None;
-    client.begin_drag(window, "notes.txt").expect("accepted");
+    client.begin_drag(window, one_file()).expect("accepted");
     assert_eq!(
         loopback.borrow().host.drags,
         [(window, String::from("notes.txt"))]
     );
     assert_eq!(
-        client.begin_drag(window, "notes.txt"),
+        client.begin_drag(window, one_file()),
         Err(Errno::AlreadyExists)
     );
     assert_eq!(
@@ -2766,33 +2816,47 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     );
 
     // Only its own conclusion ends it, and exactly once.
-    assert_eq!(
-        loopback.borrow_mut().server.deliver_event(
-            &mut sink,
-            &WindowEvent::DragEnded {
-                window_id: window,
-                dropped: true
-            }
-        ),
-        Err(Errno::OutOfRange)
-    );
+    for event in [
+        WindowEvent::DragEnded {
+            window_id: window,
+            site: DropSite::Application,
+        },
+        WindowEvent::DragOver {
+            window_id: window,
+            serial: 1,
+            at: DragAt::Nowhere,
+            shift: false,
+        },
+    ] {
+        assert_eq!(
+            loopback
+                .borrow_mut()
+                .server
+                .deliver_event(&mut sink, &event),
+            Err(Errno::OutOfRange)
+        );
+    }
     loopback
         .borrow_mut()
         .server
-        .conclude_drag(&mut sink, window, Some(&target))
+        .conclude_drag(
+            &mut sink,
+            window,
+            DragConclusion::Application(alloc::boxed::Box::new(target)),
+        )
         .expect("concluded");
     assert_eq!(
         WindowEvent::from_bytes(&sink.delivered[0].1),
         Ok(WindowEvent::DragEnded {
             window_id: window,
-            dropped: true
+            site: DropSite::Application,
         })
     );
     assert_eq!(
         loopback
             .borrow_mut()
             .server
-            .conclude_drag(&mut sink, window, None),
+            .conclude_drag(&mut sink, window, DragConclusion::Nothing),
         Err(Errno::OutOfRange)
     );
     assert_eq!(client.take_drop_target(window), Ok(target));
@@ -2803,13 +2867,225 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     );
 
     // A drag dropped on nothing leaves nothing to take.
-    client.begin_drag(window, "notes.txt").expect("accepted");
+    client.begin_drag(window, one_file()).expect("accepted");
     loopback
         .borrow_mut()
         .server
-        .conclude_drag(&mut sink, window, None)
+        .conclude_drag(&mut sink, window, DragConclusion::Nothing)
         .expect("concluded");
     assert_eq!(client.take_drop_target(window), Err(Errno::NotFound));
+}
+
+/// A loopback client over the test engine.
+type LoopClient = WindowClient<Rc<RefCell<Loopback>>>;
+
+/// Three windows — the dragging owner's two and a stranger's — with a drag
+/// carried from the first.
+fn carried_drag() -> (Rc<RefCell<Loopback>>, LoopClient, [u64; 3]) {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let source = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let sibling = create_id(&mut client, 8, EVENTS_A, 1, "b").expect("b");
+    loopback.borrow_mut().ticket = TICKET_B;
+    let stranger = create_id(&mut client, 9, EVENTS_B, 1, "c").expect("c");
+    loopback.borrow_mut().ticket = TICKET_A;
+    client.begin_drag(source, one_file()).expect("accepted");
+    (loopback, client, [source, sibling, stranger])
+}
+
+/// Where a drag goes is told only to its owner and only about the owner's
+/// own windows; a desktop folder is held for the report that named it.
+#[test]
+fn a_drag_is_reported_to_its_owner_about_its_own_windows_alone() {
+    let (loopback, mut client, [source, sibling, stranger]) = carried_drag();
+    let mut sink = QueueSink::default();
+    let report = |sink: &mut QueueSink, serial, report| {
+        loopback
+            .borrow_mut()
+            .server
+            .report_drag(sink, source, serial, report, true)
+    };
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .report_drag(&mut sink, sibling, 1, DragReport::Nowhere, false),
+        Err(Errno::NotFound),
+        "no drag is carried from that window"
+    );
+
+    report(
+        &mut sink,
+        1,
+        DragReport::Window {
+            window_id: sibling,
+            x: 0,
+            y: 0,
+        },
+    )
+    .expect("a sibling window");
+    assert_eq!(
+        sink.delivered.pop_front(),
+        Some((
+            EVENTS_A,
+            WindowEvent::DragOver {
+                window_id: sibling,
+                serial: 1,
+                at: DragAt::Window { x: 0, y: 0 },
+                shift: true,
+            }
+            .to_le_bytes()
+        )),
+        "addressed to the window under the pointer"
+    );
+    assert_eq!(
+        report(
+            &mut sink,
+            2,
+            DragReport::Window {
+                window_id: stranger,
+                x: 0,
+                y: 0
+            }
+        ),
+        Err(Errno::PermissionDenied),
+        "another owner's window is never described"
+    );
+    assert_eq!(
+        report(
+            &mut sink,
+            2,
+            DragReport::Window {
+                window_id: sibling,
+                x: u32::MAX,
+                y: 0
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+
+    report(
+        &mut sink,
+        3,
+        DragReport::Desktop {
+            folder: "/Users/ann/Desktop",
+        },
+    )
+    .expect("the desktop");
+    assert_eq!(
+        client.drag_spot(source, 3).as_deref(),
+        Ok("/Users/ann/Desktop")
+    );
+    assert_eq!(
+        client.drag_spot(source, 2),
+        Err(Errno::NotFound),
+        "another report"
+    );
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.drag_spot(source, 3),
+        Err(Errno::NotFound),
+        "only the owner reads it"
+    );
+}
+
+/// A drag is answered by its owner alone while it is carried, and a desktop
+/// drop names a folder some report held, which outlives the drop.
+#[test]
+fn a_drag_is_answered_by_its_owner_and_dropped_where_a_report_named() {
+    let (loopback, mut client, [source, _, stranger]) = carried_drag();
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .report_drag(
+            &mut sink,
+            source,
+            3,
+            DragReport::Desktop { folder: "/D" },
+            false,
+        )
+        .expect("the desktop");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.drag_verdict(source, 3, Some(DropOperation::Copy)),
+        Err(Errno::NotFound),
+        "only the owner answers"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    client
+        .drag_verdict(source, 3, Some(DropOperation::Move))
+        .expect("answered");
+    assert_eq!(
+        loopback.borrow().host.verdicts,
+        [(source, 3, Some(DropOperation::Move))]
+    );
+
+    let conclude = |sink: &mut QueueSink, ended| {
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_drag(sink, source, ended)
+    };
+    let copy = DropOperation::Copy;
+    assert_eq!(
+        conclude(
+            &mut sink,
+            DragConclusion::Window {
+                window_id: stranger,
+                x: 0,
+                y: 0,
+                operation: copy
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        conclude(
+            &mut sink,
+            DragConclusion::Desktop {
+                serial: 2,
+                operation: copy
+            }
+        ),
+        Err(Errno::OutOfRange),
+        "no folder was held for that report"
+    );
+    sink.delivered.clear();
+    conclude(
+        &mut sink,
+        DragConclusion::Desktop {
+            serial: 3,
+            operation: DropOperation::Move,
+        },
+    )
+    .expect("dropped on the desktop");
+    assert_eq!(
+        WindowEvent::from_bytes(&sink.delivered[0].1),
+        Ok(WindowEvent::DragEnded {
+            window_id: source,
+            site: DropSite::Desktop {
+                serial: 3,
+                operation: DropOperation::Move,
+            },
+        })
+    );
+    assert_eq!(
+        client.drag_spot(source, 3).as_deref(),
+        Ok("/D"),
+        "read after the drop"
+    );
+    assert_eq!(
+        client.drag_verdict(source, 3, None),
+        Err(Errno::NotFound),
+        "not carried"
+    );
+    client.begin_drag(source, one_file()).expect("a new drag");
+    assert_eq!(
+        client.drag_spot(source, 3),
+        Err(Errno::NotFound),
+        "a new drag forgets it"
+    );
 }
 
 /// A conclusion the sink refuses leaves the pick pending, so the window can
@@ -3495,7 +3771,7 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
         loopback
             .borrow_mut()
             .server
-            .deliver_app_event(&mut sink, proc_id(0xA1), &event)
+            .deliver_app_event(&mut sink, proc_id(0xA1), &event, GRANTED)
             .expect("delivered");
     }
     assert_eq!(
@@ -3521,7 +3797,12 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
     loopback
         .borrow_mut()
         .server
-        .deliver_app_event(&mut sink, proc_id(0xA1), &WindowEvent::AppBarDefault)
+        .deliver_app_event(
+            &mut sink,
+            proc_id(0xA1),
+            &WindowEvent::AppBarDefault,
+            GRANTED,
+        )
         .expect("delivered");
     assert_eq!(
         sink.delivered,
@@ -3575,7 +3856,8 @@ fn icon_bar_delivery_fails_closed_without_a_declaration() {
         loopback.borrow_mut().server.deliver_app_event(
             &mut sink,
             proc_id(0xA1),
-            &WindowEvent::AppBarDefault
+            &WindowEvent::AppBarDefault,
+            GRANTED,
         ),
         Err(Errno::NotFound)
     );
@@ -3591,7 +3873,8 @@ fn icon_bar_delivery_fails_closed_without_a_declaration() {
         loopback.borrow_mut().server.deliver_app_event(
             &mut sink,
             proc_id(0xA1),
-            &WindowEvent::AppBarDefault
+            &WindowEvent::AppBarDefault,
+            GRANTED,
         ),
         Err(Errno::NotFound)
     );
@@ -3608,7 +3891,8 @@ fn icon_bar_delivery_fails_closed_without_a_declaration() {
         loopback.borrow_mut().server.deliver_app_event(
             &mut sink,
             proc_id(0xA1),
-            &WindowEvent::CloseRequested { window_id: window }
+            &WindowEvent::CloseRequested { window_id: window },
+            GRANTED,
         ),
         Err(Errno::OutOfRange)
     );
@@ -3644,7 +3928,8 @@ fn a_dead_clients_icon_bar_presence_is_withdrawn() {
         loopback.borrow_mut().server.deliver_app_event(
             &mut sink,
             owner,
-            &WindowEvent::AppBarDefault
+            &WindowEvent::AppBarDefault,
+            GRANTED,
         ),
         Err(Errno::NotFound)
     );
@@ -4000,7 +4285,7 @@ fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || {
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
             Ok(path_entry("Users:/ada/Documents"))
         })
         .expect("the application takes it");
@@ -4025,7 +4310,7 @@ fn a_document_hand_over_carries_its_delegation_and_its_name() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || {
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
             Ok(OpenEntry::Document {
                 name: DocumentName::new("holiday.png").expect("a name"),
                 grant: 42,
@@ -4048,7 +4333,7 @@ fn a_document_hand_over_carries_its_delegation_and_its_name() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || Ok(OpenEntry::Document {
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(OpenEntry::Document {
                 name: DocumentName::new("holiday.png").expect("a name"),
                 grant: 0,
                 writable: false,
@@ -4077,7 +4362,7 @@ fn one_delegation_handle_is_queued_once_however_often_it_is_handed_over() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || Ok(document.clone()))
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(document.clone()))
             .expect("a repeat is taken");
     }
     assert_eq!(
@@ -4101,7 +4386,9 @@ fn handing_over_a_target_wakes_its_owner() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+            Ok(path_entry("Users:/ada/report"))
+        })
         .expect("the application takes it");
     let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
     assert_eq!(endpoint, EVENTS_A);
@@ -4128,7 +4415,9 @@ fn a_windowless_application_is_reached_through_its_icon_bar_route() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+            Ok(path_entry("Users:/ada/report"))
+        })
         .expect("an application with no window still has a route");
     let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
     assert_eq!(endpoint, EVENTS_A);
@@ -4159,7 +4448,7 @@ fn an_application_with_no_route_at_all_takes_nothing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), unproduced),
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, unproduced),
         Err(Errno::NotFound)
     );
     assert!(sink.delivered.is_empty());
@@ -4174,10 +4463,12 @@ fn a_refused_wake_produces_and_queues_nothing() {
     // A target the owner was never woken for would sit unreachable, and a
     // delegation minted for it could not be taken back.
     assert_eq!(
-        loopback
-            .borrow_mut()
-            .server
-            .hand_over_open_target(&mut FullSink, app_a(), unproduced),
+        loopback.borrow_mut().server.hand_over_open_target(
+            &mut FullSink,
+            app_a(),
+            GRANTED,
+            unproduced
+        ),
         Err(Errno::WouldBlock)
     );
     assert_eq!(
@@ -4204,7 +4495,7 @@ fn a_document_name_the_channel_cannot_carry_cannot_be_queued() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || {
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
             Ok(OpenEntry::Document {
                 name: widest,
                 grant: 5,
@@ -4228,7 +4519,7 @@ fn queued_targets_are_pulled_oldest_first() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry(path)))
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(path_entry(path)))
             .expect("room");
     }
     for path in ["Users:/one", "Users:/two", "Users:/three"] {
@@ -4250,7 +4541,9 @@ fn a_pull_reaches_only_the_callers_own_queue() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/secret")))
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+            Ok(path_entry("Users:/ada/secret"))
+        })
         .expect("room");
 
     // Another client's pull answers like a drained queue: the identity the
@@ -4277,7 +4570,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || {
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
                 Ok(path_entry(&alloc::format!("Users:/{index}")))
             })
             .expect("within the bound");
@@ -4286,7 +4579,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), unproduced),
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, unproduced),
         Err(Errno::NoSpace),
         "the newest is refused rather than an older one dropped silently"
     );
@@ -4301,7 +4594,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry(""))),
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(path_entry(""))),
         Err(Errno::LengthOutOfRange)
     );
     let long = "p".repeat(tairix_abi::FS_PATH_MAX + 1);
@@ -4309,7 +4602,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry(&long))),
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(path_entry(&long))),
         Err(Errno::LengthOutOfRange)
     );
 }
@@ -4326,7 +4619,9 @@ fn an_applications_queued_targets_die_with_the_client() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+            Ok(path_entry("Users:/ada/report"))
+        })
         .expect("room");
 
     // Closing the window leaves the queue alone: the application is still
@@ -4344,7 +4639,9 @@ fn an_applications_queued_targets_die_with_the_client() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
+        .hand_over_open_target(&mut sink, app_a(), GRANTED, || {
+            Ok(path_entry("Users:/ada/report"))
+        })
         .expect("room");
     let mut host = RecordingHost::default();
     loopback
@@ -4355,7 +4652,9 @@ fn an_applications_queued_targets_die_with_the_client() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report"))),
+            .hand_over_open_target(&mut sink, app_a(), GRANTED, || Ok(path_entry(
+                "Users:/ada/report"
+            ))),
         Err(Errno::NotFound),
         "a client with no windows and no bar has no route left"
     );
@@ -4553,6 +4852,139 @@ fn a_refused_tip_is_not_asked_again_on_every_pointer_sample() {
         tip.declare(&mut client, window, Some((Rect::new(0, 0, 20, 20), "Copy")));
     }
     assert_eq!(loopback.borrow().sent.len(), asked + 1);
+}
+
+/// An application raises its own window only under an activation a
+/// user-driven application event handed it: spent by its first use, void once
+/// the keyboard moves, never valid for another client's window, and gone with
+/// the client.
+#[test]
+fn a_window_is_raised_on_request_only_under_an_activation_the_engine_minted() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let deliver_app = |event: &WindowEvent| {
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_app_event(&mut QueueSink::default(), proc_id(0xA1), event, GRANTED)
+            .expect("delivered");
+    };
+
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "nothing the user did asked for it"
+    );
+    deliver_app(&WindowEvent::AppBarDefault);
+    assert_eq!(client.activate_window(window), Ok(()));
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "an activation is spent by its first use"
+    );
+
+    deliver_app(&WindowEvent::AppBarMenu {
+        item: AppMenuItemId::new(1).expect("a valid id"),
+    });
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_event(
+            &mut QueueSink::default(),
+            &WindowEvent::Focus {
+                window_id: window,
+                focused: true,
+            },
+        )
+        .expect("delivered");
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "the keyboard moved, so the gesture is past"
+    );
+
+    // A client already holding the keyboard restacks its own windows freely.
+    loopback.borrow_mut().host.focused = Some(window);
+    assert_eq!(client.activate_window(window), Ok(()));
+    loopback.borrow_mut().host.focused = None;
+
+    deliver_app(&WindowEvent::AppBarDefault);
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.activate_window(window), Err(Errno::NotFound));
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        loopback.borrow().host.raised,
+        alloc::vec![window, window],
+        "only the activated and the working requests reach the host"
+    );
+
+    loopback
+        .borrow_mut()
+        .server
+        .client_exited(&mut RecordingHost::default(), proc_id(0xA1));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "b").expect("b");
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "an activation dies with the client it was handed to"
+    );
+}
+
+/// An activation is bound to where the keyboard was when it was minted: once
+/// the keyboard has moved by any path, with or without a focus event, it
+/// raises nothing, and one withheld raises nothing at all. Each refusal is
+/// reported to the host.
+#[test]
+fn an_activation_raises_nothing_once_the_keyboard_has_moved_or_when_withheld() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let deliver_app = |activation| {
+        loopback
+            .borrow_mut()
+            .server
+            .deliver_app_event(
+                &mut QueueSink::default(),
+                proc_id(0xA1),
+                &WindowEvent::AppBarDefault,
+                activation,
+            )
+            .expect("delivered");
+    };
+
+    let elsewhere = window + 100;
+    loopback.borrow_mut().host.focused = Some(elsewhere);
+    deliver_app(Activation::Granted {
+        focus: Some(elsewhere),
+    });
+    loopback.borrow_mut().host.focused = None;
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "the keyboard left the window it was at"
+    );
+
+    deliver_app(Activation::Withheld);
+    assert_eq!(client.activate_window(window), Err(Errno::PermissionDenied));
+
+    deliver_app(GRANTED);
+    deliver_app(Activation::Withheld);
+    assert_eq!(
+        client.activate_window(window),
+        Err(Errno::PermissionDenied),
+        "a later withheld event takes back an unspent grant"
+    );
+
+    let host = &loopback.borrow().host;
+    assert!(host.raised.is_empty());
+    assert_eq!(host.raises_refused, alloc::vec![(proc_id(0xA1), window); 3]);
 }
 
 #[test]

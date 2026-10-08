@@ -9,12 +9,11 @@
 //! frame it is not ready in, and the pixels are collected when they land.
 //!
 //! [`ArtworkDesk`] is the whole policy and holds no lock, thread, or syscall,
-//! so every rule below is a host test rather than an argument. Two embedders
-//! drive it differently over the same rules: the desktop session parks a
-//! worker thread on it behind the runtime's futex mutex, and the file manager
-//! pumps one job per turn of its own event loop. When to wake that loop is
-//! part of the policy too — [`deliver`](ArtworkDesk::deliver) answers it — so
-//! neither embedder keeps its own count of what it still owes.
+//! so every rule below is a host test rather than an argument. The desktop
+//! session and the file manager each park a worker thread on it behind the
+//! runtime's futex mutex. When to wake the loop is part of the policy too —
+//! [`deliver`](ArtworkDesk::deliver) answers it — so neither embedder keeps
+//! its own count of what it still owes.
 //!
 //! # What the desk remembers, and for how long
 //!
@@ -51,6 +50,21 @@ pub struct ArtworkJob {
     pub key: ArtworkKey,
     /// The pixel side to rasterise it at.
     pub side: u32,
+}
+
+/// The most thumbnails waiting for a producer at once.
+///
+/// A containment bound, not a capacity: a sweep withdraws every thumbnail no
+/// surface asked for since the last, so this bounds only what scrolling can
+/// queue between two sweeps. Past it the oldest is withdrawn, and asked for
+/// again by the next paint that still shows it.
+pub const MAX_WANTED_THUMBNAILS: usize = 1024;
+
+/// One job's slot: where it has got to, and whether a surface asked for it
+/// since the last [`sweep`](ArtworkDesk::sweep_thumbnails).
+struct Slot {
+    state: State,
+    asked: bool,
 }
 
 /// Where one job has got to.
@@ -148,11 +162,15 @@ impl Landed {
 pub struct ArtworkDesk {
     /// Every job this desk knows about, indexed for an O(log n) collect —
     /// a paint asks once per icon it draws, so the lookup is on the frame path.
-    slots: BTreeMap<ArtworkJob, State>,
+    slots: BTreeMap<ArtworkJob, Slot>,
     /// The order [`State::Wanted`] jobs are handed out in: first asked, first
     /// decoded, so a busy surface cannot indefinitely displace a quiet one's
     /// single icon.
     queue: VecDeque<ArtworkJob>,
+    /// Thumbnails, in the same order but handed out apart: a picture of a file
+    /// costs a whole file's read, and its class picture already stands in for
+    /// it, so no icon waits behind one.
+    thumbnails: VecDeque<ArtworkJob>,
     /// What has been delivered since the embedder last asked. Bounded by the
     /// decodes in flight, and drained on the wake each batch owes.
     landed: BTreeSet<ArtworkJob>,
@@ -172,6 +190,7 @@ impl ArtworkDesk {
         Self {
             slots: BTreeMap::new(),
             queue: VecDeque::new(),
+            thumbnails: VecDeque::new(),
             landed: BTreeSet::new(),
             wake_owed: false,
             stopping: false,
@@ -195,20 +214,92 @@ impl ArtworkDesk {
             side,
         };
         match self.slots.get_mut(&job) {
-            Some(State::Done(artwork)) => {
+            Some(Slot {
+                state: State::Done(artwork),
+                ..
+            }) => {
                 let artwork = artwork.take();
                 self.slots.remove(&job);
                 Resolved::Done(artwork)
             }
-            Some(State::Wanted | State::Running | State::Declined) => Resolved::Pending,
+            Some(slot) => {
+                slot.asked = true;
+                Resolved::Pending
+            }
             None => {
                 if !self.stopping {
-                    self.slots.insert(job.clone(), State::Wanted);
-                    self.queue.push_back(job);
+                    self.enqueue(job);
                 }
                 Resolved::Pending
             }
         }
+    }
+
+    /// Record `job` as wanted, behind the others of its kind.
+    fn enqueue(&mut self, job: ArtworkJob) {
+        if is_thumbnail(&job) {
+            if self.thumbnails.len() >= MAX_WANTED_THUMBNAILS {
+                self.withdraw_oldest_thumbnail();
+            }
+            self.thumbnails.push_back(job.clone());
+        } else {
+            self.queue.push_back(job.clone());
+        }
+        self.slots.insert(
+            job,
+            Slot {
+                state: State::Wanted,
+                asked: true,
+            },
+        );
+    }
+
+    /// Forget the longest-waiting thumbnail still wanted.
+    fn withdraw_oldest_thumbnail(&mut self) {
+        while let Some(job) = self.thumbnails.pop_front() {
+            if matches!(
+                self.slots.get(&job),
+                Some(Slot {
+                    state: State::Wanted,
+                    ..
+                })
+            ) {
+                self.slots.remove(&job);
+                return;
+            }
+        }
+    }
+
+    /// Withdraw every thumbnail no surface asked for since the last sweep —
+    /// still wanted, or produced and never collected — wiping what was drawn.
+    ///
+    /// Run only after a pass over **every** surface that draws thumbnails: one
+    /// a pass skipped would lose its still-visible pictures with nothing to ask
+    /// for them again. A thumbnail in production is left to land and goes at
+    /// the next sweep if nothing collects it.
+    pub fn sweep_thumbnails(&mut self) {
+        self.slots.retain(|job, slot| {
+            let unasked = !core::mem::replace(&mut slot.asked, false);
+            let withdrawn = unasked
+                && is_thumbnail(job)
+                && matches!(slot.state, State::Wanted | State::Done(_));
+            if withdrawn {
+                if let State::Done(Some(artwork)) = &mut slot.state {
+                    artwork.wipe();
+                }
+            }
+            !withdrawn
+        });
+        let slots = &self.slots;
+        self.thumbnails.retain(|job| {
+            matches!(
+                slots.get(job),
+                Some(Slot {
+                    state: State::Wanted,
+                    ..
+                })
+            )
+        });
     }
 
     /// Record `key` at `side` as wanted, without collecting anything.
@@ -228,32 +319,56 @@ impl ArtworkDesk {
             key: key.clone(),
             side,
         };
-        if self.slots.contains_key(&job) {
-            return;
+        match self.slots.get_mut(&job) {
+            Some(slot) => slot.asked = true,
+            None => self.enqueue(job),
         }
-        self.slots.insert(job.clone(), State::Wanted);
-        self.queue.push_back(job);
     }
 
     /// Whether any recorded decode is waiting for a producer to take it.
     #[must_use]
     pub fn has_work(&self) -> bool {
-        !self.stopping && !self.queue.is_empty()
+        !self.stopping && (!self.queue.is_empty() || !self.thumbnails.is_empty())
     }
 
-    /// Take the next decode to run, or `None` when there is nothing to do.
+    /// Take the next icon decode to run, or `None` when there is none.
     pub fn next_job(&mut self) -> Option<ArtworkJob> {
         if self.stopping {
             return None;
         }
-        // The queue is only the hand-out *order*; the slots are the authority
-        // on whether a job is still wanted. Deciding that here rather than
-        // scanning the queue whenever a slot changes keeps a paint from paying
-        // for the producer's bookkeeping, and taking the next entry rather
-        // than giving up means a job that somehow lost its slot costs one
-        // decode not started, never a producer that stops taking work.
-        while let Some(job) = self.queue.pop_front() {
-            if let Some(state @ State::Wanted) = self.slots.get_mut(&job) {
+        Self::take_wanted(&mut self.queue, &mut self.slots)
+    }
+
+    /// Take the next thumbnail to run, or `None` when there is none.
+    ///
+    /// Apart from [`next_job`](Self::next_job) so the producer decides what
+    /// comes between: every icon first, and in a program whose one worker
+    /// also reads folders, their cues too.
+    pub fn next_thumbnail(&mut self) -> Option<ArtworkJob> {
+        if self.stopping {
+            return None;
+        }
+        Self::take_wanted(&mut self.thumbnails, &mut self.slots)
+    }
+
+    /// The first job in `queue` still wanted, marked running.
+    ///
+    /// The queue is only the hand-out *order*; the slots are the authority on
+    /// whether a job is still wanted. Deciding that here rather than scanning
+    /// the queue whenever a slot changes keeps a paint from paying for the
+    /// producer's bookkeeping, and taking the next entry rather than giving up
+    /// means a job that somehow lost its slot costs one decode not started,
+    /// never a producer that stops taking work.
+    fn take_wanted(
+        queue: &mut VecDeque<ArtworkJob>,
+        slots: &mut BTreeMap<ArtworkJob, Slot>,
+    ) -> Option<ArtworkJob> {
+        while let Some(job) = queue.pop_front() {
+            if let Some(Slot {
+                state: state @ State::Wanted,
+                ..
+            }) = slots.get_mut(&job)
+            {
                 *state = State::Running;
                 return Some(job);
             }
@@ -263,22 +378,28 @@ impl ArtworkDesk {
 
     /// Record what decoding `job` produced.
     ///
-    /// A wake is owed once something has been delivered *and* no further decode
+    /// A wake is owed once something has been delivered *and* no further icon
     /// is waiting to be handed out. Waking on the drained batch rather than on
     /// each icon costs a folder of fifty bundles one repaint instead of fifty,
     /// and a lone icon empties the queue at once so it still lands the moment
-    /// it is ready. The debt outlives the delivery that incurred it, so a batch
-    /// drained without a wake cannot be stranded by a final job the desk no
-    /// longer wants.
+    /// it is ready. A thumbnail is shown as it lands instead: it costs a whole
+    /// file's read and decode, far more than the repaint that shows it. The
+    /// debt outlives the delivery that incurred it, so a batch drained without
+    /// a wake cannot be stranded by a final job the desk no longer wants.
     pub fn deliver(&mut self, job: &ArtworkJob, artwork: Option<Surface>) -> Delivered {
         let mut kept = false;
-        if let Some(state @ State::Running) = self.slots.get_mut(job) {
+        if let Some(Slot {
+            state: state @ State::Running,
+            ..
+        }) = self.slots.get_mut(job)
+        {
             *state = State::Done(artwork);
             self.landed.insert(job.clone());
             self.wake_owed = true;
             kept = true;
         }
-        let wake = self.wake_owed && !self.has_work();
+        let drained = self.stopping || self.queue.is_empty();
+        let wake = self.wake_owed && (drained || is_thumbnail(job));
         self.wake_owed &= !wake;
         Delivered { kept, wake }
     }
@@ -315,10 +436,19 @@ impl ArtworkDesk {
             side,
         };
         match self.slots.get_mut(&job) {
-            Some(State::Running) => {}
-            Some(state) => *state = State::Declined,
+            Some(Slot {
+                state: State::Running,
+                ..
+            }) => {}
+            Some(slot) => slot.state = State::Declined,
             None => {
-                self.slots.insert(job, State::Declined);
+                self.slots.insert(
+                    job,
+                    Slot {
+                        state: State::Declined,
+                        asked: true,
+                    },
+                );
             }
         }
     }
@@ -327,7 +457,7 @@ impl ArtworkDesk {
     /// answer may now be retainable.
     pub fn retry_declined(&mut self) {
         self.slots
-            .retain(|_, state| !matches!(state, State::Declined));
+            .retain(|_, slot| !matches!(slot.state, State::Declined));
     }
 
     /// Stop handing out work, so a parked producer leaves its loop.
@@ -341,13 +471,14 @@ impl ArtworkDesk {
         // and the batch it would have shown — dies with the answers.
         self.wake_owed = false;
         self.landed.clear();
-        for state in self.slots.values_mut() {
-            if let State::Done(Some(artwork)) = state {
+        for slot in self.slots.values_mut() {
+            if let State::Done(Some(artwork)) = &mut slot.state {
                 artwork.wipe();
             }
         }
         self.slots.clear();
         self.queue.clear();
+        self.thumbnails.clear();
     }
 
     /// Whether the embedder has asked producers to leave.
@@ -355,6 +486,11 @@ impl ArtworkDesk {
     pub const fn stopping(&self) -> bool {
         self.stopping
     }
+}
+
+/// Whether `job` is a picture file's own content rather than an icon.
+fn is_thumbnail(job: &ArtworkJob) -> bool {
+    matches!(job.key, ArtworkKey::Thumbnail(_))
 }
 
 impl Default for ArtworkDesk {
@@ -366,11 +502,10 @@ impl Default for ArtworkDesk {
 /// The desk *is* the deferring resolver: it answers what a producer has
 /// already delivered and records everything else.
 ///
-/// An embedder that owns the desk outright — a single-threaded event loop that
-/// pumps one job per turn — hands the cache a plain `&mut` to it and needs no
-/// wrapper. One that shares the desk with a worker thread implements the trait
-/// over its own mutex instead, so the notify happens inside the same critical
-/// section as the state change.
+/// An embedder that owns the desk outright hands the cache a plain `&mut` to
+/// it and needs no wrapper. One that shares the desk with a worker thread
+/// implements the trait over its own mutex instead, so the notify happens
+/// inside the same critical section as the state change.
 impl ArtworkResolver for ArtworkDesk {
     fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
         self.collect(key, side)

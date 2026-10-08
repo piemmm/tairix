@@ -144,6 +144,14 @@ unsafe impl<T: ?Sized + Send> Send for SleepLock<T> {}
 // access to `T` through the `LOCKED` gate, never concurrent shared access.
 unsafe impl<T: ?Sized + Send> Sync for SleepLock<T> {}
 
+/// Formats without taking the lock or showing what it guards, so a holder
+/// is never blocked by a debug print and the value never reaches one.
+impl<T: ?Sized> core::fmt::Debug for SleepLock<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SleepLock").finish_non_exhaustive()
+    }
+}
+
 impl<T> SleepLock<T> {
     /// A new unlocked `SleepLock` guarding `value`.
     ///

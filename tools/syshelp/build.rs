@@ -415,6 +415,7 @@ fn sorted_children(dir: &Path) -> Vec<String> {
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !bundles::is_host_metadata(name))
         .collect();
     names.sort();
     names

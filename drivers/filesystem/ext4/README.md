@@ -21,7 +21,7 @@ versioned trait** rather than a widening of the shipped one
 | Extent-mapped inodes (default ext4)      | yes, incl. multi-level trees  |
 | Classic block map (ext2/ext3)            | yes (direct + 1/2/3 indirect) |
 | Linear directory blocks                  | yes                           |
-| Hash-indexed (`htree`) directories       | linear leaf view only         |
+| Hash-indexed (`htree`) directories       | yes, root + one interior level |
 
 The on-disk superblock magic (`0xEF53`, offset `0x38`) is validated at
 `open`; a bad magic or a structurally invalid geometry is rejected with
@@ -46,13 +46,15 @@ on demand. Logical-to-physical block mapping handles both layouts:
 
 ## Directories
 
-Directory blocks are walked linearly, honouring each entry's `rec_len`
-and skipping unused (`inode == 0`) slots and the `.`/`..` self-links
-(the VFS resolves those itself, §16). A child's kind comes from the
-entry's `file_type` byte when the `filetype` feature is set, and
-otherwise from the child inode's mode. The root block of a hash-indexed
-directory is read through its linear `.`/`..` view; deeply indexed
-interior directory nodes are not traversed.
+A linear directory's blocks are walked in order, honouring each entry's
+`rec_len` and skipping unused (`inode == 0`) slots and the `.`/`..`
+self-links (the VFS resolves those itself, §16); its listing cursor is a
+record offset. A hash-indexed (`htree`) directory is read and written
+through its index: lookups hash the name, listings run in `(hash, name)`
+order and resume after the last name returned, and new names split leaves
+and grow the index. A child's kind comes from the entry's `file_type` byte
+when the `filetype` feature is set, and otherwise from the child inode's
+mode. `docs/src/filesystem/ext4.md` has the detail.
 
 ## Writing
 
@@ -83,7 +85,8 @@ The write path maintains every on-disk checksum a volume carries, so a
 default `mkfs.ext4` image (`metadata_csum`, `extent`, `64bit`) is
 mutated in place. All checksum primitives are **first-party** (a storage
 checksum is not a cryptographic primitive, so §2.12's "never roll your
-own" does not apply):
+own" does not apply); crc32c is `lib/crc32c`'s, continued from each seed as
+a raw register:
 
 - **`metadata_csum`** (crc32c, reversed polynomial `0x82F6_3B78`,
   seeded with `crc32c(~0, s_uuid)`): the superblock `s_checksum`; each
@@ -154,8 +157,9 @@ region, or a zero `inode_count`, is refused with `OutOfRange`.
 - Extent-tree growth is gated to a single index level (depth ≤ 1); a
   deeper tree is refused, never half-built (the read path still maps
   any depth).
-- Hash-tree (`htree`) interior nodes are not traversed; only the linear
-  leaf layout is read (sufficient for small and moderate directories).
+- An index of three levels (`largedir`), a SipHash-hashed (casefolded
+  encrypted) directory, and an index on a volume recording no hash
+  signedness are read linearly and take no new names.
 - Devices, FIFOs, and sockets are reported as `NotFound` by `node_info`
   rather than surfaced as a node kind the `abi-v1` read surface does not
   model.

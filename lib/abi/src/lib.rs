@@ -38,6 +38,7 @@ pub mod filelock;
 pub mod font_ipc;
 pub mod fs;
 pub(crate) mod hex;
+pub mod home;
 pub mod hwtree;
 pub mod i2c_ipc;
 pub mod input;
@@ -126,9 +127,10 @@ pub use filelock::{
 };
 pub use fs::{
     DirChange, DirChangeBatch, DirChanges, DirEntry, DirWatchStatus, FileId, FileKind, FileStat,
-    LinkFlags, OpenFlags, RealpathMode, UnlinkFlags, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_GROUP_EXEC_BIT, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX, FS_OWNER_UNCHANGED,
-    FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
+    LinkFlags, OpenFlags, ReaddirFrom, RealpathMode, UnlinkFlags, DIR_WATCH_LATENCY_MAX_NS,
+    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_GROUP_EXEC_BIT, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX,
+    FS_OWNER_UNCHANGED, FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
+    READDIR_BATCH_MAX,
 };
 pub use hwtree::{
     snapshot_nodes, DmaCoherence, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty,

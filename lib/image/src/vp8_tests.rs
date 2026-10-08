@@ -290,3 +290,203 @@ fn the_inverse_dct_bounds_a_corrupt_streams_coefficients() {
         }
     }
 }
+
+/// What the whole-frame decoder this one replaced made of [`drawn_cases`], in
+/// order: a decode a macroblock row at a time must hand back the same pixels.
+const DRAWN: [u64; 90] = [
+    0x5f8e_5d47_8d69_db24,
+    0xa847_9b65_51cb_01d8,
+    0xd772_1b40_9d4f_ce1f,
+    0xc634_0ce5_02b6_125c,
+    0xd099_d4f1_4041_7d2e,
+    0xbc08_3561_43c3_9caa,
+    0x3b6b_a66d_59fc_8629,
+    0x9e11_f2c6_4ffc_9bd1,
+    0xc1a3_bddf_e670_3f5e,
+    0xc402_5fbc_7a64_882f,
+    0xfd48_5085_96ce_52a9,
+    0x8426_a53d_c771_0569,
+    0xc063_0ba5_98b3_ac65,
+    0xb506_0631_9011_7726,
+    0xc538_aaf3_074e_5c4f,
+    0x632a_e843_bb4e_95f1,
+    0x5ba3_ffbb_7734_1706,
+    0x4da8_c320_2d40_f561,
+    0xd31d_8d79_4ca8_9488,
+    0x8727_ae67_33af_01cc,
+    0xd3ca_2451_b4f5_7593,
+    0xe7fb_06e3_8aa7_ad61,
+    0x8c5a_53b0_a111_4ddc,
+    0xd543_26aa_1ce5_5929,
+    0xf736_a9b0_a12d_abad,
+    0xa371_5fbc_1232_71b6,
+    0x9716_85a8_2546_8cf4,
+    0x6be8_f9f3_77b4_1545,
+    0xce36_9052_2d07_d141,
+    0xadee_3752_4300_bf35,
+    0x32ff_41d7_adc4_5d15,
+    0x9dce_fd00_2124_d274,
+    0xeec8_4fa8_1e23_4221,
+    0x9879_6779_16bf_e325,
+    0xe79a_a3c7_cc74_daec,
+    0x5dc6_7e01_130d_4ae3,
+    0x7656_85a6_cb2e_35cd,
+    0xb314_7be2_22f2_9ef7,
+    0x9f41_5b0e_7548_6f25,
+    0x4d5e_bd29_50b0_57ee,
+    0x9039_7927_20e1_c307,
+    0x4584_a5b1_b9f7_9325,
+    0x5a61_a6fe_2099_1e29,
+    0x613b_94b9_6553_e093,
+    0xaa24_aa44_90af_641a,
+    0x6135_0578_e3a4_df34,
+    0x7862_94dc_f420_3930,
+    0xf89c_14fa_1950_4a54,
+    0x6952_44ad_7420_0fde,
+    0x8b01_4870_ec6d_4074,
+    0x1aed_7007_d619_ef4d,
+    0xf41e_6283_cace_509f,
+    0x6e9c_2e49_99df_801b,
+    0x5e3b_56de_de4b_3f6f,
+    0xb058_46bd_bcf8_99a7,
+    0xa6ef_9b92_9015_b7a4,
+    0xa1b1_59b3_d8a3_fb41,
+    0x8981_1cc9_dcd2_63b9,
+    0x05f8_0eb6_4cf0_eb98,
+    0xad68_5eb2_81ff_9532,
+    0x4a14_0b6c_43d3_1b25,
+    0x7cf0_f626_1035_8125,
+    0xd69a_d8ca_2e10_f325,
+    0x06a7_1c98_f777_3725,
+    0x85bc_3a51_c8a3_13a9,
+    0x8992_8e1a_9ab3_243d,
+    0xbac9_f6e9_9b55_0725,
+    0xc933_ac49_ee26_d645,
+    0xfc53_1846_00b4_2b25,
+    0xec7d_2177_5501_3b91,
+    0xbac9_f6e9_9b55_0725,
+    0x307e_0982_34d4_90a1,
+    0x3947_4ec2_0764_ab65,
+    0xbec2_05f4_7986_6325,
+    0xe050_4884_d3b7_feb1,
+    0x4cfd_1656_8b2f_6294,
+    0x9e83_a2af_b49f_c7af,
+    0x74d8_515a_13df_ca9a,
+    0x2c0b_fecb_29a6_9b2f,
+    0x281d_71ed_6bd9_0efa,
+    0x7571_cc04_4ffb_6641,
+    0x7bd8_3b99_d800_5583,
+    0xf346_1132_0efc_4089,
+    0x99ab_daa9_22f6_c24d,
+    0x601c_519b_687a_1a3d,
+    0x6be2_62be_d0d2_41eb,
+    0x52fa_d8d0_6c5d_f71c,
+    0x2814_c5e0_967a_6211,
+    0x4d28_7414_52ee_59af,
+    0xb3ab_55a9_31b1_0523,
+];
+
+#[test]
+fn a_row_at_a_time_decode_is_the_whole_frame_decode_to_the_bit() {
+    for ((seed, (width, height), filter, partitions), expected) in
+        drawn_cases().into_iter().zip(DRAWN)
+    {
+        let mut rng = Prng::new(seed);
+        let bytes = super::fixture::drawn_keyframe(width, height, filter, partitions, &mut rng);
+        let image = decode(&bytes, &limits()).expect("a drawn keyframe decodes");
+        assert_eq!(fnv(image.pixels()), expected, "seed {seed:#x}");
+        let mut streamed = Vec::new();
+        super::decode_rows(&bytes, &limits(), |row| {
+            streamed.extend_from_slice(row);
+            Ok(())
+        })
+        .expect("and streams");
+        assert_eq!(
+            streamed,
+            image.pixels(),
+            "seed {seed:#x} streams the same rows"
+        );
+    }
+}
+
+/// A frame holds one macroblock row and the rows its filter and colours still
+/// need, however tall the picture, and no more than its forecast says.
+#[test]
+fn a_frame_holds_a_window_of_rows_however_tall_the_picture() {
+    let held = |height: u32| {
+        let filter = super::fixture::Filter {
+            simple: false,
+            level: 20,
+            sharpness: 0,
+        };
+        let bytes = super::fixture::drawn_keyframe(48, height, filter, 1, &mut Prng::new(1));
+        let size = super::first_partition(&bytes).expect("a first partition");
+        let head = &bytes[super::UNCOMPRESSED_HEADER..][..size];
+        let header = super::read_header(&mut super::Bool::new(head), 48, height).expect("a header");
+        let frame = super::Frame::new(&header).expect("a frame");
+        let planes = [
+            &frame.luma,
+            &frame.blue_chroma,
+            &frame.red_chroma,
+            &frame.window.luma,
+            &frame.window.blue_chroma,
+            &frame.window.red_chroma,
+        ];
+        planes
+            .iter()
+            .map(|plane| plane.samples.len())
+            .sum::<usize>() as u64
+    };
+    assert_eq!(held(16), held(4096));
+    assert!(held(4096) <= super::frame_peak_bytes(48));
+}
+
+/// A 64-bit FNV-1a hash, so a picture's every byte is pinned in one number.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn drawn_cases() -> Vec<(u64, (u32, u32), super::fixture::Filter, usize)> {
+    use super::fixture::Filter;
+    let filters = [
+        Filter {
+            simple: false,
+            level: 0,
+            sharpness: 0,
+        },
+        Filter {
+            simple: false,
+            level: 20,
+            sharpness: 0,
+        },
+        Filter {
+            simple: false,
+            level: 63,
+            sharpness: 5,
+        },
+        Filter {
+            simple: true,
+            level: 30,
+            sharpness: 2,
+        },
+        Filter {
+            simple: true,
+            level: 63,
+            sharpness: 7,
+        },
+    ];
+    let sizes = [(40, 37), (33, 50), (64, 16), (17, 49), (16, 16), (1, 33)];
+    let mut cases = Vec::new();
+    let mut seed = 0x1D_E5_70_00u64;
+    for size in sizes {
+        for filter in filters {
+            for partitions in [1, 2, 4] {
+                seed += 1;
+                cases.push((seed, size, filter, partitions));
+            }
+        }
+    }
+    cases
+}

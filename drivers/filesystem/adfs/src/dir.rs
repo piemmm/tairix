@@ -98,11 +98,41 @@ impl Object {
 }
 
 /// Case-insensitive ASCII name ordering — the sort order `FileCore`
-/// keeps directory entries in.
+/// keeps directory entries in and binary-searches them by.
+///
+/// `FileCore` folds to upper case, so `[`, `]`, `_` and `` ` `` sort after
+/// the letters; folding to lower case would put them before, and RISC OS
+/// would find such a directory out of order.
 pub fn name_cmp(a: &[u8], b: &[u8]) -> core::cmp::Ordering {
-    let a_iter = a.iter().map(u8::to_ascii_lowercase);
-    let b_iter = b.iter().map(u8::to_ascii_lowercase);
+    let a_iter = a.iter().map(u8::to_ascii_uppercase);
+    let b_iter = b.iter().map(u8::to_ascii_uppercase);
     a_iter.cmp(b_iter)
+}
+
+/// Whether the entries `entry` yields for `0..count` stand in strictly
+/// ascending [`name_cmp`] order, as every `FileCore` directory must: RISC OS
+/// reports any other as broken, and a listing resumes by binary search on it.
+///
+/// # Errors
+///
+/// Whatever `entry` reports.
+pub fn entries_in_order<E>(
+    count: u32,
+    mut entry: impl FnMut(u32) -> Result<Option<Object>, E>,
+) -> Result<bool, E> {
+    let mut before: Option<Object> = None;
+    for index in 0..count {
+        let Some(object) = entry(index)? else {
+            break;
+        };
+        if before.as_ref().is_some_and(|earlier| {
+            name_cmp(earlier.name(), object.name()) != core::cmp::Ordering::Less
+        }) {
+            return Ok(false);
+        }
+        before = Some(object);
+    }
+    Ok(true)
 }
 
 /// Whether two names refer to the same directory entry.
@@ -211,7 +241,16 @@ impl FixedDir {
             return Err(DriverError::BadMagic);
         }
         // A directory must terminate its entry list.
-        if self.count() > self.format.capacity() {
+        let count = self.count();
+        if count > self.format.capacity() {
+            return Err(DriverError::BadMagic);
+        }
+        // A fixed directory holds at most 77 entries.
+        let count = u32::try_from(count).map_err(|_| DriverError::BadMagic)?;
+        let ordered = entries_in_order(count, |index| {
+            Ok::<_, core::convert::Infallible>(self.entry(index as usize))
+        });
+        if ordered != Ok(true) {
             return Err(DriverError::BadMagic);
         }
         // Entry names use printable bytes; a check byte of zero is

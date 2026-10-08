@@ -14702,15 +14702,16 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
     })
 }
 
-/// The home listing the shared users-root fixture plants, for reconstructing
-/// the row geometry of any surface that browses it.
+/// The listing of the account's own files the shared users-root fixture
+/// plants, for reconstructing the row geometry of any surface that browses
+/// it.
 ///
-/// It answers for the account's home and refuses everywhere else: both the
-/// picker and the file manager open at the home and these reconstructions need
-/// that one listing, so a request for anything else is a mistake rather than a
-/// directory to invent.
+/// It answers for the account's `UserFiles` and refuses everywhere else: both
+/// the picker and a bare file-manager window open there and these
+/// reconstructions need that one listing, so a request for anything else is a
+/// mistake rather than a directory to invent.
 struct PlantedHome {
-    /// Root-first components of the home the surface opens at.
+    /// Root-first components of the folder the surface opens at.
     home: Vec<String>,
     /// Names of the planted documents, decoded once by the caller.
     docs: Vec<String>,
@@ -14724,9 +14725,9 @@ impl tairix_browse::DirectorySource for PlantedHome {
             return Err(tairix_abi::Errno::NotFound);
         }
         // Derived from the same definitions the fixture plants from — the
-        // fixed home subdirectory set and the planted documents' names — so
+        // fixed user-files folders and the planted documents' names — so
         // neither side carries a copy of the listing.
-        let mut entries: Vec<Entry> = tairix_users::HOME_SUBDIRS
+        let mut entries: Vec<Entry> = tairix_abi::home::USER_FILES_SUBDIRS
             .iter()
             .map(|name| Entry::directory(*name))
             .collect();
@@ -14794,12 +14795,15 @@ fn planted_entry_index<S: tairix_browse::DirectorySource>(
         .ok_or_else(|| format!("{what}: {name} is not listed in the planted home"))
 }
 
-/// Root-first components of the account the fixture plants, parsed with the
-/// same shared spelling the session parses `HOME` with.
+/// Root-first components of the planted account's own files, where a bare
+/// open lands, parsed with the same shared spelling the session parses `HOME`
+/// with.
 fn planted_home_components() -> Result<Vec<String>, String> {
     let home = tairix_users::default_home(tairix_test_arxfs_image::USERS_FIXTURE_USERNAME);
-    tairix_browse::vfs::components_from_absolute_path(&home)
-        .map_err(|e| format!("pick script: {home} is not a spellable path: {e:?}"))
+    let home = tairix_browse::vfs::components_from_absolute_path(&home)
+        .map_err(|e| format!("pick script: {home} is not a spellable path: {e:?}"))?;
+    let [files, _] = tairix_browse::bare_open_places(&home);
+    Ok(files)
 }
 
 /// Screen point of the picker's row for the document the fixture plants in the
@@ -15004,6 +15008,7 @@ fn reconstruct_manager_item_menu(
         tairix_browse::ContextQuick {
             name,
             candidates: &[],
+            documents: &[],
         },
     )
     .map_err(|err| format!("{what}: the manager's context menu is invalid: {err:?}"))?;
@@ -17695,6 +17700,7 @@ mod tests {
                 tairix_browse::ContextQuick {
                     name,
                     candidates: &candidates,
+                    documents: &[],
                 },
             )
             .expect("the manager's context menu is valid");

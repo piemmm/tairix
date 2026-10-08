@@ -368,7 +368,7 @@ pub(crate) fn entry_from_record(
         })
     });
     let kind = EntryKind::for_listing(entry.kind, name, resolution);
-    let mut built = Entry::new(name, kind, entry.size, entry.modified);
+    let mut built = Entry::new(name, kind, entry.size, entry.modified).with_id(entry.id);
     // A link whose target could not be reached still shows the spelling it
     // stores: that spelling is exactly what tells a user why it is broken.
     if let Some(link) = described {
@@ -404,15 +404,61 @@ pub struct VfsDirectorySource<F, L, P = NoProbe> {
 /// one.
 pub type NoProbe = fn(&str, &mut [u8]) -> Result<usize, Errno>;
 
-/// Bytes handed to a probe: one maximal `DirEntry` record.
+/// Bytes handed to a probe: one batch holding a folder's first several dozen
+/// entries, which its picture is sampled from. An empty batch is an empty
+/// folder.
+pub const PROBE_BUF_LEN: usize = 4096;
+
+/// Probe each folder in `batch` through `probe`, as a
+/// [`probing`](VfsDirectorySource::probing) source does, answering for every
+/// one — a refusal included, so the folder draws plain and is not asked again.
 ///
-/// `fs_readdir` is all-or-nothing — it packs the *whole* listing or refuses
-/// with [`Errno::BufferTooSmall`] — so a buffer this size answers "is there at
-/// least one child?" without ever copying a directory out: an empty directory
-/// fits (zero bytes), a one-child directory fits, and anything larger refuses.
-/// All three answers are decisive, and none of them scales with the child
-/// count.
-pub const PROBE_BUF_LEN: usize = tairix_abi::fs::DirEntry::HEADER_LEN + tairix_abi::fs::FS_NAME_MAX;
+/// The read a worker performs for a [`Probes`](crate::Probes) batch. One
+/// [`PROBE_BUF_LEN`] buffer serves the whole batch.
+pub fn probe_batch<P>(
+    batch: Vec<Vec<String>>,
+    mut probe: P,
+) -> Vec<(Vec<String>, Result<Probe, Errno>)>
+where
+    P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
+{
+    let mut buf = [0u8; PROBE_BUF_LEN];
+    batch
+        .into_iter()
+        .map(|folder| {
+            let answer = probe_folder(&folder, &mut probe, &mut buf);
+            (folder, answer)
+        })
+        .collect()
+}
+
+/// What `probe` reads of the folder named by `components`, into `buf`.
+fn probe_folder<P>(components: &[String], probe: &mut P, buf: &mut [u8]) -> Result<Probe, Errno>
+where
+    P: FnMut(&str, &mut [u8]) -> Result<usize, Errno>,
+{
+    let path = absolute_path(components)?;
+    let read = probe(&path, buf)?;
+    probed(components, buf.get(..read).ok_or(Errno::OutOfRange)?)
+}
+
+/// What one batch of the entries of the folder named by `components`,
+/// `stream`, says of it: that it is empty, or what it holds.
+///
+/// A batch that does not decode refuses the probe, as it would refuse the
+/// listing.
+fn probed(components: &[String], stream: &[u8]) -> Result<Probe, Errno> {
+    for record in DirEntries::new(stream) {
+        record?;
+    }
+    if stream.is_empty() {
+        return Ok(Probe::Empty);
+    }
+    let named = DirEntries::new(stream)
+        .flatten()
+        .filter_map(|record| Some((core::str::from_utf8(record.name).ok()?, record.kind)));
+    Ok(Probe::Holds(crate::folder_sample(components, named)))
+}
 
 impl<F, L> VfsDirectorySource<F, L>
 where
@@ -438,12 +484,12 @@ where
 {
     /// Build the source over `fetch` and an occupancy `probe`.
     ///
-    /// `probe` opens the directory named by the spelled path, reads at most
-    /// the given buffer, and closes it, returning the bytes the packed stream
+    /// `probe` opens the directory named by the spelled path, reads one batch
+    /// into the given buffer, and closes it, returning the bytes the batch
     /// occupies — on a running system `tairix_rt::open_dir` plus one
-    /// `Dir::read`. It is handed a one-record buffer, never a listing-sized
-    /// one, so the call costs the same on an empty directory and on one with a
-    /// hundred thousand children.
+    /// `Dir::read`. A batch costs the kernel what the buffer holds, so the
+    /// [`PROBE_BUF_LEN`] buffer it is handed costs the same on a directory of
+    /// a hundred entries and on one of a hundred thousand.
     pub fn probing(fetch: F, links: L, probe: P) -> Self {
         Self {
             fetch,
@@ -468,14 +514,8 @@ where
 
     fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
         let probe = self.probe.as_mut().ok_or(Errno::NotImplemented)?;
-        let path = absolute_path(components)?;
-        let mut buf = [0u8; PROBE_BUF_LEN];
         // This thread's own read, so the answer is always ready.
-        match probe(&path, &mut buf) {
-            Ok(0) => Ok(Probe::Ready(false)),
-            Ok(_) | Err(Errno::BufferTooSmall) => Ok(Probe::Ready(true)),
-            Err(errno) => Err(errno),
-        }
+        probe_folder(components, probe, &mut [0u8; PROBE_BUF_LEN])
     }
 }
 
@@ -493,6 +533,20 @@ where
 /// wallpaper catalog), so the two calls are never re-derived.
 #[cfg(feature = "rt")]
 pub struct RtLinkReader;
+
+/// The production probe: open the directory at `path` under the caller's own
+/// identity and read one batch into `buf`, answering the bytes it holds. A
+/// batch costs what its buffer holds, however large the directory, and a
+/// directory the caller may not read simply refuses.
+///
+/// # Errors
+///
+/// The kernel's refusal of the open or the read.
+#[cfg(feature = "rt")]
+pub fn probe_directory(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
+    let dir = tairix_rt::open_dir(path.as_bytes()).map_err(Errno::from_syscall)?;
+    dir.read(buf).map_err(Errno::from_syscall)
+}
 
 #[cfg(feature = "rt")]
 impl LinkReader for RtLinkReader {

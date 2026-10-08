@@ -47,7 +47,7 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use tairix_abi::fs::{DirEntry, OpenFlags};
+    use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::{Errno, InputMode, TerminalSize, STDOUT};
     use tairix_man::{parse, run, BundleStore, Console, ManError, Request, USAGE};
     use tairix_rt::io::{self, write_stderr_line, Read, StdInfo, Stdin, Stdout, Write};
@@ -55,19 +55,13 @@ mod program {
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
 
-    /// Initial byte size of the directory-listing buffer. A `Help/` tree
-    /// lists a handful of locale directories and a store directory a
-    /// handful of bundles, so one page nearly always suffices;
-    /// `BufferTooSmall` grows it (below).
-    const DIR_BUF_INITIAL: usize = 4096;
-
-    /// Ceiling for the directory-listing buffer — a validation bound, not a
+    /// Ceiling for one directory listing — a validation bound, not a
     /// capacity. The engine refuses a `Help/` tree with more locales than
     /// its own bound long before this, and the recursive store search is
     /// budgeted in directories, so a single listing that cannot fit here is
     /// a hostile or corrupt tree; the read then fails closed rather than
     /// growing without limit.
-    const DIR_BUF_MAX: usize = 256 * 1024;
+    const LISTING_MAX: usize = 256 * 1024;
 
     /// The production [`BundleStore`]: the kernel-authorised `fs_*` view of
     /// the installed bundles. It adds no authority — every path resolution,
@@ -145,23 +139,12 @@ mod program {
                 };
             }
         };
-        let mut buf = alloc::vec![0u8; DIR_BUF_INITIAL];
-        let used = loop {
-            match dir.read(&mut buf) {
-                Ok(used) => break used,
-                Err(ret) => match Errno::from_syscall(ret) {
-                    Errno::BufferTooSmall if buf.len() < DIR_BUF_MAX => {
-                        buf.resize(buf.len() * 2, 0);
-                    }
-                    other => return Err(other),
-                },
-            }
-        };
+        let stream = dir
+            .read_all_within(LISTING_MAX)
+            .map_err(Errno::from_syscall)?;
         let mut dirs = Vec::new();
-        let mut rest = &buf[..used];
-        while !rest.is_empty() {
-            let (entry, consumed) = DirEntry::decode(rest)?;
-            rest = &rest[consumed..];
+        for entry in DirEntries::new(&stream) {
+            let entry = entry?;
             if !entry.kind.is_dir() {
                 continue;
             }

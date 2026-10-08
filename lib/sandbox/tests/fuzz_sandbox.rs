@@ -44,8 +44,9 @@ use tairix_sandbox::imageedit::{
     EditKind, EditPicture, EditPixels, KeptReason,
 };
 use tairix_sandbox::imagerender::{
-    close_view, open_view, plan_wallpaper, rasterise_icon, render_page, select_page, send_document,
-    ImageRenderService, ViewFormat, WallpaperRenderFailure, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
+    close_view, open_view, plan_wallpaper, rasterise_icon, render_page, render_thumbnail,
+    select_page, send_document, ImageRenderService, ViewFormat, WallpaperRenderFailure,
+    MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
 };
 use tairix_sandbox::loopback::{LoopbackLauncher, LoopbackSession};
 use tairix_sandbox::proto::Channel;
@@ -500,6 +501,30 @@ fn fuzz_view_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut P
     }
 }
 
+/// Mutated pictures, a truncation and noise, each drawn as a thumbnail at a
+/// random side and named format: every reply is either a refusal or exactly
+/// the square asked for.
+fn fuzz_thumbnail_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut Prng) {
+    let mut png = png_template();
+    for _ in 0..rng.at_most(6) {
+        let pos = rng.below(png.len());
+        png[pos] ^= rng.next_u8();
+    }
+    let cut = rng.at_most(png.len());
+    for document in [png.as_slice(), &png[..cut], noise] {
+        let side = u32::try_from(rng.at_most(64)).unwrap_or(0) + 1;
+        // Drawn before anything is uploaded too, so the no-document refusal is
+        // reached whether or not the upload below succeeds.
+        let _ = render_thumbnail(honest, side, None);
+        if send_document(honest, document).is_err() {
+            continue;
+        }
+        if let Ok(pixels) = render_thumbnail(honest, side, *rng.pick(&NAMED_FORMATS)) {
+            assert_eq!(pixels.len(), (side as usize) * (side as usize) * 4);
+        }
+    }
+}
+
 /// A small paletted PNG and a sprite area of a masked paletted sprite and a
 /// truecolour one: the documents the edit leg mutates.
 fn edit_templates() -> [Vec<u8>; 6] {
@@ -949,6 +974,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let (wallpaper_w, wallpaper_h, fit) =
             fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_view_iteration(&mut honest_icon, &noise, &mut rng);
+        fuzz_thumbnail_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_edit_iteration(&mut honest_icon, &noise, &mut rng);
 
         // 6b. The duplex session seam: its inbound codec over the same
@@ -972,6 +998,9 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
+        if let Ok(pixels) = render_thumbnail(&mut hostile, side, None) {
+            assert_eq!(pixels.len(), (side as usize) * (side as usize) * 4);
+        }
         let _ = drawn(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
         hostile_document_iteration(&mut hostile);
         let hostile_txn = tairix_net::ntp::Transaction {

@@ -58,8 +58,9 @@ pub mod aarch64;
 #[cfg(crc32c_x86_64)]
 pub mod x86_64;
 
-/// The implementation-handle type: a checksum over a byte slice.
-pub type Crc32cFn = fn(&[u8]) -> u32;
+/// The implementation-handle type: advance a raw CRC-32C register over a byte
+/// slice, inverting neither side.
+pub type Crc32cFn = fn(u32, &[u8]) -> u32;
 
 /// The family's stable id — the `lib/cpuops` log/pin key.
 pub const FAMILY_ID: FamilyId = FamilyId("crc32c");
@@ -104,20 +105,24 @@ const fn build_table() -> [u32; 256] {
     table
 }
 
-/// The portable, always-correct CRC-32C of `data` (reflected, table-driven,
-/// init `0xFFFF_FFFF`, final XOR `0xFFFF_FFFF`).
+/// Advance the raw CRC-32C register `state` over `data`, portably
+/// (reflected, table-driven), inverting neither side.
 ///
 /// This is the baseline every hardware candidate is verified against and the
 /// implementation used on any target without a CRC instruction, and before
 /// [`resolve`] runs. Correct on every architecture and endianness.
 #[must_use]
+pub fn portable_update(state: u32, data: &[u8]) -> u32 {
+    data.iter().fold(state, |crc, &byte| {
+        (crc >> 8) ^ TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize]
+    })
+}
+
+/// The portable CRC-32C of `data` (init `0xFFFF_FFFF`, final XOR
+/// `0xFFFF_FFFF`).
+#[must_use]
 pub fn crc32c_portable(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        let index = ((crc ^ u32::from(byte)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ TABLE[index];
-    }
-    !crc
+    !portable_update(0xFFFF_FFFF, data)
 }
 
 /// The set-once resolved implementation for the whole process/kernel image.
@@ -146,34 +151,40 @@ const CANDIDATES: &[Candidate<Crc32cFn>] = &[Candidate {
 #[cfg(not(any(crc32c_x86_64, crc32c_aarch64)))]
 const CANDIDATES: &[Candidate<Crc32cFn>] = &[];
 
-/// A self-verify input: one byte buffer the candidate and reference are both
-/// run over.
-type Vector = &'static [u8];
+/// A self-verify input: a starting register and the bytes the candidate and
+/// reference both advance it over.
+type Vector = (u32, &'static [u8]);
 
 /// The fixed self-verify vectors: empty, sub-word, exact 8-byte-word boundary
 /// crossings, a byte tail, larger buffers, and the canonical CRC-32C
-/// known-answer input (`b"123456789"` → `0xE306_9283`). A candidate that
-/// disagrees with the portable reference on any of these is rejected.
+/// known-answer input (`b"123456789"` → `0xE306_9283`), from the standard
+/// starting register and from others, as a checksum continued across buffers
+/// starts. A candidate that disagrees with the portable reference on any of
+/// these is rejected.
 const VECTORS: &[Vector] = &[
-    b"",
-    b"a",
-    b"1234567",
-    b"12345678",
-    b"123456789",
-    b"the quick brown fox jumps over the lazy dog",
-    &[0u8; 64],
-    &[0xFFu8; 65],
-    &[0x5Au8; 127],
+    (0xFFFF_FFFF, b""),
+    (0xFFFF_FFFF, b"a"),
+    (0xFFFF_FFFF, b"1234567"),
+    (0xFFFF_FFFF, b"12345678"),
+    (0xFFFF_FFFF, b"123456789"),
+    (0xFFFF_FFFF, b"the quick brown fox jumps over the lazy dog"),
+    (0xFFFF_FFFF, &[0u8; 64]),
+    (0xFFFF_FFFF, &[0xFFu8; 65]),
+    (0xFFFF_FFFF, &[0x5Au8; 127]),
+    (0, b"123456789"),
+    (0x1234_5678, b""),
+    (0x1234_5678, b"12345678"),
+    (0xDEAD_BEEF, &[0xA5u8; 61]),
 ];
 
 /// Invoke a candidate over one vector (the `lib/cpuops` `run` adapter).
 fn run(impl_: Crc32cFn, input: &Vector) -> u32 {
-    impl_(input)
+    impl_(input.0, input.1)
 }
 
 /// The portable reference (the `lib/cpuops` `reference` adapter).
 fn reference(input: &Vector) -> u32 {
-    crc32c_portable(input)
+    portable_update(input.0, input.1)
 }
 
 /// Build the `lib/cpuops` family describing the CRC-32C op: its candidates, its
@@ -190,7 +201,7 @@ fn family() -> Family<'static, Crc32cFn, Vector, u32> {
         baseline: Candidate {
             name: BASELINE_NAME,
             requires: &[],
-            impl_: crc32c_portable,
+            impl_: portable_update,
         },
         reference,
         run,
@@ -241,9 +252,18 @@ fn select_and_install(features: CpuFeatureSet, pin: Option<&'static str>) -> Dec
 /// the portable baseline (fail closed — never a trap, never a panic).
 #[must_use]
 pub fn checksum(data: &[u8]) -> u32 {
+    !update(0xFFFF_FFFF, data)
+}
+
+/// Advance the raw CRC-32C register `state` over `data` using the resolved
+/// implementation, inverting neither side: the continuation a checksum
+/// carried across buffers takes, such as ext4's `metadata_csum`, whose seeds
+/// are raw registers.
+#[must_use]
+pub fn update(state: u32, data: &[u8]) -> u32 {
     match RESOLVED.get() {
-        Ok(Some(implementation)) => implementation(data),
-        _ => crc32c_portable(data),
+        Ok(Some(implementation)) => implementation(state, data),
+        _ => portable_update(state, data),
     }
 }
 
@@ -259,6 +279,22 @@ mod tests {
     fn portable_matches_the_known_answer_vector() {
         assert_eq!(crc32c_portable(b"123456789"), 0xE306_9283);
         assert_eq!(crc32c_portable(b""), 0x0000_0000);
+    }
+
+    /// A register advanced over two buffers in turn is the register advanced
+    /// over both at once, so a checksum continues where it stopped; and the
+    /// raw register is the inverted checksum.
+    #[test]
+    fn an_update_continues_where_the_last_stopped() {
+        let whole: &[u8] = b"the quick brown fox jumps over the lazy dog";
+        for split in [0, 1, 7, 8, 9, 20, whole.len()] {
+            let (head, tail) = whole.split_at(split);
+            assert_eq!(
+                update(update(0x1234_5678, head), tail),
+                update(0x1234_5678, whole)
+            );
+        }
+        assert_eq!(update(0xFFFF_FFFF, b"123456789"), !0xE306_9283);
     }
 
     /// Every hardware candidate compiled on this build must reproduce the

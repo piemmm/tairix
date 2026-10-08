@@ -17,12 +17,8 @@
 //! renamed over the original, so a power cut mid-write leaves either the
 //! old or the new database — never a torn one. Home provisioning walks
 //! and creates the directory path, stamps the leaf owner-only under the
-//! new account's identity, and fills in the fixed home shape
-//! ([`tairix_users::HOME_SUBDIRS`]) inside it; an already-present
-//! directory is left exactly as it is (idempotent) — except for the gated
-//! per-app data roots and the search-only transit grants that reach them,
-//! which are OS shape rather than the account's data and are re-asserted every
-//! run so a store is never unreachable.
+//! new account's identity, and gives it the fixed home shape through the one
+//! shared walk ([`tairix_users::provision_home_shape`]).
 
 use alloc::sync::Arc;
 
@@ -31,10 +27,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_kernel_core::{SleepLock, UserAdminBacking, VfsError};
-use tairix_users::{
-    appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS, HOME_MODE,
-    HOME_SUBDIRS,
-};
+use tairix_users::{provision_home_shape, HomeShapeError, HOME_MODE};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
 /// mounted encrypted root volume.
@@ -136,78 +129,13 @@ where
         // somebody else's home would be provisioning one principal's
         // storage into another's.
         if fs.security(home).map_err(driver_errno)?.uid == uid {
-            ensure_home_shape(fs, home, uid, gid)?;
+            provision_home_shape(fs, home, uid, gid).map_err(|err| match err {
+                HomeShapeError::Driver(err) => driver_errno(err),
+                HomeShapeError::Occupied => Errno::AlreadyExists,
+            })?;
         }
         fs.flush().map_err(driver_errno)
     }
-}
-
-/// Create the fixed home shape inside `home`, each directory owned by
-/// `(uid, gid)` and owner-only.
-///
-/// A name already present keeps whatever it holds — the account's own data is
-/// never rewritten — and only a missing one is created. Creating them with the
-/// account is what lets the first per-user write land: those paths are a level
-/// below the home, and the writers create only their immediate parent.
-///
-/// The [`APPDATA_ROOT_PARENTS`] are the exception the app-data store needs.
-/// Their gated root is owned by the app-data service, so nothing running as
-/// the account could create it, and the service reaches it only if every
-/// directory on the way carries the search-only transit grant. Those records
-/// are OS shape rather than the account's data, so they are re-asserted on
-/// every provisioning run: a home that merely *exists* is otherwise a home
-/// whose store can never be reached.
-fn ensure_home_shape<F>(fs: &mut F, home: NodeId, uid: u32, gid: u32) -> Result<(), Errno>
-where
-    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
-{
-    let transit = appdata_transit_security(uid, gid).map_err(driver_errno)?;
-    fs.set_security(home, transit).map_err(driver_errno)?;
-    for name in HOME_SUBDIRS {
-        let node = match fs.lookup(home, name.as_bytes()) {
-            Ok(node) => node,
-            Err(DriverError::NotFound) => {
-                let node = fs
-                    .create(home, name.as_bytes(), NodeKind::Directory)
-                    .map_err(driver_errno)?;
-                fs.set_security(node, NodeSecurity::new(HOME_MODE, uid, gid))
-                    .map_err(driver_errno)?;
-                node
-            }
-            Err(err) => return Err(driver_errno(err)),
-        };
-        if APPDATA_ROOT_PARENTS.contains(&name) {
-            fs.set_security(node, transit).map_err(driver_errno)?;
-            ensure_appdata_root(fs, node)?;
-        }
-    }
-    Ok(())
-}
-
-/// Ensure `parent` holds the gated per-app data root, with the record only the
-/// app-data service can reach through.
-///
-/// A root that is already there is re-stamped rather than trusted: a
-/// pre-existing directory of that name could only have come from a principal
-/// that is not the service, and the store must not be served out of one.
-fn ensure_appdata_root<F>(fs: &mut F, parent: NodeId) -> Result<(), Errno>
-where
-    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
-{
-    let root = match fs.lookup(parent, APPDATA_ROOT.as_bytes()) {
-        Ok(node) => {
-            if fs.node_info(node).map_err(driver_errno)?.kind != NodeKind::Directory {
-                return Err(Errno::AlreadyExists);
-            }
-            node
-        }
-        Err(DriverError::NotFound) => fs
-            .create(parent, APPDATA_ROOT.as_bytes(), NodeKind::Directory)
-            .map_err(driver_errno)?,
-        Err(err) => return Err(driver_errno(err)),
-    };
-    fs.set_security(root, appdata_root_security())
-        .map_err(driver_errno)
 }
 
 /// Resolve `/System/Security` on the root volume's own tree.
@@ -279,7 +207,12 @@ mod tests {
     use alloc::vec::Vec;
 
     use tairix_abi::driver::block::Block;
+    use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
     use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+    use tairix_users::{
+        appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS,
+        HOME_SUBDIRS,
+    };
 
     const KEY: VolumeKey = [0x5A; VOLUME_KEY_LEN];
     const SECTOR: usize = 512;
@@ -478,6 +411,21 @@ mod tests {
             assert_eq!(security.mode, HOME_MODE, "{name} is owner-only");
             assert_eq!(security.uid, 1001, "{name} belongs to the account");
             assert_eq!(security.gid, 100, "{name} carries the primary group");
+        }
+        let files = fs
+            .lookup(home, HOME_USER_FILES_DIR.as_bytes())
+            .expect("UserFiles exists");
+        for name in USER_FILES_SUBDIRS {
+            let node = fs
+                .lookup(files, name.as_bytes())
+                .unwrap_or_else(|_| panic!("{name} exists in a fresh UserFiles"));
+            assert_eq!(fs.node_info(node).expect("info").kind, NodeKind::Directory);
+            let security = fs.security(node).expect("security");
+            assert_eq!(
+                (security.mode, security.uid, security.gid),
+                (HOME_MODE, 1001, 100),
+                "{name} is the account's own, owner-only"
+            );
         }
     }
 

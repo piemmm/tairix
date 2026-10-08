@@ -106,8 +106,8 @@ injected seams, mirroring the other userland crates (`cat`'s
 
 - `Listing` — stat a path (in the `stat` or `lstat` reading the posture
   selects, per path), read a link's stored target, and read a directory's
-  whole listing in one call, mirroring the kernel's one-shot `fs_readdir`
-  contract. An entry's kind is the VFS's own `FileKind` (no parallel kind
+  whole listing in one call, which `lib/rt` reads from the kernel a batch at
+  a time. An entry's kind is the VFS's own `FileKind` (no parallel kind
   enum); the per-entry stat behind the long format's columns, the `-S`
   size sort, `-F`'s execute-bit check, and `-L`'s resolution is paid only
   when one of them asks for it, and a link's target is read only by the

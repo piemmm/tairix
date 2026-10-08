@@ -20,10 +20,20 @@ use tairix_xml::Element;
 use crate::encode::EncodeError;
 use crate::picture::{masked_colour, over, Picture, PictureSource, Pixels};
 use crate::zip::{Archive, View, Writer, ZipError};
-use crate::{png, DecodeError, DecodeLimits, RasterImage, Unkept, RGBA_BYTES};
+use crate::{png, DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, RGBA_BYTES};
 
 /// What the first entry holds, which names the archive OpenRaster.
 const MIMETYPE: &str = "image/openraster";
+
+/// The member holding the layers as composed.
+const MERGED: &str = "mergedimage.png";
+
+/// The member holding the composition at no more than 256 pixels a side.
+const THUMBNAIL: &str = "Thumbnails/thumbnail.png";
+
+/// The most a thumbnail member is inflated to: one 256 pixels a side fits
+/// many times over, so a larger member is no preview worth reading.
+const MOST_THUMBNAIL_BYTES: usize = 1 << 20;
 
 /// The most layers one document is read with: a fixed defence against a
 /// stack of millions, not a capacity.
@@ -125,12 +135,8 @@ pub fn encode_ora(
         let png = crate::encode_png(layer.picture)?;
         stored(&mut zip, &layer_path(index), &png)?;
     }
-    stored(&mut zip, "mergedimage.png", &crate::encode_png(merged)?)?;
-    stored(
-        &mut zip,
-        "Thumbnails/thumbnail.png",
-        &crate::encode_png(thumbnail)?,
-    )?;
+    stored(&mut zip, MERGED, &crate::encode_png(merged)?)?;
+    stored(&mut zip, THUMBNAIL, &crate::encode_png(thumbnail)?)?;
     zip.finish().map_err(|_| EncodeError::TooLarge)
 }
 
@@ -457,30 +463,88 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     let xml = stack_xml(&archive)?;
     let root = parse(&xml)?;
     let size = checked_canvas(&root, limits)?;
-    if let Some(merged) = archive.read("mergedimage.png", MOST_LAYER_BYTES)? {
+    if let Some(merged) = archive.read(MERGED, MOST_LAYER_BYTES)? {
         let image = png::decode(&merged, limits)?;
         if (image.width(), image.height()) == size {
             return Ok(image);
         }
     }
-    let (size, mut placed, unkept) = read_stack(&root, limits)?;
+    layered(&archive, &root, limits)
+}
+
+/// The layers of `root` that show, composed.
+fn layered(
+    archive: &Archive<'_>,
+    root: &Element<'_>,
+    limits: &DecodeLimits,
+) -> Result<RasterImage, DecodeError> {
+    let (size, mut placed, unkept) = read_stack(root, limits)?;
     placed.retain(Placed::shows);
-    let (document, _) = layers(&archive, (size, placed, unkept), limits)?;
+    let (document, _) = layers(archive, (size, placed, unkept), limits)?;
     composed(&document)
 }
 
-/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
-/// from the directory, the stack and the layers' own headers: the directory
-/// twice over, the stack and its parse, the merged image read and decoded,
-/// then — where that does not answer — the layers' path. A layer stored in
-/// the archive is costed from its header; one compressed there, or whose
-/// header will not read, at the most `limits` admit.
+/// The picture OpenRaster `bytes` shows, no smaller than it must be to cover
+/// `fit`: the embedded thumbnail where it covers the box at the canvas's
+/// shape, the merged image reduced as it streams where the archive carries
+/// one of the canvas's size, and otherwise the layers composed and reduced.
 ///
 /// # Errors
 ///
-/// What [`decode`] would refuse before decoding: a malformed archive, or a
-/// stack whose canvas will not read or passes `limits`.
-pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub(crate) fn decode_fitted(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<RasterImage, DecodeError> {
+    let archive = open(bytes)?;
+    let xml = stack_xml(&archive)?;
+    let root = parse(&xml)?;
+    let size = checked_canvas(&root, limits)?;
+    // A thumbnail is a preview, so one that will not read is passed over
+    // for the merged image rather than failing the document.
+    if let Some(thumbnail) = archive.read(THUMBNAIL, MOST_THUMBNAIL_BYTES).ok().flatten() {
+        if png::probe(&thumbnail).is_ok_and(|shape| previews(shape, size, fit, limits)) {
+            return png::decode_fitted(&thumbnail, limits, fit);
+        }
+    }
+    if let Some(merged) = archive.read(MERGED, MOST_LAYER_BYTES)? {
+        if png::probe(&merged) == Ok(size) {
+            return png::decode_fitted(&merged, limits, fit);
+        }
+    }
+    crate::reduce_held(layered(&archive, &root, limits)?, fit)
+}
+
+/// Whether a thumbnail of `shape` previews a `canvas`-sized document for
+/// `fit`: it covers the box, `limits` admit it, and it is the canvas's shape
+/// to within the pixel its scaling rounds to.
+fn previews(shape: (u32, u32), canvas: (u32, u32), fit: FitBox, limits: &DecodeLimits) -> bool {
+    shape.0 >= fit.width()
+        && shape.1 >= fit.height()
+        && limits.check(shape.0, shape.1).is_ok()
+        && crate::same_shape(shape, canvas)
+}
+
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once, read from the directory, the stack and the members' own headers:
+/// the directory twice over, the stack and its parse, then the costliest path
+/// the decode can take. A stored thumbnail that previews the document, or a
+/// stored merged image of the canvas's size, answers before anything after it
+/// is read; otherwise each member read and passed over is dropped before the
+/// next. A member is costed from its PNG header — read in place where it is
+/// stored, inflated alone where it is compressed — and at the most `limits`
+/// admit where that header will not read.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse before decoding: a malformed archive,
+/// or a stack whose canvas will not read or passes `limits`.
+pub(crate) fn fitted_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
     let archive = open(bytes)?;
     let stack = archive
         .view("stack.xml")?
@@ -491,24 +555,51 @@ pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, Dec
     let size = checked_canvas(&root, limits)?;
     let directory = 2 * (archive.held_bytes() + MIMETYPE.len()) as u64;
     let parsed = (stack as u64).saturating_add(tairix_xml::parse_peak_bytes(stack));
-    let merged = archive.view("mergedimage.png")?;
-    // A stored merged image the canvas's size is shown, or refuses the
-    // decode, before any layer is read.
-    let answers = merged
+    let thumbnail = archive
+        .view(THUMBNAIL)
+        .ok()
+        .flatten()
+        .filter(|view| view.size <= MOST_THUMBNAIL_BYTES)
+        .map(|view| Costed::of(&archive, THUMBNAIL, view));
+    let previewed = thumbnail
         .as_ref()
-        .and_then(|view| view.stored)
-        .and_then(|png| png::probe(png).ok())
-        == Some(size);
-    let merged = merged.map_or(0, |view| entry_peak(&view, limits));
-    // A stack the layers' path refuses ends that path before any layer is read.
-    let layered = if answers {
-        0
+        .and_then(Costed::shape)
+        .is_some_and(|shape| previews(shape, size, fit, limits));
+    let thumbnail = thumbnail
+        .as_ref()
+        .map_or(0, |member| member.fitted(limits, fit));
+    let path = if previewed {
+        thumbnail
     } else {
-        read_stack(&root, limits).map_or(0, |(size, placed, _)| {
-            layers_peak(&archive, (size, &placed, stack), limits)
-        })
+        let merged = archive
+            .view(MERGED)?
+            .map(|view| Costed::of(&archive, MERGED, view));
+        let answers = merged.as_ref().and_then(Costed::shape) == Some(size);
+        let layered = if answers {
+            0
+        } else {
+            read_stack(&root, limits).map_or(0, |(canvas, placed, _)| {
+                let reduced = fit.reduction(canvas.0, canvas.1);
+                let reducing = if reduced == canvas {
+                    0
+                } else {
+                    tairix_raster::RowReducer::peak_bytes(canvas, reduced)
+                };
+                layers_peak(&archive, (canvas, &placed, stack), limits).saturating_add(reducing)
+            })
+        };
+        [
+            thumbnail,
+            merged
+                .as_ref()
+                .map_or(0, |member| member.fitted(limits, fit)),
+            layered,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
     };
-    Ok([parsed, merged, layered]
+    Ok([parsed, path]
         .into_iter()
         .fold(directory, u64::saturating_add))
 }
@@ -529,13 +620,16 @@ fn layers_peak(
     let mut kept = 0u64;
     let mut reading = 0u64;
     let mut shown = 0usize;
-    for view in placed
+    for member in placed
         .iter()
         .filter(|layer| layer.shows())
-        .filter_map(|layer| archive.view(&layer.src).ok().flatten())
+        .filter_map(|layer| {
+            let view = archive.view(&layer.src).ok().flatten()?;
+            Some(Costed::of(archive, &layer.src, view))
+        })
     {
-        kept = kept.saturating_add(layer_bytes(&view, limits));
-        reading = reading.max(entry_peak(&view, limits));
+        kept = kept.saturating_add(member.colours(limits));
+        reading = reading.max(member.whole(limits));
         shown += 1;
     }
     let layers = (shown * size_of::<OraLayer>()) as u64;
@@ -545,23 +639,64 @@ fn layers_peak(
         .fold(records, u64::saturating_add)
 }
 
-/// What reading `view` out of the archive and decoding it as a PNG holds.
-fn entry_peak(view: &View<'_>, limits: &DecodeLimits) -> u64 {
-    let decode = view
-        .stored
-        .and_then(|png| png::peak_bytes(png, limits).ok())
-        .unwrap_or_else(|| png::peak_ceiling(view.size, limits));
-    (view.size as u64).saturating_add(decode)
+/// A member as far as a forecast reads it: its entry, and the PNG header it
+/// opens with where the archive compresses it, inflated alone.
+struct Costed<'a> {
+    view: View<'a>,
+    head: Option<[u8; png::HEADER_LEN]>,
 }
 
-/// The colours the layer `view` holds decode to, kept beside the others.
-fn layer_bytes(view: &View<'_>, limits: &DecodeLimits) -> u64 {
-    view.stored
-        .and_then(|png| png::probe(png).ok())
-        .map_or(limits.max_pixels(), |(width, height)| {
-            u64::from(width) * u64::from(height)
-        })
-        .saturating_mul(RGBA_BYTES as u64)
+impl<'a> Costed<'a> {
+    fn of(archive: &Archive<'a>, name: &str, view: View<'a>) -> Self {
+        let head = if view.stored.is_some() {
+            None
+        } else {
+            let mut head = [0u8; png::HEADER_LEN];
+            matches!(archive.head(name, &mut head), Ok(Some(png::HEADER_LEN))).then_some(head)
+        };
+        Self { view, head }
+    }
+
+    /// The member's picture size, from its PNG header.
+    fn shape(&self) -> Option<(u32, u32)> {
+        let png = self
+            .view
+            .stored
+            .or(self.head.as_ref().map(|head| &head[..]))?;
+        png::probe(png).ok()
+    }
+
+    /// What reading the member out and decoding it fitted to `fit` holds;
+    /// at the most `limits` admit where its header will not read.
+    fn fitted(&self, limits: &DecodeLimits, fit: FitBox) -> u64 {
+        let decode = match (self.view.stored, &self.head) {
+            (Some(png), _) => png::fitted_peak_bytes(png, limits, fit).ok(),
+            (None, Some(head)) => png::header_fitted_peak_bytes(head, limits, fit).ok(),
+            (None, None) => None,
+        }
+        .unwrap_or_else(|| png::fitted_peak_ceiling(limits));
+        (self.view.size as u64).saturating_add(decode)
+    }
+
+    /// What reading the member out and decoding it whole holds.
+    fn whole(&self, limits: &DecodeLimits) -> u64 {
+        let decode = match (self.view.stored, &self.head) {
+            (Some(png), _) => png::peak_bytes(png, limits).ok(),
+            (None, Some(head)) => png::header_peak_bytes(head, limits).ok(),
+            (None, None) => None,
+        }
+        .unwrap_or_else(|| png::peak_ceiling(limits));
+        (self.view.size as u64).saturating_add(decode)
+    }
+
+    /// The colours the member decodes to, kept beside the other layers'.
+    fn colours(&self, limits: &DecodeLimits) -> u64 {
+        self.shape()
+            .map_or(limits.max_pixels(), |(width, height)| {
+                u64::from(width) * u64::from(height)
+            })
+            .saturating_mul(RGBA_BYTES as u64)
+    }
 }
 
 /// `document`'s showing layers composed over clear, each as faint as it is.

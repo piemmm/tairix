@@ -350,7 +350,7 @@ pub use chart::{Chart, MAX_CHART_SAMPLES};
 pub use checker::Checker;
 pub use collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
-    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
+    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
 };
 pub use colour_picker::{ColourPicker, PickerOutcome};
 pub use combo::{ComboAction, ComboBox};

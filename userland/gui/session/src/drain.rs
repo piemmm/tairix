@@ -10,12 +10,11 @@
 use alloc::vec::Vec;
 
 use tairix_abi::input::KeyInput;
-use tairix_abi::window_ipc::DropTarget;
 use tairix_abi::Errno;
 use tairix_greeter::Verifier;
-use tairix_wm::{Compositor, InputEvent};
+use tairix_wm::{Compositor, InputEvent, Point};
 
-use crate::drag::DragEnd;
+use crate::drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
 use crate::lock::{LockedDrain, ScreenLock};
 use crate::menu::MenuChain;
@@ -80,9 +79,19 @@ pub trait SeatRouter {
     /// given up.
     fn step_aside(&mut self, seat: &mut Seat<'_>) -> bool;
 
-    /// What the application on icon-bar slot `slot` does with a dragged file
-    /// named `name`: open it, or `None` when it does not claim it.
-    fn drop_target(&mut self, slot: usize, name: &str) -> Option<DropTarget>;
+    /// Which place the carried drag's pointer, at screen position `at`, is
+    /// over: an icon-bar slot, one of the dragging application's own windows,
+    /// the desktop, or nothing that takes it. Asked per motion, so it
+    /// allocates nothing.
+    fn drag_place(&mut self, seat: &mut Seat<'_>, at: Point) -> DragPlace;
+
+    /// What is at `place`: what a slot's application does with the one file
+    /// dragged, or the desktop folder a drop lands in. Asked only when the
+    /// pointer arrives somewhere new.
+    fn drag_surface(&mut self, seat: &mut Seat<'_>, place: DragPlace) -> DragSurface;
+
+    /// Tell the application a carried drag began in where it now is.
+    fn report_drag(&mut self, seat: &mut Seat<'_>, report: OwedReport);
 
     /// Tell the application a carried drag began in how it ended.
     fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd);
@@ -246,11 +255,12 @@ where
 }
 
 /// Drain the pointer, then the keys, into the carried drag until it ends, and
-/// hand its end to the router.
+/// hand the router the one report the batch owes and the drag's end.
 ///
 /// Nothing behind the drag is reachable while it is carried: a key is the
-/// drag's, and only `Escape` means anything to it. [`Stopped::AtEdge`] when it
-/// ended with pointer input still queued, which is the next holder's.
+/// drag's, and only `Escape` and `Shift` mean anything to it.
+/// [`Stopped::AtEdge`] when it ended with pointer input still queued, which is
+/// the next holder's.
 fn drain_drag<P, C, R>(
     seat: &mut Seat<'_>,
     pointer: &mut P,
@@ -271,17 +281,26 @@ where
         let Some(event) = pointer.poll(now_ns)? else {
             break true;
         };
-        ended = seat
-            .shell
-            .drag_pointer(seat.compositor, &event, &mut |slot, name| {
-                router.drop_target(slot, name)
-            });
+        match seat.shell.drag_pointer(seat.compositor, &event) {
+            DragStep::Moved(at) => {
+                let place = router.drag_place(seat, at);
+                if !seat.shell.drag_is_at(place) {
+                    let surface = router.drag_surface(seat, place);
+                    seat.shell.drag_over(seat.compositor, surface);
+                }
+            }
+            DragStep::Ended(end) => ended = Some(end),
+            DragStep::Held => {}
+        }
     };
     while ended.is_none() && seat.shell.drag_active() {
         let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
             break;
         };
         ended = seat.shell.drag_key(seat.compositor, &event);
+    }
+    if let Some(report) = seat.shell.take_drag_report() {
+        router.report_drag(seat, report);
     }
     if let Some(end) = ended {
         router.settle_drag(seat, end);

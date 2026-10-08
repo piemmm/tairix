@@ -412,7 +412,11 @@ loop-filter and quantiser headers with their per-segment and per-mode
 deltas; the token-probability updates; the four whole-macroblock luma modes,
 the four chroma modes, and all ten subblock modes; the Walsh-Hadamard and
 DCT reconstructions; both the normal and the simple loop filter at
-macroblock and subblock edges; and the conversion to RGB. There is no inter
+macroblock and subblock edges; and the conversion to RGB. A frame is
+decoded a macroblock row at a time: each row predicts from the unfiltered
+bottom row of the one above, kept aside before the filter moves it, and is
+filtered once the row below it is reconstructed, so the decode holds a
+window of rows rather than the frame. There is no inter
 coding at all — no reference frames, no motion vectors, no inter modes —
 because the container permits none, and a bitstream that declares itself an
 interframe is refused rather than half-read.
@@ -429,7 +433,10 @@ compression methods and all four filtering methods. Its compressed method is
 a lossless stream over the plane, held in the stream's green channel, which
 is why the container reaches for the lossless codec on the *lossy* path: the
 two codecs know nothing of each other, and the container is what knows the
-rule.
+rule. Either way the samples are unfiltered a row at a time against the row
+above and applied as each colour row arrives — read in place where they are
+stored uncompressed, out of the lossless stream's words where not — so no
+second plane is held.
 
 WEBP has a signature, but a two-part one — `RIFF` at 0 and `WEBP` at 8, with
 the RIFF size between — so the format's own module answers the test rather
@@ -602,11 +609,19 @@ page container it answers the page that container means by its picture: an
 icon file's or a sprite area's largest, and a TIFF document's first
 non-thumbnail page.
 
-## Reduced-scale decode (`decode_fitted`) is a JPEG property
+## Reduced decode (`decode_fitted`)
 
 `decode_fitted(bytes, limits, fit)` returns an image no smaller than it has
-to be to cover the caller's `FitBox` on both axes. For JPEG it picks the
-smallest DCT decode scale — one whole, one half, one quarter, or one eighth
+to be to cover the caller's `FitBox` on both axes, and never larger than the
+picture, holding memory the result sets rather than the picture.
+`decode_fitted_as` names the format for one `sniff` cannot recognise — a
+sprite area — and `decode_peak_bytes`/`decode_peak_bytes_as` forecast, from
+the headers, what a fitted decode will hold before it allocates. Where a box
+does not reduce the picture, a fitted decode is `decode`.
+
+### JPEG decodes at a reduced DCT scale
+
+A JPEG picks the smallest DCT decode scale — one whole, one half, one quarter, or one eighth
 of natural size, produced by inverse-DCT transforming only the
 coefficients that scale needs, through that scale's own `m`-point basis —
 whose output still covers the box. It never scales up and never resamples;
@@ -645,21 +660,47 @@ its own meaning there too — the picture the container is, which is its
 largest page — and is refused outright when that breaches the limits rather
 than quietly answering a smaller one.
 
-### PNG, GIF, BMP, Sprite, TIFF, and WEBP
+### Every other format streams its rows into a reduction
 
-None has a reduced-scale decode process — filtered zlib-compressed
-scanlines, an LZW code stream, a padded row array, and a grid of strips or
-tiles do not separate into scale-selectable passes — so `decode_fitted` on
-those *is* `decode`, at
-natural size, with no scale to degrade to. For WEBP the reason is sharper
-than "the coding does not separate": both its codecs *could* be given a
-coarser transform, and doing so would decode a **different** picture rather
-than a softer one, because VP8's intra prediction reads full-resolution
-neighbours and VP8L's spatial predictors and backward references read the
-pixels already produced. That asymmetry is an honest
-property of the formats rather than a gap in this crate: a caller that wants
-a smaller one resamples the decoded image through `lib/raster`'s one shared
-resampler, exactly as it must to hit any size no JPEG scale lands on.
+A PNG, GIF, BMP, sprite area, TIFF, OpenRaster document or WEBP has no
+reduced transform to choose, so its rows are fed, in the order the file
+stores them, through `lib/raster`'s `RowReducer`: the area-average arm of the
+shared resampler, holding the destination and two rows of sums. The result
+is byte for byte what `resample` makes of the whole decode at the size
+covering the box — a reduction, never a different picture. That size is the
+picture scaled by the larger of the box's ratios to it, each side rounded
+up. These formats admit what `decode` admits: a picture past the limits is
+refused however small the box, so the work stays bounded with the memory.
+
+- A BMP stored bottom up is fed bottom first, and a run-length picture's
+  rows are handed over once its runs move past them.
+- An interlaced PNG decodes only the Adam7 passes that complete the coarsest
+  grid — every eighth, fourth or second pixel — covering the box, never
+  reading the rest of its stream; its result is that grid. An interlaced GIF
+  frame reads only the passes whose rows its box needs, at a step the frame's
+  top lies on, holding those rows as palette indices.
+- A TIFF reads the smallest reduced-resolution copy of its page, at the
+  page's shape and no larger than it, that covers the box, streaming a strip
+  a row at a time and a tile a band of tiles at a time, the band no taller
+  than the page. A copy is read only where the primary page passes the same
+  admission a plain decode of it would — its limits, its coding, its tiles —
+  so a thumbnail never shows a page the viewer refuses. A page whose
+  orientation transposes it is held whole and then reduced, since its stored
+  rows are the picture's columns.
+- An OpenRaster document answers its thumbnail where that previews the
+  document at its shape and covers the box, its merged image streamed
+  otherwise, and its layers composed and reduced where it carries neither. Its
+  forecast reads each member's PNG header — in place where the archive stores
+  it, inflated alone where it compresses it — so a deflated document is costed
+  at its own pictures, not at the largest the limits admit.
+- A WEBP's colours stream, so its picture is never held. A lossy picture is
+  reconstructed a macroblock row at a time against the unfiltered bottom row
+  of the one above, and loop-filtered one row behind, so it holds the row
+  being built and the twenty-two luma and twelve chroma rows its filter and
+  colours still need rather than three whole planes; a lossless picture's
+  words are held, because a back-reference may reach any earlier pixel. An
+  animation's first frame is composited and reduced.
+
 `decode` keeps its meaning for every format: natural size.
 
 ## Writing

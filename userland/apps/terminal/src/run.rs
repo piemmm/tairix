@@ -2304,6 +2304,7 @@ mod program {
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
+                | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::PreviewRendered { .. }
                 | WindowEvent::Pinch { .. } => {}

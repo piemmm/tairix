@@ -96,7 +96,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  47 | `fs_close`     | `u32 fd`                                | `errno`       | — (backing)     | no    |
 |  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
 |  49 | `fs_write`     | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | yes |
-|  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`       | `u64` (bytes) | `CAP_FS_ACCESS` | no    |
+|  50 | `fs_readdir`   | `u32 fd`, `user_ptr` (buf), `len`, `u32 from` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 |  51 | `fs_stat`      | `u32 fd`, `user_ptr` (out), `len`       | `u64` (bytes) | —             | no    |
 |  52 | `fs_truncate`  | `u32 fd`, `u64 size`                    | `errno`       | —             | yes   |
 |  53 | `fs_sync`      | `u32 fd`                                | `errno`       | —             | no    |
@@ -419,6 +419,32 @@ one-shot delegation — which is exercised under the *grantor's* captured set
 and may legitimately hold no filesystem capability at all — can use the whole
 descriptor rather than only read it. `fs_readdir` keeps its blanket gate,
 because `fd_grant` refuses a directory and so no delegated listing exists.
+
+`fs_readdir` reads a directory **a batch at a time**, as `getdents` does. It
+writes as many whole `DirEntry` records as fit into `buf` — at most
+`READDIR_BATCH_MAX` bytes a call — from the open description's listing
+position, advances the position, and returns `0` at the end. `from` is
+`ReaddirFrom::Next` or `ReaddirFrom::Start`, which restarts the listing in the
+same call; any other value is `OutOfRange`. A listing is the directory's own
+entries, then the covered mount points beneath it that the volume holds no
+entry for, in name order.
+
+- The position lives in the open file description, so there is no cookie to
+  forge, and descriptors sharing a description share it. Calls on one
+  description serialise on it.
+- A call costs the kernel what its buffer holds, never the whole directory:
+  the batch is staged, the mount's lock is held for that batch alone, and the
+  records are copied out after it is released. The position moves only once
+  they reach the caller, so a failed copy loses no entry.
+- `BufferTooSmall` means the next record alone does not fit, and leaves the
+  position where it was.
+- The position is fixed to the directory its first batch read. A later batch
+  that finds another directory at the path — it was renamed away and
+  replaced — fails `Stale` rather than resuming inside the new one;
+  `ReaddirFrom::Start` reads what the path names now.
+- The stream keeps the POSIX contract: an entry present for the whole listing
+  is returned exactly once, and one added or removed meanwhile may or may not
+  be. Each filesystem driver's cursor upholds it (`docs/src/abi/driver_traits.md`).
 
 `fs_sync` (no. 53) is the **durability barrier** a program calls before it
 treats its data as safe against power loss. It is a real guarantee, not a

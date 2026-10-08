@@ -25,7 +25,7 @@ descriptors a real `mkfs.ext4` image carries.
 | Extent-mapped inodes (default ext4)      | yes, incl. multi-level trees  |
 | Classic block map (ext2/ext3)            | yes (direct + 1/2/3 indirect) |
 | Linear directory blocks                  | yes                           |
-| Hash-indexed (`htree`) directories       | linear leaf view only         |
+| Hash-indexed (`htree`) directories       | yes: lookup, listing, add and remove through a root and one interior level |
 
 `Ext4::open` validates the superblock magic (`0xEF53` at byte `0x38` of
 the superblock, which itself starts at the fixed byte offset 1024) and
@@ -73,13 +73,53 @@ whose contents merely look like a path.
 
 ## Directories
 
-Directory blocks are scanned linearly, honouring each entry's record
-length and skipping unused slots and the `.`/`..` self-links (the VFS
-resolves those itself, §16). A child's kind comes from the directory
-entry's `file_type` byte when the `filetype` feature is set, otherwise
-from the child inode's mode. The root block of a hash-indexed directory
-is read through its linear `.`/`..` view; deeply indexed interior nodes
-are not traversed.
+A child's kind comes from the directory entry's `file_type` byte when the
+`filetype` feature is set, otherwise from the child inode's mode; unused
+slots and the `.`/`..` self-links are skipped (the VFS resolves those
+itself, §16). A directory is read one of two ways.
+
+**Linear.** Every block is a leaf, scanned in order by record length. A
+listing cursor is a record's byte offset: parsing resumes at the cursor's
+block's first record and takes the first record at or past it, so a cursor
+that is not a record boundary can only skip, never misparse. A record here
+never moves while in use — removal folds it into its predecessor, insertion
+splits a record's slack or appends a block — so an entry present throughout
+a listing is listed exactly once.
+
+**Hash-indexed** (`htree`, on a volume with `dir_index`). Block 0 is a root
+mapping ranges of a name hash to leaf blocks, directly or through one level
+of interior nodes. A lookup hashes the name and reads its leaf, and the
+leaves after it while a run of that hash continues. A listing runs in
+`(hash, name)` order and resumes just past the name it last returned —
+leaves are packed and split here, so records do move, and no move disturbs
+that position. Its cursor is a keyed digest of the name, never `0`.
+
+- **Hashes.** The legacy, half-MD4 and TEA hashes, over bytes read as signed
+  or unsigned as the superblock records, seeded by `s_hash_seed`. They are
+  implemented from the format and the published algorithms they build on
+  (MD4, RFC 1320; TEA, Wheeler and Needham, 1994) and checked against
+  e2fsprogs' `debugfs dx_hash` as a black box.
+- **New names** go into the leaf their hash selects. A full leaf whose free
+  space is only scattered is packed first; otherwise it is split at a cut
+  that keeps a hash's entries together when it can and balances the halves'
+  bytes. A full root moves its entries down to a new interior level, and a
+  full interior node splits; with both levels full a name is refused with
+  `NoSpace`, as is one whose hash already spans 16 leaves.
+- **Write order.** The new block, then the inode mapping it, then the index
+  naming it, then the block it came from: stopped part-way, an entry is left
+  in two leaves rather than none, and readers pass over an entry outside its
+  leaf's hash range.
+- **Checksums.** Under `metadata_csum` every index block's tail and every
+  leaf's tail is checked before it is used and resealed when written; a
+  mismatch fails closed with `DeviceFault`. A linear directory's leaves are
+  checked the same way.
+- **An index this driver cannot use** — a root of the wrong shape, SipHash
+  (casefolded encrypted directories), a superblock recording no byte
+  signedness, or a third level (`largedir`) — is read linearly, its names
+  still found, listed and removed, and adding one is refused before anything
+  changes (`DeviceFault` for damage, `Unsupported` otherwise).
+- Without `dir_index` the index flag means nothing: the directory is linear,
+  and adding a name clears the stale flag.
 
 ## Security
 
@@ -128,9 +168,12 @@ delegating (`AGENTS.md` §5.4). New files and directories are created with
 the classic block map (12 direct pointers + the single indirect block);
 file data is allocated from the block bitmap, inodes from the inode
 bitmap, and the group-descriptor and superblock free counts are kept in
-step. Directory entries are inserted by splitting an existing record's
-slack (growing the directory by a block when none fits) and removed by
-merging the freed slot into its predecessor. `truncate` frees the tail
+step. Directory entries are added and removed as [Directories](#directories)
+describes; a removal drops the name before the inode it names, so a failed
+write never leaves a name pointing at a freed inode, and a create that
+cannot place its name gives its inode back. A renamed entry keeps the type
+its inode has. The directory and allocation paths take their block-sized
+scratch from the heap rather than the small kernel stack they nest on. `truncate` frees the tail
 blocks of the classic map and the extent map (the inline depth-0 root or
 a depth-1 tree) and zeroes the retained partial block so a later
 extension reads as zeros.
@@ -157,11 +200,13 @@ checksum is not a cryptographic primitive, so `AGENTS.md` §2.12's "never
 roll your own" does not apply:
 
 - **`metadata_csum`** uses crc32c (reversed polynomial `0x82F6_3B78`,
-  seeded with `crc32c(~0, s_uuid)`) for the superblock `s_checksum`,
-  each group descriptor `bg_checksum`, the block/inode-bitmap checksums,
-  every inode (`i_checksum_lo`/`hi`, seeded per inode by number and
-  generation), each directory leaf's `ext4_dir_entry_tail`, and each
-  allocated extent block's `ext4_extent_tail`.
+  seeded with `crc32c(~0, s_uuid)`) — `lib/crc32c`'s, its dispatched
+  hardware instruction continuing each seed as a raw register — for the
+  superblock `s_checksum`, each group descriptor `bg_checksum`, the
+  block/inode-bitmap checksums, every inode (`i_checksum_lo`/`hi`, seeded
+  per inode by number and generation), each directory leaf's
+  `ext4_dir_entry_tail`, each index block's `dx_tail`, and each allocated
+  extent block's `ext4_extent_tail`.
 - **`gdt_csum`/`uninit_bg`** uses crc16 (reversed polynomial `0xA001`)
   for the legacy group-descriptor checksum.
 - **`64bit`** descriptors carry the high halves of the bitmap checksums

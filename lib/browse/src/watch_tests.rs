@@ -15,6 +15,7 @@ use crate::chrome::ToolbarBand;
 use crate::entry::{Entry, Occupancy};
 use crate::render::{listing_damage, shown_listing};
 use crate::source::{DirectorySource, Listing, Probe};
+use crate::tests::focused;
 use crate::vfs::NoLinks;
 
 /// A directory whose listing a test rewrites, answered at once or, when
@@ -47,7 +48,7 @@ impl DirectorySource for Folder {
     }
 
     fn has_children(&mut self, _components: &[String]) -> Result<Probe, Errno> {
-        Ok(Probe::Ready(true))
+        Ok(Probe::Holds(tairix_icon::FolderSample::default()))
     }
 }
 
@@ -150,7 +151,7 @@ fn changes_merge_into_listing_order_keeping_focus_and_selection_by_name() {
     let folder = Folder::holding(&["b", "d", "f", "h"]);
     let mut browser = Browser::open_root(folder).expect("open");
     browser.select(2).expect("select");
-    assert_eq!(browser.selected_name(), Some("f"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("f"));
     browser.toggle_selection(3).expect("toggle");
     let moved = browser
         .apply_changes(vec![
@@ -163,7 +164,7 @@ fn changes_merge_into_listing_order_keeping_focus_and_selection_by_name() {
     assert!(moved.is_some());
     assert_eq!(names(&browser), ["a", "b", "f", "g", "h"]);
     assert_eq!(
-        browser.selected_name(),
+        focused(&browser).map(Entry::name),
         Some("h"),
         "the focus follows its entry"
     );
@@ -180,7 +181,7 @@ fn a_removed_focus_rests_where_it_was_and_leaves_the_selection() {
         .apply_changes(vec![EntryChange::Remove(String::from("b"))])
         .expect("merged");
     assert_eq!(names(&browser), ["a", "c"]);
-    assert_eq!(browser.selected_name(), Some("c"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("c"));
     assert!(
         browser
             .selection()
@@ -201,7 +202,7 @@ fn a_focus_a_removal_moved_is_nothing_to_act_on() {
     browser
         .apply_changes(vec![EntryChange::Remove(String::from("b"))])
         .expect("merged");
-    assert_eq!(browser.selected_name(), Some("c"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("c"));
     assert_eq!(browser.chosen_index(), None);
     assert!(browser.chosen_entry().is_none());
     assert!(matches!(
@@ -227,7 +228,10 @@ fn a_changed_folder_keeps_its_occupancy_until_probed_again() {
     let mut browser = Browser::open_root(folder).expect("open");
     assert!(browser.resolve_occupancy(0..2));
     let probed = browser.entries()[1].occupancy();
-    assert_eq!(probed, Occupancy::NonEmpty);
+    assert_eq!(
+        probed,
+        Occupancy::NonEmpty(tairix_icon::FolderSample::default())
+    );
     let mut fresh = Entry::directory("src");
     fresh = Entry::new(
         fresh.name().to_string(),
@@ -241,7 +245,7 @@ fn a_changed_folder_keeps_its_occupancy_until_probed_again() {
     let src = &browser.entries()[1];
     assert_eq!(
         src.occupancy(),
-        Occupancy::NonEmpty,
+        Occupancy::NonEmpty(tairix_icon::FolderSample::default()),
         "no blink back to plain"
     );
     assert!(src.needs_occupancy_probe(), "but it is asked again");
@@ -264,7 +268,7 @@ fn a_reload_keeps_focus_selection_and_unchanged_answers() {
     folder.set(&["0", "a", "b", "c"]);
     browser.refresh().expect("reload");
     assert_eq!(names(&browser), ["0", "a", "b", "c"]);
-    assert_eq!(browser.selected_name(), Some("c"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("c"));
 }
 
 #[test]
@@ -273,18 +277,16 @@ fn a_new_folders_focus_waits_for_its_listing_to_land() {
     let mut browser = Browser::open_root(folder.clone()).expect("open");
     *folder.deferred.borrow_mut() = true;
     folder.set(&["a", "new"]);
-    browser
-        .create_directory("new", |_| Ok(()))
-        .expect("creates");
+    browser.create_entry("new", |_| Ok(())).expect("creates");
     assert_eq!(browser.focus_pending(), Some("new"));
     assert_eq!(
-        browser.selected_name(),
+        focused(&browser).map(Entry::name),
         Some("a"),
         "not yet: the listing is pending"
     );
     *folder.landed.borrow_mut() = true;
     assert!(browser.resume().expect("lands"));
-    assert_eq!(browser.selected_name(), Some("new"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("new"));
     assert_eq!(browser.focus_pending(), None);
 }
 
@@ -849,16 +851,14 @@ fn choosing_something_else_lets_a_pending_focus_go() {
     let mut browser = Browser::open_root(folder.clone()).expect("open");
     *folder.deferred.borrow_mut() = true;
     folder.set(&["a", "new", "z"]);
-    browser
-        .create_directory("new", |_| Ok(()))
-        .expect("creates");
+    browser.create_entry("new", |_| Ok(())).expect("creates");
     assert_eq!(browser.focus_pending(), Some("new"));
     browser.select(1).expect("the user picks z");
     assert_eq!(browser.focus_pending(), None);
     *folder.landed.borrow_mut() = true;
     assert!(browser.resume().expect("lands"));
     assert_eq!(
-        browser.selected_name(),
+        focused(&browser).map(Entry::name),
         Some("z"),
         "the user's choice stands"
     );
@@ -870,12 +870,12 @@ fn a_focus_whose_name_never_showed_is_let_go_at_the_next_listing() {
     let mut browser = Browser::open_root(folder.clone()).expect("open");
     *folder.deferred.borrow_mut() = true;
     browser
-        .create_directory("gone-again", |_| Ok(()))
+        .create_entry("gone-again", |_| Ok(()))
         .expect("creates");
     *folder.landed.borrow_mut() = true;
     assert!(browser.resume().expect("lands"));
     assert_eq!(browser.focus_pending(), None);
-    assert_eq!(browser.selected_name(), Some("a"));
+    assert_eq!(focused(&browser).map(Entry::name), Some("a"));
 }
 
 /// A tree of folders a test removes from, answered at once or, when `later`,
@@ -923,7 +923,7 @@ impl DirectorySource for Tree {
     }
 
     fn has_children(&mut self, _components: &[String]) -> Result<Probe, Errno> {
-        Ok(Probe::Ready(true))
+        Ok(Probe::Holds(tairix_icon::FolderSample::default()))
     }
 }
 

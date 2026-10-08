@@ -11,6 +11,7 @@ use super::*;
 use crate::pagecache::MAX_CACHED_PAGES;
 use crate::wcache::TestWritebackHost;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
+use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
 };
@@ -596,7 +597,7 @@ fn a_read_only_mount_never_writes_the_device() {
     // dirtied free blocks first).
     let root = ro.root();
     let node = ro.lookup(root, b"x").expect("the authored file exists");
-    let _ = ro.read_dir(root, 0, &mut [0u8; 64]);
+    let _ = listed(&mut ro, root, 0, &[]);
     let _ = ro.create(root, b"z", NodeKind::RegularFile);
     let _ = ro.reflink(root, b"x", b"y");
     let _ = ro.set_security(node, Security::new(0o600, 0, 0));
@@ -694,14 +695,8 @@ fn nested_directories_and_listing() {
     let inner = fs.lookup(sub, b"inner").unwrap();
     assert_eq!(fs.node_info(inner).unwrap().size, 0);
 
-    let mut names = alloc::vec::Vec::new();
-    let mut buf = [0u8; 64];
-    let mut i = 0u64;
-    while let Some(e) = fs.read_dir(root, i, &mut buf).expect("read_dir") {
-        names.push(buf[..e.name_len].to_vec());
-        i += 1;
-    }
-    assert!(names.iter().any(|n| n == b"sub"));
+    let names = listed(&mut fs, root, 0, &[]).expect("read_dir");
+    assert!(names.iter().any(|(_, name)| name == b"sub"));
 }
 
 #[test]
@@ -5578,9 +5573,8 @@ fn corruption_injection_both_copies_of_a_directory_block_are_reported_not_torn()
     let mut fs = open_corruption(bytes).expect("a damaged directory block still mounts");
 
     let root = fs.root();
-    let mut name = [0u8; 256];
     assert!(
-        fs.read_dir(root, 0, &mut name).is_err(),
+        listed(&mut fs, root, 0, &[]).is_err(),
         "reading a both-copies-bad directory fails closed"
     );
     // The baseline left a paused scrub whose cursor is already past the root
@@ -6848,13 +6842,10 @@ fn names_up_to_255_bytes_round_trip() {
     let body = alloc::vec![0x9u8; 1000];
     assert_eq!(fs.write_at(root, &name, 0, &body), Ok(1000));
 
-    let mut name_out = alloc::vec![0u8; NAME_MAX];
-    let entry = fs
-        .read_dir(root, 0, &mut name_out)
+    let (_, listed_name) = first_listed(&mut fs, root, 0, &[])
         .expect("read_dir")
         .expect("one entry");
-    assert_eq!(entry.name_len, NAME_MAX);
-    assert_eq!(&name_out[..entry.name_len], &name[..]);
+    assert_eq!(listed_name, name);
 
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
@@ -6951,14 +6942,8 @@ fn directory_entries_span_multiple_blocks_on_a_512_byte_volume() {
     for n in names {
         assert!(fs.lookup(root, n).is_ok(), "{n:?} must be present");
     }
-    let mut seen = 0u64;
-    let mut cursor = 0u64;
-    let mut buf = alloc::vec![0u8; NAME_MAX];
-    while let Some(entry) = fs.read_dir(root, cursor, &mut buf).expect("read_dir") {
-        seen += 1;
-        cursor = entry.next_cursor;
-    }
-    assert_eq!(seen, names.len() as u64, "every entry enumerates back");
+    let seen = listed(&mut fs, root, 0, &[]).expect("read_dir").len();
+    assert_eq!(seen, names.len(), "every entry enumerates back");
 }
 
 /// Allocate files of one data block each until the volume is full.
@@ -7917,6 +7902,8 @@ fn stats_report_tracks_allocation() {
 struct CountingBlock {
     inner: MemBlock,
     reads: u64,
+    /// The first block of every read, in order.
+    read_at: alloc::vec::Vec<u64>,
     flushes: u64,
 }
 
@@ -7926,6 +7913,7 @@ impl Block for CountingBlock {
     }
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         self.reads += 1;
+        self.read_at.push(lba);
         self.inner.read_blocks(lba, buf)
     }
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
@@ -7957,12 +7945,7 @@ fn counted_dir_fixture(files: u32) -> (ARXFS<CountingBlock>, NodeId) {
     }
     fs.flush().expect("flush");
     let bytes = fs.into_block().expect("the volume closes").bytes();
-    let counting = CountingBlock {
-        inner: MemBlock::from_bytes(bytes, 4096, 8192),
-        reads: 0,
-        flushes: 0,
-    };
-    let fs = ARXFS::open(counting, &TEST_KEY).expect("reopen");
+    let fs = ARXFS::open(counting(bytes, 4096, 8192), &TEST_KEY).expect("reopen");
     (fs, dir)
 }
 
@@ -7973,26 +7956,71 @@ fn counted_dir_fixture(files: u32) -> (ARXFS<CountingBlock>, NodeId) {
 fn read_dir_cursor_chain_lists_every_entry_with_its_sizes() {
     const FILES: u32 = 96;
     let (mut fs, dir) = counted_dir_fixture(FILES);
-    let mut name = [0u8; MAX_BLOCK_SIZE];
-    let mut seen = alloc::vec::Vec::new();
+    let mut chained = alloc::vec::Vec::new();
     let mut cursor = 0u64;
-    while let Some(entry) = fs.read_dir(dir, cursor, &mut name).expect("read_dir") {
+    while let Some((entry, name)) = first_listed(&mut fs, dir, cursor, &[]).expect("read_dir") {
         assert!(entry.next_cursor > cursor, "the cursor always advances");
         assert_eq!(entry.info.kind, NodeKind::RegularFile);
         assert_eq!(entry.info.size, b"hello world".len() as u64);
         // One 4 KiB data block backs each 11-byte file.
         assert_eq!(entry.info.allocated, 4096);
-        seen.push(alloc::string::String::from(
-            core::str::from_utf8(&name[..entry.name_len]).expect("utf8"),
-        ));
+        chained.push(name);
         cursor = entry.next_cursor;
     }
-    assert_eq!(seen.len(), FILES as usize, "every entry listed once");
-    seen.sort();
-    seen.dedup();
-    assert_eq!(seen.len(), FILES as usize, "no entry repeated");
+    let whole: alloc::vec::Vec<_> = listed(&mut fs, dir, 0, &[])
+        .expect("read_dir")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert_eq!(chained, whole, "resumed calls list what one call does");
+    let mut unique = whole.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), FILES as usize, "every entry listed once");
     // A cursor far past the directory ends the listing, fail closed.
-    assert_eq!(fs.read_dir(dir, u64::MAX, &mut name), Ok(None));
+    assert_eq!(first_listed(&mut fs, dir, u64::MAX, &[]), Ok(None));
+}
+
+/// Entries present throughout a listing are listed exactly once across
+/// resumed calls while the directory loses names behind and ahead of the
+/// cursor and gains new ones meanwhile, and nothing removed comes back.
+#[test]
+fn a_listing_resumed_across_changes_lists_each_lasting_entry_once() {
+    const FILES: u32 = 40;
+    let (mut fs, dir) = counted_dir_fixture(FILES);
+    let mut seen = alloc::vec::Vec::new();
+    let mut cursor = 0u64;
+    let mut after = alloc::vec::Vec::new();
+    let mut step = 0u32;
+    while let Some((entry, name)) = first_listed(&mut fs, dir, cursor, &after).expect("read_dir") {
+        seen.push(name.clone());
+        cursor = entry.next_cursor;
+        after = name;
+        step += 1;
+        if step.is_multiple_of(7) {
+            let gone = alloc::format!("f{}.txt", (step * 3) % FILES).into_bytes();
+            let _ = fs.remove(dir, &gone);
+            let late = alloc::format!("late{step}.txt").into_bytes();
+            fs.create(dir, &late, NodeKind::RegularFile)
+                .expect("create");
+        }
+    }
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), seen.len(), "nothing listed twice: {seen:?}");
+    let now: alloc::vec::Vec<_> = listed(&mut fs, dir, 0, &[])
+        .expect("read_dir")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    for lasting in now.iter().filter(|name| name.starts_with(b"f")) {
+        assert!(
+            seen.contains(lasting),
+            "{:?} lasted and was missed",
+            core::str::from_utf8(lasting)
+        );
+    }
 }
 
 /// Resuming a listing from a returned cursor is O(1): the read cost of
@@ -8002,11 +8030,10 @@ fn read_dir_cursor_chain_lists_every_entry_with_its_sizes() {
 fn read_dir_resume_cost_is_independent_of_directory_position() {
     const FILES: u32 = 96;
     let (mut fs, dir) = counted_dir_fixture(FILES);
-    let mut name = [0u8; MAX_BLOCK_SIZE];
     // Walk to the last entry, remembering the cursor that names it.
     let mut cursor = 0u64;
     let mut last_at = 0u64;
-    while let Some(entry) = fs.read_dir(dir, cursor, &mut name).expect("read_dir") {
+    while let Some((entry, _)) = first_listed(&mut fs, dir, cursor, &[]).expect("read_dir") {
         last_at = cursor;
         cursor = entry.next_cursor;
     }
@@ -8014,12 +8041,12 @@ fn read_dir_resume_cost_is_independent_of_directory_position() {
     // costs must match — position in the directory must not change the
     // price of one resumed step.
     fs.block_mut().reads = 0;
-    fs.read_dir(dir, 0, &mut name)
+    first_listed(&mut fs, dir, 0, &[])
         .expect("first")
         .expect("an entry");
     let first_cost = fs.block_mut().reads;
     fs.block_mut().reads = 0;
-    fs.read_dir(dir, last_at, &mut name)
+    first_listed(&mut fs, dir, last_at, &[])
         .expect("last")
         .expect("an entry");
     let last_cost = fs.block_mut().reads;
@@ -8027,6 +8054,32 @@ fn read_dir_resume_cost_is_independent_of_directory_position() {
         first_cost, last_cost,
         "resuming at the end reads as little as resuming at the start"
     );
+}
+
+/// One call over a multi-block directory reads each directory block once,
+/// however many entries it holds.
+#[test]
+fn a_listing_reads_each_directory_block_once() {
+    const FILES: u32 = 96;
+    let (mut fs, dir) = counted_dir_fixture(FILES);
+    let ino = fs.ino_of(dir).expect("the directory");
+    let inode = fs.read_inode(ino).expect("its inode");
+    let blocks: alloc::vec::Vec<u64> = (0..fs.dir_block_count(&inode))
+        .map(|blk| fs.block_ptr(&inode, blk).expect("mapped"))
+        .collect();
+    assert!(blocks.len() > 1, "the fixture spans several blocks");
+    fs.block_mut().read_at.clear();
+    let entries = listed(&mut fs, dir, 0, &[]).expect("read_dir");
+    assert_eq!(entries.len(), FILES as usize);
+    for block in &blocks {
+        let reads = fs
+            .block_mut()
+            .read_at
+            .iter()
+            .filter(|at| *at == block)
+            .count();
+        assert_eq!(reads, 1, "directory block {block} read once in one listing");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8277,12 +8330,8 @@ fn a_clean_check_costs_no_barrier_and_its_following_sync_the_transition() {
 fn a_read_only_mount_flush_issues_no_device_flush() {
     let (fs, _dir) = counted_dir_fixture(1);
     let bytes = fs.into_block().expect("the volume closes").inner.bytes();
-    let counting = CountingBlock {
-        inner: MemBlock::from_bytes(bytes, 4096, 8192),
-        reads: 0,
-        flushes: 0,
-    };
-    let mut ro = ARXFS::open_read_only(counting, &TEST_KEY).expect("reopen read-only");
+    let mut ro =
+        ARXFS::open_read_only(counting(bytes, 4096, 8192), &TEST_KEY).expect("reopen read-only");
     FilesystemWrite::flush(&mut ro).expect("flush");
     assert_eq!(
         ro.block_mut().flushes,
@@ -8321,6 +8370,7 @@ fn counting(bytes: alloc::vec::Vec<u8>, block_size: u32, blocks: u64) -> Countin
     CountingBlock {
         inner: MemBlock::from_bytes(bytes, block_size, blocks),
         reads: 0,
+        read_at: alloc::vec::Vec::new(),
         flushes: 0,
     }
 }
@@ -8657,9 +8707,7 @@ fn a_link_is_listed_as_a_link_and_its_blocks_are_accounted_as_data() {
     fs.create_link(root, b"alias", &alloc::vec![b'y'; 1200])
         .expect("create a multi-block link");
 
-    let mut name = [0u8; 255];
-    let entry = fs
-        .read_dir(root, 0, &mut name)
+    let (entry, _) = first_listed(&mut fs, root, 0, &[])
         .expect("read_dir")
         .expect("one entry");
     assert_eq!(entry.info.kind, NodeKind::Symlink);
