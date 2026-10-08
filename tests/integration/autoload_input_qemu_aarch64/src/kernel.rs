@@ -219,8 +219,8 @@ impl AutoloadInputSink {
     }
 
     /// Count one delivery to the files window and emit whichever AW3
-    /// readiness marker that ordinal completes — the activating
-    /// `Focus` + `Pressed` pair, then the handshake `Pressed`.
+    /// readiness marker that ordinal completes: the first delivery once the
+    /// window is on screen, then the next.
     fn note_files_window_delivery(&self) {
         let delivered = self
             .first_window_deliveries

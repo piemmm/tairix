@@ -29,28 +29,28 @@
 //! to — which is what makes a per-window delivery ordinal attributable
 //! where a system-wide total is not:
 //!
-//! 1. Clicking the served files window (opened by the session at desktop
-//!    reveal, and put on screen by that app's first present — which is what
-//!    the click waits on, since nothing earlier says the window is visible)
-//!    delivers `Focus { focused: true }` (the window was unfocused) …
-//! 2. … then the activating `Pressed`. Both landed on the files window's
-//!    own port, so the guest emits [`FILES_WINDOW_ACTIVATED_MARKER`]: the
-//!    served window demonstrably exists and is active on the composited
-//!    desktop, keying the second screendump.
-//! 3. A handshake click on the still-focused window — injected only after
-//!    that marker appeared and held while the second dump is pending —
-//!    delivers one further `Pressed` to the same port, on which the guest
-//!    emits [`FILES_HANDSHAKE_MARKER`]: the wake boundary the terminal
-//!    stage waits on (the runner holds its library-popup clicks behind it).
-//! 4. The terminal stage (`plans/APPWIN.md` AW4): the taskbar's Library
+//! 1. Clicking the files slot relays its default action to the app (the first
+//!    delivery to its port), which opens a window at the user's home.
+//! 2. That window's first present maps and focuses it, and the session
+//!    reports the move app-ward at once: `Focus { focused: true }`.
+//! 3. The scripted pointer, which waits on the session's own witness that the
+//!    window's first frame is on screen, then reaches the window: the first
+//!    delivery after it is shown, on which the guest emits
+//!    [`FILES_WINDOW_ACTIVATED_MARKER`] — the served window demonstrably
+//!    exists, holds the keyboard and is on the composited desktop, keying the
+//!    second screendump.
+//! 4. The next delivery to the same port is the click's own, on which the
+//!    guest emits [`FILES_HANDSHAKE_MARKER`]: the wake boundary the terminal
+//!    stage waits on (the runner holds its library-popup clicks behind it,
+//!    and behind the pending dump).
+//! 5. The terminal stage (`plans/APPWIN.md` AW4): the taskbar's Library
 //!    button opens the program-library popup (a session-owned surface —
 //!    no app-ward delivery), its `Terminal` entry spawns the terminal
 //!    bundle through the catalog the session merged from the planted
-//!    machine store (`plans/NEW-TASKBAR.md` T5), and clicking the
-//!    terminal's served window delivers `Focus { focused: false }` to the
-//!    files window (delivery 4), `Focus { focused: true }` to the
-//!    terminal (5), and the activating `Pressed` (6) — the gate after
-//!    which the runner types the shell command.
+//!    machine store (`plans/NEW-TASKBAR.md` T5), and the terminal's first
+//!    present moves the keyboard to it: the files window is told
+//!    `Focus { focused: false }` and the terminal `Focus { focused: true }`,
+//!    the gate after which the runner types the shell command.
 //! 5. Once the terminal is focused, the runner types [`TERMINAL_COMMAND`]
 //!    (`sleep 3600` + Enter); the terminal writes the line to the shell,
 //!    which resolves and loads the store bundle
@@ -92,27 +92,29 @@ pub const FILES_BAR_APP_NAME: &str = "files";
 /// and the bundle the guest witnesses name in step.
 pub const TERMINAL_BAR_APP_NAME: &str = "terminal";
 
-/// Guest marker: the files window received the `Focus` + `Pressed` pair of
-/// the first in-window click — it exists, is active, and the compositor has
-/// the frame the second screendump reads.
+/// Guest marker: the files window, focused and on screen, received the first
+/// delivery after the session showed it — it exists, is active, and the
+/// compositor has the frame the second screendump reads.
 ///
 /// Counted **on that window's own port**, not system-wide, so no other
 /// app's, service's or session surface's traffic can advance it; test-only.
 pub const FILES_WINDOW_ACTIVATED_MARKER: &str = "AUTOLOAD files window activated";
 
 /// Deliveries to the files window's own port that
-/// [`FILES_WINDOW_ACTIVATED_MARKER`] reports: the activating click's
-/// `Focus` then `Pressed`.
-pub const FILES_ACTIVATION_DELIVERIES: u32 = 2;
+/// [`FILES_WINDOW_ACTIVATED_MARKER`] reports: the slot's relayed action, the
+/// focus report its window's first present brings, then the scripted
+/// pointer's first delivery once the window is on screen.
+pub const FILES_ACTIVATION_DELIVERIES: u32 = 3;
 
-/// Guest marker: the handshake click's `Pressed` reached the still-focused
-/// files window. The terminal stage's library-popup clicks gate on it, so
-/// they fire in a wake strictly after the verified second dump's frame.
+/// Guest marker: a further delivery from the scripted clicks reached the
+/// still-focused files window. The terminal stage's library-popup clicks gate
+/// on it, so they fire in a wake strictly after the verified second dump's
+/// frame.
 pub const FILES_HANDSHAKE_MARKER: &str = "AUTOLOAD files handshake delivered";
 
 /// Deliveries to the files window's own port that [`FILES_HANDSHAKE_MARKER`]
-/// reports: the activating click's two, then the handshake's `Pressed`.
-pub const FILES_HANDSHAKE_DELIVERIES: u32 = 3;
+/// reports: the activation's three, then the next.
+pub const FILES_HANDSHAKE_DELIVERIES: u32 = 4;
 
 /// Guest marker: the terminal window first becomes the focused key
 /// recipient (first app-ward delivery to the second distinct window port;

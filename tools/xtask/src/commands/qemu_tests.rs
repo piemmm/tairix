@@ -790,9 +790,9 @@ const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 const KEYBOARD_ONLY_ARMED_OCCURRENCES: u32 = 1;
 
 /// Guest marker keying the second screendump (the served files window on
-/// the booted desktop): the activating click's `Focus` + `Pressed` both
-/// reached that window's own event port. The guest attributes the pair to
-/// the window itself, so no other app or service can key the dump.
+/// the booted desktop): the first delivery to that window's own event port
+/// after the session showed it. The guest attributes it to the window itself,
+/// so no other app or service can key the dump.
 const AUTOLOAD_FILES_ACTIVATED_MARKER: &str =
     tairix_test_autoload_input_qemu_aarch64::FILES_WINDOW_ACTIVATED_MARKER;
 
@@ -804,9 +804,9 @@ const FILES_BAR_APP_NAME: &str = tairix_test_autoload_input_qemu_aarch64::FILES_
 /// library, from that vertical's own contract.
 const TERMINAL_BAR_APP_NAME: &str = tairix_test_autoload_input_qemu_aarch64::TERMINAL_BAR_APP_NAME;
 
-/// Guest marker gating the terminal stage's library-popup clicks: the
-/// handshake click's `Pressed` reached the still-focused files window — a
-/// wake boundary strictly past the verified second dump.
+/// Guest marker gating the terminal stage's library-popup clicks: a further
+/// delivery reached the still-focused files window — a wake boundary strictly
+/// past the verified second dump.
 const AUTOLOAD_FILES_HANDSHAKE_MARKER: &str =
     tairix_test_autoload_input_qemu_aarch64::FILES_HANDSHAKE_MARKER;
 
@@ -15978,8 +15978,10 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         // into a strip that has not seated it yet hits nothing at all.
         step(APPBAR_SLOT_MARKER, 1, click),
         // A frame carrying the files window reached the display, so click its
-        // body; the session delivers `Focus` + `Pressed` to that window, which
-        // is the second dump's key. The session's own per-window witness is
+        // body. The window already holds the keyboard — its first present
+        // focused it, and the session said so — so what reaches it here is
+        // the pointer's own, the first of which keys the second dump. The
+        // session's own per-window witness is
         // the only honest gate: it shows a served window on its client's
         // *first present*, so the create round-trip and the frame-region map
         // it performs both say the window exists and neither says it is on
