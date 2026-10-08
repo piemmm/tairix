@@ -574,15 +574,12 @@ mod tests {
             DEFAULT_DTB_RAM_MIB,
             Board::translated(DmaTranslation::VirtioIommu),
         );
+        let unit = DmaTranslation::VirtioIommu
+            .unit_device()
+            .expect("the run creates the virtio-iommu");
         assert_eq!(
             args[..5],
-            [
-                "-M",
-                "virt,dumpdtb=/t.dtb",
-                "-device",
-                "virtio-iommu-pci,addr=0x2",
-                "-cpu"
-            ]
+            ["-M", "virt,dumpdtb=/t.dtb", "-device", unit, "-cpu"]
         );
     }
 
