@@ -3,9 +3,12 @@
 //!
 //! The band's anchor is held in layout coordinates, so scrolling while it is
 //! held grows it; its head is the pointer, in window coordinates, clamped to
-//! the item area. Which entries it touches is arithmetic over the view's lines
-//! and slots, and a sweep changes only the entries entering or leaving the
-//! band, so a band costs what changes rather than what it covers.
+//! the item area. It selects an entry whose body it touches — a grid tile's
+//! picture and name, not the ground around them. Which tiles it surely touches
+//! is arithmetic over the view's lines and slots, only the tiles along its
+//! edges are tested one by one, and a sweep changes only the entries entering
+//! or leaving the band, so a band costs what changes rather than what it
+//! covers.
 
 use tairix_controls::scroll::{ScrollOrientation, ScrollView};
 use tairix_controls::{blend_area, fill_area};
@@ -14,8 +17,8 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::browser::Browser;
-use crate::layout::BandCells;
-use crate::render::{view_layout_for, Frame};
+use crate::layout::BandMarks;
+use crate::render::{entry_body, tile_core, view_layout_for, Frame};
 use crate::select::Selection;
 use crate::source::DirectorySource;
 
@@ -33,7 +36,9 @@ pub struct Marquee {
     anchor: Point,
     head: Point,
     base: Selection,
-    touched: BandCells,
+    touched: BandMarks,
+    /// What a sweep builds the next marks in, so a step allocates nothing.
+    next: BandMarks,
 }
 
 impl Marquee {
@@ -57,7 +62,8 @@ pub fn begin<S: DirectorySource>(
         anchor,
         head: point,
         base: browser.selection().clone(),
-        touched: BandCells::default(),
+        touched: BandMarks::default(),
+        next: BandMarks::default(),
     })
 }
 
@@ -79,9 +85,19 @@ pub fn sweep<S: DirectorySource>(
         frame.toolbar,
     );
     let view = layout.view(browser.scroll_offset());
-    let touched = layout.band_cells(band_in_layout(&view, marquee));
-    let changed = browser.move_band(&marquee.base, &marquee.touched, &touched);
-    marquee.touched = touched;
+    let band = band_in_layout(&view, marquee);
+    let core = layout.band_cells_within(band, tile_core(frame.scale, frame.theme));
+    let cells = layout.band_cells(band);
+    let entries = browser.entries();
+    marquee.next.rebuild(core, &cells, |index| {
+        let body = layout
+            .layout_rect(index)
+            .zip(entries.get(index))
+            .and_then(|(cell, entry)| entry_body(entry, cell, frame.scale, frame.theme));
+        body.is_some_and(|body| !body.intersection(&band).is_empty())
+    });
+    let changed = browser.move_band(&marquee.base, &marquee.touched, &marquee.next);
+    core::mem::swap(&mut marquee.touched, &mut marquee.next);
     changed
 }
 

@@ -5282,6 +5282,11 @@ fn crash_replay_at_every_step_of_a_batch_publishes_all_of_it_or_none() {
         |fs| {
             all_ran.set(false);
             let root = fs.root();
+            // The first data change of a mount commits on its own, so the
+            // batch measured is the one that follows it.
+            if fs.write_at(root, b"keep", 0, CRASH_KEEP).is_err() {
+                return;
+            }
             if fs.create(root, b"fresh", NodeKind::RegularFile).is_err() {
                 return;
             }
@@ -8266,10 +8271,20 @@ fn a_compressed_cluster_read_asks_the_device_once_for_its_stored_run() {
 
 /// An ordinary commit and an explicit sync each issue one barrier. The commit
 /// makes the map's invalidation durable before its pages; the sync makes those
-/// pages and the publishing slot durable before restoring the clean stamp.
+/// pages and the publishing slot durable before restoring the clean stamp. A
+/// mount's first data change pays one more, once: the flush that puts its
+/// content-generation stride on the medium.
 #[test]
 fn a_commit_and_a_sync_each_barrier_once() {
     let (mut fs, dir) = counted_dir_fixture(1);
+    fs.block_mut().flushes = 0;
+    fs.write_at(dir, b"f0.txt", 0, b"the mount's first change")
+        .expect("write");
+    assert_eq!(
+        fs.block_mut().flushes,
+        2,
+        "the mount's first change also flushes the slot naming its stride"
+    );
     fs.block_mut().flushes = 0;
     fs.write_at(dir, b"f0.txt", 0, b"durable payload")
         .expect("write");
@@ -8313,7 +8328,11 @@ fn a_clean_check_costs_no_barrier_and_its_following_sync_the_transition() {
         2,
         "sync used more than the clean-to-dirty transition's two barriers"
     );
-    // A second sync has no transition left to pay for.
+    // A second sync has no transition left to pay for. The mount's first
+    // change pays once for its stride, so it is made before counting.
+    fs.write_at(dir, b"f0.txt", 0, b"first")
+        .expect("first write");
+    FilesystemWrite::flush(&mut fs).expect("sync");
     fs.block_mut().flushes = 0;
     fs.write_at(dir, b"f0.txt", 0, b"x").expect("write");
     FilesystemWrite::flush(&mut fs).expect("sync");
@@ -8947,6 +8966,25 @@ fn an_unreadable_primary_transaction_root_mounts_from_its_companion() {
     let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount from the companion");
     re.lookup(re.root(), b"witness")
         .expect("the committed content is intact");
+}
+
+/// A refused repair of an unreadable transaction root is not a root that failed
+/// to commit: the mount still takes the newest one, from its companion, rather
+/// than falling back to an older slot and losing what it committed.
+#[test]
+fn an_unrepairable_primary_transaction_root_still_mounts_from_its_companion() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"witness", NodeKind::RegularFile)
+        .expect("create");
+    let root_phys = fs.root_phys;
+    let bytes = fs.into_block().expect("the volume closes").bytes();
+    let mut dev = MemBlock::from_bytes(bytes, 512, 256).fail_reads_of(root_phys);
+    dev.write_faults.insert(root_phys);
+
+    let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount from the companion");
+    re.lookup(re.root(), b"witness")
+        .expect("the newest committed root was taken");
 }
 
 #[test]
@@ -10836,4 +10874,146 @@ fn the_reclaim_never_frees_a_node_a_name_still_reaches() {
     let live = fs.used_blocks();
     fs.rebuild_free_space().expect("rebuild");
     assert_eq!(fs.used_blocks(), live);
+}
+
+/// The content generation of the node `name` names in the root directory.
+fn content_gen(fs: &mut ARXFS<MemBlock>, name: &[u8]) -> u64 {
+    let node = fs.lookup(fs.root(), name).expect("lookup");
+    fs.node_info(node).expect("node info").content_gen
+}
+
+/// A file's content generation moves with its data — creation, every write,
+/// every truncate — and with nothing else: a change of mode, an attribute, a
+/// rename or a second name leave it where it was. Every version on the volume
+/// has its own, and a directory has none.
+#[test]
+fn a_content_generation_moves_with_the_data_and_nothing_else() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"a", NodeKind::RegularFile)
+        .expect("create");
+    let created = content_gen(&mut fs, b"a");
+    assert_ne!(
+        created,
+        NodeInfo::NO_CONTENT_GEN,
+        "a file keeps a generation"
+    );
+    fs.write_at(root, b"a", 0, b"first").expect("write");
+    let written = content_gen(&mut fs, b"a");
+    assert!(written > created, "a write is a new version");
+    fs.truncate(root, b"a", 2).expect("truncate");
+    let truncated = content_gen(&mut fs, b"a");
+    assert!(truncated > written, "a truncate is a new version");
+    fs.truncate(root, b"a", 2)
+        .expect("truncate to the same size");
+    assert_eq!(fs.write_at(root, b"a", 1, b""), Ok(0));
+    assert_eq!(
+        content_gen(&mut fs, b"a"),
+        truncated,
+        "no bytes changed, so no new version"
+    );
+
+    let node = fs.lookup(root, b"a").expect("lookup");
+    fs.set_security(node, Security::new(0o600, 0, 0))
+        .expect("set_security");
+    fs.set_attr(node, b"user.colour", b"blue")
+        .expect("set_attr");
+    fs.rename(root, b"a", root, b"b").expect("rename");
+    fs.link(root, b"c", node).expect("link");
+    assert_eq!(
+        content_gen(&mut fs, b"b"),
+        truncated,
+        "metadata is not content"
+    );
+    assert_eq!(
+        content_gen(&mut fs, b"c"),
+        truncated,
+        "a second name is one node"
+    );
+
+    fs.create(root, b"d", NodeKind::RegularFile)
+        .expect("create");
+    fs.create_link(root, b"l", b"b").expect("symlink");
+    let others = [content_gen(&mut fs, b"d"), content_gen(&mut fs, b"l")];
+    assert!(others.iter().all(|gen| *gen > truncated), "{others:?}");
+    assert_ne!(others[0], others[1], "two files never share a version");
+    fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
+    assert_eq!(content_gen(&mut fs, b"dir"), NodeInfo::NO_CONTENT_GEN);
+}
+
+/// A mount's stride is on the medium before its first change returns, even on
+/// a device that caches writes: a power cut straight after that change cannot
+/// let the next mount hand out the generation a reader saw.
+#[test]
+fn a_mounts_stride_survives_a_power_cut_after_its_first_change() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"x", NodeKind::RegularFile)
+        .expect("create");
+    let image = fs.into_block().expect("the volume closes").bytes();
+
+    let device = MemBlock::from_bytes(image, 4096, 512).with_volatile_cache();
+    let mut fs = ARXFS::open(device, &TEST_KEY)
+        .expect("mount")
+        .with_clock(fixed_clock);
+    fs.write_at(root, b"x", 0, b"seen").expect("first write");
+    let seen = content_gen(&mut fs, b"x");
+    fs.block_mut().power_loss(|_| false);
+    let crashed = fs.block_mut().bytes();
+
+    let mut fs = ARXFS::open(MemBlock::from_bytes(crashed, 4096, 512), &TEST_KEY)
+        .expect("remount")
+        .with_clock(fixed_clock);
+    fs.write_at(root, b"x", 0, b"after the cut").expect("write");
+    let after = content_gen(&mut fs, b"x");
+    assert!(
+        after > seen,
+        "{after} repeats or precedes {seen}, which a reader saw"
+    );
+}
+
+/// A generation a reader saw is never handed out again — not after a crash
+/// loses the transaction it was minted in. The first data change of a mount
+/// commits the mount's stride past the sequence before it returns, so the
+/// next mount starts beyond everything the lost transaction handed out.
+#[test]
+fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
+    let mut fs = fmt(4096, 512, 64);
+    let root = fs.root();
+    fs.create(root, b"x", NodeKind::RegularFile)
+        .expect("create");
+    let image = fs.into_block().expect("the volume closes").bytes();
+
+    let host = TestWritebackHost::leaked(0);
+    let mut fs = ARXFS::open(MemBlock::from_bytes(image, 4096, 512), &TEST_KEY)
+        .expect("mount")
+        .with_clock(fixed_clock)
+        .with_writeback_host(TestWritebackHost::volume(), host);
+    fs.write_at(root, b"x", 0, b"durable").expect("first write");
+    let durable = content_gen(&mut fs, b"x");
+    // Committed before the write returned: the stride is on the device.
+    let committed = fs.block_mut().bytes();
+    fs.write_at(root, b"x", 0, b"seen, then lost")
+        .expect("second write");
+    let seen = content_gen(&mut fs, b"x");
+    assert!(seen > durable);
+    // Power lost with the second write still in the open transaction.
+    let crashed = fs.block_mut().bytes();
+    assert_eq!(crashed, committed, "the second write was not published");
+
+    let mut fs = ARXFS::open(MemBlock::from_bytes(crashed, 4096, 512), &TEST_KEY)
+        .expect("remount")
+        .with_clock(fixed_clock);
+    assert_eq!(
+        content_gen(&mut fs, b"x"),
+        durable,
+        "the volume rolled back"
+    );
+    fs.write_at(root, b"x", 0, b"after the crash")
+        .expect("write");
+    let after = content_gen(&mut fs, b"x");
+    assert!(
+        after > seen,
+        "{after} repeats or precedes {seen}, which a reader saw"
+    );
 }

@@ -587,7 +587,7 @@ fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
         bounds,
         Scale::ONE,
         &theme,
-        Some(IconPicture::Artwork(&artwork(side, ART))),
+        Some(IconPicture::coloured(&artwork(side, ART))),
     );
     let drawn = bbox(&with_art, ART.premultiply()).expect("artwork drawn");
     assert_eq!(drawn.2 + 1 - drawn.0, side);

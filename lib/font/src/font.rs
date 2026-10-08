@@ -61,6 +61,20 @@ use crate::shadow::{self, TextShadow};
 /// `char` would have to be encoded at every call site.
 pub const ELLIPSIS: &str = "\u{2026}";
 
+/// Where a wrap drops what its last line cannot hold.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Cut {
+    /// At the line's end: its start, then the mark.
+    End,
+    /// In the line's middle: its start, the mark, and the end of the text. The
+    /// end takes half the room, or the width of the text's last `keep` bytes
+    /// when that is more, so an ending such as a file's extension survives.
+    Middle {
+        /// How many bytes at the text's end are kept whole when they fit.
+        keep: usize,
+    },
+}
+
 /// A family, pixel height, and weight to draw with: the reference a client
 /// needs to fetch a family's line metrics and any glyph's coverage bitmap
 /// from the sandboxed font service.
@@ -546,6 +560,110 @@ impl BitmapFont {
         )
     }
 
+    /// Fit `text[from.byte..stop]` into `width` by cutting it in its middle:
+    /// the byte its head ends at, whether the mark is drawn, and the byte its
+    /// tail starts at. A run that fits is its own head with an empty tail.
+    ///
+    /// The tail takes half the room left beside the mark, or the width of the
+    /// run's last `keep` bytes when that is more; the head takes the rest. A
+    /// box too narrow for the mark draws nothing, as an end cut does.
+    fn cut_middle_on(
+        self,
+        client: &mut impl FontClient,
+        text: &str,
+        from: Cursor,
+        stop: usize,
+        keep: usize,
+        width: u32,
+    ) -> (usize, bool, usize) {
+        if self.fitting_end_on(client, text, from, width) >= stop {
+            return (stop, false, stop);
+        }
+        let Some(room) = width.checked_sub(self.width_on(client, ELLIPSIS)) else {
+            return (from.byte, false, stop);
+        };
+        let end = from.over(&text[from.byte..stop]);
+        let mut kept = stop.saturating_sub(keep).max(from.byte);
+        while !text.is_char_boundary(kept) {
+            kept -= 1;
+        }
+        let kept = from.over(&text[from.byte..kept]);
+        let tail_room = (room / 2)
+            .max(self.span_width_on(client, text, kept, end))
+            .min(room);
+        let tail = self.tail_start_on(client, text, from, end, tail_room);
+        let head_room = room.saturating_sub(self.span_width_on(client, text, tail, end));
+        let head = self
+            .fitting_end_on(client, text, from, head_room)
+            .min(tail.byte);
+        (head, true, tail.byte)
+    }
+
+    /// The advance of `text` from `from` to `to`, both boundaries of it.
+    fn span_width_on(
+        self,
+        client: &mut impl FontClient,
+        text: &str,
+        from: Cursor,
+        to: Cursor,
+    ) -> u32 {
+        if let Some(cell) = self.monospace_advance_on(client) {
+            return text[from.byte..to.byte].chars().fold(0, |width, ch| {
+                width.saturating_add(Self::cell_step(cell, ch))
+            });
+        }
+        client.with_measurement(
+            text,
+            self.family,
+            self.pixel_height,
+            self.weight,
+            |measured| {
+                measured
+                    .pen_at(to.chars)
+                    .saturating_sub(measured.pen_at(from.chars))
+            },
+        )
+    }
+
+    /// Where the longest tail of `text[from.byte..end.byte]` fitting `width`
+    /// starts, on a `char` boundary.
+    fn tail_start_on(
+        self,
+        client: &mut impl FontClient,
+        text: &str,
+        from: Cursor,
+        end: Cursor,
+        width: u32,
+    ) -> Cursor {
+        let span = &text[from.byte..end.byte];
+        let index = match self.monospace_advance_on(client) {
+            Some(cell) => {
+                let mut taken = 0u32;
+                let fitting = span
+                    .chars()
+                    .rev()
+                    .take_while(|&ch| {
+                        taken = taken.saturating_add(Self::cell_step(cell, ch));
+                        taken <= width
+                    })
+                    .count();
+                end.chars - fitting
+            }
+            None => client.with_measurement(
+                text,
+                self.family,
+                self.pixel_height,
+                self.weight,
+                |measured| measured.tail_start_within(from.chars, end.chars, width),
+            ),
+        };
+        let byte = span
+            .char_indices()
+            .nth(index - from.chars)
+            .map_or(end.byte, |(offset, _)| from.byte + offset);
+        Cursor { byte, chars: index }
+    }
+
     /// Lay `text` out over at most `max_lines` lines of `width` pixels,
     /// yielding one [`TextLine`] per line **to draw**.
     ///
@@ -581,6 +699,18 @@ impl BitmapFont {
     /// [`ELLIPSIS`] at the pen [`draw_text`](Self::draw_text) returned.
     #[must_use]
     pub fn wrap_to_width(self, text: &str, width: u32, max_lines: usize) -> TextWrap<'_> {
+        self.wrap_with_cut(text, width, max_lines, Cut::End)
+    }
+
+    /// [`wrap_to_width`](Self::wrap_to_width), with the last line cut as `cut`
+    /// says when the text outgrows its lines.
+    ///
+    /// [`Cut::Middle`] is how a file's name is shown under its icon: the last
+    /// line keeps its start and the name's end, so the extension that tells two
+    /// long names apart is never what gets dropped. That line's
+    /// [`tail`](TextLine::tail) is drawn after the mark.
+    #[must_use]
+    pub fn wrap_with_cut(self, text: &str, width: u32, max_lines: usize, cut: Cut) -> TextWrap<'_> {
         let content = text.trim();
         let leading = &text[..text.len() - text.trim_start().len()];
         TextWrap {
@@ -594,6 +724,7 @@ impl BitmapFont {
                 done: false,
             },
             remaining: if content.is_empty() { 0 } else { max_lines },
+            cut,
         }
     }
 
@@ -770,6 +901,9 @@ pub struct TextLine<'a> {
     pub start: usize,
     /// Whether [`ELLIPSIS`] is drawn after [`text`](Self::text).
     pub elided: bool,
+    /// What is drawn after the mark: the end of a text cut in its middle
+    /// ([`Cut::Middle`]), empty for every other line.
+    pub tail: &'a str,
 }
 
 impl TextLine<'_> {
@@ -872,6 +1006,7 @@ impl<'a> TextLines<'a> {
                     text: "",
                     start: self.limit,
                     elided: false,
+                    tail: "",
                 },
                 LineBreak::End,
             ));
@@ -887,6 +1022,7 @@ impl<'a> TextLines<'a> {
                 text,
                 start: at.byte,
                 elided: false,
+                tail: "",
             },
             ended_by,
         ))
@@ -983,6 +1119,7 @@ impl<'a> Iterator for TextLines<'a> {
 pub struct TextWrap<'a> {
     lines: TextLines<'a>,
     remaining: usize,
+    cut: Cut,
 }
 
 impl<'a> TextWrap<'a> {
@@ -991,7 +1128,9 @@ impl<'a> TextWrap<'a> {
     ///
     /// It stops at a newline rather than running the paragraphs together,
     /// because a forced break is where its author ended the sentence — and
-    /// because a newline drawn as a glyph is a defect in the making.
+    /// because a newline drawn as a glyph is a defect in the making. A middle
+    /// cut keeps the text's end only where this paragraph is the last: a cut
+    /// that dropped later paragraphs has no end of its own to keep.
     fn last_line(&mut self) -> Option<TextLine<'a>> {
         let lines = &mut self.lines;
         let at = lines.at;
@@ -1004,18 +1143,34 @@ impl<'a> TextWrap<'a> {
         // Whatever follows this paragraph is dropped along with it, so the
         // mark is owed even where the paragraph itself fits.
         let more = stop < lines.limit;
-        let (end, elided) = client::with_client(|client| {
-            lines
-                .font
-                .elide_run_on(client, lines.text, at, stop, more, lines.width)
+        let cut = self.cut;
+        let (end, elided, tail_from) = client::with_client(|client| match cut {
+            Cut::Middle { keep } if !more => {
+                lines
+                    .font
+                    .cut_middle_on(client, lines.text, at, stop, keep, lines.width)
+            }
+            Cut::End | Cut::Middle { .. } => {
+                let (end, elided) =
+                    lines
+                        .font
+                        .elide_run_on(client, lines.text, at, stop, more, lines.width);
+                (end, elided, stop)
+            }
         });
         let run = lines.text.get(at.byte..end).unwrap_or_default();
         let text = run.trim();
         let start = at.byte + (run.len() - run.trim_start().len());
+        let tail = lines
+            .text
+            .get(tail_from..stop)
+            .unwrap_or_default()
+            .trim_start();
         (!text.is_empty() || elided).then_some(TextLine {
             text,
             start,
             elided,
+            tail,
         })
     }
 }
@@ -1044,6 +1199,7 @@ impl<'a> Iterator for TextWrap<'a> {
             text: trimmed,
             start: line.start + (line.text.len() - line.text.trim_start().len()),
             elided: false,
+            tail: "",
         })
     }
 }

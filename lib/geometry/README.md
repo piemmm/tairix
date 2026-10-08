@@ -27,7 +27,8 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
   sits, which one a coordinate falls in, and — `GridFill::Spread` against
   `FixedPitch` — whether the leftover room widens the gaps or stays at the
   far end. The file manager's and the desktop's grids and the picture choice
-  all lay their tiles out through it.
+  all lay their tiles out through it, and `within` narrows each cell to one
+  part of it — a tile's picture — over the same count and stride.
 
 All edge arithmetic widens through `i64`/`u32` so a pathological coordinate
 saturates rather than wrapping — it fails closed (`AGENTS.md` §2.9). `Scale`

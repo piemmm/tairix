@@ -12,7 +12,7 @@
 use core::cell::Cell;
 
 use tairix_colour::Rgba;
-use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
+use tairix_font::{BitmapFont, Cut, TextLine, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -613,6 +613,8 @@ pub(crate) struct TextBlock {
     /// The shadow behind it, for a block drawn over ground its owner does
     /// not control — a caption over a wallpaper.
     pub(crate) shadow: Option<TextShadow>,
+    /// Where the last line drops what it cannot hold.
+    pub(crate) cut: Cut,
 }
 
 impl TextBlock {
@@ -625,6 +627,7 @@ impl TextBlock {
             align: TextAlign::Leading,
             color,
             shadow: None,
+            cut: Cut::End,
         }
     }
 
@@ -636,7 +639,7 @@ impl TextBlock {
     /// identical break decisions.
     pub(crate) fn line_count(&self, text: &str) -> usize {
         self.font
-            .wrap_to_width(text, self.width, self.lines)
+            .wrap_with_cut(text, self.width, self.lines, self.cut)
             .count()
     }
 
@@ -646,6 +649,16 @@ impl TextBlock {
         self.font.line_height().saturating_mul(lines)
     }
 
+    /// The width of `text`'s widest drawn line and how many lines it takes,
+    /// from one walk of the layout.
+    pub(crate) fn extent(&self, text: &str) -> (u32, usize) {
+        self.font
+            .wrap_with_cut(text, self.width, self.lines, self.cut)
+            .fold((0, 0), |(width, lines), line| {
+                (width.max(run_width(self.font, line)), lines + 1)
+            })
+    }
+
     /// The width `text` actually draws in: its widest line, mark included,
     /// which is never more than the block's own column.
     ///
@@ -653,8 +666,8 @@ impl TextBlock {
     /// allowed, so a two-word tooltip stays a two-word tooltip.
     pub(crate) fn measured_width(&self, text: &str) -> u32 {
         self.font
-            .wrap_to_width(text, self.width, self.lines)
-            .map(|line| run_width(self.font, (line.text, line.elided)))
+            .wrap_with_cut(text, self.width, self.lines, self.cut)
+            .map(|line| run_width(self.font, line))
             .max()
             .unwrap_or(0)
     }
@@ -678,16 +691,19 @@ impl TextBlock {
 
     /// Hand each line of `text` laid out from `(x, top)` down to `each` with
     /// the pen it starts at, and answer the `y` just past the last line.
-    fn lay_out(
+    fn lay_out<'t>(
         &self,
-        text: &str,
+        text: &'t str,
         at: (u32, u32),
-        mut each: impl FnMut((&str, bool), (i32, i32)),
+        mut each: impl FnMut(Run<'t>, (i32, i32)),
     ) -> u32 {
         let (x, top) = at;
         let mut y = top;
-        for line in self.font.wrap_to_width(text, self.width, self.lines) {
-            let run = (line.text, line.elided);
+        for line in self
+            .font
+            .wrap_with_cut(text, self.width, self.lines, self.cut)
+        {
+            let run = Run::from(line);
             let lx = match self.align {
                 TextAlign::Leading => x,
                 TextAlign::Centre => {
@@ -764,14 +780,13 @@ pub fn paint_icon_slot(
     picture: Option<IconPicture<'_>>,
     saturation: u8,
 ) {
-    let mut draw = |picture: IconPicture<'_>| match picture {
-        IconPicture::Artwork(art) => {
-            let (ax, ay) = centred_in(slot, art);
+    let mut draw = |picture: IconPicture<'_>| {
+        let art = picture.surface();
+        let (ax, ay) = centred_in(slot, art);
+        if picture.is_mask() {
+            surface.blit_tinted(ax, ay, art, tint);
+        } else {
             surface.blit_desaturated(ax, ay, art, saturation);
-        }
-        IconPicture::Mask(mask) => {
-            let (ax, ay) = centred_in(slot, mask);
-            surface.blit_tinted(ax, ay, mask, tint);
         }
     };
     match picture {
@@ -785,7 +800,7 @@ pub fn paint_icon_slot(
 }
 
 /// Where `art` is blitted to sit centred in the `(x, y, side)` square `slot`.
-fn centred_in((x, y, side): (u32, u32, u32), art: &Surface) -> (i32, i32) {
+pub(crate) fn centred_in((x, y, side): (u32, u32, u32), art: &Surface) -> (i32, i32) {
     (
         to_i32(x) + (to_i32(side) - to_i32(art.width())) / 2,
         to_i32(y) + (to_i32(side) - to_i32(art.height())) / 2,
@@ -2182,16 +2197,50 @@ pub(crate) fn paint_row(
     row_content_span(scale, theme, x, w, h).map(|(cx, cw)| (cx, y, cw, h))
 }
 
-/// The drawn width of a fitted run — the pair a fitter hands back, text and
-/// whether [`ELLIPSIS`] follows it — mark included.
-#[must_use]
-pub fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
-    let (text, elided) = run;
-    let width = font.text_width(text);
-    if elided {
-        return width.saturating_add(font.text_width(ELLIPSIS));
+/// A fitted run of text: what is drawn, whether [`ELLIPSIS`] follows it, and
+/// what follows the mark — the end of a name cut in its middle.
+///
+/// A fitter's `(text, elided)` pair converts into one with no tail, so a cut at
+/// the end reads exactly as it always has.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Run<'a> {
+    /// The run's text, or its head when the mark sits inside it.
+    pub text: &'a str,
+    /// Whether the mark is drawn after [`text`](Self::text).
+    pub elided: bool,
+    /// What is drawn after the mark.
+    pub tail: &'a str,
+}
+
+impl<'a> From<(&'a str, bool)> for Run<'a> {
+    fn from((text, elided): (&'a str, bool)) -> Self {
+        Self {
+            text,
+            elided,
+            tail: "",
+        }
     }
-    width
+}
+
+impl<'a> From<TextLine<'a>> for Run<'a> {
+    fn from(line: TextLine<'a>) -> Self {
+        Self {
+            text: line.text,
+            elided: line.elided,
+            tail: line.tail,
+        }
+    }
+}
+
+/// The drawn width of a fitted run, mark and tail included.
+#[must_use]
+pub fn run_width<'a>(font: BitmapFont, run: impl Into<Run<'a>>) -> u32 {
+    let run = run.into();
+    let mut width = font.text_width(run.text);
+    if run.elided {
+        width = width.saturating_add(font.text_width(ELLIPSIS));
+    }
+    width.saturating_add(font.text_width(run.tail))
 }
 
 /// Draw a fitted run at `at`, its mark included, over `shadow` when the
@@ -2204,23 +2253,24 @@ pub fn run_width(font: BitmapFont, run: (&str, bool)) -> u32 {
 /// for the mark itself — draws its text alone.
 /// The mark takes the shadow with the text, so a shadowed label reads as one
 /// run rather than a shadowed name and a bare ellipsis.
-pub fn paint_run(
+pub fn paint_run<'a>(
     surface: &mut Surface,
     font: BitmapFont,
-    run: (&str, bool),
+    run: impl Into<Run<'a>>,
     at: (i32, i32),
     color: Color,
     shadow: Option<TextShadow>,
 ) {
+    let run = run.into();
     if let Some(shadow) = shadow {
         paint_run_shadow(surface, font, run, at, shadow);
     }
-    let (text, elided) = run;
     let (x, y) = at;
-    let pen = font.draw_text(surface, x, y, text, color);
-    if elided {
-        font.draw_text(surface, pen, y, ELLIPSIS, color);
+    let mut pen = font.draw_text(surface, x, y, run.text, color);
+    if run.elided {
+        pen = font.draw_text(surface, pen, y, ELLIPSIS, color);
     }
+    font.draw_text(surface, pen, y, run.tail, color);
 }
 
 /// Draw only the shadow [`paint_run`] draws under a fitted run, so text laid
@@ -2229,14 +2279,14 @@ pub fn paint_run(
 fn paint_run_shadow(
     surface: &mut Surface,
     font: BitmapFont,
-    run: (&str, bool),
+    run: Run<'_>,
     at: (i32, i32),
     shadow: TextShadow,
 ) {
-    let (text, elided) = run;
     let (x, y) = at;
-    let pen = font.draw_shadow(surface, x, y, text, shadow);
-    if elided {
-        font.draw_shadow(surface, pen, y, ELLIPSIS, shadow);
+    let mut pen = font.draw_shadow(surface, x, y, run.text, shadow);
+    if run.elided {
+        pen = font.draw_shadow(surface, pen, y, ELLIPSIS, shadow);
     }
+    font.draw_shadow(surface, pen, y, run.tail, shadow);
 }

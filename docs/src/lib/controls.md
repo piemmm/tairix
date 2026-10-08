@@ -891,6 +891,22 @@ outline (`paint_drop_target`), the one drop look a table row wears too. Nothing 
 escapes its bounds, so a view may lay tiles edge to edge — and bound the whole
 grid's paint to the area it owns — without a tile bleeding onto its neighbour.
 
+State paints over the tile's **body**, not its bounds: `TileLayout::body_rect`
+is its picture and its name's drawn lines, each with half an inset of margin,
+and the rest of the bounds is ground. The body is also what a press must land
+on and what a marquee must touch, so a short name leaves the space beside it
+free to start a band, and `core_rect` — the picture with its margin — is the
+part every tile's body holds whatever it is named. `name_target` is the part a
+press on the name lands on: the lines with their margin, below the picture's.
+
+A tile built `with_picture_shadow` makes its picture cast the theme's small soft
+shadow (`IconTile::shadow_cast`: `icon_shadow_reach` in `drop_shadow`), a mask
+the picture's cache entry brings or, handed none, one cast from the picture it
+draws, so a cached and an uncached picture draw alike; the reach is less than
+the inset, so the shadow stays inside the bounds. A picture that carries a
+frame — a thumbnail's fitted bounds — is outlined one pixel in the theme's
+`frame` role, so a photo the colour of the window's ground still reads as one.
+
 A **selected** tile draws neither the pointer wash nor the focus ring, whatever
 strength its mark is currently drawn at. The selection itself suppresses both,
 not the mark's strength: an outline that appeared for as long as a mark took to
@@ -950,14 +966,16 @@ height that leaves, capped by the width — so a cell sized with
 `TileLayout::height_for(side, …)` draws exactly that picture, and a tile is only
 as tall as what it holds. `icon_side`, `label_lines` and `label_rect` read the
 one geometry the render lays out to, so an owner never re-derives it: the file
-manager states one line, the login chooser three, so a two-word display name is
-not elided.
+manager and the desktop state two lines, the login chooser three, so a two-word
+display name is not elided.
 
 The name is set in `TextRole::ItemLabel` and wraps rather than being cut.
 `paint_label` lays it out over the stated lines, each centred in the band's
 column, and elides the last with the shared ellipsis when the name runs past
 them; a band with no room for one whole line draws nothing rather than clipping
-a glyph.
+a glyph. A tile built `with_name_cut(Cut::Middle { .. })` cuts that line in its
+middle instead (`lib/font`'s `wrap_with_cut`), so a file's extension shows
+however long its name.
 
 `IconTile::with_label_shadow` draws that name, the eliding ellipsis included,
 through `lib/font`'s one soft shadow, every line's shadow laid before any

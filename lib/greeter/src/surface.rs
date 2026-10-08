@@ -895,7 +895,14 @@ impl AuthSurface {
                 Key::Named(NamedKey::Enter) => (Some(chooser.focus()), false),
                 _ => (None, false),
             },
-            _ => chooser.on_pointer(event, ctx.screen, ctx.scale, ctx.now_ns, duration_ms),
+            _ => chooser.on_pointer(
+                event,
+                ctx.screen,
+                ctx.scale,
+                ctx.theme,
+                ctx.now_ns,
+                duration_ms,
+            ),
         };
         match chosen {
             Some(slot) => self.choose(slot, ctx.now_ns, stage_ms(ctx.theme)),

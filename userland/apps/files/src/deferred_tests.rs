@@ -37,6 +37,7 @@ fn summary(name: &str) -> Properties {
                 accessed: Time64::UNIX_EPOCH,
                 changed: Time64::UNIX_EPOCH,
             },
+            content_gen: 0,
         },
     )
 }

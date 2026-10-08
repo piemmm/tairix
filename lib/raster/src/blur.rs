@@ -91,6 +91,98 @@ pub fn soften_coverage(
     }
 }
 
+/// How a picture casts its soft shadow: its coverage dropped `drop_x` right
+/// and `drop_y` down and softened by [`soften_coverage`] at `radius`, all in
+/// physical pixels.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct ShadowCast {
+    /// How far right of the picture the shadow falls.
+    pub drop_x: u32,
+    /// How far below the picture the shadow falls.
+    pub drop_y: u32,
+    /// The radius of each softening pass.
+    pub radius: u32,
+}
+
+impl ShadowCast {
+    /// How far the softened shadow spreads from where it was dropped.
+    #[must_use]
+    pub const fn reach(self) -> u32 {
+        self.radius.saturating_mul(SOFTEN_PASSES)
+    }
+
+    /// Where a [`cast_shadow`] mask's origin lies from the picture's: up and
+    /// left by the reach, less the drop.
+    #[must_use]
+    pub fn origin(self) -> (i32, i32) {
+        let back =
+            |drop: u32| i32::try_from(self.reach().saturating_sub(drop)).map_or(i32::MIN, |at| -at);
+        (back(self.drop_x), back(self.drop_y))
+    }
+}
+
+/// The soft shadow `picture` casts: a mask whose alpha is the shadow's
+/// strength, to composite tinted ([`Surface::blit_tinted`]), and where the
+/// mask's origin lies relative to the picture's. `None` for a cast that
+/// softens nothing, or memory that cannot be had.
+///
+/// The one recipe for a shadow cast from a picture's own coverage: a pointer's
+/// and an icon's are both this.
+#[must_use]
+pub fn cast_shadow(picture: &Surface, cast: ShadowCast) -> Option<(Surface, (i32, i32))> {
+    if cast.radius == 0 {
+        return None;
+    }
+    let reach = cast.reach();
+    let left = reach.saturating_sub(cast.drop_x);
+    let top = reach.saturating_sub(cast.drop_y);
+    let width = left
+        .checked_add(picture.width())?
+        .checked_add(cast.drop_x)?
+        .checked_add(reach)?;
+    let height = top
+        .checked_add(picture.height())?
+        .checked_add(cast.drop_y)?
+        .checked_add(reach)?;
+    let across = usize::try_from(width).ok()?;
+    let down = usize::try_from(height).ok()?;
+    let count = across.checked_mul(down)?;
+    let mut levels = fallible::filled(count, 0u8)?;
+    let mut aux = fallible::filled(count, 0u8)?;
+    let cast_x = usize::try_from(left.checked_add(cast.drop_x)?).ok()?;
+    let cast_y = usize::try_from(top.checked_add(cast.drop_y)?).ok()?;
+    let row_len = usize::try_from(picture.width()).ok()?;
+    if row_len > 0 {
+        for (row, source) in picture.pixels().chunks_exact(row_len).enumerate() {
+            let start = cast_y
+                .checked_add(row)?
+                .checked_mul(across)?
+                .checked_add(cast_x)?;
+            let target = levels.get_mut(start..start.checked_add(row_len)?)?;
+            for (level, pixel) in target.iter_mut().zip(source) {
+                *level = pixel.a;
+            }
+        }
+    }
+    soften_coverage(
+        &mut levels,
+        across,
+        down,
+        usize::try_from(cast.radius).ok()?,
+        &mut aux,
+    );
+    let mut mask = Surface::new(width, height)?;
+    for (pixel, &level) in mask.pixels_mut().iter_mut().zip(&levels) {
+        *pixel = Pixel {
+            r: level,
+            g: level,
+            b: level,
+            a: level,
+        };
+    }
+    Some((mask, cast.origin()))
+}
+
 /// [`box_blur`] over any sample the window can average.
 fn blur_block<S: Sample>(
     region: &mut [S],

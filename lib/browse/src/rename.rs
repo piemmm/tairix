@@ -17,10 +17,13 @@
 //! denial, a read-only mount, a lost race), which surfaces as
 //! [`RenameError::Refused`] with the kernel's own [`Errno`].
 
+use core::ops::Range;
+
 use tairix_abi::Errno;
 use tairix_path::PathError;
 
-use crate::entry::Entry;
+use crate::entry::{Entry, EntryKind};
+use crate::media::Ending;
 
 /// Why a rename was not applied.
 ///
@@ -120,4 +123,17 @@ pub fn validate_new_name(
         return Err(RenameError::Clash);
     }
     Ok(())
+}
+
+/// The part of `entry`'s name an in-place rename opens with selected:
+/// everything before what ends it — an extension, a RISC OS file type, a
+/// bundle's suffix — so typing replaces the name and keeps what it is. A
+/// folder's name has no ending to keep and is selected whole.
+#[must_use]
+pub fn rename_selection(entry: &Entry) -> Range<usize> {
+    let name = entry.name();
+    match entry.kind().resolved() {
+        Some(EntryKind::Directory) => 0..name.len(),
+        _ => 0..Ending::of(name).stem.len(),
+    }
 }

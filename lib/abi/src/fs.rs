@@ -662,19 +662,21 @@ pub struct FileStat {
     /// access (atime), metadata-change (ctime)), each 64-bit-native. A stamp
     /// the backing format does not keep is [`Time64::UNIX_EPOCH`].
     pub times: NodeTimes,
+    /// The node's content generation
+    /// ([`NodeInfo::content_gen`](crate::driver::filesystem::NodeInfo::content_gen)):
+    /// the volume never hands one out twice, so with [`id`](Self::id) it names
+    /// one version of the node's data. `0` where the volume keeps none.
+    pub content_gen: u64,
 }
 
 impl FileStat {
     /// Encoded size of a [`FileStat`] on the wire.
     ///
     /// `kind(1)` + `pad(3)` + `nlink(4)` + `size(8)` + `allocated(8)` +
-    /// `mode(4)` + `uid(4)` + `gid(4)` + `id.volume(16)` + `id.node(8)` +
-    /// `created(12)` + `modified(12)` + `accessed(12)` + `changed(12)`,
-    /// padded to a multiple of 8 for natural alignment of the `u64` fields.
-    ///
-    /// `nlink` fills the alignment padding the `kind` byte already carried,
-    /// so the record's length is unchanged.
-    pub const WIRE_LEN: usize = 112;
+    /// `mode(4)` + `uid(4)` + `gid(4)` + `pad(4)` + `id.volume(16)` +
+    /// `id.node(8)` + `created(12)` + `modified(12)` + `accessed(12)` +
+    /// `changed(12)` + `content_gen(8)`.
+    pub const WIRE_LEN: usize = 120;
 
     /// Encode `self` into the first [`FileStat::WIRE_LEN`] bytes of `out`.
     ///
@@ -700,6 +702,7 @@ impl FileStat {
         out[76..88].copy_from_slice(&self.times.modified.to_le_bytes());
         out[88..100].copy_from_slice(&self.times.accessed.to_le_bytes());
         out[100..112].copy_from_slice(&self.times.changed.to_le_bytes());
+        put_u64(out, 112, self.content_gen);
         Ok(Self::WIRE_LEN)
     }
 
@@ -738,6 +741,7 @@ impl FileStat {
                 accessed: Time64::from_bytes(&bytes[88..100])?,
                 changed: Time64::from_bytes(&bytes[100..112])?,
             },
+            content_gen: read_u64(bytes, 112),
         })
     }
 }
@@ -799,6 +803,10 @@ pub struct DirEntry<'a> {
     /// How many directory entries name this node — the [`FileStat::nlink`]
     /// of the same node, read from the format and never derived.
     pub nlink: u32,
+    /// The node's content generation — the [`FileStat::content_gen`] of the
+    /// same node, so a listing names which version of each file's data it
+    /// saw. `0` where the volume keeps none.
+    pub content_gen: u64,
     /// The entry's name (UTF-8, no terminator, never empty, never `.`/`..`).
     pub name: &'a [u8],
 }
@@ -806,8 +814,8 @@ pub struct DirEntry<'a> {
 impl<'a> DirEntry<'a> {
     /// Size of the fixed per-entry header: `kind(1)` + `pad(1)` +
     /// `name_len(2)` + `size(8)` + `allocated(8)` + `modified(12)` +
-    /// `id.volume(16)` + `id.node(8)` + `nlink(4)`.
-    pub const HEADER_LEN: usize = 60;
+    /// `id.volume(16)` + `id.node(8)` + `nlink(4)` + `content_gen(8)`.
+    pub const HEADER_LEN: usize = 68;
 
     /// The longest record: the header and a name of [`FS_NAME_MAX`] bytes.
     pub const MAX_LEN: usize = Self::HEADER_LEN + FS_NAME_MAX;
@@ -849,6 +857,7 @@ impl<'a> DirEntry<'a> {
         out[32..48].copy_from_slice(&self.id.volume);
         put_u64(out, 48, self.id.node);
         put_u32(out, 56, self.nlink);
+        put_u64(out, 60, self.content_gen);
         out[Self::HEADER_LEN..total].copy_from_slice(self.name);
         Ok(total)
     }
@@ -896,6 +905,7 @@ impl<'a> DirEntry<'a> {
                     node: read_u64(bytes, 48),
                 },
                 nlink: read_u32(bytes, 56),
+                content_gen: read_u64(bytes, 60),
                 name: &bytes[Self::HEADER_LEN..total],
             },
             total,
@@ -1426,10 +1436,16 @@ mod tests {
                 accessed: Time64::UNIX_EPOCH,
                 changed: Time64::from_secs(1_700_000_000),
             },
+            content_gen: 0x1122_3344_5566_7788,
         };
         let mut buf = [0u8; FileStat::WIRE_LEN];
         assert_eq!(stat.encode(&mut buf), Ok(FileStat::WIRE_LEN));
         assert_eq!(FileStat::decode(&buf), Ok(stat));
+        assert_eq!(
+            buf[112..120],
+            0x1122_3344_5566_7788u64.to_le_bytes(),
+            "the generation closes the record"
+        );
     }
 
     #[test]
@@ -1444,6 +1460,7 @@ mod tests {
             gid: 0,
             id: FileId::NONE,
             times: NodeTimes::default(),
+            content_gen: 0,
         };
         let mut tiny = [0u8; FileStat::WIRE_LEN - 1];
         assert_eq!(stat.encode(&mut tiny), Err(Errno::BufferTooSmall));
@@ -1474,6 +1491,7 @@ mod tests {
                     node: 42,
                 },
                 nlink: 2,
+                content_gen: 0,
                 name: b"Logs",
             },
             DirEntry {
@@ -1487,6 +1505,7 @@ mod tests {
                     node: u64::MAX,
                 },
                 nlink: u32::MAX,
+                content_gen: u64::MAX,
                 name: b"motd.txt",
             },
         ];
@@ -1508,6 +1527,7 @@ mod tests {
                 entry.modified,
                 entry.id,
                 entry.nlink,
+                entry.content_gen,
                 entry.name.to_vec(),
             ));
             cursor += used;
@@ -1526,6 +1546,7 @@ mod tests {
                     node: 42
                 },
                 2,
+                0,
                 b"Logs".to_vec()
             )
         );
@@ -1541,8 +1562,14 @@ mod tests {
                     node: u64::MAX
                 },
                 u32::MAX,
+                u64::MAX,
                 b"motd.txt".to_vec()
             )
+        );
+        assert_eq!(
+            buf[DirEntry::HEADER_LEN + 4 + 60..DirEntry::HEADER_LEN + 4 + 68],
+            u64::MAX.to_le_bytes(),
+            "the generation closes the second record's header"
         );
     }
 
@@ -1563,6 +1590,7 @@ mod tests {
                 id,
                 nlink: 2,
                 name: b"first",
+                content_gen: 0,
             },
             DirEntry {
                 kind: FileKind::Regular,
@@ -1572,6 +1600,7 @@ mod tests {
                 id,
                 nlink: 2,
                 name: b"second",
+                content_gen: 0,
             },
         ]);
         let decoded: alloc::vec::Vec<DirEntry<'_>> = DirEntries::new(&stream)
@@ -1593,6 +1622,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"f",
+            content_gen: 0,
         };
         let mut buf = [0u8; DirEntry::HEADER_LEN + 1];
         entry.encode_into(&mut buf).expect("fits");
@@ -1612,6 +1642,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"",
+            content_gen: 0,
         };
         assert_eq!(empty.encode_into(&mut buf), Err(Errno::LengthOutOfRange));
         let big = vec![b'a'; FS_NAME_MAX + 1];
@@ -1623,6 +1654,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: &big,
+            content_gen: 0,
         };
         let mut wide = vec![0u8; FS_NAME_MAX + 8];
         assert_eq!(
@@ -1641,6 +1673,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"abcd",
+            content_gen: 0,
         };
         let mut buf = [0u8; DirEntry::HEADER_LEN + 2];
         assert_eq!(e.encode_into(&mut buf), Err(Errno::BufferTooSmall));
@@ -1686,6 +1719,7 @@ mod tests {
                 id: FileId::NONE,
                 nlink: 1,
                 name: b"Logs",
+                content_gen: 0,
             },
             DirEntry {
                 kind: FileKind::Regular,
@@ -1695,6 +1729,7 @@ mod tests {
                 id: FileId::NONE,
                 nlink: 1,
                 name: b"motd.txt",
+                content_gen: 0,
             },
         ]);
         let mut it = DirEntries::new(&stream);
@@ -1721,6 +1756,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"x",
+            content_gen: 0,
         }]);
         assert!(DirEntry::decode(&stream).is_ok());
         stream[1] = 1;
@@ -1742,6 +1778,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"ok",
+            content_gen: 0,
         }]);
         // A second record with an undefined kind byte: the walk must yield
         // the good entry, then exactly one error, then fuse.
@@ -1754,6 +1791,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"x",
+            content_gen: 0,
         }
         .encode_into(&mut bad)
         .expect("fits");
@@ -1780,6 +1818,7 @@ mod tests {
             id: FileId::NONE,
             nlink: 1,
             name: b"Users",
+            content_gen: 0,
         }]);
         // A dangling half header can never be a listing the caller shows.
         stream.extend_from_slice(&[0u8; 3]);
@@ -1804,6 +1843,7 @@ mod tests {
             },
             nlink: 2,
             name,
+            content_gen: 0,
         }
     }
 

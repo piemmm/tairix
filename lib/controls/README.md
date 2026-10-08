@@ -280,7 +280,12 @@ to produce artwork.
 ## A selected icon tile: the accent over a frosted backdrop
 
 `collection::IconTile` wears no plate of its own, so a selection has to be
-drawn behind the picture. What it blurs is the **backdrop**: the pixels the
+drawn behind the picture — over the tile's **body**
+(`TileLayout::body_rect`: its picture and its name's drawn lines, each with
+half an inset of margin), which is also what a press and a marquee must touch,
+so the cell around it stays ground. A tile `with_name_cut` cuts a long name in
+its middle so its extension shows, and one `with_picture_shadow` casts the
+theme's small soft shadow under its picture. What it blurs is the **backdrop**: the pixels the
 tile covers — a window's surface, the desktop wallpaper — are frosted by the
 scaled `selection_backdrop_blur` through `tairix_raster`'s one shared region
 frost, the same call the compositor frosts a window's backdrop with, and the

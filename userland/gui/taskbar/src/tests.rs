@@ -5657,7 +5657,7 @@ impl IconArtwork for FakeArtwork {
         self.held
             .iter()
             .find(|(held, _)| *held == kind)
-            .map(|(_, art)| IconPicture::Artwork(art))
+            .map(|(_, art)| IconPicture::coloured(art))
     }
 }
 
@@ -8640,7 +8640,7 @@ struct ClassArtwork(Surface);
 
 impl IconArtwork for ClassArtwork {
     fn artwork(&mut self, _request: IconRequest<'_>, _side: u32) -> Option<IconPicture<'_>> {
-        Some(IconPicture::Artwork(&self.0))
+        Some(IconPicture::coloured(&self.0))
     }
 }
 

@@ -607,6 +607,21 @@ const I_EXTENT_ROOT: usize = 152;
 /// Physical block of this inode's extended-attribute set ([`BlockType::Attr`]),
 /// or `0` when the inode carries no attributes (`docs/src/filesystem/arxfs-spec.md` §21).
 const I_ATTR_ROOT: usize = 160;
+/// The content generation of a file's or link's data, `0` for a directory.
+const I_CONTENT_GEN: usize = 168;
+
+/// The first content generation a fresh volume hands out: `0` is the value a
+/// volume keeping none reports.
+const FIRST_CONTENT_GEN: u64 = 1;
+
+/// How far a mount advances the volume's content generation past the last
+/// committed value, durably, before it hands one out.
+///
+/// The generations handed out since the last commit — and since the commit a
+/// fall-back to an older ring slot would select — are bounded by the
+/// dirty-age window and the write-back cap, far below this, so a mount after a
+/// crash never repeats one a reader already saw.
+const CONTENT_GEN_STRIDE: u64 = 1 << 32;
 
 /// In-memory image of one on-disk inode.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -623,6 +638,9 @@ struct Inode {
     /// carries no attributes. Stored as an encrypted, mirrored copy-on-write
     /// metadata block ([`BlockType::Attr`]).
     attr_root: u64,
+    /// The generation of this file's or link's current data
+    /// ([`ARXFS::mint_content_gen`]); `0` for a directory.
+    content_gen: u64,
 }
 
 impl Inode {
@@ -641,6 +659,7 @@ impl Inode {
             },
             extent_root: 0,
             attr_root: 0,
+            content_gen: 0,
         }
     }
 
@@ -696,6 +715,7 @@ impl Inode {
             times,
             extent_root: rd_u64(buf, I_EXTENT_ROOT),
             attr_root: rd_u64(buf, I_ATTR_ROOT),
+            content_gen: rd_u64(buf, I_CONTENT_GEN),
         }))
     }
 
@@ -734,6 +754,7 @@ impl Inode {
         }
         wr_u64(buf, I_EXTENT_ROOT, self.extent_root);
         wr_u64(buf, I_ATTR_ROOT, self.attr_root);
+        wr_u64(buf, I_CONTENT_GEN, self.content_gen);
     }
 }
 
@@ -785,6 +806,13 @@ pub struct ARXFS<B: Block> {
     ring_pos: u64,
     inode_tree_root: u64,
     next_ino: u64,
+    /// The next content generation to hand out. Never moved back — not by a
+    /// rolled-back operation, whose generations a later one simply skips — so
+    /// no value is handed out twice in a mount.
+    next_content_gen: u64,
+    /// Whether this mount's stride past the committed sequence is durable
+    /// ([`ARXFS::mint_content_gen`]).
+    content_gens: ContentGens,
     /// Root of the authoritative chunk/refcount tree, `0` until a chunk is
     /// shared (`dedupe` module, `docs/src/filesystem/arxfs-spec.md` §4, §9).
     chunk_tree_root: u64,
@@ -876,6 +904,19 @@ pub struct ARXFS<B: Block> {
     /// shortened by and the bytes the set may hold before the transaction is
     /// published. Read once per operation, in [`Self::begin`].
     reading: Option<WritebackReading>,
+}
+
+/// Where a mount stands with its stride past the committed content-generation
+/// sequence ([`CONTENT_GEN_STRIDE`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ContentGens {
+    /// Nothing handed out yet: the next generation minted applies the stride.
+    Unreserved,
+    /// The stride is applied but not yet committed, so the operation that
+    /// applied it commits before it returns.
+    Pending,
+    /// The stride is committed.
+    Committed,
 }
 
 /// What a prepared commit will publish once its superblock slot is written.
@@ -1651,8 +1692,9 @@ impl<B: Block> ARXFS<B> {
     /// widened the incompatible-feature word (the word and the structures it
     /// names are published together, and a reader must not have to wait for an
     /// unrelated operation to learn of them), or when the handle has no
-    /// monotonic clock and therefore no window to age against. Otherwise the
-    /// work stays staged and the next operation joins it.
+    /// monotonic clock and therefore no window to age against, or when the
+    /// mount's content-generation stride is not yet on the medium. Otherwise
+    /// the work stays staged and the next operation joins it.
     ///
     /// A commit failure here rolls the whole transaction back and is reported
     /// as this operation's, which is honest: this operation did not happen
@@ -1666,7 +1708,10 @@ impl<B: Block> ARXFS<B> {
             self.note_released();
             return self.commit();
         }
-        if self.schedule.expired() || self.incompat != self.saved_txn.incompat {
+        if self.schedule.expired()
+            || self.incompat != self.saved_txn.incompat
+            || self.content_gens == ContentGens::Pending
+        {
             return self.commit();
         }
         self.schedule.joined();
@@ -2130,12 +2175,23 @@ impl<B: Block> ARXFS<B> {
             self.freeze_unknown_publication();
             return Err(err);
         }
+        // A stride is what a reader's generation relies on, so it must survive
+        // power loss before the operation that minted under it returns.
+        if self.content_gens == ContentGens::Pending {
+            if let Err(err) = self.block.flush() {
+                self.freeze_unknown_publication();
+                return Err(err);
+            }
+        }
         // Commit point passed: the slot naming the new root is durable-ordered
         // behind every block it references, so a mount now selects the new
         // state. Nothing below this line can fail.
         self.generation = published.generation;
         self.ring_pos = self.ring_pos.wrapping_add(1);
         self.root_phys = published.root_phys;
+        if self.content_gens == ContentGens::Pending {
+            self.content_gens = ContentGens::Committed;
+        }
         self.finish_txn();
         Ok(())
     }
@@ -2168,6 +2224,7 @@ impl<B: Block> ARXFS<B> {
             alloc_map_start,
             alloc_map_covered: self.total_blocks,
             free_count: self.free_count,
+            next_content_gen: self.next_content_gen,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
         self.write_meta(root_phys, buf)?;
@@ -2234,6 +2291,8 @@ impl<B: Block> ARXFS<B> {
             ring_pos: 0,
             inode_tree_root: 0,
             next_ino: u64::from(ROOT_INO) + 1,
+            next_content_gen: FIRST_CONTENT_GEN,
+            content_gens: ContentGens::Unreserved,
             chunk_tree_root: 0,
             reverse_ref_tree_root: 0,
             scrub_progress_root: 0,
@@ -2338,6 +2397,9 @@ impl<B: Block> ARXFS<B> {
         // enabled regardless.
         fs.store_initial_health_baseline()?;
         fs.commit()?;
+        // The first generation is committed with the volume, so this handle
+        // hands it out with no stride.
+        fs.content_gens = ContentGens::Committed;
         // Leave the map stamped clean at the committed generation, so the very
         // first mount of a freshly built image adopts it instead of walking
         // the volume.
@@ -2466,6 +2528,7 @@ impl<B: Block> ARXFS<B> {
         let root = fs.read_txn_root(fs.fs_uuid, sb.root_phys, sb.generation, &mut buf)?;
         fs.inode_tree_root = root.inode_tree_root;
         fs.next_ino = root.next_ino;
+        fs.next_content_gen = root.next_content_gen;
         fs.chunk_tree_root = root.chunk_tree_root;
         fs.reverse_ref_tree_root = root.reverse_ref_tree_root;
         fs.scrub_progress_root = root.scrub_progress_root;
@@ -2485,6 +2548,31 @@ impl<B: Block> ARXFS<B> {
         // and reachable from nothing, which is what read-only means here.
         fs.drain_pending_deletes()?;
         Ok(fs)
+    }
+
+    /// Hand out the generation of a new version of some file's data.
+    ///
+    /// Drawn from one volume-wide sequence rather than counted per inode, so a
+    /// generation names one version of one file's content even when a crash
+    /// rolls an inode, or its number, back. The first one a mount mints
+    /// advances the sequence by [`CONTENT_GEN_STRIDE`] and makes its operation
+    /// commit, and flush the slot naming it, before returning: calls are
+    /// exclusive, so no reader sees a generation of this mount before the
+    /// stride is on the medium, and a mount that changes no file's data writes
+    /// nothing for it. Running out of the sequence — after 2³² mounts that
+    /// change data — refuses the change as [`DriverError::NoSpace`]: the volume
+    /// can name no further version.
+    fn mint_content_gen(&mut self) -> Result<u64, DriverError> {
+        if self.content_gens == ContentGens::Unreserved {
+            self.next_content_gen = self
+                .next_content_gen
+                .checked_add(CONTENT_GEN_STRIDE)
+                .ok_or(DriverError::NoSpace)?;
+            self.content_gens = ContentGens::Pending;
+        }
+        let minted = self.next_content_gen;
+        self.next_content_gen = minted.checked_add(1).ok_or(DriverError::NoSpace)?;
+        Ok(minted)
     }
 
     /// Take up the allocation map the committed root names, rebuilding it from
@@ -2787,7 +2875,9 @@ impl<B: Block> ARXFS<B> {
         }
         self.read_block(Self::companion(root_phys), buf)?;
         let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
-        self.repair_meta_copy(root_phys, buf)?;
+        // A refused repair is not a root that failed to commit: the ring scan
+        // must not pass over the newest committed root for it.
+        let _ = self.repair_meta_copy(root_phys, buf);
         Ok(root)
     }
 
@@ -3600,6 +3690,10 @@ impl<B: Block> ARXFS<B> {
             },
             allocated,
             times: inode.times,
+            content_gen: match inode.kind {
+                InodeKind::Dir => NodeInfo::NO_CONTENT_GEN,
+                InodeKind::File | InodeKind::Link => inode.content_gen,
+            },
         })
     }
 
@@ -4145,6 +4239,8 @@ impl<B: Block> ARXFS<B> {
         let mut child = Inode::empty(kind_val, Security::new(mode, 0, 0), now);
         if kind_val == InodeKind::Dir {
             child.nlink = 2;
+        } else {
+            child.content_gen = self.mint_content_gen()?;
         }
         let child_ino = self.alloc_inode(&child)?;
         if kind_val == InodeKind::Dir {
@@ -4217,6 +4313,7 @@ impl<B: Block> ARXFS<B> {
         // target — so the conventional world-traversable `lrwxrwxrwx` is
         // stored, which is also what a listing shows.
         let mut child = Inode::empty(InodeKind::Link, Security::new(0o777, 0, 0), now);
+        child.content_gen = self.mint_content_gen()?;
         let child_ino = self.alloc_inode(&child)?;
         self.write_file(&mut child, child_ino, 0, target, WriteLength::Whole)?;
         self.write_inode(child_ino, &child)?;
@@ -4475,6 +4572,7 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::AlreadyExists);
         }
         let mut dst = Inode::empty(InodeKind::File, src.sec, now);
+        dst.content_gen = self.mint_content_gen()?;
         let dst_ino = self.alloc_inode(&dst)?;
         // Walk the source's extents: a raw run shares per block, a compressed
         // cluster shares its whole stored run in one reference. Only the
@@ -4557,6 +4655,9 @@ impl<B: Block> ARXFS<B> {
         let now = (self.clock)();
         child.times.modified = now;
         child.times.changed = now;
+        if written > 0 {
+            child.content_gen = self.mint_content_gen()?;
+        }
         self.write_inode(child_ino, &child)?;
         self.end_operation()?;
         Ok(written)
@@ -4587,10 +4688,14 @@ impl<B: Block> ARXFS<B> {
     /// and lawful at every point on the medium.
     fn truncate_step(&mut self, ino: u32, size: u64) -> Result<bool, DriverError> {
         let mut child = self.read_inode(ino)?;
+        let before = child.size;
         let done = self.truncate_file(&mut child, ino, size)?;
         let now = (self.clock)();
         child.times.modified = now;
         child.times.changed = now;
+        if child.size != before {
+            child.content_gen = self.mint_content_gen()?;
+        }
         self.write_inode(ino, &child)?;
         self.end_operation()?;
         Ok(done)

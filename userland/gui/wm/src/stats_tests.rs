@@ -188,9 +188,9 @@ fn a_fade_in_flight_takes_no_run_and_still_composes_identically() {
 #[test]
 fn a_one_pixel_repaint_composes_identically() {
     let repaint = |comp: &mut Compositor, id: WindowId| {
-        comp.present_window_content(id, 64, 48, |surface| {
+        comp.present_window_content(id, 64, 48, |surface, changed| {
             surface.set(31, 17, Color::rgb(1, 2, 3).premultiply());
-            ((), Rect::new(31, 17, 1, 1))
+            changed.add(Rect::new(31, 17, 1, 1));
         });
         comp.composite();
     };

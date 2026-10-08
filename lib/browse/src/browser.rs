@@ -26,7 +26,7 @@ use crate::create::{validate_new_entry_name, CreateError};
 use crate::delete::DeletePlan;
 use crate::entry::{resolve_target, Entry, EntryKind, LinkTarget};
 use crate::error::BrowseError;
-use crate::layout::{BandCells, ViewMode};
+use crate::layout::{BandMarks, ViewMode};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
@@ -488,11 +488,11 @@ impl<S: DirectorySource> Browser<S> {
         self.selection.clear();
     }
 
-    /// Move a band's mark from the cells `from` to the cells `to`: an entry
-    /// only `to` touches is selected, and one only `from` touched leaves the
-    /// selection unless `base` holds it. Answers whether any entry's mark
-    /// changed.
-    pub(crate) fn move_band(&mut self, base: &Selection, from: &BandCells, to: &BandCells) -> bool {
+    /// Move a band's mark from the entries `from` selects to those `to`
+    /// selects: an entry only `to` selects is selected, and one only `from`
+    /// selected leaves the selection unless `base` holds it. Answers whether
+    /// any entry's mark changed.
+    pub(crate) fn move_band(&mut self, base: &Selection, from: &BandMarks, to: &BandMarks) -> bool {
         self.focus_intent = None;
         let count = self.entries.len();
         let selection = &mut self.selection;

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use tairix_controls::{
     ControlState, FocusState, IconTile, PointerState, SelectionState, TileLayout,
 };
-use tairix_font::{BitmapFont, TextShadow};
+use tairix_font::{BitmapFont, Cut, TextShadow};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{monogram_disc, monogram_of, IconKind, IconPicture};
 use tairix_input::{InputEvent, PointerButton};
@@ -477,13 +477,28 @@ impl Chooser {
         ))
     }
 
-    /// The slot under `point`, tested against the very rectangles the paint
-    /// draws into.
-    pub(crate) fn hit(&self, point: Point, screen: Rect, scale: Scale) -> Option<usize> {
+    /// The slot whose tile's body — its disc and name, as the paint draws
+    /// them — is under `point`.
+    pub(crate) fn hit(
+        &self,
+        point: Point,
+        screen: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<usize> {
         (0..self.slots()).find(|&slot| {
             self.tile_rect(slot, screen, scale)
-                .is_some_and(|rect| rect.contains(point))
+                .and_then(|rect| {
+                    ACCOUNT_TILE.body_rect(rect, scale, theme, self.label(slot), Cut::End)
+                })
+                .is_some_and(|body| body.contains(point))
         })
+    }
+
+    /// The name tile `slot` shows.
+    fn label(&self, slot: usize) -> &str {
+        self.account(slot)
+            .map_or(OTHER_LABEL, AccountTile::display_name)
     }
 
     /// Track the pointer and report the slot a completed primary click
@@ -497,13 +512,14 @@ impl Chooser {
         event: &InputEvent,
         screen: Rect,
         scale: Scale,
+        theme: &Theme,
         now_ns: u64,
         duration_ms: u16,
     ) -> (Option<usize>, bool) {
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = *to;
-                let over = self.hit(*to, screen, scale);
+                let over = self.hit(*to, screen, scale, theme);
                 (
                     None,
                     over.is_some_and(|slot| self.focus_on(slot, now_ns, duration_ms)),
@@ -512,7 +528,7 @@ impl Chooser {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                self.armed = self.hit(self.pointer, screen, scale);
+                self.armed = self.hit(self.pointer, screen, scale, theme);
                 if let Some(slot) = self.armed {
                     self.focus_on(slot, now_ns, duration_ms);
                 }
@@ -522,7 +538,7 @@ impl Chooser {
                 button: PointerButton::Primary,
             } => {
                 let armed = self.armed.take();
-                let over = self.hit(self.pointer, screen, scale);
+                let over = self.hit(self.pointer, screen, scale, theme);
                 let chosen = armed.filter(|slot| Some(*slot) == over);
                 (chosen, armed.is_some())
             }
@@ -621,13 +637,10 @@ impl Chooser {
         shadow: Option<TextShadow>,
     ) {
         let account = self.account(slot);
-        let mut tile = IconTile::new(
-            account.map_or(OTHER_LABEL, AccountTile::display_name),
-            IconKind::Generic,
-        )
-        .with_layout(ACCOUNT_TILE)
-        .with_state(self.tile_state(slot))
-        .with_selection_fade(self.selection_fade(slot));
+        let mut tile = IconTile::new(self.label(slot), IconKind::Generic)
+            .with_layout(ACCOUNT_TILE)
+            .with_state(self.tile_state(slot))
+            .with_selection_fade(self.selection_fade(slot));
         if let Some(shadow) = shadow {
             tile = tile.with_label_shadow(shadow);
         }
@@ -643,7 +656,7 @@ impl Chooser {
             bounds,
             scale,
             theme,
-            artwork.as_ref().map(IconPicture::Artwork),
+            artwork.as_ref().map(IconPicture::coloured),
         );
         if account.is_some_and(AccountTile::has_live_session) {
             paint_live_badge(surface, bounds, scale, theme);

@@ -285,6 +285,7 @@ impl FilesystemRead for MockRootFs {
             size: n.content.len() as u64,
             allocated: n.content.len() as u64,
             times: NodeTimes::default(),
+            content_gen: 0,
         })
     }
 

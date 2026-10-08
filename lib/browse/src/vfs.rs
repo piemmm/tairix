@@ -368,7 +368,9 @@ pub(crate) fn entry_from_record(
         })
     });
     let kind = EntryKind::for_listing(entry.kind, name, resolution);
-    let mut built = Entry::new(name, kind, entry.size, entry.modified).with_id(entry.id);
+    let mut built = Entry::new(name, kind, entry.size, entry.modified)
+        .with_id(entry.id)
+        .with_content_gen(entry.content_gen);
     // A link whose target could not be reached still shows the spelling it
     // stores: that spelling is exactly what tells a user why it is broken.
     if let Some(link) = described {
@@ -454,10 +456,10 @@ fn probed(components: &[String], stream: &[u8]) -> Result<Probe, Errno> {
     if stream.is_empty() {
         return Ok(Probe::Empty);
     }
-    let named = DirEntries::new(stream)
-        .flatten()
-        .filter_map(|record| Some((core::str::from_utf8(record.name).ok()?, record.kind)));
-    Ok(Probe::Holds(crate::folder_sample(components, named)))
+    Ok(Probe::Holds(crate::folder_sample(
+        components,
+        DirEntries::new(stream).flatten(),
+    )))
 }
 
 impl<F, L> VfsDirectorySource<F, L>

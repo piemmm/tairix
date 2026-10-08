@@ -33,6 +33,8 @@
 
 use core::ops::Range;
 
+use alloc::vec::Vec;
+
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use tairix_geometry::{GridFill, GridRun, Point, Rect};
 
@@ -315,6 +317,59 @@ impl BandCells {
         let (left, right) = outside(&self.slots, &other.slots);
         for slots in [left, right] {
             cells(shared.clone(), slots, self.per_line, self.count).for_each(&mut visit);
+        }
+    }
+}
+
+/// The entries a band selects: every cell whose core it touches — the part
+/// every tile's body holds — and, of the cells it touches only along its
+/// edges, those whose body it touches.
+///
+/// The edge entries are at most the band's perimeter in cells, so membership
+/// and the difference between two bands stay arithmetic plus a short sorted
+/// list.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BandMarks {
+    core: BandCells,
+    edge: Vec<usize>,
+}
+
+impl BandMarks {
+    /// Rebuild these marks as `core` plus whichever of `cells` beyond it
+    /// `touches` accepts, keeping the edge list's allocation.
+    pub(crate) fn rebuild(
+        &mut self,
+        core: BandCells,
+        cells: &BandCells,
+        mut touches: impl FnMut(usize) -> bool,
+    ) {
+        self.edge.clear();
+        cells.each_not_in(&core, |index| {
+            if touches(index) {
+                self.edge.push(index);
+            }
+        });
+        self.edge.sort_unstable();
+        self.core = core;
+    }
+
+    /// Whether the band selects the entry at `index`.
+    #[must_use]
+    pub(crate) fn contains(&self, index: usize) -> bool {
+        self.core.contains(index) || self.edge.binary_search(&index).is_ok()
+    }
+
+    /// Visit every entry `self` selects and `other` does not.
+    pub(crate) fn each_not_in(&self, other: &Self, mut visit: impl FnMut(usize)) {
+        self.core.each_not_in(&other.core, |index| {
+            if !other.contains(index) {
+                visit(index);
+            }
+        });
+        for &index in &self.edge {
+            if !other.contains(index) {
+                visit(index);
+            }
         }
     }
 }
@@ -731,6 +786,37 @@ impl GridView {
     /// coordinates. A band lying only in a margin or a gap touches none.
     #[must_use]
     pub(crate) fn band_cells(&self, band: Rect) -> BandCells {
+        self.band_cells_over(band, self.line_run(), self.slot_run())
+    }
+
+    /// The tiles whose `part` — a rectangle relative to a tile's own top-left
+    /// corner — `band` touches.
+    #[must_use]
+    pub(crate) fn band_cells_within(&self, band: Rect, part: Rect) -> BandCells {
+        let left = u32::try_from(part.left()).unwrap_or(0);
+        let top = u32::try_from(part.top()).unwrap_or(0);
+        // The trailing-edge column measures across inward from a tile's right
+        // edge, exactly as it lays its tiles out.
+        let across = if self.flow.anchors_to_the_trailing_edge() {
+            self.cell_width
+                .saturating_sub(left.saturating_add(part.width))
+        } else {
+            left
+        };
+        let ((line_at, line_len), (slot_at, slot_len)) = if self.flow.wraps_down_a_column() {
+            ((across, part.width), (top, part.height))
+        } else {
+            ((top, part.height), (across, part.width))
+        };
+        self.band_cells_over(
+            band,
+            self.line_run().within(line_at, line_len),
+            self.slot_run().within(slot_at, slot_len),
+        )
+    }
+
+    /// The cells of `lines` × `slots` any part of which lies within `band`.
+    fn band_cells_over(&self, band: Rect, lines: GridRun, slots: GridRun) -> BandCells {
         let area = self.tile_area();
         let (x_from, x_extent) = along(band.left(), band.width, area.left());
         let down = along(band.top(), band.height, area.top());
@@ -750,8 +836,8 @@ impl GridView {
             (down, across)
         };
         BandCells::new(
-            self.line_run().shown(line_span.0, line_span.1),
-            self.slot_run().shown(slot_span.0, slot_span.1),
+            lines.shown(line_span.0, line_span.1),
+            slots.shown(slot_span.0, slot_span.1),
             self.cells_per_line(),
             self.entry_count,
         )
@@ -855,6 +941,16 @@ impl ViewLayout {
         match self {
             Self::List(v) => v.band_cells(band),
             Self::Grid(v) => v.band_cells(band),
+        }
+    }
+
+    /// The entries whose `part` — relative to an item's own top-left — any of
+    /// `band` touches. A list row is all body, so a list answers its cells.
+    #[must_use]
+    pub(crate) fn band_cells_within(&self, band: Rect, part: Rect) -> BandCells {
+        match self {
+            Self::List(v) => v.band_cells(band),
+            Self::Grid(v) => v.band_cells_within(band, part),
         }
     }
 

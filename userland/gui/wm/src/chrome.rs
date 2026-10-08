@@ -195,7 +195,7 @@ impl WindowChrome {
                     outer,
                     scale,
                     theme,
-                    artwork.map(IconPicture::Artwork),
+                    artwork.map(IconPicture::coloured),
                 );
             });
             *strip = Some(surface);

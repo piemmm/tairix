@@ -35,7 +35,7 @@ use tairix_abi::desktop::{ScreensaverKind, CURSOR_SET_NAME_MAX};
 use tairix_abi::display_ipc::{
     decode_mode_reply, decode_stats_reply, DisplayRequest, DisplayStats,
 };
-use tairix_abi::driver::display::{DamageRect, DisplayFormat};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
 };
@@ -1603,6 +1603,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
             accessed: Time64::UNIX_EPOCH,
             changed: Time64::from_secs(1_700_000_000),
         },
+        content_gen: 0,
     }
     .encode(&mut stat)
     .expect("a well-formed FileStat encodes");
@@ -1621,6 +1622,7 @@ fn structured_fs_inputs_with_corrupted_fields_never_panic() {
         },
         nlink: 3,
         name: b"inbox",
+        content_gen: 0,
     }
     .encode_into(&mut dirent)
     .expect("a well-formed DirEntry encodes");
@@ -1899,12 +1901,21 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::Present {
             window_id: 3,
             frame_index: 1,
-            damage: DamageRect {
-                x: 4,
-                y: 8,
-                width_px: 16,
-                height_px: 32,
-            },
+            damage: DamageList::new(&[
+                DamageRect {
+                    x: 4,
+                    y: 8,
+                    width_px: 16,
+                    height_px: 32,
+                },
+                DamageRect {
+                    x: 40,
+                    y: 8,
+                    width_px: 2,
+                    height_px: 2,
+                },
+            ])
+            .expect("two rectangles"),
         },
         WindowRequest::Close { window_id: 3 },
         WindowRequest::PickFile {
@@ -2515,6 +2526,7 @@ fn dir_change_batches_with_flipped_bits_round_trip_or_are_refused() {
         },
         nlink: 1,
         name: b"report.txt",
+        content_gen: 0,
     };
     let changes = [DirChange::Present(entry), DirChange::Absent(b"old.log")];
     let mut canonical = vec![0u8; 512];

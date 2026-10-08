@@ -1420,7 +1420,11 @@ properties:
   (`LateFilesystem::register` returns the leaked lock precisely so a
   second, coherence-breaking window over the same device cannot exist).
 - **Precise, fail-closed invalidation.** Writes/truncates drop the
-  file's chunks and stat; create/remove/rename drop the affected
+  file's chunks and stat and the listing written through — every
+  directory's listings when the file has another name, since each embeds
+  its size, times and content generation and nothing records which
+  directories hold the other names (a link drops them the same way, for
+  the name count); create/remove/rename drop the affected
   directory's *entire* lookup set (driver name matching may fold case),
   its directory entries, and its stat; an unidentifiable mutation
   target purges the whole cache; a detected ledger imbalance poisons

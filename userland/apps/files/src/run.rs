@@ -114,7 +114,7 @@ mod program {
     use tairix_abi::time::Duration64;
 
     use crate::route;
-    use tairix_abi::driver::display::{DamageRect, DisplayMode};
+    use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
     use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
@@ -165,7 +165,8 @@ mod program {
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
-        ArtworkReader, ArtworkResolver, IconRequest, InlineArtwork, Resolved, MAX_ARTWORK_BYTES,
+        ArtworkReader, ArtworkResolver, IconRequest, InlineArtwork, Resolved, ThumbnailStore,
+        MAX_ARTWORK_BYTES,
     };
     use tairix_input::{ClickKind, DoubleClickTracker, Key, Modifiers, NamedKey, PointerButton};
     use tairix_procinfo::{IpcTransport, WalkStep};
@@ -177,18 +178,19 @@ mod program {
     use tairix_theme::{Grounds, Theme, ThemeRegistry};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
-        EventMailbox, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
-        WindowTransport,
+        pointer_input_events, pointer_point, Desktop, EventDrain, EventError, EventMailbox,
+        EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+        EVENT_MAILBOX_CAPACITY,
     };
 
     use crate::appbar;
-    use crate::chrome::{Accelerator, Chrome};
+    use crate::chrome::{Accelerator, Chrome, SelectionVerb};
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
     use crate::deferred::{FilesClient, FilesClients, PropertyJob, PropertyReads};
     use crate::gesture::{
-        self, bundle_intent, press_step, AfterHandoff, DragArm, PressHit, PressHold, PressInput,
-        PressStep, PrimaryPress, SelectHow, SelectKeys,
+        self, bundle_intent, press_step, AfterHandoff, DragArm, Keyboard, NamePress, PressHit,
+        PressHold, PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit, SelectHow,
+        SelectKeys,
     };
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
@@ -304,8 +306,9 @@ mod program {
         title: &'a mut String,
         /// The window-lifetime surface the frame is drawn in and copied from.
         surface: &'a mut Surface,
-        /// The rectangle this frame redraws and presents.
-        damage: DamageRect,
+        /// The rectangles this frame redraws, each under its own clip, and
+        /// presents.
+        parts: DamageList,
     }
 
     /// One open browser window: everything a frame is drawn from, and nothing
@@ -330,6 +333,8 @@ mod program {
         /// clipped repaint sound — every pixel outside the clip is the one
         /// already on screen.
         surface: Surface,
+        /// What the rounds since its last present have left it owing.
+        owed: Owed,
         /// What this window is showing.
         kind: WindowKind,
     }
@@ -386,6 +391,8 @@ mod program {
         /// Where the pointer last was over this window, or `None` before it
         /// has been.
         pointer: Option<Point>,
+        /// Whether it holds the keyboard, as its focus reports tell it.
+        keyboard: Keyboard,
         /// This window's unanswered context-menu gesture, if one is up.
         ///
         /// The desktop mints one open id per gesture and never reuses it, so an
@@ -618,12 +625,82 @@ mod program {
             Repaint::reported_if(moved && mark.report(&self.browser, frame, damage))
         }
 
-        /// When the band held over this window next steps the listing.
-        fn band_due(&self) -> Option<u64> {
-            match &self.overlays.sweep {
+        /// When this window next needs the loop with no event to bring it: the
+        /// band held over it steps the listing, or a clicked name opens.
+        fn due(&self) -> Option<u64> {
+            let band = match &self.overlays.sweep {
                 Some(Sweep::Live(band)) => band.due(),
                 _ => None,
+            };
+            let rename = self.overlays.rename_arm.and_then(|arm| arm.due());
+            band.into_iter().chain(rename).min()
+        }
+
+        /// Open the rename a click on a name armed once it is due at `now`,
+        /// reporting what it repainted: the entry and its field, or the item
+        /// area if bringing it into view scrolled. It opens only on the entry
+        /// still chosen alone, with nothing holding the listing and no
+        /// navigation under way.
+        fn open_due_rename(
+            &mut self,
+            canvas: Canvas<'_>,
+            now: u64,
+            damage: &mut Region,
+        ) -> Repaint {
+            let Some(arm) = self.overlays.rename_arm.filter(|arm| arm.is_due(now)) else {
+                return Repaint::Nothing;
+            };
+            self.overlays.rename_arm = None;
+            let settled = self
+                .browser
+                .listing_target()
+                .is_none_or(|target| target == self.browser.components());
+            let free = !self.listing_is_held()
+                && self.overlays.delete.is_none()
+                && self.overlays.operation.is_none();
+            if !settled || !free || self.browser.chosen_index() != Some(arm.index()) {
+                return Repaint::Nothing;
             }
+            let frame = Frame {
+                scale: canvas.scale,
+                theme: canvas.theme(),
+                viewport: canvas.viewport(&self.places),
+                toolbar: canvas.chrome.toolbar,
+            };
+            let mark = ViewMark::of(&self.browser, frame);
+            let (opened, _) = begin_rename(
+                &mut self.browser,
+                &mut self.overlays.rename,
+                frame.scale,
+                frame.theme,
+                frame.viewport,
+                frame.toolbar,
+            );
+            if !opened {
+                return Repaint::Nothing;
+            }
+            mark.report(&self.browser, frame, damage);
+            let (scale, theme, viewport, toolbar) =
+                (frame.scale, frame.theme, frame.viewport, frame.toolbar);
+            let entry = tairix_browse::render::entry_rect(
+                &self.browser,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+                arm.index(),
+            );
+            let field = tairix_browse::render::selection_name_rect(
+                &self.browser,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            );
+            for rect in entry.into_iter().chain(field) {
+                damage.add(rect);
+            }
+            Repaint::Reported
         }
 
         /// Open the rename New ▸ asked for once the listing shows the new
@@ -732,6 +809,10 @@ mod program {
                 self.overlays
                     .double_click
                     .follow(|at| placement.place_subject(at));
+                self.overlays.rename_arm = self
+                    .overlays
+                    .rename_arm
+                    .and_then(|arm| arm.follow(|at| placement.place(at)));
             }
             // The editor may scroll its row into view, and the verbs live in
             // the toolbar: neither is a row comparison.
@@ -800,48 +881,52 @@ mod program {
         documents: Vec<BlankDocument>,
     }
 
-    /// Paint `win`'s current state and present it.
+    /// Fold one round's conclusion about `win`, and the region it reported,
+    /// into what the window owes. The turn paints it once its input is drained,
+    /// so a burst of samples costs one frame.
+    fn owe(win: &mut OpenWindow, repaint: Repaint, damage: &Region) {
+        let mode = *win.pane.mode();
+        win.owed.owe(&mode, repaint, damage);
+    }
+
+    /// Paint what `win` owes and present it.
     ///
     /// # Errors
     ///
     /// Whatever the present refuses; the caller treats a refused present as a
     /// lost channel and exits fail-loud.
-    fn present_window(
+    fn present_owed(
         win: &mut OpenWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
         grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
-        repaint: Repaint,
-        damage: &Region,
     ) -> Result<(), Errno> {
-        if repaint == Repaint::Nothing {
+        if win.owed.is_clean() {
             // Nothing moved, so a released window stays released rather than
             // being re-attached to redraw pixels nobody can see.
             return Ok(());
         }
-        let refitted = fit_to_listing(win, client, grounds, scale);
         // A region the session released, like a surface a fit re-allocated,
         // holds none of the pixels a partial present would leave standing.
-        let repaint = if refitted || win.pane.content_released() {
-            Repaint::Whole
-        } else {
-            repaint
-        };
-        let Some(damage) = present_damage(win.pane.mode(), repaint, damage) else {
+        if fit_to_listing(win, client, grounds, scale) || win.pane.content_released() {
+            win.owed.owe_whole();
+        }
+        let whole = win.owed.is_whole();
+        let mode = *win.pane.mode();
+        let Some(parts) = win.owed.take(&mode) else {
             return Ok(());
         };
-        let mode = *win.pane.mode();
         let mut target = FrameTarget {
             client,
             pane: &mut win.pane,
             title: &mut win.title,
             surface: &mut win.surface,
-            damage,
+            parts,
         };
         match &mut win.kind {
             WindowKind::Browser(browser) => {
-                if repaint == Repaint::Whole {
+                if whole {
                     sidebar::follow_pointer(
                         &mut browser.places,
                         (
@@ -892,35 +977,31 @@ mod program {
         let controls = win.controls();
         let view = win.view();
         let frame = win.frame();
-        let damage = target.damage;
+        let parts = target.parts;
         let surface = &mut *target.surface;
-        surface.with_clip(
-            damage.x,
-            damage.y,
-            damage.width_px,
-            damage.height_px,
-            |surface| {
-                let mut pipeline = icons.borrow_mut();
-                draw_properties_window(
-                    surface,
-                    frame,
-                    view,
-                    controls,
-                    scale,
-                    theme,
-                    window,
-                    &mut pipeline.source(),
-                );
-            },
-        );
-        target.pane.present(target.client, surface, damage)
+        {
+            let mut pipeline = icons.borrow_mut();
+            let mut source = pipeline.source();
+            for part in parts.rects() {
+                surface.with_clip(part.x, part.y, part.width_px, part.height_px, |surface| {
+                    draw_properties_window(
+                        surface,
+                        frame,
+                        view,
+                        controls,
+                        scale,
+                        theme,
+                        window,
+                        &mut source,
+                    );
+                });
+            }
+        }
+        target.pane.present_list(target.client, surface, &parts)
     }
 
-    /// Repaint and present the whole of `win`.
-    ///
-    /// The first frame, a resize onto a fresh surface, a re-theme, and a model
-    /// refresh a round could not describe all cover the window, so they name
-    /// the one conclusion here rather than each spelling it out.
+    /// Repaint and present the whole of `win` now: a window's first frame,
+    /// and each slice of a running operation's progress.
     ///
     /// # Errors
     ///
@@ -932,15 +1013,51 @@ mod program {
         icons: &RefCell<IconPipeline>,
         scale: Scale,
     ) -> Result<(), Errno> {
-        present_window(
-            win,
-            client,
-            grounds,
-            icons,
-            scale,
-            Repaint::Whole,
-            &Region::new(),
-        )
+        win.owed.owe_whole();
+        present_owed(win, client, grounds, icons, scale)
+    }
+
+    /// Paint every window that owes the screen, and every chooser popup over
+    /// one, once: how a turn ends after its input is drained and what landed
+    /// meanwhile is adopted.
+    ///
+    /// # Errors
+    ///
+    /// Whatever a window's present refuses. A chooser's refusal is said and
+    /// costs nothing more: the window behind it is unaffected.
+    fn present_owed_windows(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        grounds: Grounds<'_>,
+        icons: &RefCell<IconPipeline>,
+        scale: Scale,
+    ) -> Result<(), Errno> {
+        for win in windows {
+            present_owed(win, client, grounds, icons, scale)?;
+            let mode = *win.pane.mode();
+            let WindowKind::Browser(state) = &mut win.kind else {
+                continue;
+            };
+            let Some(overlay) = state
+                .overlays
+                .open_with
+                .as_mut()
+                .filter(|overlay| overlay.owed)
+            else {
+                continue;
+            };
+            overlay.owed = false;
+            let canvas = Canvas {
+                theme: grounds.popups,
+                mode: &mode,
+                scale,
+                chrome: state.chrome,
+            };
+            if present_chooser(overlay, client, canvas, icons).is_err() {
+                report_error("the chooser present was refused");
+            }
+        }
+        Ok(())
     }
 
     /// Open one browser window at `location`, mapping its own frame region and
@@ -999,6 +1116,7 @@ mod program {
             pane,
             title,
             surface,
+            owed: Owed::new(),
             kind: WindowKind::Browser(Box::new(BrowserWindow {
                 browser,
                 listing,
@@ -1006,6 +1124,7 @@ mod program {
                 places: places.clone(),
                 chrome: Chrome::HIDDEN,
                 pointer: None,
+                keyboard: Keyboard::default(),
                 menu: None,
                 fit: Fit {
                     location: listed.components().to_vec(),
@@ -1103,30 +1222,28 @@ mod program {
 
     /// Carry every window over to a desktop change: a browser window asks for
     /// its blur again and re-reads its floor and opening height at the new
-    /// density, and each is presented whole in the new theme.
-    ///
-    /// # Errors
-    ///
-    /// Whatever a present refuses.
-    fn redraw_for_desktop(
+    /// density, and each window — and any chooser over one — owes the whole of
+    /// itself in the new theme.
+    fn owe_desktop(
         windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         grounds: Grounds<'_>,
-        icons: &RefCell<IconPipeline>,
-    ) -> Result<(), Errno> {
+    ) {
         let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT).1;
         let floor_width = win_floor_width(desktop.scale(), grounds.window);
         for win in windows {
             let id = win.pane.id();
+            win.owed.owe_whole();
             if let Some(state) = win.browser() {
                 state.fit.opening = opening;
                 state.fit.floor_width = floor_width;
                 apply_backdrop(client, id, grounds);
+                if let Some(overlay) = state.overlays.open_with.as_mut() {
+                    overlay.owed = true;
+                }
             }
-            present_whole(win, client, grounds, icons, desktop.scale())?;
         }
-        Ok(())
     }
 
     /// Close the window at `index`, which never ends the process.
@@ -1153,6 +1270,87 @@ mod program {
             WindowKind::Properties(_) => reads.forget_properties(closed.pane.id()),
         }
         let _ = closed.pane.close(client);
+    }
+
+    /// The window a running long operation owns, if one does.
+    fn operating(windows: &[OpenWindow]) -> Option<usize> {
+        windows.iter().position(|win| {
+            matches!(&win.kind, WindowKind::Browser(state) if state.overlays.operation.is_some())
+        })
+    }
+
+    /// Serve what falls due with no event to bring it, answering whether any
+    /// window moved: a band held where its listing scrolls steps it, and a
+    /// click on a chosen name whose double-click interval has run out opens
+    /// the rename it armed.
+    fn serve_due(windows: &mut [OpenWindow], theme: &Theme, scale: Scale) -> bool {
+        let now = tairix_rt::clock_get();
+        let mut moved = false;
+        for win in windows {
+            let mode = *win.pane.mode();
+            let mut damage = Region::new();
+            let repaint = match win.browser() {
+                Some(state) => {
+                    let canvas = Canvas {
+                        theme,
+                        mode: &mode,
+                        scale,
+                        chrome: state.chrome,
+                    };
+                    let stepped = state.step_band(canvas, now, &mut damage);
+                    stepped.merged(state.open_due_rename(canvas, now, &mut damage))
+                }
+                None => Repaint::Nothing,
+            };
+            moved |= repaint != Repaint::Nothing;
+            owe(win, repaint, &damage);
+        }
+        moved
+    }
+
+    /// Serve one event addressed to the window a running operation owns: its
+    /// Cancel asks the operation to stop at its next step boundary, and a close
+    /// closes the window. Nothing else reaches a window while it is modal.
+    fn serve_operation_event(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        busy: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        theme: &Theme,
+        scale: Scale,
+        reads: &Reads,
+        event: &WindowEvent,
+    ) {
+        let Some(win) = windows.get_mut(busy) else {
+            return;
+        };
+        let mode = *win.pane.mode();
+        let Some(state) = win.browser() else {
+            return;
+        };
+        state.note_pointer(event);
+        state.keyboard = state.keyboard.step(event).1;
+        let canvas = Canvas {
+            theme,
+            mode: &mode,
+            scale,
+            chrome: state.chrome,
+        };
+        match operation_control(
+            canvas.chrome.rail(&state.places),
+            scale,
+            theme,
+            canvas.window(),
+            canvas.chrome.toolbar,
+            event,
+        ) {
+            OperationControl::Cancel => {
+                if let Some(operation) = state.overlays.operation.as_mut() {
+                    operation.progress.request_cancel();
+                }
+            }
+            OperationControl::Close => close_window(windows, busy, client, reads),
+            OperationControl::Ignore => {}
+        }
     }
 
     /// What routing an icon-bar event did.
@@ -1314,8 +1512,7 @@ mod program {
             route_drag(
                 windows,
                 client,
-                grounds,
-                icons,
+                grounds.popups,
                 launcher,
                 desktop.scale(),
                 event,
@@ -1339,7 +1536,6 @@ mod program {
                 client,
                 desktop,
                 launcher,
-                icons,
                 grounds.popups,
                 event,
             );
@@ -1355,15 +1551,8 @@ mod program {
             if let Some(browser) = windows[index].browser() {
                 browser.fit.restored = state == WindowSizeState::Restored;
             }
-            return resize_window(
-                &mut windows[index],
-                client,
-                grounds,
-                icons,
-                desktop.scale(),
-                width_px,
-                height_px,
-            );
+            resize_window(&mut windows[index], client, width_px, height_px);
+            return None;
         }
 
         // Nobody can see the window, so the session gave its copy of the pixels
@@ -1377,16 +1566,16 @@ mod program {
         }
 
         if matches!(windows[index].kind, WindowKind::Properties(_)) {
-            return route_properties_event(
+            route_properties_event(
                 windows,
                 index,
                 client,
-                grounds,
-                icons,
+                grounds.popups,
                 reads,
                 desktop.scale(),
                 event,
             );
+            return None;
         }
         route_browser_event(
             windows,
@@ -1417,8 +1606,7 @@ mod program {
     fn route_drag(
         windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
-        grounds: Grounds<'_>,
-        icons: &RefCell<IconPipeline>,
+        theme: &Theme,
         launcher: &RefCell<Launcher>,
         scale: Scale,
         event: &WindowEvent,
@@ -1430,7 +1618,6 @@ mod program {
             return;
         };
         let source_id = windows[source].pane.id();
-        let theme = grounds.popups;
         match *event {
             WindowEvent::DragOver {
                 window_id,
@@ -1460,7 +1647,7 @@ mod program {
                         ClipboardOp::Copy => DropOperation::Copy,
                         ClipboardOp::Cut => DropOperation::Move,
                     });
-                light_drop_tile(windows, client, (grounds, icons, scale), verdict.and(tile));
+                light_drop_tile(windows, theme, scale, verdict.and(tile));
                 // A drag that ended after this report was sent answers
                 // nothing; its end is already on its way.
                 match client.drag_verdict(source_id, serial, verdict) {
@@ -1474,7 +1661,7 @@ mod program {
                 let carrying = windows[source]
                     .browser()
                     .and_then(|state| state.overlays.carrying.take());
-                light_drop_tile(windows, client, (grounds, icons, scale), None);
+                light_drop_tile(windows, theme, scale, None);
                 let Some(carrying) = carrying else {
                     return;
                 };
@@ -1561,8 +1748,8 @@ mod program {
     /// that changed.
     fn light_drop_tile(
         windows: &mut [OpenWindow],
-        client: &mut WindowClient<app::RtWindowTransport>,
-        (grounds, icons, scale): (Grounds<'_>, &RefCell<IconPipeline>, Scale),
+        theme: &Theme,
+        scale: Scale,
         tile: Option<(u64, usize)>,
     ) {
         for win in windows.iter_mut() {
@@ -1577,7 +1764,7 @@ mod program {
                 continue;
             }
             let canvas = Canvas {
-                theme: grounds.popups,
+                theme,
                 mode: &mode,
                 scale,
                 chrome: state.chrome,
@@ -1588,7 +1775,7 @@ mod program {
                 if let Some(rect) = tairix_browse::render::entry_rect(
                     &state.browser,
                     scale,
-                    canvas.theme(),
+                    theme,
                     viewport,
                     canvas.chrome.toolbar,
                     index,
@@ -1596,19 +1783,7 @@ mod program {
                     damage.add(rect);
                 }
             }
-            if present_window(
-                win,
-                client,
-                grounds,
-                icons,
-                scale,
-                Repaint::Reported,
-                &damage,
-            )
-            .is_err()
-            {
-                report_error("a window could not show where the drag would drop");
-            }
+            owe(win, Repaint::Reported, &damage);
         }
     }
 
@@ -1685,7 +1860,6 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &mut Desktop,
         launcher: &RefCell<Launcher>,
-        icons: &RefCell<IconPipeline>,
         theme: &Theme,
         event: &WindowEvent,
     ) -> Option<i32> {
@@ -1712,12 +1886,8 @@ mod program {
         );
         // The popup paints itself; the window behind it owes nothing, so a
         // round that changed only the chooser presents only the chooser.
-        if repaint {
-            if let Some(overlay) = state.overlays.open_with.as_mut() {
-                if present_chooser(overlay, client, canvas, icons).is_err() {
-                    report_error("the chooser present was refused");
-                }
-            }
+        if let Some(overlay) = state.overlays.open_with.as_mut() {
+            overlay.owed |= repaint;
         }
         None
     }
@@ -1744,8 +1914,24 @@ mod program {
     ) -> Option<i32> {
         let win = windows.get_mut(index)?;
         let window_id = win.pane.id();
+        let double_click = desktop.info().double_click();
+        let mut keyboard_held = false;
         if let Some(state) = win.browser() {
             state.note_pointer(event);
+            let (held, keyboard) = state.keyboard.step(event);
+            (keyboard_held, state.keyboard) = (held, keyboard);
+            // Stepped before the event is routed, so the press that arms a
+            // rename is not taken for the press that lets it go.
+            let to = state.pointer.unwrap_or(Point::new(0, 0));
+            state.overlays.rename_arm = state.overlays.rename_arm.and_then(|arm| {
+                arm.step(
+                    PressInput::of(event),
+                    to,
+                    tairix_rt::clock_get(),
+                    double_click,
+                    desktop.scale(),
+                )
+            });
         }
         // The chrome toggle is a window-level gesture like the refresh below,
         // not a listing key: it changes what the frame is laid out from, so it
@@ -1781,10 +1967,10 @@ mod program {
                 *places_read.borrow_mut() = Some(found);
             }
         }
-        // One sink per round: every control the event reaches, and the rail
-        // and listing for the marks they move themselves, report into this
-        // one, which is what the present is clipped to.
-        let mut damage = damage::sink();
+        // Exact rather than budgeted: a band's edges and the tiles it selects
+        // are far apart, and a sink that degraded to their bounding box would
+        // repaint the whole band where the window's account merges them least.
+        let mut damage = Region::new();
         let popup = PopupLink::of(client, desktop, event_endpoint);
         let mut properties = None;
         let state = win.browser()?;
@@ -1794,6 +1980,7 @@ mod program {
                 overlays: &mut state.overlays,
                 places: &mut state.places,
                 pointer: state.pointer,
+                keyboard_held,
             },
             &mut Acts {
                 menu: MenuLink {
@@ -1807,7 +1994,7 @@ mod program {
                 popup,
                 icons,
                 properties: &mut properties,
-                double_click: desktop.info().double_click(),
+                double_click,
             },
             canvas,
             event,
@@ -1817,24 +2004,7 @@ mod program {
             close_window(windows, index, client, reads);
             return None;
         }
-        let repaint = repaint.merged(whole_if(chrome_toggled));
-        if present_window(
-            win,
-            client,
-            grounds,
-            icons,
-            desktop.scale(),
-            repaint,
-            &damage,
-        )
-        .is_err()
-        {
-            return Some(app::fail(
-                APP_NAME,
-                app::EXIT_CHANNEL_LOST,
-                "present refused",
-            ));
-        }
+        owe(win, repaint.merged(whole_if(chrome_toggled)), &damage);
         // The window this round asked for, opened once its own window's borrow
         // has ended.
         if let Some(request) = properties {
@@ -1855,9 +2025,10 @@ mod program {
 
     /// Adopt the client size the window manager gave this window.
     ///
-    /// Re-maps the frame region at the new size and repaints whole, whatever
-    /// the window is showing: the browser lays out to the new viewport and a
-    /// Properties window re-places its bands.
+    /// Re-maps the frame region at the new size at once, so the input that
+    /// follows is resolved against the layout it was aimed at, and owes the
+    /// window whole: the browser lays out to the new viewport and a Properties
+    /// window re-places its bands.
     ///
     /// The reported size is adopted exactly — the declared minimum is the
     /// window manager's to hold, and an app that pushed back here would fight
@@ -1866,28 +2037,16 @@ mod program {
     /// region, so a refusal at either step leaves the window drawable at the
     /// size it already had (fail closed). The surface holds none of the last
     /// frame's pixels, so the repaint that follows can only be a whole one.
-    #[allow(clippy::too_many_arguments)] // The window, the frame, and the new size.
     fn resize_window(
         win: &mut OpenWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
-        grounds: Grounds<'_>,
-        icons: &RefCell<IconPipeline>,
-        scale: Scale,
         width_px: u32,
         height_px: u32,
-    ) -> Option<i32> {
+    ) {
         let new_mode = app::mode_for(width_px, height_px);
-        if !win.pane.resize_with(client, &new_mode, &mut win.surface) {
-            return None;
+        if win.pane.resize_with(client, &new_mode, &mut win.surface) {
+            win.owed.owe_whole();
         }
-        if present_whole(win, client, grounds, icons, scale).is_err() {
-            return Some(app::fail(
-                APP_NAME,
-                app::EXIT_CHANNEL_LOST,
-                "present refused",
-            ));
-        }
-        None
     }
 
     /// Route one event to the Properties window at `index`.
@@ -1895,29 +2054,29 @@ mod program {
     /// Its own path because a Properties window shares nothing with a listing
     /// but the pane, the surface and the title: no rail, no chrome, no
     /// overlays, and no listing to navigate.
-    #[allow(clippy::too_many_arguments)] // The window list, the frame, and the event.
     fn route_properties_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
         index: usize,
         client: &mut WindowClient<app::RtWindowTransport>,
-        grounds: Grounds<'_>,
-        icons: &RefCell<IconPipeline>,
+        theme: &Theme,
         reads: &Reads,
         scale: Scale,
         event: &WindowEvent,
-    ) -> Option<i32> {
-        let win = windows.get_mut(index)?;
+    ) {
+        let Some(win) = windows.get_mut(index) else {
+            return;
+        };
         let window_id = win.pane.id();
         let mode = *win.pane.mode();
         let mut damage = damage::sink();
         let WindowKind::Properties(props) = &mut win.kind else {
-            return None;
+            return;
         };
         let (repaint, close) = apply_properties_event(
             props,
             window_id,
             reads,
-            grounds.popups,
+            theme,
             scale,
             Rect::new(0, 0, mode.width_px, mode.height_px),
             event,
@@ -1925,16 +2084,9 @@ mod program {
         );
         if close {
             close_window(windows, index, client, reads);
-            return None;
+            return;
         }
-        if present_window(win, client, grounds, icons, scale, repaint, &damage).is_err() {
-            return Some(app::fail(
-                APP_NAME,
-                app::EXIT_CHANNEL_LOST,
-                "present refused",
-            ));
-        }
-        None
+        owe(win, repaint, &damage);
     }
 
     /// Apply the chrome toggle `event` names to `win`, answering whether a
@@ -2533,6 +2685,73 @@ mod program {
         /// The parser-sandbox seam: one worker, started on the first decode and
         /// replaced by the seam if it ever fails.
         sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+        /// Where a thumbnail decoded once per version of its file is kept.
+        store: StoreSlot,
+    }
+
+    impl SandboxRasteriser {
+        fn new() -> Self {
+            Self {
+                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                store: StoreSlot::Unopened,
+            }
+        }
+    }
+
+    /// The blob in this application's own bulk store its thumbnails persist in.
+    const THUMBNAIL_BLOB: &str = "thumbnails";
+
+    /// The persistent thumbnail store (`plans/FILES-INTERACTION.md` FI25),
+    /// opened on the first thumbnail, at the side that asks for it.
+    enum StoreSlot {
+        Unopened,
+        Open(ThumbnailStore<tairix_rt::File>),
+        /// Refused, and said once: thumbnails are decoded and not kept.
+        Unavailable,
+    }
+
+    impl StoreSlot {
+        /// The store, when it holds pictures `side` pixels square.
+        fn at(&mut self, side: u32) -> Option<&mut ThumbnailStore<tairix_rt::File>> {
+            if matches!(self, Self::Unopened) {
+                *self = match open_thumbnail_store(side) {
+                    Ok(store) => Self::Open(store),
+                    Err(reason) => {
+                        report_error(&alloc::format!("thumbnails are not kept: {reason}"));
+                        Self::Unavailable
+                    }
+                };
+            }
+            match self {
+                Self::Open(store) if store.side() == side => Some(store),
+                Self::Open(_) | Self::Unopened | Self::Unavailable => None,
+            }
+        }
+    }
+
+    /// Open the thumbnail blob. A second instance shares it unlocked — a
+    /// delegated descriptor takes no advisory lock — which the store survives
+    /// because every slot checks itself.
+    fn open_thumbnail_store(side: u32) -> Result<ThumbnailStore<tairix_rt::File>, String> {
+        let handle = tairix_appdata::blobs::open(
+            &mut tairix_appdata::RtHost,
+            THUMBNAIL_BLOB,
+            tairix_abi::appdata_ipc::BlobMode::ReadWrite,
+        )
+        .map_err(|err| alloc::format!("the store was refused ({err})"))?;
+        let file = tairix_rt::File::from_delegation(handle).map_err(|err| {
+            alloc::format!(
+                "the store's descriptor was refused ({})",
+                Errno::from_syscall(err)
+            )
+        })?;
+        ThumbnailStore::open(
+            file,
+            side,
+            tairix_sandbox::imagerender::THUMBNAIL_REVISION,
+            tairix_abi::appdata_ipc::APPDATA_BULK_FILE_MAX_BYTES,
+        )
+        .ok_or_else(|| String::from("the store could not be laid out"))
     }
 
     impl ArtworkRasteriser for SandboxRasteriser {
@@ -2551,8 +2770,15 @@ mod program {
             side: u32,
             reading: tairix_icon::Reading,
             document: &mut dyn tairix_icon::ArtworkDocument,
-        ) -> Option<alloc::vec::Vec<u8>> {
-            tairix_sandbox::imagerender::thumbnail(&mut self.sandbox, side, reading, document).ok()
+        ) -> Option<tairix_icon::Fitted> {
+            let sandbox = &mut self.sandbox;
+            let mut decode = |document: &mut dyn tairix_icon::ArtworkDocument| {
+                tairix_sandbox::imagerender::thumbnail(sandbox, side, reading, document).ok()
+            };
+            match self.store.at(side) {
+                Some(store) => store.serve(reading, document, decode),
+                None => decode(document),
+            }
         }
     }
 
@@ -2692,9 +2918,7 @@ mod program {
         /// so no sandbox handle ever crosses a thread boundary.
         fn serve(&self) {
             let mut reader = VfsArtworkReader;
-            let mut rasteriser = SandboxRasteriser {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-            };
+            let mut rasteriser = SandboxRasteriser::new();
             // Refused, each drain reads its changes a few at a time instead.
             let mut scratch =
                 tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
@@ -3441,9 +3665,7 @@ mod program {
         } else {
             alloc::boxed::Box::new(InlineArtwork::new(
                 VfsArtworkReader,
-                SandboxRasteriser {
-                    sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-                },
+                SandboxRasteriser::new(),
             ))
         };
         IconPipeline::new(cache, resolver)
@@ -3487,9 +3709,10 @@ mod program {
         /// Where a places read the mount notice asked for lands when no worker
         /// was there to read it.
         places_read: &'a PlacesRead,
-        /// When a band held over a window next steps its listing: the one
-        /// deadline the park keeps for the loop.
-        band_due: &'a Cell<Option<u64>>,
+        /// The soonest a window needs the loop with no event to bring it — a
+        /// band's step, a clicked name opening — and the one deadline the park
+        /// keeps for the loop.
+        due: &'a Cell<Option<u64>>,
     }
 
     /// Places read on the loop's own thread because no worker was there to
@@ -3510,16 +3733,16 @@ mod program {
             // the rate limiter is holding back only ever *tightens* the park
             // to the moment it may be sent; with nothing pending the park
             // stays indefinite.
-            let band_due = self.band_due.get();
-            let loop_ns = band_due.map_or(u64::MAX, |due| {
+            let due = self.due.get();
+            let loop_ns = due.map_or(u64::MAX, |due| {
                 tairix_window::park::remaining_ns(due, tairix_rt::clock_get())
             });
             let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(loop_ns);
             let Some(wake) = app::park_for(self.set, timeout_ns)? else {
                 // No member woke, so one of the two deadlines is due: the
-                // held-back report, or a band's step, which is the loop's.
+                // held-back report, or the loop's own.
                 tairix_rt::cachereport::publish_if_due();
-                if band_due.is_some_and(|due| tairix_rt::clock_get() >= due) {
+                if due.is_some_and(|due| tairix_rt::clock_get() >= due) {
                     return Ok(Parked::Interrupted);
                 }
                 return Ok(Parked::Served);
@@ -3680,6 +3903,8 @@ mod program {
         overlays: &'a mut Overlays,
         places: &'a mut Places,
         pointer: Option<Point>,
+        /// Whether the window held the keyboard before this round's event.
+        keyboard_held: bool,
     }
 
     /// What one event round acts *through*, as against what it acts *on*.
@@ -3819,6 +4044,8 @@ mod program {
         /// The entry a press inside a multi-selection landed on, selected alone
         /// if the press is released without becoming a drag.
         collapse_on_release: Option<usize>,
+        /// A click on the one selected entry's name, waiting to rename it.
+        rename_arm: Option<RenameArm>,
         /// A press on the listing's ground, and the band a drag from it draws.
         sweep: Option<Sweep>,
     }
@@ -3828,8 +4055,9 @@ mod program {
     enum Sweep {
         /// Pressed here.
         Armed(DragArm),
-        /// The band being dragged.
-        Live(Band),
+        /// The band being dragged, boxed: it carries the marks it selected,
+        /// and a press that never travels should not pay for them.
+        Live(Box<Band>),
     }
 
     /// How often the listing steps under a held band: a frame at sixty hertz.
@@ -3929,6 +4157,8 @@ mod program {
         pane: WindowPane,
         /// The surface every frame of it is drawn into.
         surface: Surface,
+        /// A round changed it since it was last presented.
+        owed: bool,
     }
 
     impl Overlays {
@@ -4017,11 +4247,11 @@ mod program {
         browser.resolve_occupancy(range)
     }
 
-    /// Render the browser into the window's retained surface, clipped to
-    /// `target.damage`, and present that rectangle.
+    /// Render the browser into the window's retained surface, once under each
+    /// of `target.parts`, and present those rectangles.
     ///
     /// Clipping is sound because the surface lives for the life of the window:
-    /// every pixel outside the clip is the one already on screen, and the
+    /// every pixel outside the clips is the one already on screen, and the
     /// single shared frame holds the same. A round that could not describe
     /// what it changed asks for the whole window instead.
     ///
@@ -4084,69 +4314,68 @@ mod program {
         // resolves. Only the tiles the grid actually draws are asked for, so
         // nothing scrolled out of view is ever decoded. The borrow is taken for
         // the render alone; the parked event source holds it only to trim.
-        let damage = target.damage;
+        let parts = target.parts;
         let surface = &mut *target.surface;
-        surface.with_clip(
-            damage.x,
-            damage.y,
-            damage.width_px,
-            damage.height_px,
-            |surface| {
-                {
-                    let mut pipeline = icons.borrow_mut();
+        let drawn = ManagerChrome {
+            tools: MANAGER_TOOLS,
+            tool_model: manager_tool_model(browser),
+            sidebar: rail,
+            toolbar,
+        };
+        let band = match overlays.sweep.as_ref() {
+            Some(Sweep::Live(band)) => {
+                let frame = Frame {
+                    scale,
+                    theme,
+                    viewport,
+                    toolbar,
+                };
+                marquee::band(browser, frame, &band.marquee)
+            }
+            Some(Sweep::Armed(_)) | None => None,
+        };
+        {
+            let mut pipeline = icons.borrow_mut();
+            let mut source = pipeline.source();
+            for part in parts.rects() {
+                surface.with_clip(part.x, part.y, part.width_px, part.height_px, |surface| {
                     render_into(
                         surface,
                         browser,
                         scale,
                         grounds.window,
                         window,
-                        &ManagerChrome {
-                            tools: MANAGER_TOOLS,
-                            tool_model: manager_tool_model(browser),
-                            sidebar: rail,
-                            toolbar,
-                        },
-                        &mut pipeline.source(),
+                        &drawn,
+                        &mut source,
                     );
-                }
-                if let Some(Sweep::Live(band)) = overlays.sweep.as_ref() {
-                    let frame = Frame {
-                        scale,
-                        theme,
-                        viewport,
-                        toolbar,
-                    };
-                    if let Some(shown) = marquee::band(browser, frame, &band.marquee) {
+                    if let Some(shown) = band {
                         marquee::draw(surface, shown, scale, theme);
                     }
-                }
-                // In rename mode, overlay the inline editor on the selected
-                // item's *name* through the shared geometry the views draw it
-                // at, so the field covers what is being edited and not the
-                // icon or the columns beside it, and scrolls with its item.
-                if let Some(field) = rename {
-                    draw_rename_field(surface, field, browser, scale, theme, viewport, toolbar);
-                }
-                // The delete-confirmation dialog is modal: drawn last, on top
-                // of the view, and never open together with the rename
-                // editor.
-                if let Some(confirm) = overlays.delete.as_ref() {
-                    draw_delete_dialog(surface, &confirm.dialog, scale, theme, viewport);
-                }
-                // The "Open With…" chooser is not drawn here: it has its own
-                // popup window, painted by `present_chooser`. Neither is the
-                // right-click menu — its plates are the desktop's own
-                // surfaces, so this window paints no menu pixel either.
-                //
-                // A running long operation's progress + cancel panel is modal:
-                // drawn last so it is topmost while the walk runs interleaved
-                // with input.
-                if let Some(operation) = overlays.operation.as_ref() {
-                    draw_progress_dialog(surface, &operation.progress, scale, theme, viewport);
-                }
-            },
-        );
-        target.pane.present(target.client, surface, damage)
+                    // In rename mode, overlay the inline editor on the selected
+                    // item's *name* through the shared geometry the views draw
+                    // it at, so the field covers what is being edited and not
+                    // the icon or the columns beside it, and scrolls with its
+                    // item.
+                    if let Some(field) = rename {
+                        draw_rename_field(surface, field, browser, scale, theme, viewport, toolbar);
+                    }
+                    // The delete-confirmation dialog is modal: drawn last, on
+                    // top of the view, and never open together with the rename
+                    // editor.
+                    if let Some(confirm) = overlays.delete.as_ref() {
+                        draw_delete_dialog(surface, &confirm.dialog, scale, theme, viewport);
+                    }
+                    // The "Open With…" chooser has its own popup window and the
+                    // right-click menu is the desktop's own plates, so neither
+                    // is drawn here. A running operation's progress panel is
+                    // modal, so it is drawn last.
+                    if let Some(operation) = overlays.operation.as_ref() {
+                        draw_progress_dialog(surface, &operation.progress, scale, theme, viewport);
+                    }
+                });
+            }
+        }
+        target.pane.present_list(target.client, surface, &parts)
     }
 
     /// Apply one delivered event to the browser, reporting whether the
@@ -4168,11 +4397,10 @@ mod program {
             browser,
             overlays,
             places,
-            pointer,
+            ..
         } = win;
         let theme = canvas.theme();
         let scale = canvas.scale;
-        let window = canvas.window();
         // Everything below the rail lays out in what the rail leaves, resolved
         // through the one shared inset the renderer paints with, so a click
         // lands on exactly the control the user saw.
@@ -4205,9 +4433,9 @@ mod program {
             let Some(gesture) = acts.menu.open.take() else {
                 return (Repaint::Nothing, false);
             };
-            let (changed, close) =
-                apply_menu_outcome(browser, overlays, acts, &gesture, canvas, viewport, outcome);
-            return (whole_if(changed), close);
+            return apply_menu_outcome(
+                browser, overlays, acts, &gesture, canvas, viewport, outcome, damage,
+            );
         }
 
         // The "Open With…" chooser is not handled here. It is a window of its
@@ -4232,27 +4460,118 @@ mod program {
             return (whole_if(changed), close);
         }
 
-        // Rename mode: the inline editor owns the keyboard. Its keys never
-        // navigate the listing, and non-key events leave the edit untouched.
+        // Rename mode: the inline editor owns the keyboard and the presses
+        // inside it. A press outside commits the name, and acts as it would
+        // with no editor open only when the name was unchanged.
         if overlays.rename.is_some() {
-            let (changed, close) = match event {
-                WindowEvent::Key {
-                    key: KeyInput::Pressed { key, modifiers },
-                    ..
-                } => apply_rename_key(
-                    browser,
-                    &mut overlays.rename,
-                    scale,
-                    theme,
-                    viewport,
-                    toolbar,
-                    *key,
-                    *modifiers,
-                ),
-                _ => (false, false),
+            let frame = Frame {
+                scale,
+                theme,
+                viewport,
+                toolbar,
             };
-            return (whole_if(changed), close);
+            return match rename_event(browser, &mut overlays.rename, frame, event, damage) {
+                RenameRouting::Taken(repaint, close) => (repaint, close),
+                RenameRouting::Committed => {
+                    let (repaint, close) = route_listing_event(win, acts, canvas, event, damage);
+                    (repaint.merged(Repaint::Whole), close)
+                }
+            };
         }
+        route_listing_event(win, acts, canvas, event, damage)
+    }
+
+    /// What routing an event to the open rename editor did.
+    enum RenameRouting {
+        /// The editor took it, repainting as this says; `true` closes the
+        /// window.
+        Taken(Repaint, bool),
+        /// A press outside the editor closed it on an unchanged name; the
+        /// press routes on as though no editor had been open.
+        Committed,
+    }
+
+    /// Route one event to the open rename editor.
+    ///
+    /// Keys edit, submit, or cancel ([`apply_rename_key`]); a press inside the
+    /// field places the caret and a drag from it selects. A press outside it
+    /// commits the name, and acts only when nothing moved
+    /// ([`RenameCommit::press_acts`]). Anything else leaves the edit untouched.
+    fn rename_event<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        frame: Frame<'_>,
+        event: &WindowEvent,
+        damage: &mut Region,
+    ) -> RenameRouting {
+        let Frame {
+            scale,
+            theme,
+            viewport,
+            toolbar,
+        } = frame;
+        match event {
+            WindowEvent::Key {
+                key: KeyInput::Pressed { key, modifiers },
+                ..
+            } => {
+                let (changed, close) = apply_rename_key(
+                    browser, rename, scale, theme, viewport, toolbar, *key, *modifiers,
+                );
+                RenameRouting::Taken(whole_if(changed), close)
+            }
+            WindowEvent::Pointer { x, y, action, .. } => {
+                let point = pointer_point(*x, *y);
+                let bounds = tairix_browse::render::selection_name_rect(
+                    browser, scale, theme, viewport, toolbar,
+                )
+                .unwrap_or(Rect::EMPTY);
+                if matches!(action, PointerAction::Pressed(_)) && !bounds.contains(point) {
+                    return if commit_rename(browser, rename, scale, theme, viewport, toolbar)
+                        .press_acts()
+                    {
+                        RenameRouting::Committed
+                    } else {
+                        RenameRouting::Taken(Repaint::Whole, false)
+                    };
+                }
+                let Some(field) = rename.as_mut() else {
+                    return RenameRouting::Taken(Repaint::Nothing, false);
+                };
+                let mut moved = damage::sink();
+                for input in pointer_input_events(*action, point) {
+                    field.on_pointer(&input, bounds, scale, theme, &mut moved);
+                }
+                for rect in moved.rects() {
+                    damage.add(*rect);
+                }
+                RenameRouting::Taken(Repaint::reported_if(!moved.is_empty()), false)
+            }
+            _ => RenameRouting::Taken(Repaint::Nothing, false),
+        }
+    }
+
+    /// Route one event to the listing and the chrome around it: the band a
+    /// press on the ground draws, the places rail, then the view itself.
+    fn route_listing_event<S: DirectorySource>(
+        win: &mut WindowState<'_, S>,
+        acts: &mut Acts<'_>,
+        canvas: Canvas<'_>,
+        event: &WindowEvent,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        let WindowState {
+            browser,
+            overlays,
+            places,
+            pointer,
+            ..
+        } = win;
+        let theme = canvas.theme();
+        let scale = canvas.scale;
+        let window = canvas.window();
+        let toolbar = canvas.chrome.toolbar;
+        let viewport = canvas.viewport(places);
 
         // A band holds the pointer from its press to its release, wherever the
         // pointer goes, so it is served before the rail could claim a motion.
@@ -4305,9 +4624,9 @@ mod program {
     /// as a press on it would. Alt+Enter opens a Properties window, a plain
     /// Enter activates the selection and Shift+Enter lists a bundle rather
     /// than running it — the keyboard spelling of the pointer's
-    /// shift-double-click — Delete opens the delete confirmation, and
-    /// Ctrl+X/C/V drive the clipboard verbs; every other key is the shared
-    /// `apply_nav_key`'s.
+    /// shift-double-click — Delete opens the delete confirmation,
+    /// Ctrl+X/C/V drive the clipboard verbs, and Ctrl+A / Ctrl+Shift+A select
+    /// every entry or none; every other key is the shared `apply_nav_key`'s.
     #[allow(clippy::too_many_arguments)] // The key, its context, and the round's report.
     fn apply_nav_press<S: DirectorySource>(
         browser: &mut Browser<S>,
@@ -4356,6 +4675,14 @@ mod program {
                 &mut overlays.operation,
                 verb,
             ))
+        } else if let Some(verb) = SelectionVerb::of_key(key, modifiers) {
+            let frame = Frame {
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            };
+            apply_selection_verb(browser, frame, verb, damage)
         } else {
             apply_nav_key(
                 browser,
@@ -4658,11 +4985,11 @@ mod program {
             let Some(marquee) = marquee::begin(browser, frame, arm.at) else {
                 return Repaint::Nothing;
             };
-            *sweep = Sweep::Live(Band {
+            *sweep = Sweep::Live(Box::new(Band {
                 marquee,
                 stepped_at: None,
                 carry: 0,
-            });
+            }));
         }
         let Sweep::Live(band) = sweep else {
             return Repaint::Nothing;
@@ -4686,6 +5013,7 @@ mod program {
         damage: &mut Region,
     ) -> (Repaint, bool) {
         let toolbar = canvas.chrome.toolbar;
+        let keyboard_held = win.keyboard_held;
         let WindowState {
             browser, overlays, ..
         } = win;
@@ -4764,13 +5092,10 @@ mod program {
             Some(point) => apply_primary_press(
                 browser,
                 overlays,
-                acts.launcher,
-                acts.menu.client,
+                acts,
                 canvas,
-                acts.double_click,
                 viewport,
-                point,
-                *modifiers,
+                (point, *modifiers, keyboard_held),
                 damage,
             ),
             None => (Repaint::Nothing, false),
@@ -4823,6 +5148,24 @@ mod program {
             )),
             _ => (Repaint::Nothing, false),
         }
+    }
+
+    /// Select every entry or none, reporting the entries whose mark changed.
+    fn apply_selection_verb<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        frame: Frame<'_>,
+        verb: SelectionVerb,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        let mark = ViewMark::of(browser, frame);
+        match verb {
+            SelectionVerb::All => browser.select_all(),
+            SelectionVerb::Clear => browser.clear_selection(),
+        }
+        (
+            Repaint::reported_if(mark.report(browser, frame, damage)),
+            false,
+        )
     }
 
     /// Move the listing's focus with `step`, keep it on screen, and report the
@@ -6002,17 +6345,16 @@ mod program {
     /// `viewport` is the rail-inset content area the items occupy; the write
     /// tools sit on the toolbar band, which spans the whole window
     /// (`canvas.window()`).
-    #[allow(clippy::too_many_arguments)] // The press, its context, and the round's report.
+    ///
+    /// `press` is where it landed, the modifiers held, and whether the window
+    /// held the keyboard before it.
     fn apply_primary_press<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
-        launcher: &RefCell<Launcher>,
-        client: &mut WindowClient<app::RtWindowTransport>,
+        acts: &mut Acts<'_>,
         canvas: Canvas<'_>,
-        double_click: Duration64,
         viewport: Rect,
-        point: Point,
-        modifiers: AbiModifiers,
+        (point, modifiers, keyboard_held): (Point, AbiModifiers, bool),
         damage: &mut Region,
     ) -> (Repaint, bool) {
         let toolbar = canvas.chrome.toolbar;
@@ -6066,14 +6408,14 @@ mod program {
             place,
             keys,
             in_selection,
-            double_click,
+            acts.double_click,
         ) {
             PrimaryPress::Activate { index } => {
                 let _ = browser.select(index);
                 whole(activate(
                     browser,
-                    launcher,
-                    client,
+                    acts.launcher,
+                    acts.menu.client,
                     scale,
                     theme,
                     viewport,
@@ -6082,23 +6424,14 @@ mod program {
                     AfterHandoff::Keep,
                 ))
             }
-            // A selection change repaints only the shown entries whose mark
-            // changed, so the round reports exactly those.
-            PrimaryPress::Select { index, how } => {
-                let mark = ViewMark::of(browser, frame);
-                let applied = match how {
-                    SelectHow::Single => browser.select(index),
-                    SelectHow::Toggle => browser.toggle_selection(index),
-                    SelectHow::Extend => browser.extend_selection_to(index),
-                    SelectHow::Hold => {
-                        overlays.collapse_on_release = Some(index);
-                        Ok(())
-                    }
-                };
-                let moved = mark.report(browser, frame, damage);
-                overlays.drag = browser.is_selected(index).then_some(DragArm { at: point });
-                (Repaint::reported_if(applied.is_ok() && moved), false)
-            }
+            PrimaryPress::Select { index, how } => select_pressed(
+                browser,
+                overlays,
+                frame,
+                (index, how),
+                (point, keyboard_held),
+                damage,
+            ),
             PrimaryPress::Empty { keep } => {
                 let mark = ViewMark::of(browser, frame);
                 if !keep {
@@ -6113,6 +6446,53 @@ mod program {
             }
             PrimaryPress::Chrome => whole(apply_chrome_press(browser, canvas, viewport, point)),
         }
+    }
+
+    /// Apply a lone press that selected the entry at `index` `how`: the
+    /// selection changes, a drag may begin from it, and a click on the name of
+    /// the entry already chosen arms its rename.
+    ///
+    /// A selection change repaints only the shown entries whose mark changed,
+    /// so the round reports exactly those.
+    fn select_pressed<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        frame: Frame<'_>,
+        (index, how): (usize, SelectHow),
+        (point, keyboard_held): (Point, bool),
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        overlays.rename_arm = RenameArm::on_press(
+            index,
+            point,
+            NamePress {
+                how,
+                was_chosen: browser.chosen_index() == Some(index),
+                on_name: tairix_browse::render::entry_name_target(
+                    browser,
+                    frame.scale,
+                    frame.theme,
+                    frame.viewport,
+                    frame.toolbar,
+                    index,
+                )
+                .is_some_and(|name| name.contains(point)),
+                keyboard_held,
+            },
+        );
+        let mark = ViewMark::of(browser, frame);
+        let applied = match how {
+            SelectHow::Single => browser.select(index),
+            SelectHow::Toggle => browser.toggle_selection(index),
+            SelectHow::Extend => browser.extend_selection_to(index),
+            SelectHow::Hold => {
+                overlays.collapse_on_release = Some(index);
+                Ok(())
+            }
+        };
+        let moved = mark.report(browser, frame, damage);
+        overlays.drag = browser.is_selected(index).then_some(DragArm { at: point });
+        (Repaint::reported_if(applied.is_ok() && moved), false)
     }
 
     /// Apply one primary press that landed on the read-only **chrome** (the
@@ -6307,6 +6687,7 @@ mod program {
     /// refusal is stated on `stderr` and the window carries on. A row id this
     /// window never declared names no command and is dropped (fail closed —
     /// an outcome is never guessed at).
+    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, the answer, and the round's report.
     fn apply_menu_outcome<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -6315,15 +6696,18 @@ mod program {
         canvas: Canvas<'_>,
         viewport: Rect,
         outcome: MenuOutcome,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         let scale = canvas.scale;
         let theme = canvas.theme();
         let toolbar = canvas.chrome.toolbar;
         let window = acts.menu.window;
-        match outcome {
+        let (changed, close) = match outcome {
             MenuOutcome::Chosen(item) => match context_choice_from_item(item) {
                 Some(ContextChoice::Command(command)) => {
-                    dispatch_context_command(browser, overlays, acts, canvas, viewport, command)
+                    return dispatch_context_command(
+                        browser, overlays, acts, canvas, viewport, command, damage,
+                    );
                 }
                 Some(ContextChoice::OpenWithCandidate(index)) => {
                     launch_candidate(gesture, index, acts.launcher, acts.menu.client)
@@ -6377,7 +6761,8 @@ mod program {
                 report_error(&alloc::format!("no menu was shown: {}", reason.describe()));
                 (false, false)
             }
-        }
+        };
+        (whole_if(changed), close)
     }
 
     /// Pull the name the user typed into the context menu's Rename field and
@@ -6463,7 +6848,7 @@ mod program {
     /// paths the toolbar and keyboard drive, so the right-click menu can never
     /// diverge from them. Every verb is the user's own permission- checked
     /// action under their identity — the menu adds no authority.
-    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, and the command.
+    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, the command, and the round's report.
     fn dispatch_context_command<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -6471,12 +6856,19 @@ mod program {
         canvas: Canvas<'_>,
         viewport: Rect,
         command: ContextCommand,
-    ) -> (bool, bool) {
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
         let scale = canvas.scale;
         let theme = canvas.theme();
         let toolbar = canvas.chrome.toolbar;
         let launcher = acts.launcher;
-        match command {
+        let frame = Frame {
+            scale,
+            theme,
+            viewport,
+            toolbar,
+        };
+        let (changed, close) = match command {
             ContextCommand::Open => activate(
                 browser,
                 launcher,
@@ -6528,12 +6920,19 @@ mod program {
                 &mut overlays.operation,
                 ClipboardVerb::Paste,
             ),
+            ContextCommand::SelectAll => {
+                return apply_selection_verb(browser, frame, SelectionVerb::All, damage);
+            }
+            ContextCommand::ClearSelection => {
+                return apply_selection_verb(browser, frame, SelectionVerb::Clear, damage);
+            }
             ContextCommand::Properties => ask_properties(browser, acts.properties),
             // The same modal-confirmed removal the `Delete` key opens: the menu
             // adds no authority — the confirmed walk is the user's own
             // permission-checked `fs_unlink`s.
             ContextCommand::Delete => begin_delete(browser, &mut overlays.delete),
-        }
+        };
+        (whole_if(changed), close)
     }
 
     /// Open the "Open With…" application chooser for the selected regular
@@ -6641,6 +7040,7 @@ mod program {
             clicks: DoubleClickTracker::new(),
             pane,
             surface,
+            owed: false,
         };
         if present_chooser(&mut overlay, acts.menu.client, canvas, acts.icons).is_err() {
             report_error("the chooser present was refused; not shown");
@@ -7121,11 +7521,19 @@ mod program {
         viewport: Rect,
         toolbar: ToolbarBand,
     ) -> (bool, bool) {
-        let Some(name) = browser.chosen_entry().map(|entry| entry.name().to_string()) else {
+        let Some((name, stem)) = browser.chosen_entry().map(|entry| {
+            (
+                entry.name().to_string(),
+                tairix_browse::rename_selection(entry),
+            )
+        }) else {
             return (false, false);
         };
         tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
-        let mut field = TextField::new().with_text(&name).with_max_len(FS_NAME_MAX);
+        let mut field = TextField::new()
+            .with_text(&name)
+            .with_max_len(FS_NAME_MAX)
+            .with_selection(stem);
         field.set_focused(true);
         *rename = Some(field);
         (true, false)
@@ -7202,6 +7610,7 @@ mod program {
             pane,
             title,
             surface,
+            owed: Owed::new(),
             kind: WindowKind::Properties(Box::new(PropertiesWindow {
                 path,
                 kind,
@@ -7855,36 +8264,8 @@ mod program {
         };
         match action {
             Some(TextAction::Submitted) => {
-                let Some(new_name) = rename.as_ref().map(|f| f.text().to_string()) else {
-                    return (false, false);
-                };
-                match browser.rename_selected(&new_name, |from, to| {
-                    let ret = tairix_rt::fs_rename(from.as_bytes(), to.as_bytes());
-                    if ret == 0 {
-                        Ok(())
-                    } else {
-                        Err(Errno::from_syscall(ret))
-                    }
-                }) {
-                    // A committed rename (or a no-op rename to the same name)
-                    // closes the editor; the selection follows the entry.
-                    Ok(()) | Err(RenameError::Unchanged) => {
-                        *rename = None;
-                        tairix_browse::render::reveal_selection(
-                            browser, scale, theme, viewport, toolbar,
-                        );
-                        (true, false)
-                    }
-                    // A refused rename stays open with the honest reason shown
-                    // in the field (never a silent or fabricated result); the
-                    // listing is untouched.
-                    Err(err) => {
-                        if let Some(field) = rename.as_mut() {
-                            field.set_message(Some(String::from(err.message())));
-                        }
-                        (true, false)
-                    }
-                }
+                let _ = commit_rename(browser, rename, scale, theme, viewport, toolbar);
+                (true, false)
             }
             Some(TextAction::Cancelled) => {
                 *rename = None;
@@ -7903,6 +8284,49 @@ mod program {
                 (true, false)
             }
             None => (false, false),
+        }
+    }
+
+    /// Commit the name typed into the open rename editor through `fs_rename`,
+    /// answering whether the editor closed.
+    ///
+    /// A name taken, or the name left as it was, closes it and the selection
+    /// follows the entry; a refusal keeps it open with the honest reason in the
+    /// field (never a silent or fabricated result) and the listing untouched.
+    fn commit_rename<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        rename: &mut Option<TextField>,
+        scale: Scale,
+        theme: &Theme,
+        viewport: Rect,
+        toolbar: ToolbarBand,
+    ) -> RenameCommit {
+        let Some(new_name) = rename.as_ref().map(|field| field.text().to_string()) else {
+            return RenameCommit::Refused;
+        };
+        match browser.rename_selected(&new_name, |from, to| {
+            let ret = tairix_rt::fs_rename(from.as_bytes(), to.as_bytes());
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(Errno::from_syscall(ret))
+            }
+        }) {
+            outcome @ (Ok(()) | Err(RenameError::Unchanged)) => {
+                *rename = None;
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
+                if outcome.is_ok() {
+                    RenameCommit::Renamed
+                } else {
+                    RenameCommit::Unchanged
+                }
+            }
+            Err(err) => {
+                if let Some(field) = rename.as_mut() {
+                    field.set_message(Some(String::from(err.message())));
+                }
+                RenameCommit::Refused
+            }
         }
     }
 
@@ -7997,6 +8421,7 @@ mod program {
             drag: None,
             carrying: None,
             collapse_on_release: None,
+            rename_arm: None,
             sweep: None,
         }
     }
@@ -8308,12 +8733,14 @@ mod program {
         ));
         let can_chown = holds_chown();
 
-        // --- The event loop: serve input, adopt what the reader answered,
-        // repaint, and park only when there is nothing of either left. A dead
-        // channel ends the app fail-loud; a clean close ends it at zero.
+        // --- The event loop. A turn serves every queued event, folding what
+        // each changed into its window's account; adopts what the reader has
+        // answered; paints each window that owes, once; and parks only when a
+        // turn found nothing at all. A dead channel ends the app fail-loud; a
+        // clean close ends it at zero.
         let desktop_moved = Cell::new(false);
         let places_read: PlacesRead = RefCell::new(None);
-        let band_due = Cell::new(None);
+        let due = Cell::new(None);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
@@ -8322,8 +8749,10 @@ mod program {
             reads: &reads,
             desktop_moved: &desktop_moved,
             places_read: &places_read,
-            band_due: &band_due,
+            due: &due,
         });
+        // The event a park woke for, served first by the turn after it.
+        let mut woken = None;
         loop {
             // Report what the icon cache holds at the head of the turn: this
             // is the one point every path through the body passes through
@@ -8335,31 +8764,16 @@ mod program {
             tairix_rt::cachereport::publish_if_due();
             // A running long operation (a recursive delete, or a copy/move
             // paste) owns its own window: drive it a bounded slice at a time,
-            // repaint the progress, and drain (non-blocking) a mid-run
-            // cancel or a close — never parking while there is genuine work to
-            // do, and returning to the parked wait the instant the operation
-            // finishes. Another window carries on: the drained event is routed
-            // to whichever window it names, so only the operating window is
-            // modal.
-            if let Some(busy) = windows.iter_mut().position(|win| {
-                win.browser()
-                    .is_some_and(|state| state.overlays.operation.is_some())
-            }) {
+            // repaint the progress, and serve (non-blocking) one event — a
+            // mid-run cancel or a close — never parking while there is genuine
+            // work to do. Another window carries on: an event naming it is
+            // routed as usual, so only the operating window is modal.
+            if let Some(busy) = operating(&windows) {
                 let finished = windows[busy]
                     .browser()
                     .and_then(|state| state.overlays.operation.as_mut())
                     .is_some_and(advance_operation);
-                if present_whole(
-                    &mut windows[busy],
-                    &mut client,
-                    themes.grounds(MANAGER_WINDOW_GROUND),
-                    &icons,
-                    desktop.scale(),
-                )
-                .is_err()
-                {
-                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                }
+                windows[busy].owed.owe_whole();
                 if finished {
                     // Re-list so the view reflects what actually remains — a
                     // partial removal (a refusal or a cancel) is shown
@@ -8378,492 +8792,332 @@ mod program {
                     // Reap any launched bundle that exited while the operation
                     // ran (the wait-set was not parked on during it).
                     launcher.borrow_mut().reap();
-                    if present_whole(
-                        &mut windows[busy],
-                        &mut client,
-                        themes.grounds(MANAGER_WINDOW_GROUND),
-                        &icons,
-                        desktop.scale(),
-                    )
-                    .is_err()
-                    {
-                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                    }
-                    continue;
-                }
-                // Poll (non-blocking) for a cancel or a close while the walk
-                // runs. An event naming the operating window is the
-                // operation's; one naming another window is that window's and
-                // is applied as usual, so a long walk in one window never
-                // freezes the rest.
-                match events.try_wait(&mut client) {
-                    Ok(Some(event)) => {
-                        // A desktop change during a long operation is
-                        // adopted here too: this loop re-presents the
-                        // progress panel on every pass, so re-theming is
-                        // all it takes for the change to reach the screen.
-                        adopt_desktop(&mut desktop, &mut themes, &desktop_moved);
-                        if event.window_id() == Some(windows[busy].pane.id()) {
-                            let win = &mut windows[busy];
-                            if let Some(state) = win.browser() {
-                                state.note_pointer(&event);
-                            }
-                            let WindowKind::Browser(state) = &win.kind else {
-                                continue;
-                            };
-                            let canvas = Canvas {
-                                theme: themes.active(),
-                                mode: win.pane.mode(),
-                                scale: desktop.scale(),
-                                chrome: state.chrome,
-                            };
-                            match operation_control(
-                                canvas.chrome.rail(&state.places),
-                                canvas.scale,
-                                canvas.theme(),
-                                canvas.window(),
-                                canvas.chrome.toolbar,
-                                &event,
-                            ) {
-                                OperationControl::Cancel => {
-                                    if let Some(operation) = win
-                                        .browser()
-                                        .and_then(|state| state.overlays.operation.as_mut())
-                                    {
-                                        operation.progress.request_cancel();
-                                    }
+                } else {
+                    // Every queued event before the next paint, as below; the
+                    // operating window is found again per event, since one can
+                    // close it.
+                    for _ in 0..EVENT_MAILBOX_CAPACITY {
+                        let delivered = match woken.take() {
+                            Some(event) => Ok(Some(event)),
+                            None => events.try_wait(&mut client),
+                        };
+                        match delivered {
+                            Ok(Some(event)) => {
+                                if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
+                                    let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+                                    owe_desktop(&mut windows, &mut client, &desktop, grounds);
                                 }
-                                OperationControl::Close => {
-                                    close_window(&mut windows, busy, &mut client, &reads);
+                                let busy = operating(&windows);
+                                if let Some(busy) = busy.filter(|&busy| {
+                                    event.window_id() == Some(windows[busy].pane.id())
+                                }) {
+                                    serve_operation_event(
+                                        &mut windows,
+                                        busy,
+                                        &mut client,
+                                        themes.active(),
+                                        desktop.scale(),
+                                        &reads,
+                                        &event,
+                                    );
+                                } else if let Some(code) = route_event(
+                                    &mut windows,
+                                    &mut client,
+                                    &mut desktop,
+                                    &mut places,
+                                    themes.grounds(MANAGER_WINDOW_GROUND),
+                                    &icons,
+                                    &launcher,
+                                    (&reads, &places_read),
+                                    &installed,
+                                    event_endpoint,
+                                    start.role,
+                                    can_chown,
+                                    &event,
+                                ) {
+                                    return code;
                                 }
-                                OperationControl::Ignore => {}
                             }
-                        } else if let Some(code) = route_event(
-                            &mut windows,
-                            &mut client,
-                            &mut desktop,
-                            &mut places,
-                            themes.grounds(MANAGER_WINDOW_GROUND),
-                            &icons,
-                            &launcher,
-                            (&reads, &places_read),
-                            &installed,
-                            event_endpoint,
-                            start.role,
-                            can_chown,
-                            &event,
-                        ) {
-                            return code;
+                            Ok(None) => break,
+                            // A malformed frame from the authenticated session is
+                            // refused, and the operation carries on (never guessed
+                            // at).
+                            Err(EventError::Undecodable(_)) => {}
+                            Err(EventError::Mailbox(_)) => {
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "event channel lost",
+                                )
+                            }
                         }
                     }
-                    // Nothing queued, or a malformed frame from the
-                    // authenticated session: refused, and the operation
-                    // carries on (never guessed at).
-                    Ok(None) | Err(EventError::Undecodable(_)) => {}
-                    Err(EventError::Mailbox(_)) => {
-                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
-                    }
+                }
+                serve_due(&mut windows, themes.active(), desktop.scale());
+                let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+                if present_owed_windows(&mut windows, &mut client, grounds, &icons, desktop.scale())
+                    .is_err()
+                {
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                 }
                 continue;
             }
 
-            // Queued input first, then whatever the reader has answered, and
-            // a park only when neither has anything left.
-            let delivered = match events.try_wait(&mut client) {
-                Ok(Some(event)) => Ok(Some(event)),
-                Ok(None) => {
-                    // The desktop the session published, adopted before
-                    // anything is drawn from it. Every window is composed
-                    // from the theme at its scale, so a change repaints them
-                    // whole.
-                    if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
-                        let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
-                        if redraw_for_desktop(&mut windows, &mut client, &desktop, grounds, &icons)
-                            .is_err()
-                        {
-                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                        }
-                        continue;
+            // Every queued event before anything is painted, so a burst of
+            // pointer samples costs one frame. Bounded to one mailbox's worth,
+            // so a flood cannot hold the frame off for ever.
+            let mut drained = false;
+            for _ in 0..EVENT_MAILBOX_CAPACITY {
+                let delivered = match woken.take() {
+                    Some(event) => Ok(Some(event)),
+                    None => events.try_wait(&mut client),
+                };
+                let event = match delivered {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        drained = true;
+                        break;
                     }
-                    // A band held where its listing scrolls steps it once a
-                    // frame, ahead of the reader's work, so the scroll keeps
-                    // its pace.
-                    let now = tairix_rt::clock_get();
-                    let mut stepped = false;
-                    for win in &mut windows {
-                        let mode = *win.pane.mode();
-                        let mut damage = Region::new();
-                        let repaint = match win.browser() {
-                            Some(state) => state.step_band(
-                                Canvas {
-                                    theme: themes.active(),
-                                    mode: &mode,
-                                    scale: desktop.scale(),
-                                    chrome: state.chrome,
-                                },
-                                now,
-                                &mut damage,
-                            ),
-                            None => Repaint::Nothing,
-                        };
-                        if repaint == Repaint::Nothing {
-                            continue;
-                        }
-                        stepped = true;
-                        if present_window(
-                            win,
-                            &mut client,
-                            themes.grounds(MANAGER_WINDOW_GROUND),
-                            &icons,
-                            desktop.scale(),
-                            repaint,
-                            &damage,
-                        )
-                        .is_err()
-                        {
-                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                        }
+                    // A malformed frame from the authenticated session is
+                    // refused and the drain carries on (never guessed at).
+                    Err(EventError::Undecodable(_)) => continue,
+                    Err(EventError::Mailbox(_)) => {
+                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                     }
-                    if stepped {
-                        continue;
-                    }
-                    // A mount-table change the reader has answered: the rail
-                    // is what is mounted, so it is rebuilt and every window's
-                    // copy with it.
-                    let landed = places_read
-                        .borrow_mut()
-                        .take()
-                        .or_else(|| reads.take_places());
-                    if let Some((home, volumes)) = landed {
-                        places = Places::new(&home, &volumes);
-                        for win in &mut windows {
-                            if let Some(state) = win.browser() {
-                                sidebar::refresh_places(&mut state.places, &home, &volumes);
-                                // A listing no volume records changes for — the
-                                // namespace's own roots, the mount points under
-                                // `/Storage` — moves with the mount table.
-                                if !state.browser.follows() && !state.browser.is_listing() {
-                                    if let Err(err) = state.browser.refresh() {
-                                        report_error(&alloc::format!("listing refused ({err})"));
-                                    }
-                                }
-                            }
-                        }
-                        if start.role == Role::Desktop {
-                            declare_app_bar(&mut client, event_endpoint, start.role, &places);
-                        }
-                        // Only a listing draws the rail, so only a listing is
-                        // repainted for it.
-                        for win in &mut windows {
-                            if !matches!(win.kind, WindowKind::Browser(_)) {
-                                continue;
-                            }
-                            if present_whole(
-                                win,
-                                &mut client,
-                                themes.grounds(MANAGER_WINDOW_GROUND),
-                                &icons,
-                                desktop.scale(),
-                            )
-                            .is_err()
-                            {
-                                return app::fail(
-                                    APP_NAME,
-                                    app::EXIT_CHANNEL_LOST,
-                                    "present refused",
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    // A bundle scan the reader has answered is taken into the
-                    // one store every window's quick offers and chooser are
-                    // built from, so the next gesture reads an answer that has
-                    // already landed rather than waiting on a disk.
-                    if let Some(found) = reads.take_bundles() {
-                        *installed.borrow_mut() = Some(found);
-                        launcher.borrow_mut().scan_landed(&mut client);
-                    }
-                    // A document the reader opened goes to the application it
-                    // was opened for.
-                    while let Some(opened) = reads.take_opened() {
-                        launcher.borrow_mut().opened(&mut client, opened);
-                    }
-                    // A listing the reader has answered is adopted here: the
-                    // browser holds the navigation it could not complete, and
-                    // resuming it is what turns the answer into entries. It
-                    // costs a taken `Option` when nothing is pending, so
-                    // asking every turn is free.
-                    let mut resumed = alloc::vec::Vec::new();
-                    for (index, win) in windows.iter_mut().enumerate() {
-                        let mode = *win.pane.mode();
-                        let Some(state) = win.browser() else {
-                            continue;
-                        };
-                        // A menu, a rename or a drag acts on the entries it was
-                        // opened over: the listing that replaces them waits.
-                        if state.listing_is_held() {
-                            continue;
-                        }
-                        match state.browser.resume() {
-                            Ok(true) => {
-                                state.lost = false;
-                                state.overlays.double_click.reset();
-                                state.rename_arrived(Canvas {
-                                    theme: themes.active(),
-                                    mode: &mode,
-                                    scale: desktop.scale(),
-                                    chrome: state.chrome,
-                                });
-                                resumed.push(index);
-                            }
-                            Ok(false) => {}
-                            // A folder gone from its path is left for the
-                            // nearest one above rather than shown as it was.
-                            Err(_) if state.lost => {
-                                if matches!(state.climb(), Repaint::Whole) {
-                                    resumed.push(index);
-                                }
-                            }
-                            Err(err) => {
-                                report_error(&alloc::format!("listing refused ({err})"));
-                            }
-                        }
-                    }
-                    if !resumed.is_empty() {
-                        // A listing is a whole new set of entries, so the
-                        // window is repainted whole rather than by a mark: no
-                        // reading of the old state describes where anything is
-                        // now. Only the windows that committed one.
-                        for index in resumed {
-                            let Some(win) = windows.get_mut(index) else {
-                                continue;
-                            };
-                            if present_whole(
-                                win,
-                                &mut client,
-                                themes.grounds(MANAGER_WINDOW_GROUND),
-                                &icons,
-                                desktop.scale(),
-                            )
-                            .is_err()
-                            {
-                                return app::fail(
-                                    APP_NAME,
-                                    app::EXIT_CHANNEL_LOST,
-                                    "present refused",
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    // What each window's watch reported, applied to that
-                    // window alone and repainted only where it altered a row.
-                    let mut followed = false;
-                    for win in &mut windows {
-                        let mode = *win.pane.mode();
-                        let mut damage = Region::new();
-                        let repaint = match win.browser() {
-                            Some(state) => {
-                                let canvas = Canvas {
-                                    theme: themes.active(),
-                                    mode: &mode,
-                                    scale: desktop.scale(),
-                                    chrome: state.chrome,
-                                };
-                                state.follow_watch(&reads, canvas, &mut damage)
-                            }
-                            None => Repaint::Nothing,
-                        };
-                        if repaint == Repaint::Nothing {
-                            continue;
-                        }
-                        followed = true;
-                        if present_window(
-                            win,
-                            &mut client,
-                            themes.grounds(MANAGER_WINDOW_GROUND),
-                            &icons,
-                            desktop.scale(),
-                            repaint,
-                            &damage,
-                        )
-                        .is_err()
-                        {
-                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
-                        }
-                    }
-                    if followed {
-                        continue;
-                    }
-                    // A node's description the reader has answered, adopted
-                    // by the window that asked for it. Each window collects
-                    // its own answer, so one window's read never lands in
-                    // another.
-                    if reads.take_properties_landed() {
-                        let mut shown = false;
-                        for win in &mut windows {
-                            let id = win.pane.id();
-                            let WindowKind::Properties(props) = &mut win.kind else {
-                                continue;
-                            };
-                            let Some(answer) = reads.take_properties(id) else {
-                                continue;
-                            };
-                            adopt_properties(props, answer);
-                            shown = true;
-                            if present_whole(
-                                win,
-                                &mut client,
-                                themes.grounds(MANAGER_WINDOW_GROUND),
-                                &icons,
-                                desktop.scale(),
-                            )
-                            .is_err()
-                            {
-                                return app::fail(
-                                    APP_NAME,
-                                    app::EXIT_CHANNEL_LOST,
-                                    "present refused",
-                                );
-                            }
-                        }
-                        if shown {
-                            continue;
-                        }
-                    }
-                    // A folder-cue batch the reader has answered. The
-                    // answers are latched onto the entries here — the worker
-                    // only produced them — and a window whose icons moved is
-                    // presented. Without this the answers would sit on the
-                    // desk until some unrelated gesture repainted, which is
-                    // what left every folder drawn empty until it was clicked.
-                    if reads.take_probes_landed() {
-                        let mut shown = false;
-                        for win in &mut windows {
-                            let mode = *win.pane.mode();
-                            let Some(state) = win.browser() else {
-                                continue;
-                            };
-                            let canvas = Canvas {
-                                theme: themes.active(),
-                                mode: &mode,
-                                scale: desktop.scale(),
-                                chrome: state.chrome,
-                            };
-                            let places = &state.places;
-                            if !resolve_visible_occupancy(&mut state.browser, places, canvas) {
-                                continue;
-                            }
-                            shown = true;
-                            if present_whole(
-                                win,
-                                &mut client,
-                                themes.grounds(MANAGER_WINDOW_GROUND),
-                                &icons,
-                                desktop.scale(),
-                            )
-                            .is_err()
-                            {
-                                return app::fail(
-                                    APP_NAME,
-                                    app::EXIT_CHANNEL_LOST,
-                                    "present refused",
-                                );
-                            }
-                        }
-                        // Every window just asked about the folders it shows, so
-                        // one none of them asked about has left the screen.
-                        reads.sweep_probes();
-                        // A batch that answered nothing this window is showing
-                        // costs no frame, and the turn carries on to the park.
-                        if shown {
-                            continue;
-                        }
-                    }
-                    // The reader nudges on its drained queue, so what landed
-                    // is a whole batch: one whole-window pass for it rather
-                    // than one per icon, a present being a compositor round
-                    // trip and far dearer than one tile's decode.
-                    if reads.take_artwork_landed() {
-                        for win in &mut windows {
-                            if present_whole(
-                                win,
-                                &mut client,
-                                themes.grounds(MANAGER_WINDOW_GROUND),
-                                &icons,
-                                desktop.scale(),
-                            )
-                            .is_err()
-                            {
-                                return app::fail(
-                                    APP_NAME,
-                                    app::EXIT_CHANNEL_LOST,
-                                    "present refused",
-                                );
-                            }
-                        }
-                        // Every window was just drawn whole, so a thumbnail
-                        // none of them asked for is no longer on screen.
-                        reads.sweep_thumbnails();
-                        continue;
-                    }
-                    band_due.set(
-                        windows
-                            .iter()
-                            .filter_map(|win| match &win.kind {
-                                WindowKind::Browser(state) => state.band_due(),
-                                WindowKind::Properties(_) => None,
-                            })
-                            .min(),
-                    );
-                    events.wait(&mut client)
+                };
+                // The desktop belongs to the seat, not to one window, so a
+                // change is adopted once and every window owes it whole.
+                if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
+                    let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+                    owe_desktop(&mut windows, &mut client, &desktop, grounds);
                 }
-                Err(err) => Err(err),
-            };
-            // A park the reader interrupted has no event; the collect at the
-            // top of the next turn is what adopts what it woke for.
-            let delivered = match delivered {
-                Ok(None) => continue,
-                Ok(Some(event)) => Ok(event),
-                Err(err) => Err(err),
-            };
-            let event = match delivered {
-                Ok(event) => event,
-                // A malformed frame from the authenticated session is
-                // refused and the app keeps waiting (never guessed at).
-                Err(EventError::Undecodable(_)) => continue,
-                Err(EventError::Mailbox(_)) => {
-                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
+                if let Some(code) = route_event(
+                    &mut windows,
+                    &mut client,
+                    &mut desktop,
+                    &mut places,
+                    themes.grounds(MANAGER_WINDOW_GROUND),
+                    &icons,
+                    &launcher,
+                    (&reads, &places_read),
+                    &installed,
+                    event_endpoint,
+                    start.role,
+                    can_chown,
+                    &event,
+                ) {
+                    return code;
                 }
-            };
-
-            // The desktop belongs to the seat, not to one window, so a change
-            // is adopted once and every window is repainted in it.
-            if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
-                let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
-                if redraw_for_desktop(&mut windows, &mut client, &desktop, grounds, &icons).is_err()
-                {
-                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+                // An operation the event started owns its window from here, so
+                // what follows is the operation's turn to serve.
+                if operating(&windows).is_some() {
+                    break;
                 }
             }
 
-            if let Some(code) = route_event(
-                &mut windows,
-                &mut client,
-                &mut desktop,
-                &mut places,
-                themes.grounds(MANAGER_WINDOW_GROUND),
-                &icons,
-                &launcher,
-                (&reads, &places_read),
-                &installed,
-                event_endpoint,
-                start.role,
-                can_chown,
-                &event,
-            ) {
-                return code;
+            // What landed while the input was served, folded into the windows
+            // it moves. `moved` keeps the loop turning while a step produced
+            // work a later step adopts, as a listing a watch re-read does.
+            let mut moved = false;
+            if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
+                let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+                owe_desktop(&mut windows, &mut client, &desktop, grounds);
+                moved = true;
+            }
+            moved |= serve_due(&mut windows, themes.active(), desktop.scale());
+            // A mount-table change the reader has answered: the rail is what
+            // is mounted, so it is rebuilt and every window's copy with it.
+            let landed = places_read
+                .borrow_mut()
+                .take()
+                .or_else(|| reads.take_places());
+            if let Some((home, volumes)) = landed {
+                places = Places::new(&home, &volumes);
+                for win in &mut windows {
+                    let Some(state) = win.browser() else {
+                        continue;
+                    };
+                    sidebar::refresh_places(&mut state.places, &home, &volumes);
+                    // A listing no volume records changes for — the
+                    // namespace's own roots, the mount points under
+                    // `/Storage` — moves with the mount table.
+                    if !state.browser.follows() && !state.browser.is_listing() {
+                        if let Err(err) = state.browser.refresh() {
+                            report_error(&alloc::format!("listing refused ({err})"));
+                        }
+                    }
+                    // Only a listing draws the rail.
+                    win.owed.owe_whole();
+                }
+                if start.role == Role::Desktop {
+                    declare_app_bar(&mut client, event_endpoint, start.role, &places);
+                }
+                moved = true;
+            }
+            // A bundle scan the reader has answered is taken into the one
+            // store every window's quick offers and chooser are built from, so
+            // the next gesture reads an answer that has already landed rather
+            // than waiting on a disk.
+            if let Some(found) = reads.take_bundles() {
+                *installed.borrow_mut() = Some(found);
+                launcher.borrow_mut().scan_landed(&mut client);
+            }
+            // A document the reader opened goes to the application it was
+            // opened for.
+            while let Some(opened) = reads.take_opened() {
+                launcher.borrow_mut().opened(&mut client, opened);
+            }
+            // A listing the reader has answered is adopted here: the browser
+            // holds the navigation it could not complete, and resuming it is
+            // what turns the answer into entries. A listing is a whole new set
+            // of entries, so no reading of the old state describes where
+            // anything is now and the window owes the whole of itself.
+            for win in &mut windows {
+                let mode = *win.pane.mode();
+                let Some(state) = win.browser() else {
+                    continue;
+                };
+                // A menu, a rename or a drag acts on the entries it was opened
+                // over: the listing that replaces them waits.
+                if state.listing_is_held() {
+                    continue;
+                }
+                let replaced = match state.browser.resume() {
+                    Ok(true) => {
+                        state.lost = false;
+                        state.overlays.double_click.reset();
+                        state.rename_arrived(Canvas {
+                            theme: themes.active(),
+                            mode: &mode,
+                            scale: desktop.scale(),
+                            chrome: state.chrome,
+                        });
+                        true
+                    }
+                    Ok(false) => false,
+                    // A folder gone from its path is left for the nearest one
+                    // above rather than shown as it was.
+                    Err(_) if state.lost => matches!(state.climb(), Repaint::Whole),
+                    Err(err) => {
+                        report_error(&alloc::format!("listing refused ({err})"));
+                        false
+                    }
+                };
+                if replaced {
+                    // A new listing is a new set of entries: no click armed on
+                    // the old one names any of them.
+                    state.overlays.rename_arm = None;
+                    win.owed.owe_whole();
+                    moved = true;
+                }
+            }
+            // What each window's watch reported, applied to that window alone
+            // and repainted only where it altered a row.
+            for win in &mut windows {
+                let mode = *win.pane.mode();
+                let mut damage = Region::new();
+                let repaint = match win.browser() {
+                    Some(state) => {
+                        let canvas = Canvas {
+                            theme: themes.active(),
+                            mode: &mode,
+                            scale: desktop.scale(),
+                            chrome: state.chrome,
+                        };
+                        state.follow_watch(&reads, canvas, &mut damage)
+                    }
+                    None => Repaint::Nothing,
+                };
+                moved |= repaint != Repaint::Nothing;
+                owe(win, repaint, &damage);
+            }
+            // A node's description the reader has answered, adopted by the
+            // window that asked for it. Each window collects its own answer,
+            // so one window's read never lands in another.
+            if reads.take_properties_landed() {
+                for win in &mut windows {
+                    let id = win.pane.id();
+                    let WindowKind::Properties(props) = &mut win.kind else {
+                        continue;
+                    };
+                    let Some(answer) = reads.take_properties(id) else {
+                        continue;
+                    };
+                    adopt_properties(props, answer);
+                    win.owed.owe_whole();
+                    moved = true;
+                }
+            }
+            // A folder-cue batch the reader has answered. The answers are
+            // latched onto the entries here — the worker only produced them —
+            // and a window whose icons moved owes the frame that shows them;
+            // a batch that answered nothing a window shows costs no frame.
+            if reads.take_probes_landed() {
+                for win in &mut windows {
+                    let mode = *win.pane.mode();
+                    let Some(state) = win.browser() else {
+                        continue;
+                    };
+                    let canvas = Canvas {
+                        theme: themes.active(),
+                        mode: &mode,
+                        scale: desktop.scale(),
+                        chrome: state.chrome,
+                    };
+                    if resolve_visible_occupancy(&mut state.browser, &state.places, canvas) {
+                        win.owed.owe_whole();
+                        moved = true;
+                    }
+                }
+                // Every window just asked about the folders it shows, so one
+                // none of them asked about has left the screen.
+                reads.sweep_probes();
+            }
+            // The reader nudges on its drained queue, so what landed is a
+            // whole batch: one whole-window pass for it rather than one per
+            // icon, a present being a compositor round trip and far dearer
+            // than one tile's decode.
+            let artwork_landed = reads.take_artwork_landed();
+            if artwork_landed {
+                for win in &mut windows {
+                    win.owed.owe_whole();
+                }
+                moved = true;
+            }
+
+            let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+            if present_owed_windows(&mut windows, &mut client, grounds, &icons, desktop.scale())
+                .is_err()
+            {
+                return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+            }
+            // Every window was just drawn whole, so a thumbnail none of them
+            // asked for is no longer on screen.
+            if artwork_landed {
+                reads.sweep_thumbnails();
+            }
+            if moved || !drained {
+                continue;
+            }
+            due.set(
+                windows
+                    .iter()
+                    .filter_map(|win| match &win.kind {
+                        WindowKind::Browser(state) => state.due(),
+                        WindowKind::Properties(_) => None,
+                    })
+                    .min(),
+            );
+            // A park the reader interrupted has no event; the next turn
+            // adopts what it woke for.
+            match events.wait(&mut client) {
+                Ok(event) => woken = event,
+                // A malformed frame from the authenticated session is refused
+                // and the app keeps waiting (never guessed at).
+                Err(EventError::Undecodable(_)) => {}
+                Err(EventError::Mailbox(_)) => {
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
+                }
             }
         }
     }

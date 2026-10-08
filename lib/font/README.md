@@ -107,10 +107,13 @@ the payload exceeds the pre-Korean size ceiling.
   a word starts the next line rather than being split, breaking an
   over-long word mid-word on a `char` boundary (a run that cannot break must
   still advance), drawing no surrounding whitespace, and eliding only the
-  last line. It is a **lazy iterator** of `TextLine { text, elided }`
+  last line. It is a **lazy iterator** of `TextLine { text, elided, tail }`
   borrowing the label, never a `Vec`: a caller counts a clone to size the
   block and walks the original to draw, so a label re-laid out every repaint
-  allocates nothing.
+  allocates nothing. `wrap_with_cut` lays the same lines with the last cut as
+  a `Cut` says: `Cut::Middle { keep }` keeps its start, the mark, and the
+  text's end (`tail`) — half the room, or the last `keep` bytes when wider —
+  so a file name keeps its extension.
 - `font::ELLIPSIS` — the one definition of the mark a shortened line ends
   with, measured and drawn through the same constant so the two can never
   disagree.

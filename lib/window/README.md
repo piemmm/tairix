@@ -86,7 +86,12 @@ server and every app's client can never drift apart.
   wrapping, so a coordinate past the range hits nothing. A round that changed the view but reported no
   rectangle presents the whole window: over-covering costs pixels, while
   under-covering would leave a stale frame on screen, because the session
-  copies only what a present declares. The
+  copies only what a present declares. `present_damage_list` is the same
+  three cases for an app that paints each reported rectangle under its own
+  clip, and `Owed` is the account such an app folds every round of a drained
+  burst into — the strongest conclusion and the rectangles reported, clipped
+  to the window and merged by least growth to what one present carries — so
+  a burst costs one frame and the account stays bounded. The
   endpoint's *depth* (`EVENT_MAILBOX_CAPACITY`) is defined here, and its
   *name* beside the other pid-derived endpoints
   (`tairix_abi::window_ipc::event_endpoint_for`), once each, because both

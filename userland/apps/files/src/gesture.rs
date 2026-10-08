@@ -23,6 +23,7 @@
 //! | drag on the listing's ground | draw a band selecting what it covers; escape takes it back ([`press_step`]) |
 //! | double-click | activate: descend, run a bundle, or open a file |
 //! | shift-double-click | list a bundle's contents instead of running it |
+//! | click on the one selected item's name | rename it, once the click can no longer pair ([`RenameArm`]) |
 //! | right-click | ask the desktop for the context menu on the item |
 //!
 //! There is no right-*double*-click: the menu the first press opens is the
@@ -266,6 +267,166 @@ impl PressInput {
     }
 }
 
+/// Whether a window holds the keyboard, as its focus reports tell it.
+///
+/// The session reports a window coming forward and then delivers the press
+/// that brought it, so a press straight after a gain is that press rather than
+/// one on a window already in use.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Keyboard {
+    /// Elsewhere.
+    #[default]
+    Away,
+    /// Just gained: a press now is the one that brought the window forward.
+    Arriving,
+    /// Held since before the event in hand.
+    Held,
+}
+
+impl Keyboard {
+    /// Whether the window held the keyboard before `event`, and what it holds
+    /// after it.
+    #[must_use]
+    pub const fn step(self, event: &WindowEvent) -> (bool, Self) {
+        let next = match *event {
+            WindowEvent::Focus { focused: true, .. } => Self::Arriving,
+            WindowEvent::Focus { focused: false, .. } => Self::Away,
+            _ => match self {
+                Self::Away => Self::Away,
+                Self::Arriving | Self::Held => Self::Held,
+            },
+        };
+        (matches!(self, Self::Held), next)
+    }
+}
+
+/// What committing an inline rename did.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RenameCommit {
+    /// The entry took its new name, so its folder may re-sort.
+    Renamed,
+    /// The name was unchanged, so nothing moved.
+    Unchanged,
+    /// The name was refused; the editor stays open with its reason.
+    Refused,
+}
+
+impl RenameCommit {
+    /// Whether the press outside the editor that committed it goes on to act
+    /// on the listing: only when nothing moved, since a re-sorted folder puts
+    /// another entry where the user aimed.
+    #[must_use]
+    pub const fn press_acts(self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+/// What a press that selected an item knew about it, which decides whether it
+/// may become a rename ([`RenameArm::on_press`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NamePress {
+    /// What the press did to the selection.
+    pub how: SelectHow,
+    /// The item was already the one selected item before the press.
+    pub was_chosen: bool,
+    /// The press landed on the item's drawn name.
+    pub on_name: bool,
+    /// The window held the keyboard before the press, so this is not the
+    /// press that brought it forward.
+    pub keyboard_held: bool,
+}
+
+/// A click on the name of the one selected item, waiting to open its rename.
+///
+/// It opens once the double-click interval has passed since the click's
+/// release, the first moment the click can no longer pair into an
+/// activation; anything but hovering lets it go first.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RenameArm {
+    index: usize,
+    at: Point,
+    due_ns: Option<u64>,
+}
+
+impl RenameArm {
+    /// The arm a primary press at `at` on the item at `index` sets, or `None`
+    /// unless it was a plain click on the drawn name of the item that was
+    /// already the one selected, in a window that held the keyboard.
+    #[must_use]
+    pub fn on_press(index: usize, at: Point, press: NamePress) -> Option<Self> {
+        (press.how == SelectHow::Single && press.was_chosen && press.on_name && press.keyboard_held)
+            .then_some(Self {
+                index,
+                at,
+                due_ns: None,
+            })
+    }
+
+    /// The item whose rename this arm opens.
+    #[must_use]
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+
+    /// What `input`, arriving at monotonic `now_ns` with the pointer at `to`,
+    /// does to the arm, at `scale` and double-click `interval`.
+    ///
+    /// The release starts the wait. A press, a key, a scroll, another button,
+    /// or the window losing the keyboard lets the arm go, as does travelling
+    /// past the drag slop before the release; hovering afterwards does not.
+    #[must_use]
+    pub fn step(
+        self,
+        input: PressInput,
+        to: Point,
+        now_ns: u64,
+        interval: Duration64,
+        scale: Scale,
+    ) -> Option<Self> {
+        match input {
+            PressInput::Moved => {
+                let dragged = self.due_ns.is_none() && DragArm { at: self.at }.travelled(to, scale);
+                (!dragged).then_some(self)
+            }
+            PressInput::PrimaryReleased => {
+                Some(Self {
+                    due_ns: Some(self.due_ns.unwrap_or_else(|| {
+                        now_ns.saturating_add(interval.saturating_total_nanos())
+                    })),
+                    ..self
+                })
+            }
+            PressInput::Other => Some(self),
+            PressInput::PrimaryPressed
+            | PressInput::OtherPressed
+            | PressInput::OtherPointer
+            | PressInput::Escape
+            | PressInput::Key
+            | PressInput::Unfocused => None,
+        }
+    }
+
+    /// The listing moved under the arm: carry it to where `moved` says its
+    /// item now is, or let it go once that answers nothing, so it renames the
+    /// item clicked and never one that took its place.
+    #[must_use]
+    pub fn follow(self, moved: impl FnOnce(usize) -> Option<usize>) -> Option<Self> {
+        moved(self.index).map(|index| Self { index, ..self })
+    }
+
+    /// When the rename opens, once the click has been released.
+    #[must_use]
+    pub const fn due(&self) -> Option<u64> {
+        self.due_ns
+    }
+
+    /// Whether the rename opens at `now_ns`.
+    #[must_use]
+    pub fn is_due(&self, now_ns: u64) -> bool {
+        self.due_ns.is_some_and(|due| now_ns >= due)
+    }
+}
+
 /// What a held press does with an event.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PressStep {
@@ -315,8 +476,9 @@ pub const fn press_step(hold: PressHold, input: PressInput) -> PressStep {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundle_intent, press_step, primary_press as press_with, DragArm, PressHit, PressHold,
-        PressInput, PressStep, PrimaryPress, SelectHow, SelectKeys, DRAG_SLOP,
+        bundle_intent, press_step, primary_press as press_with, DragArm, Keyboard, NamePress,
+        PressHit, PressHold, PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit,
+        SelectHow, SelectKeys, DRAG_SLOP,
     };
     use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent};
@@ -344,6 +506,16 @@ mod tests {
             index,
             how: SelectHow::Single,
         }
+    }
+
+    /// A press outside the rename editor acts only on a listing that did not
+    /// move: a rename that took may re-sort the folder under the pointer, and
+    /// a refusal keeps the editor open.
+    #[test]
+    fn only_a_commit_that_moved_nothing_lets_its_press_act() {
+        assert!(RenameCommit::Unchanged.press_acts());
+        assert!(!RenameCommit::Renamed.press_acts());
+        assert!(!RenameCommit::Refused.press_acts());
     }
 
     #[test]
@@ -597,6 +769,149 @@ mod tests {
         assert_eq!(live(PressInput::PrimaryPressed), PressStep::EndAndRoute);
         assert_eq!(live(PressInput::Unfocused), PressStep::EndAndRoute);
         assert_eq!(live(PressInput::Other), PressStep::Route);
+    }
+
+    /// The press that brings a window forward arrives straight after its focus
+    /// gain, so it is not one on a window that held the keyboard; whatever the
+    /// window sees next settles the gain, and losing focus is losing it.
+    #[test]
+    fn the_press_after_a_focus_gain_is_the_one_that_brought_the_window_forward() {
+        let gained = WindowEvent::Focus {
+            window_id: 1,
+            focused: true,
+        };
+        let lost = WindowEvent::Focus {
+            window_id: 1,
+            focused: false,
+        };
+        let press = pointer(PointerAction::Pressed(PointerButtonCode::Primary));
+        let moved = pointer(PointerAction::Moved);
+        let (_, arriving) = Keyboard::Away.step(&gained);
+        assert_eq!(arriving, Keyboard::Arriving);
+        assert_eq!(arriving.step(&press), (false, Keyboard::Held));
+        assert_eq!(arriving.step(&moved), (false, Keyboard::Held));
+        assert_eq!(Keyboard::Held.step(&press), (true, Keyboard::Held));
+        assert_eq!(Keyboard::Held.step(&lost), (true, Keyboard::Away));
+        assert_eq!(Keyboard::Away.step(&press), (false, Keyboard::Away));
+    }
+
+    /// A plain click on the name of the item already chosen, in a window that
+    /// held the keyboard.
+    const fn name_click() -> NamePress {
+        NamePress {
+            how: SelectHow::Single,
+            was_chosen: true,
+            on_name: true,
+            keyboard_held: true,
+        }
+    }
+
+    /// Only a plain click on the drawn name of the one item already selected,
+    /// in a window that held the keyboard, arms a rename: the click that brings
+    /// a window forward, or that selects the item, never starts editing.
+    #[test]
+    fn only_a_plain_click_on_the_chosen_items_name_arms_a_rename() {
+        let at = Point::new(10, 10);
+        assert!(RenameArm::on_press(3, at, name_click()).is_some());
+        for press in [
+            NamePress {
+                how: SelectHow::Toggle,
+                ..name_click()
+            },
+            NamePress {
+                how: SelectHow::Extend,
+                ..name_click()
+            },
+            NamePress {
+                how: SelectHow::Hold,
+                ..name_click()
+            },
+            NamePress {
+                was_chosen: false,
+                ..name_click()
+            },
+            NamePress {
+                on_name: false,
+                ..name_click()
+            },
+            NamePress {
+                keyboard_held: false,
+                ..name_click()
+            },
+        ] {
+            assert_eq!(RenameArm::on_press(3, at, press), None, "{press:?}");
+        }
+    }
+
+    /// The wait starts at the release and lasts the double-click interval, so
+    /// the rename opens the first moment the click can no longer pair.
+    #[test]
+    fn a_rename_opens_one_interval_after_the_release() {
+        let interval = Duration64::from_millis(400);
+        let arm = RenameArm::on_press(3, Point::new(10, 10), name_click()).expect("armed");
+        assert_eq!(arm.due(), None);
+        assert!(!arm.is_due(u64::MAX), "nothing is due before the release");
+        let released = arm
+            .step(
+                PressInput::PrimaryReleased,
+                Point::new(11, 10),
+                1_000,
+                interval,
+                Scale::ONE,
+            )
+            .expect("still armed");
+        assert_eq!(released.due(), Some(400_001_000));
+        assert!(!released.is_due(400_000_999));
+        assert!(released.is_due(400_001_000));
+        assert_eq!(released.index(), 3);
+    }
+
+    /// A listing change carries the arm with its item, and an item that went
+    /// takes the arm with it.
+    #[test]
+    fn a_rename_arm_follows_its_item_or_goes_with_it() {
+        let arm = RenameArm::on_press(3, Point::new(1, 1), name_click()).expect("armed");
+        assert_eq!(
+            arm.follow(|at| Some(at + 2)).map(|arm| arm.index()),
+            Some(5)
+        );
+        assert_eq!(arm.follow(|_| None), None);
+    }
+
+    /// Hovering after the release keeps the arm; travelling past the drag slop
+    /// before it is a drag, and every other input lets the arm go.
+    #[test]
+    fn anything_but_hovering_lets_a_rename_arm_go() {
+        let interval = Duration64::from_millis(400);
+        let at = Point::new(100, 100);
+        let slop = i32::try_from(DRAG_SLOP).expect("small");
+        let arm = RenameArm::on_press(3, at, name_click()).expect("armed");
+        let step = |arm: RenameArm, input, to| arm.step(input, to, 0, interval, Scale::ONE);
+        assert!(
+            step(arm, PressInput::Moved, Point::new(101, 100)).is_some(),
+            "jitter"
+        );
+        assert_eq!(
+            step(arm, PressInput::Moved, Point::new(100 + slop, 100)),
+            None,
+            "a drag"
+        );
+        let released = step(arm, PressInput::PrimaryReleased, at).expect("released");
+        assert!(
+            step(released, PressInput::Moved, Point::new(300, 300)).is_some(),
+            "hovering after the release"
+        );
+        assert!(step(released, PressInput::Other, at).is_some());
+        for input in [
+            PressInput::PrimaryPressed,
+            PressInput::OtherPressed,
+            PressInput::OtherPointer,
+            PressInput::Escape,
+            PressInput::Key,
+            PressInput::Unfocused,
+        ] {
+            assert_eq!(step(released, input, at), None, "{input:?}");
+        }
     }
 
     /// An arm has changed nothing, so a right-click, a key, a second press, or

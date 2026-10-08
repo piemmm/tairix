@@ -369,6 +369,7 @@ mod tests {
                 accessed: Time64::UNIX_EPOCH,
                 changed: Time64::from_secs(1_700_000_000),
             },
+            content_gen: 0,
         }
     }
 

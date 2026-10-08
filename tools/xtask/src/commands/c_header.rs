@@ -2693,13 +2693,17 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          \x20   tairix_time64_t changed;\n\
          } tairix_node_times_t;\n\n",
     "/* Structural metadata about a filesystem node; `kind` is a TAIRIX_NODE_KIND_*.\n\
-         * `times` carries the node's four timestamps, read in the same structural\n\
-         * read as kind/size. */\n\
+         * `nlink` counts the directory entries naming the node; `times` carries its\n\
+         * four timestamps, read in the same structural read as kind/size; and\n\
+         * `content_gen` names the version of its data, 0 where the volume keeps\n\
+         * none. */\n\
          typedef struct tairix_node_info {\n\
          \x20   uint8_t kind;\n\
+         \x20   uint32_t nlink;\n\
          \x20   uint64_t size;\n\
          \x20   uint64_t allocated;\n\
          \x20   tairix_node_times_t times;\n\
+         \x20   uint64_t content_gen;\n\
          } tairix_node_info_t;\n\n",
     "/* One directory entry; `node` is a NodeId (uint64_t). The entry carries the\n\
          * child's full tairix_node_info_t (including its timestamps) and the opaque\n\
@@ -4901,15 +4905,9 @@ mod tests {
             DmaGroupRecord, DmaNodeRecord, DmaUnitRecord, PageRequest, SysinfoRequestHeader,
         };
         let h = body("tairix_sysinfo.h");
-        let expect = |fields: &[(&str, usize)]| -> Vec<(String, usize)> {
-            fields
-                .iter()
-                .map(|&(name, at)| (name.to_owned(), at))
-                .collect()
-        };
         assert_eq!(
             c_field_offsets(&h, "tairix_sysinfo_request_header"),
-            expect(&[
+            named(&[
                 ("magic", offset_of!(SysinfoRequestHeader, magic)),
                 ("version", offset_of!(SysinfoRequestHeader, version)),
                 ("flags", offset_of!(SysinfoRequestHeader, flags)),
@@ -4919,7 +4917,7 @@ mod tests {
         );
         assert_eq!(
             c_field_offsets(&h, "tairix_page_request"),
-            expect(&[
+            named(&[
                 ("offset", offset_of!(PageRequest, offset)),
                 ("limit", offset_of!(PageRequest, limit)),
                 ("flags", offset_of!(PageRequest, flags)),
@@ -4928,7 +4926,7 @@ mod tests {
         );
         assert_eq!(
             c_field_offsets(&h, "tairix_dma_unit_record"),
-            expect(&[
+            named(&[
                 ("node", offset_of!(DmaUnitRecord, node)),
                 ("family", offset_of!(DmaUnitRecord, family)),
                 ("state", offset_of!(DmaUnitRecord, state)),
@@ -4952,7 +4950,7 @@ mod tests {
         );
         assert_eq!(
             c_field_offsets(&h, "tairix_dma_group_record"),
-            expect(&[
+            named(&[
                 ("unit", offset_of!(DmaGroupRecord, unit)),
                 ("group", offset_of!(DmaGroupRecord, group)),
                 ("holder", offset_of!(DmaGroupRecord, holder)),
@@ -4962,7 +4960,7 @@ mod tests {
         );
         assert_eq!(
             c_field_offsets(&h, "tairix_dma_node_record"),
-            expect(&[
+            named(&[
                 ("node", offset_of!(DmaNodeRecord, node)),
                 ("unit", offset_of!(DmaNodeRecord, unit)),
                 ("group", offset_of!(DmaNodeRecord, group)),
@@ -4978,7 +4976,64 @@ mod tests {
     /// The fields of `typedef struct <tag>` in `header`, reserved padding left
     /// out, at the offsets a C compiler lays them out at. The struct may name
     /// only fixed-width unsigned integers and arrays of them.
+    /// The filesystem records' C fields lie where `lib/abi` lays them out, so
+    /// a field added on one side and not the other is caught even where it
+    /// leaves the size unchanged.
+    #[test]
+    fn filesystem_record_fields_lie_where_lib_abi_lays_them_out() {
+        use core::mem::{align_of, offset_of, size_of};
+        use tairix_abi::driver::filesystem::{DirEntry, NodeInfo, NodeTimes};
+        let h = body("tairix_driver.h");
+        let times = [(
+            "tairix_node_times_t",
+            size_of::<NodeTimes>(),
+            align_of::<NodeTimes>(),
+        )];
+        assert_eq!(
+            c_field_offsets_with(&h, "tairix_node_info", &times),
+            named(&[
+                ("kind", offset_of!(NodeInfo, kind)),
+                ("nlink", offset_of!(NodeInfo, nlink)),
+                ("size", offset_of!(NodeInfo, size)),
+                ("allocated", offset_of!(NodeInfo, allocated)),
+                ("times", offset_of!(NodeInfo, times)),
+                ("content_gen", offset_of!(NodeInfo, content_gen)),
+            ])
+        );
+        let info = [(
+            "tairix_node_info_t",
+            size_of::<NodeInfo>(),
+            align_of::<NodeInfo>(),
+        )];
+        assert_eq!(
+            c_field_offsets_with(&h, "tairix_dir_entry", &info),
+            named(&[
+                ("node", offset_of!(DirEntry, node)),
+                ("info", offset_of!(DirEntry, info)),
+                ("next_cursor", offset_of!(DirEntry, next_cursor)),
+            ])
+        );
+    }
+
+    /// `(name, offset)` pairs as [`c_field_offsets`] reports them.
+    fn named(fields: &[(&str, usize)]) -> Vec<(String, usize)> {
+        fields
+            .iter()
+            .map(|&(name, at)| (name.to_owned(), at))
+            .collect()
+    }
+
     fn c_field_offsets(header: &str, tag: &str) -> Vec<(String, usize)> {
+        c_field_offsets_with(header, tag, &[])
+    }
+
+    /// [`c_field_offsets`] for a struct holding other published structs, each
+    /// named in `nested` with its size and alignment.
+    fn c_field_offsets_with(
+        header: &str,
+        tag: &str,
+        nested: &[(&str, usize, usize)],
+    ) -> Vec<(String, usize)> {
         let open = format!("typedef struct {tag} {{");
         let start = header.find(&open).expect("the typedef is published") + open.len();
         let end = start + header[start..].find('}').expect("the typedef closes");
@@ -4988,18 +5043,21 @@ mod tests {
             let Some((ty, name)) = decl.split_once(' ') else {
                 continue;
             };
-            let width = match ty {
-                "uint8_t" => 1,
-                "uint16_t" => 2,
-                "uint32_t" => 4,
-                "uint64_t" => 8,
-                other => panic!("`{other}` in {tag} is not a fixed-width integer"),
+            let (width, align) = match ty {
+                "uint8_t" => (1, 1),
+                "uint16_t" => (2, 2),
+                "uint32_t" => (4, 4),
+                "uint64_t" => (8, 8),
+                other => nested.iter().find(|(name, ..)| *name == other).map_or_else(
+                    || panic!("`{other}` in {tag} has no stated layout"),
+                    |&(_, size, align)| (size, align),
+                ),
             };
             let (name, count) = name.split_once('[').map_or((name, 1), |(name, count)| {
                 let count = count.trim_end_matches(']').parse().expect("array length");
                 (name, count)
             });
-            at = usize::next_multiple_of(at, width);
+            at = usize::next_multiple_of(at, align);
             if !name.starts_with("reserved") {
                 fields.push((name.to_owned(), at));
             }
@@ -5515,8 +5573,8 @@ mod tests {
             ("tairix_driver.h", "} tairix_bus_device_t;", size_of::<BusDevice>(), 24, align_of::<BusDevice>(), 8),
             ("tairix_driver.h", "} tairix_display_mode_t;", size_of::<DisplayMode>(), 16, align_of::<DisplayMode>(), 4),
             ("tairix_driver.h", "} tairix_accel_caps_t;", size_of::<AccelCaps>(), 16, align_of::<AccelCaps>(), 4),
-            ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 88, align_of::<NodeInfo>(), 8),
-            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 104, align_of::<DirEntry>(), 8),
+            ("tairix_driver.h", "} tairix_node_info_t;", size_of::<NodeInfo>(), 96, align_of::<NodeInfo>(), 8),
+            ("tairix_driver.h", "} tairix_dir_entry_t;", size_of::<DirEntry>(), 112, align_of::<DirEntry>(), 8),
             ("tairix_driver.h", "} tairix_node_times_t;", size_of::<NodeTimes>(), 64, align_of::<NodeTimes>(), 8),
             ("tairix_driver.h", "} tairix_input_event_t;", size_of::<InputEvent>(), 8, align_of::<InputEvent>(), 4),
             ("tairix_driver.h", "} tairix_mac_address_t;", size_of::<MacAddress>(), 6, align_of::<MacAddress>(), 1),

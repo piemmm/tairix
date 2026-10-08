@@ -923,7 +923,9 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             }
             Damage::SmallRect => {
                 let (width, height) = warm.client;
-                compositor.present_window_content(warm.top, width, height, |_| ((), SMALL_DAMAGE));
+                compositor.present_window_content(warm.top, width, height, |_, changed| {
+                    changed.add(SMALL_DAMAGE);
+                });
             }
             Damage::Drag => {
                 // Two origins a sample apart, alternated, so a long run of

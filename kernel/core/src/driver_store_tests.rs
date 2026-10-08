@@ -175,6 +175,7 @@ impl FilesystemRead for MockStore {
             size: n.reported_size.unwrap_or(n.content.len() as u64),
             allocated: n.content.len() as u64,
             times: NodeTimes::default(),
+            content_gen: 0,
         })
     }
 

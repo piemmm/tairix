@@ -8877,6 +8877,7 @@ mod tests {
             gid: 1000,
             id: tairix_abi::FileId::NONE,
             times: tairix_abi::NodeTimes::default(),
+            content_gen: 0,
         };
         let mut wire = [0u8; FileStat::WIRE_LEN];
         stat.encode(&mut wire).expect("encode");

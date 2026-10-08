@@ -41,12 +41,12 @@ use tairix_controls::state::{
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    ground_fill, paint_icon_slot, stack, Checkbox, ChromeLayer, Fact, FactList, FieldAction,
-    FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton,
-    IconTile, ListRow, Panel, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout, Toolbar,
-    FULL_COLOUR,
+    ground_fill, paint_icon_slot, stack, withheld, Checkbox, ChromeLayer, Fact, FactList,
+    FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
+    IconButton, IconTile, ListRow, Panel, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout,
+    Toolbar, FULL_COLOUR,
 };
-use tairix_font::{BitmapFont, ELLIPSIS};
+use tairix_font::{BitmapFont, Cut, ELLIPSIS};
 use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey};
@@ -62,7 +62,7 @@ use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
-use crate::media::{entry_icon, icon_for_entry, media_for_name, MediaType};
+use crate::media::{entry_icon, icon_for_entry, media_for_name, Ending, MediaType};
 use crate::open_with::OpenWithChooser;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
@@ -137,8 +137,12 @@ pub fn render_into<S: DirectorySource>(
         chrome.sidebar,
         sidebar_view(viewport, scale, theme, chrome.sidebar, chrome.toolbar),
     ) {
-        let selected = places.index_of(browser.components());
-        draw_sidebar(surface, scale, theme, places, &view, selected, artwork);
+        // A frame painted a damaged part at a time draws the rail only for the
+        // parts that reach it.
+        if !withheld(surface, view.rail_rect()) {
+            let selected = places.index_of(browser.components());
+            draw_sidebar(surface, scale, theme, places, &view, selected, artwork);
+        }
     }
     // The toolbar is window chrome: its band spans the full window, above the
     // rail, so it aligns with the rest of the desktop's chrome. Everything
@@ -607,6 +611,11 @@ fn draw_list<S: DirectorySource>(
             let (Some(entry), Some(bounds)) = (entries.get(index), view.row_rect(index)) else {
                 break;
             };
+            // A repaint clipped to a few rows must not pay every row's
+            // classification and artwork lookup only to have its writes withheld.
+            if withheld(surface, bounds) {
+                continue;
+            }
             let kind = icon_for_entry(entry, parent);
             let mut row = entry_row(entry, browser.is_selected(index), kind);
             if browser.drop_mark() == Some(index) {
@@ -658,11 +667,15 @@ fn draw_grid<S: DirectorySource>(
     // appends its leaf into one reused buffer rather than allocating a path.
     let dir = crate::vfs::spell_absolute_path(parent);
     let mut scratch = String::new();
+    let shadow = IconTile::shadow_cast(scale, theme);
     view.view(offset).paint(surface, |surface| {
         for index in view.visible_range(offset) {
             let (Some(entry), Some(bounds)) = (entries.get(index), view.cell_rect(index)) else {
                 break;
             };
+            if withheld(surface, bounds) {
+                continue;
+            }
             let (kind, request) = entry_icon(&dir, parent, entry, &mut scratch);
             let mut state = ControlState::idle();
             if browser.is_selected(index) {
@@ -673,7 +686,7 @@ fn draw_grid<S: DirectorySource>(
             }
             let tile = grid_tile(entry, state, kind);
             let side = TILE_LAYOUT.icon_side(bounds, scale, theme);
-            let art = artwork.artwork(request, side);
+            let art = artwork.shadowed(request, side, shadow);
             tile.render(surface, bounds, scale, theme, art);
         }
     });
@@ -694,6 +707,9 @@ fn draw_scrollbar<S: DirectorySource>(
     let Some(bounds) = scrollbar_bounds(scale, theme, viewport, toolbar) else {
         return;
     };
+    if withheld(surface, bounds) {
+        return;
+    }
     draw_bar(
         browser.scroll().scrollbar(),
         scroll_model(browser, scale, theme, viewport, toolbar),
@@ -812,22 +828,37 @@ fn entry_row(entry: &Entry, selected: bool, icon: IconKind) -> TableRow {
     row
 }
 
-/// The layout every entry tile is divided by: one name line under its picture.
+/// The layout every entry tile is divided by: two name lines under its picture.
 ///
 /// Shared with the desktop's icon field, so a tile there and in a listing
 /// seat their names alike.
-pub const TILE_LAYOUT: TileLayout = TileLayout::new(1);
+pub const TILE_LAYOUT: TileLayout = TileLayout::new(2);
 
 /// Build the [`IconTile`] for one grid entry: the entry's file-type `icon`
 /// above its label, carrying the shared selection state when selected. The
 /// `icon` is the shared classification ([`icon_for_entry`]) resolved by the
 /// caller — a display hint only, decided once so a tile and a list row draw
 /// the same icon for the same entry.
+///
+/// A name too long for its lines is cut in its middle ([`name_cut`]), so its
+/// extension is never what is dropped.
 #[must_use]
 pub fn grid_tile(entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
     IconTile::new(entry_label(entry), icon)
         .with_layout(TILE_LAYOUT)
         .with_state(state)
+        .with_name_cut(name_cut(entry.name()))
+        .with_picture_shadow()
+}
+
+/// How a name too long for its tile is cut: in its middle, keeping whatever
+/// ends it — the extension after its last dot, or the file type after its last
+/// comma — whole when that fits.
+#[must_use]
+pub fn name_cut(name: &str) -> Cut {
+    Cut::Middle {
+        keep: name.len() - Ending::of(name).stem.len(),
+    }
 }
 
 /// The name shown for an entry: exactly the name the volume holds.
@@ -900,7 +931,7 @@ fn content_viewport(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
 /// density instead of staying a fixed pixel count.
 ///
 /// A tile is exactly as tall as what it holds ([`TILE_LAYOUT`]): its picture,
-/// seven thirds of the body line, and one name line beneath it.
+/// seven thirds of the body line, and two name lines beneath it.
 ///
 /// Shared with the desktop's icon column, which lays the same tiles out under
 /// a different [`GridFlow`], so the two views can never disagree about how big
@@ -1027,10 +1058,13 @@ fn draw_toolbar<S: DirectorySource>(
     tool_model: ManagerToolModel,
     artwork: &mut dyn IconArtwork,
 ) {
-    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
     let Some(bounds) = toolbar_bounds(scale, theme, window, ToolbarBand::Shown) else {
         return;
     };
+    if withheld(surface, bounds) {
+        return;
+    }
+    let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
     toolbar.render(surface, bounds, scale, theme, artwork);
 }
 
@@ -1354,8 +1388,9 @@ pub fn reveal_selection<S: DirectorySource>(
 }
 
 /// The index of the entry at window-local pixel `point` for the browser's
-/// current view and scroll offset, or `None` for the toolbar band, an empty
-/// gap, the scrollbar gutter, and any coordinate outside the item area.
+/// current view and scroll offset, or `None` for the toolbar band, the ground
+/// around a grid tile's picture and name, the scrollbar gutter, and any
+/// coordinate outside the item area.
 ///
 /// This mirrors [`render_into`]'s own layout through the shared [`ViewLayout`], so a
 /// pointer-driven view resolves a click to exactly the item the user saw —
@@ -1370,8 +1405,48 @@ pub fn entry_index_at<S: DirectorySource>(
     toolbar: ToolbarBand,
     point: Point,
 ) -> Option<usize> {
-    view_layout_for(browser, scale, theme, viewport, toolbar)
-        .index_at(browser.scroll_offset(), point)
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+    entry_at(browser, &view, scale, theme, point)
+}
+
+/// The entry whose drawn item covers window `point`: a list's row, or a grid
+/// tile's body.
+fn entry_at<S: DirectorySource>(
+    browser: &Browser<S>,
+    view: &ViewLayout,
+    scale: Scale,
+    theme: &Theme,
+    point: Point,
+) -> Option<usize> {
+    let offset = browser.scroll_offset();
+    let index = view.index_at(offset, point)?;
+    let ViewLayout::Grid(grid) = view else {
+        return Some(index);
+    };
+    let at = view.view(offset).to_content(point)?;
+    let entry = browser.entries().get(index)?;
+    entry_body(entry, grid.cell_rect(index)?, scale, theme)?
+        .contains(at)
+        .then_some(index)
+}
+
+/// The part of every grid tile's body it holds whatever its name — its
+/// picture with the body's margin — relative to the tile's own top-left.
+#[must_use]
+pub(crate) fn tile_core(scale: Scale, theme: &Theme) -> Rect {
+    let metrics = grid_metrics(scale, theme);
+    let cell = Rect::new(0, 0, metrics.cell_width, metrics.cell_height);
+    TILE_LAYOUT
+        .core_rect(cell, scale, theme)
+        .unwrap_or(Rect::EMPTY)
+}
+
+/// Where the grid tile for `entry`, laid out in `cell`, truly lies: its
+/// picture and its name's drawn lines ([`TileLayout::body_rect`]). The rest of
+/// the cell is ground.
+#[must_use]
+pub fn entry_body(entry: &Entry, cell: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    TILE_LAYOUT.body_rect(cell, scale, theme, entry.name(), name_cut(entry.name()))
 }
 
 /// The folder a drop at window-local `point` lands in, and the listed folder
@@ -1400,7 +1475,7 @@ pub fn drop_folder_at<S: DirectorySource>(
         return None;
     }
     let mut folder = browser.components().to_vec();
-    let tile = view.index_at(offset, point).and_then(|index| {
+    let tile = entry_at(browser, &view, scale, theme, point).and_then(|index| {
         let entry = browser.entries().get(index)?;
         (entry.kind().resolved() == Some(EntryKind::Directory)).then(|| {
             folder.push(String::from(entry.name()));
@@ -1430,6 +1505,38 @@ pub fn entry_rect<S: DirectorySource>(
 ) -> Option<Rect> {
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     view.item_rect(browser.scroll_offset(), index)
+}
+
+/// The window-local pixel rectangle of entry `index` a press lands on, as far
+/// as it shows: a list's row, or a grid tile's body. `None` when that is
+/// scrolled out of view.
+///
+/// What a pointer aimed at the entry from outside — a scripted gesture — must
+/// aim inside, where [`entry_rect`] is what the entry repaints.
+#[must_use]
+pub fn entry_target<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    index: usize,
+) -> Option<Rect> {
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+    let offset = browser.scroll_offset();
+    let shown = view.item_rect(offset, index)?;
+    let ViewLayout::Grid(grid) = view else {
+        return Some(shown);
+    };
+    let scrolled = view.view(offset);
+    let body = entry_body(
+        browser.entries().get(index)?,
+        grid.cell_rect(index)?,
+        scale,
+        theme,
+    )?;
+    let target = scrolled.to_window(body)?.intersection(&shown);
+    (!target.is_empty()).then_some(target)
 }
 
 /// The window-local pixel rectangle of the browser's chosen item's **name**
@@ -1482,6 +1589,48 @@ pub fn entry_name_rect<S: DirectorySource>(
     view.to_window(field)
 }
 
+/// The window-local rectangle a press on entry `index`'s drawn name lands on,
+/// as far as it shows: a list row's name text, or a grid tile's name lines
+/// ([`TileLayout::name_target`]). `None` when that is scrolled out of view.
+#[must_use]
+pub fn entry_name_target<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    index: usize,
+) -> Option<Rect> {
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+    let item = view.layout_rect(index)?;
+    let entry = browser.entries().get(index)?;
+    let name = match view {
+        ViewLayout::List(_) => list_name_rect(browser, entry, item, scale, theme)?,
+        ViewLayout::Grid(_) => {
+            TILE_LAYOUT.name_target(item, scale, theme, entry.name(), name_cut(entry.name()))?
+        }
+    };
+    let offset = browser.scroll_offset();
+    let target = view
+        .view(offset)
+        .to_window(name)?
+        .intersection(&view.item_rect(offset, index)?);
+    (!target.is_empty()).then_some(target)
+}
+
+/// Where a list row laid out at `item` draws `entry`'s name: the span its
+/// glyphs occupy in the name column.
+fn list_name_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    entry: &Entry,
+    item: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<Rect> {
+    let kind = icon_for_entry(entry, browser.components());
+    entry_row(entry, false, kind).cell_text_rect(item, scale, theme, &COLUMNS, 0)
+}
+
 /// Draw the in-place rename `field` over the chosen item's name, laid out
 /// where the name is and cut by the viewport's edge with the item it names, so
 /// a scroll carries the editor with its item rather than squeezing it into
@@ -1519,12 +1668,8 @@ fn name_field<S: DirectorySource>(
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let item = view.layout_rect(index)?;
     let name = match view {
-        // The name is the first cell, and the row control reports the span
-        // its glyphs occupy inside that column.
         ViewLayout::List(_) => {
-            let entry = browser.entries().get(index)?;
-            let kind = icon_for_entry(entry, browser.components());
-            entry_row(entry, false, kind).cell_text_rect(item, scale, theme, &COLUMNS, 0)?
+            list_name_rect(browser, browser.entries().get(index)?, item, scale, theme)?
         }
         ViewLayout::Grid(_) => TILE_LAYOUT.label_rect(item, scale, theme)?,
     };

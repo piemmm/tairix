@@ -514,6 +514,7 @@ fn common_metrics() -> Metrics {
         window_backdrop_blur: 43,
         popup_corner_radius: 6,
         drop_shadow_reach: 6,
+        icon_shadow_reach: 3,
         border_thickness: 1,
         scrollbar_breadth: 14,
         min_thumb_length: 24,

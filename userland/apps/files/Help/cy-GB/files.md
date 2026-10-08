@@ -45,6 +45,22 @@ clirio'r dewisiad. Mae llusgo ar draws lle gwag yn tynnu blwch sy'n dewis
 popeth y mae'n ei gyffwrdd wrth iddo dyfu; o'i ddal ar frig neu waelod y
 rhestriad, mae'n sgrolio, ac mae `Escape` yn dadwneud yr hyn a ddewisodd.
 
+Mae'r lle o amgylch pob eicon a'i enw'n cyfrif fel lle gwag, felly gall
+blwch ddechrau unrhyw le rhwng eitemau. Mae `Ctrl+A` yn dewis popeth yn y
+rhestriad ac mae `Ctrl+Shift+A` yn clirio'r dewisiad; mae'r ddau ar y
+ddewislen clic de hefyd.
+
+Dangosir enw eitem yn gyfan, dros ddwy linell pan fo angen; mae enw sy'n rhy
+hir hyd yn oed i'r rheini'n cadw ei ddechrau a'i ddiwedd, gyda `…` yn y
+canol, fel bod ei estyniad yn dangos bob amser.
+
+Mae `F2` yn ailenwi'r eitem a ddewiswyd yn ei lle, fel y mae clicio ar enw'r
+unig eitem a ddewiswyd ac aros: mae'r enw'n agor i'w olygu cyn gynted ag na
+all y clic fod yn glic dwbl mwyach. Dewisir y rhan cyn yr estyniad, felly
+mae teipio'n disodli'r enw ac yn cadw'r estyniad. Mae `Enter`, neu glic y tu
+allan i'r enw, yn cadw'r enw newydd — mae enw y mae'r gyfrol yn ei wrthod yn
+aros ar agor gyda'r rheswm — ac mae `Escape` yn ei adael.
+
 Mae llusgo eitemau a ddewiswyd ar ffenestr rheolwr ffeiliau arall, ar
 ffolder ynddi, neu ar y bwrdd gwaith yn eu copïo yno; o ddal `Shift`, cânt
 eu symud yn lle hynny. Mae'r pwyntydd yn dangos plws tra byddai gollwng yn

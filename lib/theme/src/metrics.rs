@@ -58,6 +58,11 @@ pub struct Metrics {
     /// dropped by this reach and softened over the same distance: nothing
     /// shows above the top edge, one reach beside each side, and two below.
     pub drop_shadow_reach: u32,
+    /// How far the soft shadow an icon's picture casts reaches past it, in
+    /// logical pixels: the picture's own silhouette dropped a third of this
+    /// and softened over all of it, in [`drop_shadow`](crate::Palette::drop_shadow).
+    /// `0` casts none.
+    pub icon_shadow_reach: u32,
     /// Thickness of window and control borders/separators.
     pub border_thickness: u32,
     /// Breadth (the short dimension) of a scrollbar's Scroll Channel — a

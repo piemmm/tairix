@@ -198,7 +198,7 @@ pub use places::{
 pub use probes::Probes;
 pub use progress::{ProgressModel, ProgressOp};
 pub use properties::{Attribute, Attributes, Properties};
-pub use rename::{validate_new_name, RenameError};
+pub use rename::{rename_selection, validate_new_name, RenameError};
 pub use render::{render_into, ManagerChrome};
 pub use rowlist::RowList;
 pub use select::Selection;

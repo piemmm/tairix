@@ -384,7 +384,11 @@ shared `lib/controls` `IconTile` — the picture over its name with no plate of
 its own, so the icons sit on the wallpaper rather than in a row of boxes, and
 only a hovered, selected, or focused icon paints anything behind itself. A
 selected icon is filled with the theme's accent at half opacity, its edge
-softened, so the wallpaper still reads through the mark.
+softened, so the wallpaper still reads through the mark. Its name is whole,
+over two lines when it needs them, and cut in its middle when even those are
+too few, so its extension always shows; its picture casts a small soft shadow,
+and a thumbnail is outlined one pixel around its own bounds — the file
+manager's tile, exactly.
 
 The one place the desktop's geometry deliberately differs from the file
 manager's is what it does with the space a column has left over: the field
@@ -398,7 +402,9 @@ Neither cuts a tile across its column. The desktop never scrolls: its grid rests
 on the edge the icons hug, and a column the work area cannot hold whole is left
 out — neither drawn nor hit — because no scroll could ever bring it whole.
 
-**Pointer and keyboard.** A primary press selects the icon under it (or
+**Pointer and keyboard.** A press hits an icon's **body** — its picture and
+its name's drawn lines (`render::entry_body`) — and the rest of its cell is
+wallpaper. A primary press selects the icon under it (or
 clears the selection on an empty desktop) and arms the shared
 `DoubleClickTracker` under the double-click interval the user chose, so a
 second press within it activates the icon

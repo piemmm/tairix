@@ -294,6 +294,9 @@ pub struct Compositor {
     /// What the scan-out frame holds that the display refused to take: owed
     /// to the next present, which sends it again without recomposing it.
     undelivered: Region,
+    /// What a client's present changed in its window's content, held here and
+    /// cleared per present so presenting allocates nothing.
+    present_changes: Region,
     /// Which of the composite's specialisations may serve this compositor.
     /// Only a test turns one off, to compose the same scene the general way
     /// and hold the two to each other; production has no reason to and no way
@@ -445,6 +448,7 @@ impl Compositor {
             stats: FrameCounters::new(),
             presented: None,
             undelivered: Region::new(),
+            present_changes: Region::new(),
             #[cfg(test)]
             fast_paths: FastPaths::ALL,
             next_id: 1,
@@ -1756,36 +1760,44 @@ impl Compositor {
     /// the whole client area is marked dirty, because every pixel of it now
     /// comes from a buffer that carried nothing over.
     ///
-    /// The reported `Rect` is in content-surface-local pixels (origin at
-    /// the content's top-left). It is translated by the window's content
-    /// origin and intersected with its client rectangle
-    /// ([`Window::client_rect`]), so an empty rectangle marks nothing and
-    /// an over-large one is clipped rather than ever reaching into a
-    /// neighbouring window.
+    /// The conversion adds what it changed to the region it is handed, in
+    /// content-surface-local pixels (origin at the content's top-left): one
+    /// rectangle per changed part, so two far-apart edits recompose as two
+    /// rather than as the box between them. Each is translated by the window's
+    /// content origin and intersected with its client rectangle
+    /// ([`Window::client_rect`]), so an empty rectangle marks nothing and an
+    /// over-large one is clipped rather than ever reaching into a neighbouring
+    /// window. What it reports is marked even when it then refuses, because
+    /// those pixels are in the content now.
     pub fn present_window_content<T>(
         &mut self,
         id: WindowId,
         width: u32,
         height: u32,
-        convert: impl FnOnce(&mut Surface) -> (T, Rect),
+        convert: impl FnOnce(&mut Surface, &mut Region) -> T,
     ) -> Option<T> {
         let index = self.index_of(id)?;
         let window = self.windows.get_mut(index)?;
         let (content, established) = window.content_for_present(width, height)?;
-        let (out, local_damage) = convert(content);
+        let mut changed = core::mem::take(&mut self.present_changes);
+        changed.clear();
+        let out = convert(content, &mut changed);
         let client = window.client_rect();
-        let screen_damage = if established {
-            client
+        if established {
+            self.mark_layer(id, client);
         } else {
-            Rect::new(
-                client.left().saturating_add(local_damage.left()),
-                client.top().saturating_add(local_damage.top()),
-                local_damage.width,
-                local_damage.height,
-            )
-            .intersection(&client)
-        };
-        self.mark_layer(id, screen_damage);
+            for local in changed.rects() {
+                let screen = Rect::new(
+                    client.left().saturating_add(local.left()),
+                    client.top().saturating_add(local.top()),
+                    local.width,
+                    local.height,
+                )
+                .intersection(&client);
+                self.mark_layer(id, screen);
+            }
+        }
+        self.present_changes = changed;
         Some(out)
     }
 

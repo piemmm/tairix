@@ -1607,7 +1607,7 @@ memory model, two mechanisms suited to two different kinds of memory.
 - **Releasing wipes.** The buffer holds user data, so
   `Window::release_content` overwrites every pixel before dropping the
   allocation rather than trusting the allocator to have cleared it.
-- **The redraw handshake.** A present carries only a *damage rectangle*,
+- **The redraw handshake.** A present carries only *damage rectangles*,
   so a re-established surface starts transparent — the plate showing
   through it on a decorated window — and is correct only once a
   full-window present arrives. Every release therefore queues a
@@ -1947,12 +1947,22 @@ The desktop session serves it; an app's `Run` binary calls it.
 The transport is zero-copy, the display protocol's shape one layer up: an
 app `shm_create`s a region holding its window frames, `shm_grant`s it to
 the session once (`Create`), and thereafter presents by **frame index**
-plus a damage rectangle (`Present`) — pixels never cross the IPC. A
+plus a damage list — one to `MAX_DAMAGE_RECTS` pairwise-disjoint
+rectangles, the display protocol's own `DamageList` — (`Present`); pixels
+never cross the IPC, two far-apart edits are converted and recomposed as two
+rectangles rather than the box between them, and no pixel is converted twice:
+a list naming overlapping rectangles is refused at decode, and the session
+checks every rectangle's shape before it converts any
+(`tairix_display::winframe::decode_list`). A
 `Create` also carries the frame geometry, a bounded, validated
 `WindowTitle` (UTF-8, no control characters — it crosses into the taskbar
 renderer), and the app's own **event endpoint**; the reply is the
 session-minted, never-reused window id. Input travels the other way as
-fixed-width `WindowEvent`s — focus changes, key events (embedding the one
+fixed-width `WindowEvent`s — focus changes (every move of the keyboard,
+whatever moved it — a press, a raise from the icon bar, a popup opening, a
+window closing — reported lost before gained and before the next input, so
+an app can tell a press that brought it forward from one it already had the
+keyboard for), key events (embedding the one
 desktop `KeyInput` codec), window-local pointer events, `CloseRequested`
 (the app owns the close decision), and `RedrawRequested` (the session
 released this window's retained content to reclaim memory and needs it
@@ -2100,8 +2110,8 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   existed. The granted region is mapped **once** at create (the shared
   `tairix_display::ShmMapper` seam) and validated to hold every frame;
   each present hands the session's compositor bridge (`WindowHost`) a
-  bounds-checked frame slice and a damage rectangle validated inside the
-  window's surface. A per-client window cap bounds pinned memory, a dead
+  bounds-checked frame slice and a damage list, every rectangle validated
+  inside the window's surface and none overlapping another. A per-client window cap bounds pinned memory, a dead
   client's windows are torn down via `client_exited`, and app-ward events
   are validated against the live window before delivery.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
@@ -2118,6 +2128,11 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   served ahead of that work and the loop parks only when neither has
   anything left; an app whose own loop dispatches several wake sources and
   a deadline of its own keeps that park and takes the drain alone.
+  An app that drains every queued event before painting folds each round
+  into its window's `Owed` account — the strongest conclusion the rounds
+  reached and the rectangles they reported, clipped to the window and merged
+  by least growth to what one present carries — and paints and presents each
+  rectangle once a turn, so a burst of pointer samples costs one frame.
   `EventMailbox` is the production drain: it accepts only frames of the
   right length from the kernel-attested session identity the create reply
   named, so that authentication has one definition rather than one per app.

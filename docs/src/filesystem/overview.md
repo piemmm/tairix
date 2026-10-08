@@ -308,6 +308,17 @@ not count names without walking every directory on the volume.
   second-name object, so one name is the whole truth rather than a floor
   (`NodeInfo::SINGLE_NAME`, the one definition every such driver reads).
 
+## Content generations
+
+`FileStat::content_gen` and every directory record's `content_gen` name the
+version of a node's data, carried up from the driver's `NodeInfo::content_gen`
+unchanged. A volume never hands one out twice, so a node's identity and its
+generation name exactly one version of its content — what a cache of something
+derived from a file (a thumbnail, an index) keys on to be exact rather than
+merely likely. ARXFS keeps one for every file and link (`arxfs-spec.md` §13,
+§14); ext4, FAT32 and ADFS keep none and report `0`, which a consumer treats as
+no exact version at all.
+
 [`Filesystem`]: ../abi/driver_traits.md
 [`Metadata`]: ./permissions.md
 [`Credentials`]: ./permissions.md

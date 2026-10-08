@@ -45,6 +45,23 @@ todo lo que toca a medida que crece; sostenido en el borde superior o
 inferior del listado, este se desplaza, y `Escape` deshace lo que el
 recuadro seleccionó.
 
+El espacio que rodea cada icono y su nombre cuenta como vacío, así que un
+recuadro puede empezar en cualquier punto entre los elementos. `Ctrl+A`
+selecciona todo lo del listado y `Ctrl+Shift+A` borra la selección; ambos
+están también en el menú contextual.
+
+El nombre de un elemento se muestra entero, en dos líneas cuando las
+necesita; un nombre demasiado largo incluso para ellas conserva su principio
+y su final, con `…` en medio, de modo que su extensión siempre se ve.
+
+`F2` cambia el nombre del elemento seleccionado en su sitio, igual que hacer
+clic en el nombre del único elemento seleccionado y esperar: el nombre se
+abre para editarlo en cuanto el clic ya no puede ser un doble clic. Queda
+seleccionada la parte anterior a la extensión, así que lo que se escribe
+sustituye al nombre y conserva la extensión. `Intro`, o un clic fuera del
+nombre, conserva el nombre nuevo —un nombre que el volumen rechaza sigue
+abierto con el motivo— y `Escape` lo descarta.
+
 Arrastrar los elementos seleccionados a otra ventana del gestor de archivos,
 a una carpeta de ella o al escritorio los copia allí; manteniendo Mayús, en
 cambio, los mueve. El puntero muestra un signo más mientras soltar copiaría

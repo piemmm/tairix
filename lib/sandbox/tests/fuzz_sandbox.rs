@@ -519,10 +519,19 @@ fn fuzz_thumbnail_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &
         if send_document(honest, document).is_err() {
             continue;
         }
-        if let Ok(pixels) = render_thumbnail(honest, side, *rng.pick(&NAMED_FORMATS)) {
-            assert_eq!(pixels.len(), (side as usize) * (side as usize) * 4);
+        if let Ok(fitted) = render_thumbnail(honest, side, *rng.pick(&NAMED_FORMATS)) {
+            assert_fitted(&fitted, side);
         }
     }
+}
+
+/// A believed thumbnail is exactly the square asked for, with its picture
+/// placed inside it.
+fn assert_fitted(fitted: &tairix_icon::Fitted, side: u32) {
+    assert_eq!(fitted.pixels.len(), (side as usize) * (side as usize) * 4);
+    let square = tairix_geometry::Rect::new(0, 0, side, side);
+    assert!(!fitted.bounds.is_empty());
+    assert_eq!(fitted.bounds.intersection(&square), fitted.bounds);
 }
 
 /// A small paletted PNG and a sprite area of a masked paletted sprite and a
@@ -998,8 +1007,8 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
-        if let Ok(pixels) = render_thumbnail(&mut hostile, side, None) {
-            assert_eq!(pixels.len(), (side as usize) * (side as usize) * 4);
+        if let Ok(fitted) = render_thumbnail(&mut hostile, side, None) {
+            assert_fitted(&fitted, side);
         }
         let _ = drawn(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
         hostile_document_iteration(&mut hostile);

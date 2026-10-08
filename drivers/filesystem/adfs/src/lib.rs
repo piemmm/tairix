@@ -1095,6 +1095,7 @@ impl<B: Block> FilesystemRead for Adfs<B> {
                 size: 0,
                 allocated,
                 times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             });
         }
         let object = self.resolve(node)?;
@@ -1176,6 +1177,7 @@ impl<B: Block> Adfs<B> {
             size,
             allocated,
             times: object_times(object),
+            content_gen: NodeInfo::NO_CONTENT_GEN,
         })
     }
 

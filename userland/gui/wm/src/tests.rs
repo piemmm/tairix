@@ -76,7 +76,11 @@ fn present_content<T>(
     convert: impl FnOnce(&mut Surface) -> (T, Rect),
 ) -> Option<T> {
     let (w, h) = comp.window(id)?.client_size();
-    comp.present_window_content(id, w, h, convert)
+    comp.present_window_content(id, w, h, |surface, changed| {
+        let (out, rect) = convert(surface);
+        changed.add(rect);
+        out
+    })
 }
 
 /// Fill `colour` over exactly the rectangles a layer or window repaint handed
@@ -1204,9 +1208,9 @@ fn an_empty_content_damage_marks_nothing_although_the_edit_ran() {
 fn editing_an_unknown_window_never_runs_the_edit() {
     let mut c = new_compositor(mode(16, 16), BLUE).expect("compositor");
     let mut ran = false;
-    let edited = c.present_window_content(WindowId(9_999), 4, 4, |_surface| {
+    let edited = c.present_window_content(WindowId(9_999), 4, 4, |_surface, changed| {
         ran = true;
-        ((), Rect::new(0, 0, 4, 4))
+        changed.add(Rect::new(0, 0, 4, 4));
     });
     assert_eq!(edited, None);
     assert!(!ran);
@@ -5577,14 +5581,14 @@ fn a_client_presenting_short_of_its_frame_leaves_no_gap_at_the_decoration() {
     let (client_w, client_h) = c.window(id).expect("window").client_size();
     let (short_w, short_h) = (client_w - 5, client_h - 3);
     assert!(c
-        .present_window_content(id, short_w, short_h, |surface| {
+        .present_window_content(id, short_w, short_h, |surface, changed| {
             let (w, h) = (surface.width(), surface.height());
             for y in 0..h {
                 for x in 0..w {
                     surface.set(x, y, GREEN.premultiply());
                 }
             }
-            ((), Rect::new(0, 0, w, h))
+            changed.add(Rect::new(0, 0, w, h));
         })
         .is_some());
     c.composite();
@@ -5645,9 +5649,8 @@ fn a_present_at_a_new_size_re_establishes_the_buffer_and_repaints_the_client() {
     let client = c.window_client_rect(id).expect("client");
     assert_eq!(client, Rect::new(4, 4, 12, 12));
 
-    let blank = c.present_window_content(id, 12, 12, |surface| {
-        let blank = surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT);
-        (blank, Rect::EMPTY)
+    let blank = c.present_window_content(id, 12, 12, |surface, _changed| {
+        surface.pixels().iter().all(|p| *p == Pixel::TRANSPARENT)
     });
     assert_eq!(
         blank,
@@ -11100,4 +11103,27 @@ fn a_casters_layer_spans_its_footprint_and_carries_its_shadow() {
         [255, 0, 0, 255],
         "the body over it"
     );
+}
+
+/// A present that changed two far-apart places marks those two, not the box
+/// between them, so the composite that follows recomposes what moved.
+#[test]
+fn a_present_marks_each_changed_rectangle_rather_than_their_box() {
+    let (mut c, id) = decorated_compositor();
+    let (w, h) = c.window(id).expect("window").client_size();
+    let _ = c.present_window_content(id, w, h, |_surface, changed| {
+        changed.add(Rect::new(0, 0, w, h));
+    });
+    c.composite();
+    assert!(!c.has_damage(), "the first frame drained the damage");
+
+    let client = c.window_client_rect(id).expect("client");
+    let _ = c.present_window_content(id, w, h, |_surface, changed| {
+        changed.add(Rect::new(0, 0, 1, 1));
+        changed.add(Rect::new(10, 10, 1, 1));
+    });
+    let at = |dx: i32, dy: i32| Point::new(client.left() + dx, client.top() + dy);
+    assert!(c.damage_covers(at(0, 0)));
+    assert!(c.damage_covers(at(10, 10)));
+    assert!(!c.damage_covers(at(5, 5)), "the space between is untouched");
 }

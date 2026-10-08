@@ -10,9 +10,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::display_ipc::{decode_stats_reply, DamageList, DisplayRequest, DISPLAY_MAX_FRAMES};
+use tairix_abi::display_ipc::{decode_stats_reply, DisplayRequest, DISPLAY_MAX_FRAMES};
 use tairix_abi::driver::display::{
-    AccelCaps, DamageRect, Display, DisplayDeviceReport, DisplayFormat, DisplayMode, DisplayPower,
+    AccelCaps, DamageList, DamageRect, Display, DisplayDeviceReport, DisplayFormat, DisplayMode,
+    DisplayPower,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::DisplayLease;

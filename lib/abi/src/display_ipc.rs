@@ -40,8 +40,8 @@
 //! guessing.
 
 use crate::driver::display::{
-    AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, DisplayPower,
-    MAX_DAMAGE_RECTS,
+    AccelCaps, DamageList, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode,
+    DisplayPower, MAX_DAMAGE_RECTS, NO_RECT,
 };
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::Errno;
@@ -143,71 +143,6 @@ pub enum DisplayRequest {
     },
 }
 
-/// The damage a [`DisplayRequest::Present`] names: one to
-/// [`MAX_DAMAGE_RECTS`] rectangles, held inline in the fixed-width frame.
-///
-/// Constructing one is the only way to name a present's damage, so the count
-/// bound and the "no empty rectangle" rule hold before a byte is encoded as
-/// well as after one is decoded — a decoded list is exactly as trustworthy as
-/// a locally built one. Rectangles beyond the live count are zero, which is
-/// what makes the frame's reserved tail checkable.
-///
-/// Equality compares the rectangles named, not the dead slots behind them.
-#[derive(Copy, Clone, Debug)]
-pub struct DamageList {
-    rects: [DamageRect; MAX_DAMAGE_RECTS],
-    count: u8,
-}
-
-/// The zero rectangle filling a [`DamageList`]'s unused slots. Not a valid
-/// damage rectangle — it is never inside the live prefix.
-const NO_RECT: DamageRect = DamageRect {
-    x: 0,
-    y: 0,
-    width_px: 0,
-    height_px: 0,
-};
-
-impl DamageList {
-    /// The list naming `rects`.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::LengthOutOfRange`] if `rects` is empty, holds more than
-    /// [`MAX_DAMAGE_RECTS`] entries, or holds an empty rectangle.
-    pub fn new(rects: &[DamageRect]) -> Result<Self, Errno> {
-        let count = u8::try_from(rects.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        if rects.is_empty() || rects.len() > MAX_DAMAGE_RECTS {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let mut slots = [NO_RECT; MAX_DAMAGE_RECTS];
-        for (slot, rect) in slots.iter_mut().zip(rects) {
-            if rect.width_px == 0 || rect.height_px == 0 {
-                return Err(Errno::LengthOutOfRange);
-            }
-            *slot = *rect;
-        }
-        Ok(Self {
-            rects: slots,
-            count,
-        })
-    }
-
-    /// The rectangles the present names.
-    #[must_use]
-    pub fn rects(&self) -> &[DamageRect] {
-        &self.rects[..usize::from(self.count)]
-    }
-}
-
-impl PartialEq for DamageList {
-    fn eq(&self, other: &Self) -> bool {
-        self.rects() == other.rects()
-    }
-}
-
-impl Eq for DamageList {}
-
 /// Wire operation discriminant of [`DisplayRequest::Query`].
 const OP_QUERY: u16 = 1;
 /// Wire operation discriminant of [`DisplayRequest::Configure`].
@@ -270,7 +205,7 @@ impl DisplayRequest {
                 put_u16(&mut out, 6, OP_PRESENT);
                 put_u64(&mut out, 8, seat_id);
                 put_u32(&mut out, 16, frame_index);
-                put_u32(&mut out, 20, u32::from(damage.count));
+                put_u32(&mut out, 20, u32::try_from(damage.len()).unwrap_or(0));
                 for (index, rect) in damage.rects().iter().enumerate() {
                     put_rect(&mut out, PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN, rect);
                 }
@@ -717,10 +652,11 @@ mod tests {
 
     /// The rectangle `index` pixels down the surface, so a list's entries
     /// are distinguishable at a glance.
+    /// The `index`th of a column of rectangles that touch and never overlap.
     fn rect(index: u32) -> DamageRect {
         DamageRect {
             x: 10,
-            y: 20 + index,
+            y: 20 + index * 40,
             width_px: 30,
             height_px: 40,
         }

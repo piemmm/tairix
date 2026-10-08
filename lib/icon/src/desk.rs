@@ -34,10 +34,10 @@
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use tairix_raster::Surface;
 use tairix_reclaim::CachedBytes;
 
 use crate::artwork::{ArtworkKey, ArtworkResolver, IconRequest, Resolved};
+use crate::picture::Artwork;
 
 /// One decode: what to resolve, and the pixel side to resolve it at.
 ///
@@ -76,7 +76,7 @@ enum State {
     /// Produced and waiting to be collected. `None` is a refusal — an absent,
     /// over-long, or undecodable asset — which the cache retains just as it
     /// retains artwork.
-    Done(Option<Surface>),
+    Done(Option<Artwork>),
     /// Collected, and the cache could not keep it: no room the current
     /// pressure band allows. Held rather than forgotten, because decoding it
     /// again would only be refused again.
@@ -386,7 +386,7 @@ impl ArtworkDesk {
     /// file's read and decode, far more than the repaint that shows it. The
     /// debt outlives the delivery that incurred it, so a batch drained without
     /// a wake cannot be stranded by a final job the desk no longer wants.
-    pub fn deliver(&mut self, job: &ArtworkJob, artwork: Option<Surface>) -> Delivered {
+    pub fn deliver(&mut self, job: &ArtworkJob, artwork: Option<Artwork>) -> Delivered {
         let mut kept = false;
         if let Some(Slot {
             state: state @ State::Running,
@@ -488,9 +488,9 @@ impl ArtworkDesk {
     }
 }
 
-/// Whether `job` is a picture file's own content rather than an icon.
+/// Whether `job` reads picture files' own content rather than an icon.
 fn is_thumbnail(job: &ArtworkJob) -> bool {
-    matches!(job.key, ArtworkKey::Thumbnail(_))
+    job.key.is_thumbnail_class()
 }
 
 impl Default for ArtworkDesk {

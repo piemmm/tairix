@@ -376,7 +376,7 @@ pub use number::{NumberAction, NumberField};
 pub use paint::{
     blend_area, fill_area, ground_fill, inset, paint_framed_surface_plate, paint_icon_slot,
     paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, withheld,
-    ChromeLayer, FULL as FULL_PERMILLE, FULL_COLOUR,
+    ChromeLayer, Run, FULL as FULL_PERMILLE, FULL_COLOUR,
 };
 pub use picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
 pub use rail::{ActionRail, RailAction};

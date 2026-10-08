@@ -295,6 +295,11 @@ This crate owns:
   and does not depend on the colour, so a monochrome shape is resolved once,
   untinted, and then drawn in any theme colour rather than re-rasterised per
   colour or per frame.
+- `Surface::blit_transformed` — a picture drawn through an `Affine`, the one
+  transformed blit: each destination pixel it can touch maps its centre back
+  and samples the source bilinearly in premultiplied space, everything outside
+  the source transparent, so a turned edge anti-aliases against what lies
+  beneath it. A transform that collapses area draws nothing.
 - `Surface::blit_faded` — the same walk with each source pixel weakened to a
   strength as it lands, so an opaque source mixes the destination toward it in
   exactly that proportion. One picture dissolving into another is this: the

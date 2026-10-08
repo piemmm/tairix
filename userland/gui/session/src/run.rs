@@ -124,27 +124,27 @@ mod program {
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
-        drain_locked, drop_is_noteworthy, encode_switchboard_reply, land_preview, launch_argv,
-        load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
-        open_tray, parse, publish_pinboard, reap_launched, relay_power, resize_drag_event,
-        resolve_launch, resolve_window_identities, seat_held, serve_park_ns, serve_pinboard_apply,
-        serve_switchboard_request, size_state_name, window_control_alternate_event,
-        window_control_event, Acquisition, AidPolicy, Answer, AppBarBridge, AppBarService,
-        AppearanceWork, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command,
-        ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction, DesktopActivation,
-        DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd,
-        DragPlace, DragSurface, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
-        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
-        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
-        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
-        LoadedPrograms, MachineWatch, OwedReport, OwnerBundleGate, OwnerWindow, PickAccess,
-        PickEnd, PickStep, Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob,
-        PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Routed, SaverIdentity,
-        SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader,
-        SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker,
-        SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
-        APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
+        drain_locked, drop_is_noteworthy, encode_switchboard_reply, focus_reports, land_preview,
+        launch_argv, load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report,
+        open_entry, open_tray, parse, publish_pinboard, reap_launched, relay_power,
+        resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
+        serve_pinboard_apply, serve_switchboard_request, size_state_name,
+        window_control_alternate_event, window_control_event, Acquisition, AidPolicy, Answer,
+        AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
+        BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
+        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
+        DocumentRelay, DragEnd, DragPlace, DragSurface, ElevatePrompt, Elevator, FrameContent,
+        FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack,
+        IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource,
+        Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed,
+        LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport, OwnerBundleGate, OwnerWindow,
+        PickAccess, PickEnd, PickStep, Prepared, PresentedOwners, PreviewBudget, PreviewDone,
+        PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Routed,
+        SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
+        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
+        WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
         APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
         DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
@@ -2959,6 +2959,17 @@ mod program {
                         &mut apps.service,
                         &mut menu,
                     );
+                    reconcile_focus(
+                        &mut focused,
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut apps.service,
+                        &mut menu,
+                    );
                     // A chain this pass brought up has to reach the screen,
                     // and one it displaced has to be answered. Both run here
                     // rather than in the bridge, for the reason the identity
@@ -5695,7 +5706,7 @@ mod program {
             side: u32,
             reading: tairix_icon::Reading,
             document: &mut dyn tairix_icon::ArtworkDocument,
-        ) -> Option<alloc::vec::Vec<u8>> {
+        ) -> Option<tairix_icon::Fitted> {
             tairix_sandbox::imagerender::thumbnail(&mut self.0, side, reading, document).ok()
         }
     }
@@ -5808,7 +5819,7 @@ mod program {
                 self.programs,
                 now_ns,
             );
-            route_outcome(
+            let routed = route_outcome(
                 outcome,
                 key,
                 self.catalogs,
@@ -5832,7 +5843,19 @@ mod program {
                 self.switchboard_pid,
                 self.pending_open,
                 self.programs,
-            )
+            );
+            reconcile_focus(
+                self.focused,
+                self.server,
+                self.sink,
+                seat.shell,
+                seat.compositor,
+                self.windows,
+                self.picker,
+                &mut self.apps.service,
+                seat.menu,
+            );
+            routed
         }
 
         fn settle_chain(
@@ -5897,7 +5920,12 @@ mod program {
             }
             let layout = seat.shell.desktop_layout(seat.compositor, self.desktop);
             DragPlace::Desktop {
-                icon: self.desktop.drop_icon_at(at, &layout),
+                icon: self.desktop.drop_icon_at(
+                    at,
+                    &layout,
+                    seat.compositor.scale(),
+                    seat.shell.session().active_theme(),
+                ),
                 revision: self.desktop.revision(),
             }
         }
@@ -6578,44 +6606,19 @@ mod program {
             ShellOutcome::WindowManager(response) => match response {
                 InputResponse::Activated { window, local } => {
                     let target = windows.ipc_id(window);
-                    // Mirror the focus change app-ward: the window that
-                    // lost focus (if served) learns first, then the
-                    // newly focused one.
-                    if *focused != target {
-                        if let Some(old) = focused.take() {
-                            deliver(
-                                server,
-                                sink,
-                                shell,
-                                compositor,
-                                windows,
-                                picker,
-                                &mut apps.service,
-                                menu,
-                                &WindowEvent::Focus {
-                                    window_id: old,
-                                    focused: false,
-                                },
-                            );
-                        }
-                        if let Some(id) = target {
-                            deliver(
-                                server,
-                                sink,
-                                shell,
-                                compositor,
-                                windows,
-                                picker,
-                                &mut apps.service,
-                                menu,
-                                &WindowEvent::Focus {
-                                    window_id: id,
-                                    focused: true,
-                                },
-                            );
-                        }
-                        *focused = target;
-                    }
+                    // The focus change reaches the apps before the press.
+                    tell_focus(
+                        focused,
+                        target,
+                        server,
+                        sink,
+                        shell,
+                        compositor,
+                        windows,
+                        picker,
+                        &mut apps.service,
+                        menu,
+                    );
                     // The activating press itself, window-local. A
                     // negative coordinate cannot occur for an in-window
                     // press; refuse rather than wrap if it ever did.
@@ -6693,41 +6696,18 @@ mod program {
                     // read-only browser with no context menu, so a right-click
                     // on it delivers focus only and opens nothing.
                     let target = windows.ipc_id(window);
-                    if *focused != target {
-                        if let Some(old) = focused.take() {
-                            deliver(
-                                server,
-                                sink,
-                                shell,
-                                compositor,
-                                windows,
-                                picker,
-                                &mut apps.service,
-                                menu,
-                                &WindowEvent::Focus {
-                                    window_id: old,
-                                    focused: false,
-                                },
-                            );
-                        }
-                        if let Some(id) = target {
-                            deliver(
-                                server,
-                                sink,
-                                shell,
-                                compositor,
-                                windows,
-                                picker,
-                                &mut apps.service,
-                                menu,
-                                &WindowEvent::Focus {
-                                    window_id: id,
-                                    focused: true,
-                                },
-                            );
-                        }
-                        *focused = target;
-                    }
+                    tell_focus(
+                        focused,
+                        target,
+                        server,
+                        sink,
+                        shell,
+                        compositor,
+                        windows,
+                        picker,
+                        &mut apps.service,
+                        menu,
+                    );
                     if let (Some(id), Ok(x), Ok(y)) =
                         (target, u32::try_from(local.x), u32::try_from(local.y))
                     {
@@ -6757,22 +6737,18 @@ mod program {
                 // it lost it. The secondary press additionally opens the
                 // backdrop menu, which `route_desktop` has already applied.
                 InputResponse::DesktopPressed | InputResponse::DesktopSecondaryPressed => {
-                    if let Some(old) = focused.take() {
-                        deliver(
-                            server,
-                            sink,
-                            shell,
-                            compositor,
-                            windows,
-                            picker,
-                            &mut apps.service,
-                            menu,
-                            &WindowEvent::Focus {
-                                window_id: old,
-                                focused: false,
-                            },
-                        );
-                    }
+                    tell_focus(
+                        focused,
+                        None,
+                        server,
+                        sink,
+                        shell,
+                        compositor,
+                        windows,
+                        picker,
+                        &mut apps.service,
+                        menu,
+                    );
                 }
                 InputResponse::Key { window, .. } => {
                     if picker.wm_id() == Some(window) {
@@ -7517,12 +7493,20 @@ mod program {
         let acted = match outcome {
             tairix_desktop_session::ShellOutcome::WindowManager(response) => match response {
                 InputResponse::DesktopPointerMoved => {
-                    desktop.pointer_moved(pointer, &layout, &mut damage);
+                    desktop.pointer_moved(
+                        pointer,
+                        &layout,
+                        compositor.scale(),
+                        shell.session().active_theme(),
+                        &mut damage,
+                    );
                     DesktopOutcome::ignored()
                 }
                 InputResponse::DesktopPressed => desktop.press(
                     pointer,
                     &layout,
+                    compositor.scale(),
+                    shell.session().active_theme(),
                     now_ns,
                     &programs.associations,
                     &mut damage,
@@ -7532,7 +7516,13 @@ mod program {
                     // for it directly rather than naming an action: it is the
                     // desktop's own model handed to the one service, exactly
                     // as an application's `OpenMenu` is.
-                    let on_icon = desktop.context_press(pointer, &layout, &mut damage);
+                    let on_icon = desktop.context_press(
+                        pointer,
+                        &layout,
+                        compositor.scale(),
+                        shell.session().active_theme(),
+                        &mut damage,
+                    );
                     open_backdrop_menu(
                         pointer, on_icon, seat_held, desktop, menu, shell, compositor, windows,
                     );
@@ -8879,6 +8869,51 @@ mod program {
         let ceiling = tairix_browse::document::grant_ceiling(opened.writable);
         let handle = tairix_rt::fd_grant(opened.file.fd(), ceiling, owner);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
+    }
+
+    /// Move what the apps were told of the keyboard, `told`, to `now`: the
+    /// window that lost it learns first, then the one that gained it.
+    #[allow(clippy::too_many_arguments)] // `deliver`'s context, and the two places.
+    fn tell_focus<S: DirectorySource, F: FnMut() -> S>(
+        told: &mut Option<u64>,
+        now: Option<u64>,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        for event in focus_reports(*told, now) {
+            deliver(
+                server, sink, shell, compositor, windows, picker, apps, menu, &event,
+            );
+        }
+        *told = now;
+    }
+
+    /// Tell the apps where the keyboard is after it moved without the press
+    /// that reports it — a window raised from its slot, a popup opened over
+    /// its owner, a window closed — so one that lost it learns so before its
+    /// next input.
+    #[allow(clippy::too_many_arguments)] // `deliver`'s context, and what the apps were told.
+    fn reconcile_focus<S: DirectorySource, F: FnMut() -> S>(
+        told: &mut Option<u64>,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        let now = windows.focused(shell);
+        tell_focus(
+            told, now, server, sink, shell, compositor, windows, picker, apps, menu,
+        );
     }
 
     /// Deliver a redraw request to the owning app of every window whose

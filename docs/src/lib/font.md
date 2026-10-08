@@ -253,6 +253,12 @@ is drawn as a blank line, trims every line so no whitespace a break consumed
 is drawn, and elides only the last. A box too narrow for one glyph draws none
 of the text rather than a column of overflowing glyphs.
 
+`wrap_with_cut` is the same layout with the last line cut as a `Cut` says.
+`Cut::End` is `wrap_to_width`'s own. `Cut::Middle { keep }` keeps that line's
+start, the mark, and the text's end, the end taking half the room or the width
+of the last `keep` bytes when that is more — how a file's name keeps its
+extension under its icon, whatever is cut.
+
 `lines_to_width` is the same break rules laid out **to edit**, and it is what
 a multi-line entry ([`TextArea`](./controls.md#the-multi-line-text-box)) is
 built on. Nothing is trimmed, nothing is elided and no line is suppressed:
@@ -264,8 +270,9 @@ rather than none, because the caret still has a home. A box too narrow for a
 character takes one anyway: dropping it would drop the rest of the buffer
 with it, so the line overflows and the caller clips.
 
-Both are **lazy iterators** of `TextLine { text, start, elided }` borrowing
-the text, never a `Vec`: a caller counts a clone of one to size the block
+Both are **lazy iterators** of `TextLine { text, start, elided, tail }`
+borrowing the text, never a `Vec` — `tail` is the end a middle cut keeps,
+drawn after the mark, and empty for every other line: a caller counts a clone of one to size the block
 vertically, then walks the original to draw, and text re-laid out on every
 repaint costs no heap traffic. Drawing a viewport's worth of a long buffer
 therefore costs the lines up to the last one drawn, not the whole text.

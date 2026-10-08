@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::desktop::{Appearance, DesktopInfo, ScreensaverKind};
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
@@ -30,8 +30,9 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, retained_damage, DeclaredTip, EventDrain, EventError,
-    EventSource, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    damage_in, pointer_point, present_damage, present_damage_list, retained_damage, DeclaredTip,
+    EventDrain, EventError, EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents,
+    WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -210,7 +211,7 @@ struct RecordingHost {
     /// The terrain the host reports, and the refusal it answers instead.
     terrain: Vec<TerrainPlate>,
     refuse_terrain: Option<Errno>,
-    presented: Vec<(u64, Vec<u8>, DamageRect)>,
+    presented: Vec<(u64, Vec<u8>, DamageList)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<(u64, PickPurpose)>,
@@ -411,9 +412,9 @@ impl WindowHost for RecordingHost {
         window_id: u64,
         _surface: &DisplayMode,
         frame: &[u8],
-        damage: DamageRect,
+        damage: &DamageList,
     ) -> Result<(), Errno> {
-        self.presented.push((window_id, frame.to_vec(), damage));
+        self.presented.push((window_id, frame.to_vec(), *damage));
         Ok(())
     }
 
@@ -673,7 +674,7 @@ impl WindowHost for MinimalHost {
         _window_id: u64,
         _surface: &DisplayMode,
         _frame: &[u8],
-        _damage: DamageRect,
+        _damage: &DamageList,
     ) -> Result<(), Errno> {
         Ok(())
     }
@@ -927,8 +928,13 @@ fn an_interrupted_wait_parks_once_rather_than_spinning() {
 }
 
 /// Full damage over SURFACE.
-fn full_damage() -> DamageRect {
-    DamageRect::full(&SURFACE)
+fn full_damage() -> DamageList {
+    one(DamageRect::full(&SURFACE))
+}
+
+/// A present naming `rect` alone.
+fn one(rect: DamageRect) -> DamageList {
+    DamageList::new(&[rect]).expect("a non-empty rectangle")
 }
 
 /// Create through `client`, returning just the minted window id (the
@@ -1092,12 +1098,14 @@ fn create_present_close_round_trips_through_the_loopback() {
         width_px: 2,
         height_px: 2,
     };
-    client.present(window, 1, damage).expect("present succeeds");
+    client
+        .present(window, 1, one(damage))
+        .expect("present succeeds");
     {
         let inner = loopback.borrow();
         let (id, frame, seen) = &inner.host.presented[0];
         assert_eq!(*id, window);
-        assert_eq!(*seen, damage);
+        assert_eq!(*seen, one(damage));
         let expected: Vec<u8> = (FRAME_LEN..2 * FRAME_LEN)
             .map(|i| region_byte(7, i))
             .collect();
@@ -1210,13 +1218,13 @@ fn resize_remaps_the_window_and_presents_at_the_new_size() {
     // bounds against the old one).
     let damage = DamageRect::full(&BIG);
     client
-        .present(window, 1, damage)
+        .present(window, 1, one(damage))
         .expect("present at new size");
     {
         let inner = loopback.borrow();
         let (id, frame, seen) = inner.host.presented.last().expect("a present");
         assert_eq!(*id, window);
-        assert_eq!(*seen, damage);
+        assert_eq!(*seen, one(damage));
         assert_eq!(frame.len(), BIG_FRAME_LEN);
     }
 }
@@ -1252,7 +1260,7 @@ fn resize_is_refused_fail_closed() {
     // Full damage of the larger surface is still out of bounds — the
     // window was never actually resized.
     assert_eq!(
-        client.present(window, 0, DamageRect::full(&BIG)),
+        client.present(window, 0, one(DamageRect::full(&BIG))),
         Err(Errno::LengthOutOfRange)
     );
 }
@@ -1515,7 +1523,7 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("window");
     client
-        .present(window, 0, DamageRect::full(&SURFACE))
+        .present(window, 0, one(DamageRect::full(&SURFACE)))
         .expect("presents");
 
     // The session's half of the release.
@@ -1527,7 +1535,7 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
         "the window itself survives its pixels"
     );
     assert_eq!(
-        client.present(window, 0, DamageRect::full(&SURFACE)),
+        client.present(window, 0, one(DamageRect::full(&SURFACE))),
         Err(Errno::NotAttached),
         "a present with nothing attached is refused, not guessed at"
     );
@@ -1536,7 +1544,7 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
         .resize(window, 8, 1, &SURFACE)
         .expect("a released window re-attaches");
     client
-        .present(window, 0, DamageRect::full(&SURFACE))
+        .present(window, 0, one(DamageRect::full(&SURFACE)))
         .expect("and presents again");
 }
 
@@ -1646,7 +1654,7 @@ fn present_bounds_are_enforced() {
         height_px: 1,
     };
     assert_eq!(
-        client.present(window, 0, outside),
+        client.present(window, 0, one(outside)),
         Err(Errno::LengthOutOfRange)
     );
     assert!(loopback.borrow().host.presented.is_empty());
@@ -2234,7 +2242,7 @@ fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
         width_px: 2,
         height_px: 1,
     };
-    client.present(window, 1, partial).expect("present");
+    client.present(window, 1, one(partial)).expect("present");
     assert_eq!(loopback.borrow().host.presented.len(), 1);
     let mut waiter = WindowEvents::new(redraw_source(window));
     assert_eq!(
@@ -4161,6 +4169,133 @@ fn a_round_presents_what_it_reported() {
     );
 }
 
+/// A painter that paints each reported rectangle alone presents them as they
+/// are, clipped to the window, so two far-apart edits are two rectangles
+/// rather than the box between them.
+#[test]
+fn a_round_presents_each_rectangle_it_reported() {
+    let mut damage = Region::new();
+    damage.add(Rect::new(0, 0, 1, 1));
+    damage.add(Rect::new(3, 2, 9, 9));
+    let presented = present_damage_list(&SURFACE, Repaint::Reported, &damage).expect("rectangles");
+    assert_eq!(presented.rects(), [rect(0, 0, 1, 1), rect(3, 2, 1, 1)]);
+    assert_eq!(
+        present_damage_list(&SURFACE, Repaint::Reported, &Region::new()).map(|list| list.bounds()),
+        Some(DamageRect::full(&SURFACE)),
+        "a round that reported nothing presents the window"
+    );
+    assert_eq!(
+        present_damage_list(&SURFACE, Repaint::Nothing, &damage),
+        None
+    );
+    assert_eq!(
+        present_damage_list(&SURFACE, Repaint::Whole, &damage).map(|list| list.bounds()),
+        Some(DamageRect::full(&SURFACE))
+    );
+}
+
+/// A window of 200×100: room for a burst of separated edits.
+const WIDE: DisplayMode = DisplayMode {
+    width_px: 200,
+    height_px: 100,
+    stride_bytes: 800,
+    format: DisplayFormat::Bgra8888,
+};
+
+/// One round's region of `rects`.
+fn reported(rects: &[Rect]) -> Region {
+    let mut region = Region::new();
+    for rect in rects {
+        region.add(*rect);
+    }
+    region
+}
+
+/// Rounds folded into one account present every rectangle any of them
+/// reported, clipped to the window, and leave nothing owed once taken.
+#[test]
+fn owed_rounds_present_every_rectangle_once() {
+    let mut owed = Owed::new();
+    assert!(owed.is_clean());
+    owed.owe(&WIDE, Repaint::Nothing, &reported(&[Rect::new(0, 0, 9, 9)]));
+    assert!(owed.is_clean(), "a round that changed nothing owes nothing");
+    owed.owe(
+        &WIDE,
+        Repaint::Reported,
+        &reported(&[Rect::new(10, 10, 5, 5)]),
+    );
+    owed.owe(
+        &WIDE,
+        Repaint::Reported,
+        &reported(&[Rect::new(190, 90, 50, 50)]),
+    );
+    assert!(!owed.is_clean() && !owed.is_whole());
+    let parts = owed.take(&WIDE).expect("rectangles");
+    assert_eq!(parts.rects(), [rect(10, 10, 5, 5), rect(190, 90, 10, 10)]);
+    assert!(owed.is_clean());
+    assert_eq!(owed.take(&WIDE), None);
+}
+
+/// However many rounds fold in, the account holds what one present carries,
+/// still covers every reported pixel, and keeps two far-apart columns of
+/// edits apart rather than presenting the area between them.
+#[test]
+fn a_burst_of_rounds_stays_bounded_and_keeps_far_edges_apart() {
+    let mut owed = Owed::new();
+    for step in 0..60 {
+        let edits = [Rect::new(2, step, 1, 1), Rect::new(197, step, 1, 1)];
+        owed.owe(&WIDE, Repaint::Reported, &reported(&edits));
+    }
+    let parts = owed.take(&WIDE).expect("rectangles");
+    assert!(parts.len() <= tairix_abi::driver::display::MAX_DAMAGE_RECTS);
+    let covers = |x: u32, y: u32| {
+        parts.rects().iter().any(|part| {
+            (part.x..part.x + part.width_px).contains(&x)
+                && (part.y..part.y + part.height_px).contains(&y)
+        })
+    };
+    assert!((0..60).all(|y| covers(2, y) && covers(197, y)));
+    let covered: u64 = parts
+        .rects()
+        .iter()
+        .map(|part| u64::from(part.width_px) * u64::from(part.height_px))
+        .sum();
+    assert!(
+        covered <= 2 * 60,
+        "the columns were merged across: {parts:?}"
+    );
+}
+
+/// A reported round naming nothing inside the window still moved pixels, so
+/// it owes the window whole, and a whole account absorbs every later round.
+#[test]
+fn an_owed_round_reporting_nothing_in_the_window_owes_it_whole() {
+    let mut owed = Owed::new();
+    owed.owe(
+        &WIDE,
+        Repaint::Reported,
+        &reported(&[Rect::new(5, 5, 2, 2)]),
+    );
+    owed.owe(
+        &WIDE,
+        Repaint::Reported,
+        &reported(&[Rect::new(300, 300, 4, 4)]),
+    );
+    assert!(owed.is_whole());
+    owed.owe(
+        &WIDE,
+        Repaint::Reported,
+        &reported(&[Rect::new(5, 5, 2, 2)]),
+    );
+    assert_eq!(
+        owed.take(&WIDE).map(|parts| parts.rects().to_vec()),
+        Some(alloc::vec![DamageRect::full(&WIDE)])
+    );
+    owed.owe(&WIDE, Repaint::Whole, &Region::new());
+    owed.owe(&WIDE, Repaint::Nothing, &Region::new());
+    assert!(owed.is_whole());
+}
+
 #[test]
 fn a_round_that_changed_the_view_but_reported_nothing_presents_the_window() {
     // Under-covering would leave a stale frame on screen, so the fallback is
@@ -5278,7 +5413,7 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
             _window_id: u64,
             _surface: &DisplayMode,
             _frame: &[u8],
-            _damage: DamageRect,
+            _damage: &DamageList,
         ) -> Result<(), Errno> {
             Ok(())
         }

@@ -43,6 +43,22 @@ Dragging across empty space draws a band that selects everything it touches
 as it grows; held at the top or bottom of the listing it scrolls, and
 `Escape` takes back what it selected.
 
+The space around each icon and its name counts as empty, so a band can start
+anywhere between items. `Ctrl+A` selects everything in the listing and
+`Ctrl+Shift+A` clears the selection; both are on the right-click menu too.
+
+An item's name is shown whole, over two lines when it needs them; a name too
+long even for those keeps its start and its end, with `…` in the middle, so
+its extension always shows.
+
+`F2` renames the selected item in place, as does clicking the name of the one
+selected item and pausing: the name opens for editing once the click can no
+longer be a double-click. The part before the extension is selected, so typing
+replaces the name and keeps the extension. `Enter`, or a click outside the
+name, keeps the new name — a name the volume refuses stays open with the
+reason — and `Escape` abandons it. A click that renamed the item does
+nothing else, since the folder may have re-sorted under the pointer.
+
 Dragging selected items onto another file-manager window, a folder in one,
 or the desktop copies them there; holding `Shift` moves them instead. The
 pointer shows a plus while a drop would copy and an arrow while it would

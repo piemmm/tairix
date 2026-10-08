@@ -1023,6 +1023,7 @@ fn wire_entry<'a>(volume: [u8; 16], entry: &DelegatedRef<'a>) -> DirEntry<'a> {
         modified: entry.info.times.modified,
         id: node_identity(volume, entry.node),
         nlink: entry.info.nlink,
+        content_gen: entry.info.content_gen,
         name: entry.name.as_bytes(),
     }
 }
@@ -1050,6 +1051,7 @@ fn mount_point_wire(name: &str) -> DirEntry<'_> {
         modified: Time64::UNIX_EPOCH,
         id: FileId::NONE,
         nlink: NodeInfo::SINGLE_NAME,
+        content_gen: NodeInfo::NO_CONTENT_GEN,
         name: name.as_bytes(),
     }
 }
@@ -1337,6 +1339,7 @@ where
                 gid: info.meta.group.0,
                 id: node_identity(volume, info.node),
                 times: info.times,
+                content_gen: info.content_gen,
             })
         })
     }

@@ -142,8 +142,8 @@ impl DisplayPower {
 /// band its owner repaints, or the two rectangles a moved cursor leaves —
 /// and eight of them keep the request frame at 152 bytes, small enough that
 /// the whole request stays one plain copyable value. A producer holding more
-/// rectangles than this presents their bounding box instead: over-covering
-/// costs pixels, losing a rectangle would cost correctness.
+/// rectangles than this merges them down to it ([`DamageList::fitted`]):
+/// over-covering costs pixels, losing a rectangle would cost correctness.
 pub const MAX_DAMAGE_RECTS: usize = 8;
 
 /// One axis-aligned pixel rectangle of a presented frame, in surface
@@ -165,6 +165,165 @@ pub struct DamageRect {
     pub width_px: u32,
     /// Height in pixels; never zero in a valid rectangle.
     pub height_px: u32,
+}
+
+/// The damage a present names: one to [`MAX_DAMAGE_RECTS`] pairwise-disjoint
+/// rectangles, held inline so a request carrying them stays a plain copyable
+/// value. Disjoint, so a present never makes its receiver convert a pixel
+/// twice.
+///
+/// Constructing one is the only way to name a present's damage, so the count
+/// bound and the "no empty or overlapping rectangle" rules hold before a byte
+/// is encoded as well as after one is decoded — a decoded list is exactly as trustworthy as
+/// a locally built one. Rectangles beyond the live count are zero, which is
+/// what makes a frame's reserved tail checkable.
+///
+/// Equality compares the rectangles named, not the dead slots behind them.
+#[derive(Copy, Clone, Debug)]
+pub struct DamageList {
+    rects: [DamageRect; MAX_DAMAGE_RECTS],
+    count: u8,
+}
+
+/// The zero rectangle filling a [`DamageList`]'s unused slots. Not a valid
+/// damage rectangle — it is never inside the live prefix.
+pub(crate) const NO_RECT: DamageRect = DamageRect {
+    x: 0,
+    y: 0,
+    width_px: 0,
+    height_px: 0,
+};
+
+impl DamageList {
+    /// The list naming `rects`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Errno::LengthOutOfRange`] if `rects` is empty, holds more than
+    /// [`MAX_DAMAGE_RECTS`] entries, holds an empty rectangle, or holds two
+    /// that overlap.
+    pub fn new(rects: &[DamageRect]) -> Result<Self, crate::Errno> {
+        let count = u8::try_from(rects.len()).map_err(|_| crate::Errno::LengthOutOfRange)?;
+        if rects.is_empty() || rects.len() > MAX_DAMAGE_RECTS {
+            return Err(crate::Errno::LengthOutOfRange);
+        }
+        let mut slots = [NO_RECT; MAX_DAMAGE_RECTS];
+        for (index, (slot, rect)) in slots.iter_mut().zip(rects).enumerate() {
+            let overlapped = rects[..index].iter().any(|earlier| earlier.overlaps(*rect));
+            if rect.width_px == 0 || rect.height_px == 0 || overlapped {
+                return Err(crate::Errno::LengthOutOfRange);
+            }
+            *slot = *rect;
+        }
+        Ok(Self {
+            rects: slots,
+            count,
+        })
+    }
+
+    /// The list covering `rects`, however many there are: empty rectangles are
+    /// dropped, while more than [`MAX_DAMAGE_RECTS`] remain the pair whose
+    /// union adds the fewest pixels is merged into that union, and then any two
+    /// that overlap are merged until none do. `None` when nothing is left to
+    /// name.
+    ///
+    /// Merging over-covers by the least it can, where presenting the bounding
+    /// box would turn two far-apart edits — a band's moving edges — into the
+    /// whole area between them.
+    #[must_use]
+    pub fn fitted(rects: impl IntoIterator<Item = DamageRect>) -> Option<Self> {
+        let mut slots = [NO_RECT; MAX_DAMAGE_RECTS + 1];
+        let mut count = 0;
+        for rect in rects {
+            if rect.width_px == 0 || rect.height_px == 0 {
+                continue;
+            }
+            if count == slots.len() {
+                merge_cheapest(&mut slots, &mut count);
+            }
+            slots[count] = rect;
+            count += 1;
+        }
+        if count > MAX_DAMAGE_RECTS {
+            merge_cheapest(&mut slots, &mut count);
+        }
+        merge_overlapping(&mut slots, &mut count);
+        Self::new(&slots[..count]).ok()
+    }
+
+    /// The rectangles the present names.
+    #[must_use]
+    pub fn rects(&self) -> &[DamageRect] {
+        &self.rects[..usize::from(self.count)]
+    }
+
+    /// How many rectangles the present names.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether the list names no rectangle — never, for a list built by
+    /// [`new`](Self::new) or [`fitted`](Self::fitted).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The smallest rectangle covering every one this list names.
+    #[must_use]
+    pub fn bounds(&self) -> DamageRect {
+        self.rects()
+            .iter()
+            .fold(NO_RECT, |covered, rect| covered.union(*rect))
+    }
+}
+
+impl PartialEq for DamageList {
+    fn eq(&self, other: &Self) -> bool {
+        self.rects() == other.rects()
+    }
+}
+
+impl Eq for DamageList {}
+
+/// Merge overlapping rectangles of `slots[..count]` into their unions until no
+/// two overlap; each merge leaves one fewer, so it ends.
+fn merge_overlapping(slots: &mut [DamageRect], count: &mut usize) {
+    'merge: loop {
+        for a in 0..*count {
+            for b in a + 1..*count {
+                if slots[a].overlaps(slots[b]) {
+                    slots[a] = slots[a].union(slots[b]);
+                    *count -= 1;
+                    slots[b] = slots[*count];
+                    continue 'merge;
+                }
+            }
+        }
+        return;
+    }
+}
+
+/// Merge the two rectangles of `slots[..count]` whose union adds the fewest
+/// pixels, leaving one fewer.
+fn merge_cheapest(slots: &mut [DamageRect], count: &mut usize) {
+    let area = |rect: DamageRect| u64::from(rect.width_px) * u64::from(rect.height_px);
+    let mut cheapest = None;
+    for a in 0..*count {
+        for b in a + 1..*count {
+            let union = slots[a].union(slots[b]);
+            let growth = area(union).saturating_sub(area(slots[a]).saturating_add(area(slots[b])));
+            if cheapest.is_none_or(|(_, _, least)| growth < least) {
+                cheapest = Some((a, b, growth));
+            }
+        }
+    }
+    if let Some((a, b, _)) = cheapest {
+        slots[a] = slots[a].union(slots[b]);
+        *count -= 1;
+        slots[b] = slots[*count];
+    }
 }
 
 impl DamageRect {
@@ -206,6 +365,17 @@ impl DamageRect {
             width_px: right - x,
             height_px: bottom - y,
         }
+    }
+
+    /// Whether this rectangle and `other` share a pixel; an empty one shares
+    /// none.
+    #[must_use]
+    pub fn overlaps(self, other: Self) -> bool {
+        let far = |start: u32, extent: u32| u64::from(start) + u64::from(extent);
+        u64::from(self.x) < far(other.x, other.width_px)
+            && u64::from(other.x) < far(self.x, self.width_px)
+            && u64::from(self.y) < far(other.y, other.height_px)
+            && u64::from(other.y) < far(self.y, self.height_px)
     }
 
     /// Whether this rectangle covers the whole of `mode`'s surface.
@@ -820,5 +990,80 @@ mod tests {
             ..one
         };
         assert_eq!(d.present_layers(&[faded]), Err(DriverError::Unsupported));
+    }
+}
+
+#[cfg(test)]
+mod damage_list_tests {
+    use super::{DamageList, DamageRect, MAX_DAMAGE_RECTS};
+
+    fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
+        DamageRect {
+            x,
+            y,
+            width_px,
+            height_px,
+        }
+    }
+
+    /// What fits is kept as it is, and empty rectangles name nothing.
+    #[test]
+    fn a_fitting_list_keeps_its_rectangles_and_drops_empty_ones() {
+        let list = DamageList::fitted([rect(0, 0, 4, 4), rect(0, 0, 0, 9), rect(10, 0, 2, 2)])
+            .expect("a list");
+        assert_eq!(list.rects(), [rect(0, 0, 4, 4), rect(10, 0, 2, 2)]);
+        assert!(DamageList::fitted([rect(1, 1, 0, 0)]).is_none());
+        assert!(DamageList::fitted([]).is_none());
+    }
+
+    /// A list names no pixel twice: one built from overlapping rectangles is
+    /// refused, and a fitted one merges each overlapping pair into its union —
+    /// so a receiver converts every pixel a present names exactly once.
+    #[test]
+    fn a_list_names_no_pixel_twice() {
+        assert_eq!(
+            DamageList::new(&[rect(0, 0, 10, 10), rect(9, 9, 2, 2)]).err(),
+            Some(crate::Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            DamageList::new(&[rect(0, 0, 10, 10), rect(0, 0, 10, 10)]).err(),
+            Some(crate::Errno::LengthOutOfRange),
+            "the same rectangle twice"
+        );
+        assert!(DamageList::new(&[rect(0, 0, 10, 10), rect(10, 0, 5, 10)]).is_ok());
+        let list = DamageList::fitted([
+            rect(0, 0, 10, 10),
+            rect(5, 5, 10, 10),
+            rect(14, 14, 4, 4),
+            rect(40, 0, 2, 2),
+        ])
+        .expect("a list");
+        assert_eq!(list.rects(), [rect(0, 0, 18, 18), rect(40, 0, 2, 2)]);
+    }
+
+    /// Past the bound the closest pair merges first, so two far-apart edits
+    /// stay two rectangles rather than becoming the box between them.
+    #[test]
+    fn an_overlong_list_merges_the_pair_whose_union_grows_least() {
+        let rects: [DamageRect; MAX_DAMAGE_RECTS + 1] = core::array::from_fn(|i| {
+            if i == MAX_DAMAGE_RECTS {
+                rect(11, 0, 10, 10)
+            } else {
+                rect(u32::try_from(i).expect("small") * 100, 0, 10, 10)
+            }
+        });
+        let list = DamageList::fitted(rects).expect("a list");
+        assert_eq!(list.len(), MAX_DAMAGE_RECTS);
+        assert!(list.rects().contains(&rect(0, 0, 21, 10)), "{list:?}");
+        assert!(list.rects().contains(&rect(700, 0, 10, 10)));
+        let covered = |x: u32| {
+            list.rects()
+                .iter()
+                .any(|r| r.x <= x && x < r.x + r.width_px)
+        };
+        for original in &rects {
+            assert!(covered(original.x), "{original:?} is still covered");
+        }
+        assert_eq!(list.bounds(), rect(0, 0, 710, 10));
     }
 }

@@ -5,9 +5,9 @@
 //! through the superblock ring (`superblock` module). It is a self-identifying
 //! block ([`BlockType::TxnRoot`]) whose payload names the roots of the
 //! copy-on-write metadata the transaction produced — the inode-tree root, the
-//! next free inode number, and the pending-delete set naming every inode still
-//! to be reclaimed — and ends with a **commit record**: a commit magic plus a
-//! second copy of the generation.
+//! next free inode number, the next content generation, and the pending-delete
+//! set naming every inode still to be reclaimed — and ends with a **commit
+//! record**: a commit magic plus a second copy of the generation.
 //!
 //! Co-locating the commit record in the same sealed block makes commit atomic
 //! against a torn write: the block's checksum (`header`) and the commit
@@ -38,10 +38,11 @@ const P_ALLOC_MAP_START: usize = HEADER_LEN + 56;
 const P_ALLOC_MAP_COVERED: usize = HEADER_LEN + 64;
 const P_FREE_COUNT: usize = HEADER_LEN + 72;
 const P_PENDING_DELETE_ROOT: usize = HEADER_LEN + 80;
-const P_COMMIT_MAGIC: usize = HEADER_LEN + 88;
-const P_COMMIT_GENERATION: usize = HEADER_LEN + 96;
+const P_NEXT_CONTENT_GEN: usize = HEADER_LEN + 88;
+const P_COMMIT_MAGIC: usize = HEADER_LEN + 96;
+const P_COMMIT_GENERATION: usize = HEADER_LEN + 104;
 /// Bytes of meaningful transaction-root payload following the header.
-const PAYLOAD_LEN: u32 = 104;
+const PAYLOAD_LEN: u32 = 112;
 
 fn rd_u64(buf: &[u8], off: usize) -> u64 {
     let mut bytes = [0u8; 8];
@@ -102,6 +103,9 @@ pub struct TxnRoot {
     /// — which builds no allocation state at all — still reports honest volume
     /// statistics without reading or rebuilding the map.
     pub free_count: u64,
+    /// The next content generation the volume hands out; every generation
+    /// any committed inode carries is below it.
+    pub next_content_gen: u64,
 }
 
 impl TxnRoot {
@@ -136,6 +140,7 @@ impl TxnRoot {
         wr_u64(block, P_ALLOC_MAP_COVERED, self.alloc_map_covered);
         wr_u64(block, P_FREE_COUNT, self.free_count);
         wr_u64(block, P_PENDING_DELETE_ROOT, self.pending_delete_root);
+        wr_u64(block, P_NEXT_CONTENT_GEN, self.next_content_gen);
         wr_u64(block, P_COMMIT_MAGIC, COMMIT_MAGIC);
         wr_u64(block, P_COMMIT_GENERATION, self.generation);
         let header = BlockHeader {
@@ -187,6 +192,7 @@ impl TxnRoot {
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
             health_baseline_root: rd_u64(block, P_HEALTH_BASELINE_ROOT),
             pending_delete_root: rd_u64(block, P_PENDING_DELETE_ROOT),
+            next_content_gen: rd_u64(block, P_NEXT_CONTENT_GEN),
         })
     }
 
@@ -224,6 +230,7 @@ impl TxnRoot {
             scrub_progress_root: rd_u64(block, P_SCRUB_PROGRESS_ROOT),
             health_baseline_root: rd_u64(block, P_HEALTH_BASELINE_ROOT),
             pending_delete_root: rd_u64(block, P_PENDING_DELETE_ROOT),
+            next_content_gen: rd_u64(block, P_NEXT_CONTENT_GEN),
         })
     }
 }

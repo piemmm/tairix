@@ -48,9 +48,11 @@
 
 use alloc::string::String;
 
-use tairix_abi::fs::FileKind;
+use tairix_abi::fs::{DirEntry, FileKind};
 use tairix_abi::SYSTEM_SERVICE_STORE;
-use tairix_icon::{FolderSample, IconKind, IconRequest, Reading, ICON_KINDS};
+use tairix_icon::{
+    DocumentStamp, FolderSample, IconKind, IconRequest, Reading, SampleCard, Thumbnail,
+};
 
 use crate::entry::{Entry, EntryKind};
 
@@ -488,7 +490,18 @@ pub enum Family {
 
 impl Family {
     /// Every family.
-    const COUNT: usize = 7;
+    const ALL: [Self; 7] = [
+        Self::Picture,
+        Self::Text,
+        Self::Document,
+        Self::Audio,
+        Self::Video,
+        Self::Archive,
+        Self::Program,
+    ];
+
+    /// How many families there are.
+    const COUNT: usize = Self::ALL.len();
 
     const fn index(self) -> usize {
         self as usize
@@ -555,16 +568,22 @@ impl MediaType {
     }
 }
 
-/// What a batch of `folder`'s entries shows of it: for each of the up to
-/// three families most frequent among them, the kind most frequent in that
-/// family, a tie in either going to whichever was seen first. Folders, links
-/// and files of no recognised type make no card.
+/// What a batch of `folder`'s entries shows of it: up to three of its
+/// members, **variety first, then fill**. One card for each of the most
+/// frequent families in turn, a tie going to whichever was seen first; cards
+/// left over go round the families again, in the same order, while a family
+/// has members not yet shown. Within a family, members come in the batch's
+/// order. Folders, links and files of no recognised type make no card.
 ///
-/// Counted in tables over the closed families and kinds, so a sample costs no
-/// allocation however many entries the batch holds.
+/// A member is drawn as its own picture where its tile would be — a regular
+/// file the listing names with an identity, of a type that has a reading —
+/// and as its kind otherwise.
+///
+/// `entries` is walked twice, once to count and once to pick, so a sample
+/// allocates only the paths of the pictures it keeps.
 pub fn folder_sample<'n>(
     folder: &[String],
-    entries: impl IntoIterator<Item = (&'n str, FileKind)>,
+    entries: impl Iterator<Item = DirEntry<'n>> + Clone,
 ) -> FolderSample {
     // A count and the first position it was seen at, so a larger count, then
     // an earlier first sighting, wins.
@@ -573,57 +592,91 @@ pub fn folder_sample<'n>(
         count: u32,
         first: u32,
     }
-    impl Seen {
-        fn note(&mut self, at: u32) {
-            if self.count == 0 {
-                self.first = at;
-            }
-            self.count += 1;
-        }
-        fn rank(self) -> (u32, core::cmp::Reverse<u32>) {
-            (self.count, core::cmp::Reverse(self.first))
-        }
-    }
     let service_store = is_system_service_store(folder);
-    let mut families = [Seen::default(); Family::COUNT];
-    let mut kinds = [(Seen::default(), None::<Family>); ICON_KINDS.len()];
-    for (at, (name, kind)) in (0u32..).zip(entries) {
+    let classify = |record: &DirEntry<'n>| {
+        let name = core::str::from_utf8(record.name).ok()?;
         let media = media_for_named(
             name,
-            EntryKind::for_listing(kind, name, None),
+            EntryKind::for_listing(record.kind, name, None),
             service_store,
         );
-        let Some(family) = media.family() else {
+        Some((media.family()?, media, name))
+    };
+    let mut families = [Seen::default(); Family::COUNT];
+    for (at, record) in (0u32..).zip(entries.clone()) {
+        let Some((family, ..)) = classify(&record) else {
             continue;
         };
-        families[family.index()].note(at);
-        let slot = &mut kinds[media.icon().index()];
-        slot.0.note(at);
-        slot.1 = Some(family);
+        let seen = &mut families[family.index()];
+        if seen.count == 0 {
+            seen.first = at;
+        }
+        seen.count += 1;
     }
-    let mut order = [
-        Family::Picture,
-        Family::Text,
-        Family::Document,
-        Family::Audio,
-        Family::Video,
-        Family::Archive,
-        Family::Program,
-    ];
-    order.sort_unstable_by_key(|family| core::cmp::Reverse(families[family.index()].rank()));
-    FolderSample::new(
-        order
-            .into_iter()
-            .filter(|family| families[family.index()].count > 0)
-            .filter_map(|family| {
-                ICON_KINDS
-                    .iter()
-                    .zip(&kinds)
-                    .filter(|(_, (seen, of))| *of == Some(family) && seen.count > 0)
-                    .max_by_key(|(_, (seen, _))| seen.rank())
-                    .map(|(kind, _)| *kind)
-            }),
-    )
+    let mut order = Family::ALL;
+    order.sort_unstable_by_key(|family| {
+        let seen = families[family.index()];
+        core::cmp::Reverse((seen.count, core::cmp::Reverse(seen.first)))
+    });
+    // Which member of which family each card shows, front card first.
+    let mut wanted = [None::<(Family, u32)>; FolderSample::MOST];
+    let mut chosen = 0;
+    'rounds: for round in 0.. {
+        let mut any = false;
+        for family in order {
+            if families[family.index()].count <= round {
+                continue;
+            }
+            let Some(slot) = wanted.get_mut(chosen) else {
+                break 'rounds;
+            };
+            *slot = Some((family, round));
+            chosen += 1;
+            any = true;
+        }
+        if !any {
+            break;
+        }
+    }
+    let mut cards: [Option<SampleCard>; FolderSample::MOST] = Default::default();
+    let mut met = [0u32; Family::COUNT];
+    let mut path = None::<String>;
+    for record in entries {
+        let Some((family, media, name)) = classify(&record) else {
+            continue;
+        };
+        let nth = met[family.index()];
+        met[family.index()] += 1;
+        let Some(slot) = wanted.iter().position(|want| *want == Some((family, nth))) else {
+            continue;
+        };
+        let kind = media.icon();
+        let reading = media
+            .thumbnail()
+            .filter(|_| record.kind == FileKind::Regular && !record.id.is_none());
+        cards[slot] = Some(match reading {
+            Some(reading) => {
+                let dir = path.get_or_insert_with(|| crate::vfs::spell_absolute_path(folder));
+                let mut member = dir.clone();
+                crate::vfs::push_child(&mut member, name);
+                SampleCard::Picture(
+                    kind,
+                    Thumbnail {
+                        path: member,
+                        stamp: DocumentStamp {
+                            size: record.size,
+                            modified: record.modified,
+                            id: record.id,
+                            content_gen: record.content_gen,
+                        },
+                        reading,
+                    },
+                )
+            }
+            None => SampleCard::Kind(kind),
+        });
+    }
+    FolderSample::new(cards.into_iter().flatten())
 }
 
 /// Every [`MediaType`], in registry order: the spelling round-trip
@@ -999,7 +1052,7 @@ fn icon_of(entry: &Entry, media: MediaType) -> IconKind {
 pub fn entry_icon<'a>(
     dir: &str,
     parent: &[String],
-    entry: &Entry,
+    entry: &'a Entry,
     scratch: &'a mut String,
 ) -> (IconKind, IconRequest<'a>) {
     let media = media_for_entry(entry, parent);
@@ -1021,14 +1074,7 @@ pub fn entry_icon<'a>(
     scratch.push_str(dir);
     crate::vfs::push_child(scratch, entry.name());
     let request = match thumbnail {
-        Some(reading) => IconRequest::thumbnail(
-            kind,
-            scratch,
-            entry.size(),
-            entry.modified(),
-            entry.id(),
-            reading,
-        ),
+        Some(reading) => IconRequest::thumbnail(kind, scratch, entry.stamp(), reading),
         None => IconRequest::bundle(kind, scratch),
     };
     (kind, request)

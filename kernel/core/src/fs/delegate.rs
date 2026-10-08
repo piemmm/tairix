@@ -121,6 +121,8 @@ pub struct DelegatedInfo {
     pub node: u64,
     /// The node's four timestamps, as the driver reported them.
     pub times: NodeTimes,
+    /// The node's content generation, as the driver reported it.
+    pub content_gen: u64,
 }
 
 /// One entry of a delegated directory listing: the child's name, the
@@ -1169,6 +1171,7 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             meta,
             node: node.raw(),
             times: info.times,
+            content_gen: info.content_gen,
         })
     }
 

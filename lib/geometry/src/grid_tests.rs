@@ -86,3 +86,26 @@ fn an_offset_past_the_axis_is_refused_rather_than_wrapped() {
     let run = GridRun::fixed(usize::MAX, u32::MAX / 2, 0);
     assert_eq!(run.offset(3), None);
 }
+
+#[test]
+fn the_parts_within_cells_name_the_cells_they_lie_in() {
+    let lines = GridRun::fixed(5, 40, 10);
+    let middle = lines.within(10, 20);
+    assert_eq!((middle.count(), middle.stride()), (5, 50));
+    assert_eq!(middle.offset(2), Some(110));
+    // A view touching a cell only outside its part touches no part.
+    assert_eq!(middle.shown(0, 10), 0..0);
+    assert_eq!(
+        middle.shown(30, 30),
+        1..1,
+        "between the parts of cells 0 and 1"
+    );
+    assert_eq!(middle.shown(25, 40), 0..2);
+    assert_eq!(middle.shown(0, 1_000), 0..5);
+    assert_eq!(middle.cell_at(115), Some(2));
+    assert_eq!(middle.cell_at(105), None, "before the part of cell 2");
+    // A part reaching past the cell is clamped to it.
+    let clamped = lines.within(30, 100);
+    assert_eq!(clamped.cell(), 10);
+    assert_eq!(lines.within(60, 5).cell(), 0);
+}

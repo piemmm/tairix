@@ -2567,7 +2567,7 @@ fn thumbnailed(
     format: Option<super::ViewFormat>,
 ) -> Result<Vec<u8>, IconRasterFailure> {
     super::send_document(sandbox, document).expect("uploaded");
-    super::render_thumbnail(sandbox, side, format)
+    super::render_thumbnail(sandbox, side, format).map(|fitted| fitted.pixels)
 }
 
 #[test]
@@ -2575,7 +2575,14 @@ fn a_thumbnail_is_its_picture_fitted_and_centred() {
     let mut sandbox = sandbox();
     let (red, blue) = ([200, 0, 0, 255], [0, 0, 200, 255]);
     let png = png_with(8, 4, |x, _| if x < 4 { red } else { blue });
-    let pixels = thumbnailed(&mut sandbox, &png, 4, None).expect("drawn");
+    super::send_document(&mut sandbox, &png).expect("uploaded");
+    let fitted = super::render_thumbnail(&mut sandbox, 4, None).expect("drawn");
+    assert_eq!(
+        fitted.bounds,
+        tairix_geometry::Rect::new(0, 1, 4, 2),
+        "where the picture lies"
+    );
+    let pixels = fitted.pixels;
     assert_eq!(pixels.len(), 4 * 4 * 4);
     for x in 0..4 {
         assert_eq!(rgba_at(&pixels, 4, x, 0)[3], 0, "padding above");
@@ -2687,12 +2694,52 @@ fn the_worker_refuses_every_malformed_thumbnail_request() {
     );
 }
 
+/// A thumbnail reply framing `pixels` in a square of `side`, the picture
+/// placed at `placed`.
+fn fitted_reply(side: u32, placed: [u32; 4], pixels: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(super::REPLY_FITTED);
+    w.u32(side);
+    for at in placed {
+        w.u32(at);
+    }
+    w.bytes(pixels);
+    w.finish()
+}
+
 #[test]
 fn a_thumbnail_reply_of_the_wrong_length_is_refused() {
+    let mut sandbox = scripted(fitted_reply(2, [0, 0, 2, 2], &[0u8; 3]));
+    assert_eq!(
+        super::render_thumbnail(&mut sandbox, 2, None),
+        Err(IconRasterFailure::ReplyMalformed)
+    );
+}
+
+/// A placement the worker states is believed only inside the square and
+/// non-empty: a worker that says otherwise is not believed at all.
+#[test]
+fn a_thumbnail_placed_outside_its_square_or_nowhere_is_refused() {
+    let square = [0u8; 2 * 2 * 4];
+    for placed in [
+        [1, 0, 2, 2],
+        [0, 1, 2, 2],
+        [0, 0, 0, 2],
+        [0, 0, 2, 0],
+        [u32::MAX, 0, 2, 2],
+    ] {
+        let mut sandbox = scripted(fitted_reply(2, placed, &square));
+        assert_eq!(
+            super::render_thumbnail(&mut sandbox, 2, None),
+            Err(IconRasterFailure::ReplyMalformed),
+            "{placed:?}"
+        );
+    }
+    // An icon's reply is not a thumbnail's.
     let mut w = Writer::new();
     w.u8(super::REPLY_PIXELS);
     w.u32(2);
-    w.bytes(&[0u8; 3]);
+    w.bytes(&square);
     let mut sandbox = scripted(w.finish());
     assert_eq!(
         super::render_thumbnail(&mut sandbox, 2, None),
@@ -2712,6 +2759,7 @@ fn a_thumbnail_streams_its_document_and_draws_it() {
                 size: self.0.len() as u64,
                 modified: tairix_abi::time::Time64::UNIX_EPOCH,
                 id: tairix_abi::FileId::NONE,
+                content_gen: 0,
             }
         }
 
@@ -2731,6 +2779,7 @@ fn a_thumbnail_streams_its_document_and_draws_it() {
         tairix_icon::Reading::Signature,
         &mut document,
     )
-    .expect("drawn");
+    .expect("drawn")
+    .pixels;
     assert_eq!(rgba_at(&pixels, 2, 1, 1), colour);
 }

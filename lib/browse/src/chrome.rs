@@ -402,6 +402,10 @@ pub enum ContextCommand {
     /// Paste the held clipboard into the current directory
     /// ([`plan_paste`](crate::clipboard::plan_paste)).
     Paste,
+    /// Select every entry the listing holds ([`select_all`](Browser::select_all)).
+    SelectAll,
+    /// Drop the whole selection ([`clear_selection`](Browser::clear_selection)).
+    ClearSelection,
     /// Show the selected entry's properties
     /// ([`Properties`](crate::properties::Properties)).
     Properties,
@@ -426,6 +430,8 @@ pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Cut,
     ContextCommand::Copy,
     ContextCommand::Paste,
+    ContextCommand::SelectAll,
+    ContextCommand::ClearSelection,
     ContextCommand::Properties,
     ContextCommand::Delete,
 ];
@@ -444,6 +450,8 @@ impl ContextCommand {
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
+            Self::SelectAll => "Select All",
+            Self::ClearSelection => "Clear Selection",
             Self::Properties => "Properties",
             Self::Delete => "Delete",
         }
@@ -464,6 +472,8 @@ impl ContextCommand {
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
             Self::Paste => "Ctrl+V",
+            Self::SelectAll => "Ctrl+A",
+            Self::ClearSelection => "Ctrl+Shift+A",
             Self::Properties => "Alt+Enter",
             Self::Delete => "Delete",
         }
@@ -472,10 +482,13 @@ impl ContextCommand {
     /// Whether this command begins a new visual group, so the menu draws a
     /// divider above it.
     ///
-    /// The three opening commands, then the editing verbs, then what the entry
-    /// *is*, then the removal on its own.
+    /// The three opening commands, then the editing verbs, then the selection
+    /// as a whole, then what the entry *is*, then the removal on its own.
     const fn opens_group(self) -> bool {
-        matches!(self, Self::Rename | Self::Properties | Self::Delete)
+        matches!(
+            self,
+            Self::Rename | Self::SelectAll | Self::Properties | Self::Delete
+        )
     }
 
     /// Whether carrying this command out destroys something, so its row draws
@@ -750,6 +763,9 @@ pub struct ContextMenuModel {
     chosen: Option<EntryKind>,
     /// How many entries the set verbs — cut, copy, delete — act on.
     selected: usize,
+    /// How many entries the listing holds, which Select All needs to know
+    /// whether any is left to select.
+    listed: usize,
     has_clipboard: bool,
 }
 
@@ -766,6 +782,7 @@ impl ContextMenuModel {
         Self {
             chosen: browser.chosen_entry().map(Entry::kind),
             selected: browser.selection().len(),
+            listed: browser.entries().len(),
             has_clipboard,
         }
     }
@@ -789,6 +806,8 @@ impl ContextMenuModel {
     /// and the other single-entry verbs act on the one entry selected, so they
     /// need exactly one. [`Paste`](ContextCommand::Paste) targets the current
     /// directory and needs only a held clipboard, not a selection.
+    /// [`SelectAll`](ContextCommand::SelectAll) needs an entry left to select
+    /// and [`ClearSelection`](ContextCommand::ClearSelection) a selection.
     ///
     /// The text is display text a menu row states beside its label; it names
     /// what the user must do, never what they may not (an authority a
@@ -804,7 +823,10 @@ impl ContextMenuModel {
             (None, _) => Err("several items selected"),
         };
         match command {
-            ContextCommand::Cut | ContextCommand::Copy | ContextCommand::Delete => {
+            ContextCommand::Cut
+            | ContextCommand::Copy
+            | ContextCommand::Delete
+            | ContextCommand::ClearSelection => {
                 if self.selected > 0 {
                     ""
                 } else {
@@ -842,6 +864,15 @@ impl ContextMenuModel {
                     ""
                 } else {
                     "nothing to paste"
+                }
+            }
+            ContextCommand::SelectAll => {
+                if self.listed == 0 {
+                    "the folder is empty"
+                } else if self.selected >= self.listed {
+                    "everything is selected"
+                } else {
+                    ""
                 }
             }
         }

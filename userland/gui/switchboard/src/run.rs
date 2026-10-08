@@ -84,7 +84,7 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_icon::{
-        artwork_cache, render_artwork, ArtworkCache, ArtworkDesk, ArtworkJob, ArtworkKey,
+        artwork_cache, render_artwork, Artwork, ArtworkCache, ArtworkDesk, ArtworkJob, ArtworkKey,
         ArtworkRasteriser, ArtworkReader, ArtworkResolver, Delivered, IconArtworkSource, Resolved,
         MAX_ARTWORK_BYTES,
     };
@@ -93,7 +93,6 @@ mod program {
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
     };
     use tairix_procinfo::IpcTransport;
-    use tairix_raster::Surface;
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
@@ -1109,7 +1108,7 @@ mod program {
 
         /// Record what a decode produced. When a wake falls due is the desk's
         /// own batch rule, never a count this service keeps.
-        fn deliver(&self, job: &ArtworkJob, artwork: Option<Surface>) -> Delivered {
+        fn deliver(&self, job: &ArtworkJob, artwork: Option<Artwork>) -> Delivered {
             self.desk.lock().deliver(job, artwork)
         }
 

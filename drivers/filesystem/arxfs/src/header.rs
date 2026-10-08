@@ -41,10 +41,10 @@ use crate::{rd_u128, rd_u32, rd_u64, wr_u128, wr_u32, wr_u64};
 pub use tairix_fsprobe::ARXFS_HEADER_MAGIC as HEADER_MAGIC;
 
 /// On-disk format version understood by this build. A volume written by a
-/// different version is refused rather than misread. Version 2 widened the
-/// extent record to carry a physical length and a compressed flag
-/// (`docs/src/filesystem/arxfs-spec.md` §10 compressed extents).
-pub const FORMAT_VERSION: u32 = 2;
+/// different version is refused rather than misread. Version 3 gave every
+/// inode a content generation and the transaction root the volume's next one
+/// (`docs/src/filesystem/arxfs-spec.md` §13, §14).
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Fixed size of a metadata-block header, in bytes. The payload of a block
 /// begins at this offset. It is large enough to hold the 32-byte keyed

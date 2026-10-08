@@ -145,6 +145,22 @@ impl MeasuredText {
         rest.partition_point(|&advance| advance.saturating_sub(base) <= limit)
     }
 
+    /// The first `char` index in `start..=end` from which the run up to `end`
+    /// fits within `limit`: where the longest fitting tail of that span starts.
+    pub(crate) fn tail_start_within(&self, start: usize, end: usize, limit: u32) -> usize {
+        let floor = self.pen_at(end).saturating_sub(limit);
+        let (mut low, mut high) = (start, end.max(start));
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.pen_at(mid) >= floor {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        low
+    }
+
     /// The pen position at `char` index `index` — equivalently, the pen after
     /// the `index` `char`s before it. Zero at the start, and the whole width
     /// at or past the end.

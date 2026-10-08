@@ -82,8 +82,11 @@ and are compared byte-for-byte, so they are **case-sensitive**; a directory
 grows by whole copy-on-write blocks as entries are added (one slot per
 512-byte block, fourteen per 4096-byte block). `.` and `..` are stored on disk
 and hidden from `read_dir`. The inode record also stores the four §21
-timestamps. A volume written by a different format version is refused rather
-than misread.
+timestamps and, for a file or link, its **content generation** — the version
+of its data, drawn from one volume-wide sequence the transaction root carries
+and never handed out twice, not even across a crash (`arxfs-spec.md` §13,
+§14). A volume written by a different format version is refused rather than
+misread.
 
 The volume's committed block count is pinned in the superblock and may be
 smaller than the backing device; `ARXFS::grow` extends a mounted volume to

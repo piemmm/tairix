@@ -834,8 +834,19 @@ Each inode stores:
 ```text
 kind (directory / regular file / symbolic link),
 owner uid, group gid, POSIX mode bits, ACL, optional capability requirement,
-created Time64, modified Time64, changed Time64
+created Time64, modified Time64, changed Time64,
+content generation (u64; 0 for a directory)
 ```
+
+A file's or link's **content generation** names the version of its data. Every
+change to the data — creation, a write, a truncate or extend — gives the inode
+a new one and nothing else does: a change of mode, owner, attributes, a rename
+or a second name leaves it alone, and no caller can set it. It is drawn from
+one volume-wide sequence the transaction root carries (§14), never counted per
+inode, so the node's identity and its generation name exactly one version of
+its content even after a crash rolls the inode, or its number, back. It is
+reported as `NodeInfo::content_gen` and so through `fs_stat` and every
+directory record; a directory reports `0`.
 
 A **symbolic link**'s mode is the conventional `lrwxrwxrwx`, and it gates
 nothing: resolution authorises every directory it traverses and then the
@@ -925,11 +936,25 @@ After power loss, mount selects the highest valid committed root. A partial
 transaction is ignored. Full `arxfs check` is not required for ordinary crash
 recovery.
 
+**Content generations survive a crash unrepeated.** A transaction root records
+the next content generation the volume hands out. The first data change of a
+mount advances it by a fixed stride (2³²) past the committed value, commits,
+and flushes the published slot before its operation returns — the one commit
+whose slot is made stable at once; operations are exclusive, so no reader sees
+a generation of that mount before the stride is on the medium, and a mount that
+changes no file's data writes nothing for it. A failed flush leaves the
+publication unknown and freezes the handle read-only, as a failed slot write
+does. What a lost transaction handed out — and
+what a fall-back to an older ring slot forgets — is bounded by the dirty-age
+window and the write-back cap, far below the stride, so the next mount starts
+beyond every generation a reader has seen. A rolled-back operation's
+generations are skipped, never handed out again.
+
 **Durability vs. consistency.** Crash *consistency* depends on the mandatory
 pre-slot barrier: it makes every block the new root transitively names durable
 before either slot copy can publish that root. A barrier failure publishes
-nothing. The slot itself may remain volatile when an ordinary operation
-returns, so *durability* — the caller's write surviving power loss on demand —
+nothing. Except for a mount's content-generation stride above, the slot
+itself may remain volatile when an ordinary operation returns, so *durability* — the caller's write surviving power loss on demand —
 is delivered by `fs_sync`. Its one `Block::flush` makes the slot and allocation
 map pages stable through the block driver (virtio-blk `VIRTIO_BLK_T_FLUSH`,
 SCSI `SYNCHRONIZE CACHE`) and fails closed if the device cannot confirm them.

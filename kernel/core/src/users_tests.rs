@@ -78,6 +78,7 @@ impl FilesystemRead for MockRoot {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             USERS if self.present => Ok(NodeInfo {
                 kind: if self.is_dir {
@@ -89,6 +90,7 @@ impl FilesystemRead for MockRoot {
                 size: self.reported_size,
                 allocated: self.reported_size,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             _ => Err(DriverError::NotFound),
         }

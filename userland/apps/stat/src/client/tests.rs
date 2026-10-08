@@ -129,6 +129,7 @@ fn stat_of(kind: FileKind, mode: u32) -> FileStat {
             accessed: stamp(),
             changed: stamp(),
         },
+        content_gen: 0,
     }
 }
 

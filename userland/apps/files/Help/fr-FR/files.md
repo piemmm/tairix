@@ -47,6 +47,23 @@ cadre qui sélectionne tout ce qu'il touche à mesure qu'il grandit ; maintenu
 en haut ou en bas du listage, celui-ci défile, et `Escape` reprend ce que le
 cadre avait sélectionné.
 
+L'espace autour de chaque icône et de son nom compte comme vide, si bien
+qu'un cadre peut commencer n'importe où entre les entrées. `Ctrl+A`
+sélectionne tout le listage et `Ctrl+Shift+A` efface la sélection ; les deux
+figurent aussi dans le menu contextuel.
+
+Le nom d'une entrée est affiché en entier, sur deux lignes au besoin ; un
+nom trop long même pour celles-ci garde son début et sa fin, avec `…` au
+milieu, de sorte que son extension reste toujours visible.
+
+`F2` renomme l'entrée sélectionnée sur place, tout comme un clic sur le nom
+de la seule entrée sélectionnée suivi d'une pause : le nom s'ouvre à la
+modification dès que le clic ne peut plus devenir un double-clic. La partie
+qui précède l'extension est sélectionnée, si bien que la saisie remplace le
+nom et conserve l'extension. `Entrée`, ou un clic hors du nom, garde le
+nouveau nom — un nom que le volume refuse reste ouvert avec la raison — et
+`Escape` l'abandonne.
+
 Faire glisser les entrées sélectionnées sur une autre fenêtre du
 gestionnaire de fichiers, sur un dossier de celle-ci ou sur le bureau les y
 copie ; en maintenant Maj, elles sont déplacées à la place. Le pointeur

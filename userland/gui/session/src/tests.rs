@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, Display, DisplayFormat, DisplayMode};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
     CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
@@ -11702,7 +11702,16 @@ fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
     // An icon is selected and the desktop holds the keyboard, exactly as it
     // does before the user clicks into the terminal.
     let mut damage = Region::new();
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut damage);
+    let (scale, theme) = (comp.scale(), shell.session().active_theme().clone());
+    desktop.press(
+        centre_of(&layout, 1),
+        &layout,
+        scale,
+        &theme,
+        0,
+        &[],
+        &mut damage,
+    );
     shell.present_desktop_area(&mut comp, &desktop, &damage);
     comp.composite();
     assert!(!comp.has_damage(), "the opening frames have been drained");
@@ -11738,7 +11747,7 @@ fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
     // With nothing selected there is no ring to move, so the same click
     // changes no pixel at all and asks for no frame.
     damage.clear();
-    desktop.press(EMPTY_BACKDROP, &layout, 1, &[], &mut damage);
+    desktop.press(EMPTY_BACKDROP, &layout, scale, &theme, 1, &[], &mut damage);
     shell.present_desktop_area(&mut comp, &desktop, &damage);
     comp.composite();
     assert_eq!(desktop.selected(), None);
@@ -11892,7 +11901,7 @@ fn cued_desktop() -> (Desktop<CuedTree>, Rc<RefCell<tairix_browse::Probes>>) {
 
 /// The sample the fixture's occupied folder is answered with.
 fn docs_sample() -> tairix_icon::FolderSample {
-    tairix_icon::FolderSample::new([IconKind::Text])
+    tairix_icon::FolderSample::new([tairix_icon::SampleCard::Kind(IconKind::Text)])
 }
 
 /// Answer every folder `probes` was asked about: `Docs` holds text, anything
@@ -11957,7 +11966,7 @@ fn a_landed_folder_cue_repaints_only_the_icon_it_changes() {
     );
     assert_eq!(
         desktop.entries()[empty].occupancy(),
-        tairix_browse::Occupancy::Empty,
+        &tairix_browse::Occupancy::Empty,
         "the empty folder is answered too"
     );
 
@@ -12058,9 +12067,12 @@ fn a_desktop_picture_file_asks_for_its_own_content_after_the_icons() {
 
     let thumbnail = ArtworkKey::Thumbnail(tairix_icon::Thumbnail {
         path: String::from("/photo.png"),
-        size: 640,
-        modified: written,
-        id,
+        stamp: tairix_icon::DocumentStamp {
+            size: 640,
+            modified: written,
+            id,
+            content_gen: 0,
+        },
         reading: tairix_icon::Reading::Signature,
     });
     let mut desk = artwork.borrow_mut();
@@ -12088,7 +12100,7 @@ fn a_desktop_that_cannot_probe_draws_plain_folders_and_asks_once() {
     let docs = icon_named(&desktop, "Docs");
     assert_eq!(
         desktop.entries()[docs].occupancy(),
-        tairix_browse::Occupancy::Indeterminate,
+        &tairix_browse::Occupancy::Indeterminate,
         "latched, so the next resolve asks nothing"
     );
     assert_eq!(
@@ -12136,6 +12148,7 @@ fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
         with_backdrop(desktop, Rgb::new(10, 20, 30));
     }
     let layout = cheap.0.desktop_layout(&cheap.1, &desktops[0]);
+    let (scale, theme) = (cheap.1.scale(), cheap.0.session().active_theme().clone());
 
     // Every gesture the pointer and keyboard produce over the icon column,
     // each of which reports its own cells.
@@ -12143,13 +12156,13 @@ fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
     let second = centre_of(&layout, 1);
     let gestures: [&Gesture<'_>; 6] = [
         &|d, dmg| {
-            d.pointer_moved(first, &layout, dmg);
+            d.pointer_moved(first, &layout, scale, &theme, dmg);
         },
         &|d, dmg| {
-            d.pointer_moved(second, &layout, dmg);
+            d.pointer_moved(second, &layout, scale, &theme, dmg);
         },
         &|d, dmg| {
-            d.press(second, &layout, 2, &[], dmg);
+            d.press(second, &layout, scale, &theme, 2, &[], dmg);
         },
         &|d, dmg| d.set_focused(false, &layout, dmg),
         &|d, dmg| d.set_focused(true, &layout, dmg),
@@ -13301,6 +13314,11 @@ fn served_mode(width: u32, height: u32) -> DisplayMode {
     }
 }
 
+/// Damage covering the whole of `mode`.
+pub(crate) fn whole(mode: &DisplayMode) -> DamageList {
+    DamageList::new(&[DamageRect::full(mode)]).expect("a non-empty frame")
+}
+
 /// Run `body` against a [`ShellWindowHost`] built over `shell`, `comp` and
 /// `windows`, so a test drives the very bridge the serve loop drives.
 fn with_window_host<R>(
@@ -13356,12 +13374,7 @@ fn open_parent_and_popup(
                 1,
                 &served_mode(320, 240),
                 &vec![0u8; 320 * 240 * 4],
-                DamageRect {
-                    x: 0,
-                    y: 0,
-                    width_px: 320,
-                    height_px: 240,
-                },
+                &whole(&served_mode(320, 240)),
             ),
             Ok(())
         );
@@ -13756,12 +13769,7 @@ fn hovering_an_open_popup_repaints_only_the_popup() {
                 2,
                 &served_mode(popup_bounds.width, popup_bounds.height),
                 &vec![0x40; (popup_bounds.width * popup_bounds.height * 4) as usize],
-                DamageRect {
-                    x: 0,
-                    y: 0,
-                    width_px: popup_bounds.width,
-                    height_px: popup_bounds.height,
-                },
+                &whole(&served_mode(popup_bounds.width, popup_bounds.height)),
             ),
             Ok(())
         );
@@ -15057,7 +15065,7 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
                 2,
                 &served_mode(220, 180),
                 &frame,
-                DamageRect::full(&served_mode(220, 180))
+                &whole(&served_mode(220, 180))
             ),
             Ok(())
         );
