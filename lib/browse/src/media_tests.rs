@@ -624,17 +624,7 @@ fn pictured(entry: &Entry) -> (IconKind, Option<Reading>) {
     let path = alloc::format!("{PICTURES}/{}", entry.name());
     let reading = [Reading::Signature, Reading::Sprite]
         .into_iter()
-        .find(|&reading| {
-            request
-                == IconRequest::thumbnail(
-                    kind,
-                    &path,
-                    entry.size(),
-                    entry.modified(),
-                    entry.id(),
-                    reading,
-                )
-        });
+        .find(|&reading| request == IconRequest::thumbnail(kind, &path, entry.stamp(), reading));
     (kind, reading)
 }
 

@@ -20,8 +20,7 @@ use core::cell::{Cell, RefCell};
 
 use tairix_icon::{
     artwork_cache, render_artwork, ArtworkCache, ArtworkDesk, ArtworkKey, ArtworkRasteriser,
-    ArtworkReader, ArtworkResolver, IconArtwork, IconKind, IconPicture, IconRequest, InlineArtwork,
-    Resolved,
+    ArtworkReader, ArtworkResolver, IconArtwork, IconKind, IconRequest, InlineArtwork, Resolved,
 };
 use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
@@ -210,7 +209,7 @@ impl Arrangement {
     fn paint(&mut self) -> bool {
         matches!(
             self.pipeline.source().artwork(request(), SIDE),
-            Some(IconPicture::Artwork(_))
+            Some(picture) if !picture.is_mask()
         )
     }
 
@@ -288,7 +287,7 @@ fn the_inline_resolver_is_what_made_the_paint_block() {
     assert!(
         matches!(
             pipeline.source().artwork(request(), SIDE),
-            Some(IconPicture::Artwork(_))
+            Some(picture) if !picture.is_mask()
         ),
         "the inline resolver draws the artwork in the frame that asked"
     );
@@ -643,8 +642,8 @@ mod grid {
             let drawn = self.drawn;
             let picture = self.source.artwork(request, side);
             let counter = match picture {
-                Some(IconPicture::Artwork(_)) => &drawn.artwork,
-                Some(IconPicture::Mask(_)) | None => &drawn.glyph,
+                Some(picture) if !picture.is_mask() => &drawn.artwork,
+                Some(_) | None => &drawn.glyph,
             };
             counter.set(counter.get() + 1);
             picture

@@ -54,7 +54,7 @@ pub enum Listing {
 /// The [`Listing`] shape, for the one question a listing cannot answer. A
 /// refusal is the `Err` half of the enclosing [`Result`]: pending is never an
 /// error, and an error is never retried by waiting.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Probe {
     /// The directory holds nothing.
     Empty,

@@ -45,6 +45,23 @@ seleziona tutto ciò che tocca mentre cresce; tenuto al bordo superiore o
 inferiore dell'elenco, questo scorre, e `Escape` annulla ciò che il riquadro
 ha selezionato.
 
+Lo spazio intorno a ogni icona e al suo nome conta come vuoto, quindi un
+riquadro può partire ovunque tra le voci. `Ctrl+A` seleziona tutto l'elenco
+e `Ctrl+Shift+A` annulla la selezione; entrambi sono anche nel menu
+contestuale.
+
+Il nome di una voce è mostrato per intero, su due righe quando servono; un
+nome troppo lungo anche per quelle conserva l'inizio e la fine, con `…` nel
+mezzo, così l'estensione resta sempre visibile.
+
+`F2` rinomina sul posto la voce selezionata, come fa un clic sul nome
+dell'unica voce selezionata seguito da una pausa: il nome si apre per la
+modifica non appena il clic non può più diventare un doppio clic. La parte
+prima dell'estensione è selezionata, quindi ciò che si digita sostituisce il
+nome e mantiene l'estensione. `Invio`, o un clic fuori dal nome, conferma il
+nuovo nome — un nome che il volume rifiuta resta aperto con il motivo — e
+`Escape` lo abbandona.
+
 Trascinare le voci selezionate su un'altra finestra del gestore di file, su
 una cartella in essa o sul desktop le copia lì; tenendo premuto Maiusc,
 invece, le sposta. Il cursore mostra un più finché il rilascio copierebbe e

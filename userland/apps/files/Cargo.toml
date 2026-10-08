@@ -98,6 +98,9 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = [
 # The production thumbnail document (`RtDocument`): a picture file opened under
 # this program's own identity and read at an offset, written once in `lib/icon`.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0", features = ["rt"] }
+# The app-data client: the thumbnail store is a blob of this application's own
+# bulk store, reached only through the app-data service.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 # The shared latest-wins job desk (`tairix_util::defer`) the deferred bundle
 # scan hands its work to the reader thread through, so walking three program
 # stores never happens on the loop that owes the window a frame.

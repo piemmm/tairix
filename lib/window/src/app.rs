@@ -28,7 +28,7 @@
 
 use core::fmt;
 
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::window_ipc::{LayerDepth, WindowEvent, WindowSizing, WINDOW_ENDPOINT};
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
@@ -744,13 +744,33 @@ impl WindowPane {
         surface: &Surface,
         damage: DamageRect,
     ) -> Result<(), Errno> {
+        let damage = DamageList::new(&[damage])?;
+        self.present_list(client, surface, &damage)
+    }
+
+    /// [`present`](Self::present) for several rectangles at once: each copied
+    /// into the shared frame, and the present naming exactly those, so the
+    /// session converts and recomposes what moved rather than the box
+    /// spanning it.
+    ///
+    /// # Errors
+    ///
+    /// [`present`](Self::present)'s.
+    pub fn present_list<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        surface: &Surface,
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
         let mode = self.mode;
         let window = self.window;
         let pixels = client
             .frame_pixels(&mut self.frames, window, FRAME_COUNT, &mode)
             .ok_or(Errno::NotAttached)?;
-        winframe::encode(surface, pixels, &mode, damage, &SERIAL)?;
-        client.present(window, 0, damage)
+        for rect in damage.rects() {
+            winframe::encode(surface, pixels, &mode, *rect, &SERIAL)?;
+        }
+        client.present(window, 0, *damage)
     }
 
     /// Re-map the frame region onto `new_mode`, answering whether the new

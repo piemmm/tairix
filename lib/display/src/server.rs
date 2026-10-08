@@ -54,10 +54,12 @@
 //!   refusal, never a clamp.
 
 use tairix_abi::display_ipc::{
-    encode_mode_reply, encode_stats_reply, DamageList, DisplayRequest, DisplayStats,
-    DISPLAY_MODE_REPLY_LEN, DISPLAY_STATS_REPLY_LEN,
+    encode_mode_reply, encode_stats_reply, DisplayRequest, DisplayStats, DISPLAY_MODE_REPLY_LEN,
+    DISPLAY_STATS_REPLY_LEN,
 };
-use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower,
+};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::seat::{DisplayLease, SEAT_PRIMARY};
 use tairix_abi::time::MonotonicClock;

@@ -46,6 +46,23 @@ einen Rahmen auf, der beim Wachsen alles auswählt, was er berührt; am oberen
 oder unteren Rand der Auflistung gehalten, rollt sie weiter, und `Escape`
 nimmt zurück, was er ausgewählt hat.
 
+Der Raum um jedes Symbol und seinen Namen gilt als leere Fläche, sodass ein
+Rahmen überall zwischen den Einträgen beginnen kann. `Ctrl+A` wählt alles in
+der Auflistung aus, und `Ctrl+Shift+A` hebt die Auswahl auf; beides steht
+auch im Rechtsklickmenü.
+
+Der Name eines Eintrags wird vollständig gezeigt, bei Bedarf auf zwei
+Zeilen; ein Name, der selbst dafür zu lang ist, behält seinen Anfang und
+sein Ende mit `…` in der Mitte, sodass seine Endung immer sichtbar bleibt.
+
+`F2` benennt den ausgewählten Eintrag an Ort und Stelle um, ebenso ein Klick
+auf den Namen des einzigen ausgewählten Eintrags mit einer kurzen Pause
+danach: Der Name öffnet sich zum Bearbeiten, sobald der Klick kein
+Doppelklick mehr werden kann. Der Teil vor der Endung ist ausgewählt, sodass
+Tippen den Namen ersetzt und die Endung behält. `Eingabe` oder ein Klick
+außerhalb des Namens übernimmt den neuen Namen — lehnt der Datenträger ihn
+ab, bleibt das Feld mit dem Grund geöffnet —, und `Escape` verwirft ihn.
+
 Ausgewählte Einträge, die auf ein anderes Dateimanager-Fenster, einen Ordner
 darin oder den Desktop gezogen werden, werden dorthin kopiert; mit
 gehaltener Umschalttaste werden sie stattdessen verschoben. Der Zeiger zeigt

@@ -7,9 +7,10 @@ use tairix_colour::Rgb;
 use tairix_raster::{Color, Pixel, Surface};
 
 use super::BadgeHue;
-use crate::artwork::{builtin_picture, glyph_mask, IconPicture};
+use crate::artwork::{builtin_picture, glyph_mask};
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
+use crate::picture::IconPicture;
 use crate::symbol::marks;
 
 /// The sides a badge is drawn at on the desktop: every sidebar size from a

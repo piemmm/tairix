@@ -4,7 +4,7 @@ use super::*;
 
 use alloc::vec;
 
-use tairix_icon::{FolderSample, IconKind};
+use tairix_icon::{FolderSample, IconKind, SampleCard};
 
 use crate::entry::Entry;
 
@@ -14,7 +14,7 @@ fn path(names: &[&str]) -> Vec<String> {
 
 /// What a probe finds in a folder holding text.
 fn text() -> Probe {
-    Probe::Holds(FolderSample::new([IconKind::Text]))
+    Probe::Holds(FolderSample::new([SampleCard::Kind(IconKind::Text)]))
 }
 
 /// A probe's answer for an empty folder.
@@ -22,9 +22,9 @@ const EMPTY: Result<Probe, Errno> = Ok(Probe::Empty);
 
 /// Answer the batch in flight with `answer` for every folder in it, and sweep
 /// as the embedder's loop does once it has drawn what landed.
-fn answer_all(probes: &mut Probes, answer: Result<Probe, Errno>) -> bool {
+fn answer_all(probes: &mut Probes, answer: &Result<Probe, Errno>) -> bool {
     let batch = probes.next_batch().expect("a batch");
-    let fresh = probes.deliver(batch.into_iter().map(|f| (f, answer)).collect());
+    let fresh = probes.deliver(batch.into_iter().map(|f| (f, answer.clone())).collect());
     probes.sweep();
     fresh
 }
@@ -37,7 +37,7 @@ fn a_refused_probe_is_answered_rather_than_dropped() {
     let mut probes = Probes::new();
     let folder = path(&["Locked"]);
     assert_eq!(probes.ask(&folder), (Ok(Probe::Pending), true));
-    assert!(answer_all(&mut probes, Err(Errno::PermissionDenied)));
+    assert!(answer_all(&mut probes, &Err(Errno::PermissionDenied)));
     assert_eq!(probes.ask(&folder), (Err(Errno::PermissionDenied), false));
 }
 
@@ -121,7 +121,7 @@ fn an_answer_is_served_once_and_then_asked_again() {
     let mut probes = Probes::new();
     let folder = path(&["Empty"]);
     let _ = probes.ask(&folder);
-    assert!(answer_all(&mut probes, EMPTY));
+    assert!(answer_all(&mut probes, &EMPTY));
     assert_eq!(probes.ask(&folder), (EMPTY, false));
     assert_eq!(probes.ask(&folder), (Ok(Probe::Pending), true));
     assert!(probes.has_work());
@@ -147,7 +147,7 @@ fn a_delivered_batch_owes_the_loop_one_adoption() {
     let mut probes = Probes::new();
     let folder = path(&["Users"]);
     let _ = probes.ask(&folder);
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     assert!(probes.take_landed());
     assert_eq!(
         probes.ask(&folder),
@@ -162,7 +162,7 @@ fn a_delivered_batch_owes_the_loop_one_adoption() {
 fn stopping_drops_an_unconsumed_adoption() {
     let mut probes = Probes::new();
     let _ = probes.ask(&path(&["a"]));
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     probes.stop();
     assert!(!probes.take_landed());
 }
@@ -187,7 +187,7 @@ fn a_probe_in_flight_answers_the_re_asks_it_absorbed() {
 fn an_answer_a_whole_pass_did_not_take_is_dropped() {
     let mut probes = Probes::new();
     let _ = probes.ask(&path(&["scrolled-away"]));
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     assert!(probes.take_landed());
     // The pass that followed never asked: the folder had left the view.
     assert!(!probes.take_landed());
@@ -209,9 +209,9 @@ fn a_batch_landing_before_the_loop_resolved_keeps_the_last_ones_answers() {
     let mut probes = Probes::new();
     let (first, second) = (path(&["one", "a"]), path(&["two", "b"]));
     let _ = probes.ask(&first);
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     let _ = probes.ask(&second);
-    assert!(answer_all(&mut probes, EMPTY));
+    assert!(answer_all(&mut probes, &EMPTY));
     assert!(probes.take_landed());
     assert_eq!(probes.ask(&first), (Ok(text()), false));
     assert_eq!(probes.ask(&second), (EMPTY, false));
@@ -267,7 +267,7 @@ fn a_folder_that_changed_mid_probe_is_asked_afresh() {
         "another folder's change keeps it"
     );
     let _ = probes.ask(&folder);
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     assert!(probes.invalidate(&dir, &changed));
     assert_eq!(
         probes.ask(&folder).0,
@@ -284,7 +284,7 @@ fn a_change_to_no_folder_invalidates_nothing() {
     let folder = path(&["Users", "src"]);
     let mut probes = Probes::new();
     let _ = probes.ask(&folder);
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     let changes = [
         EntryChange::Upsert(Entry::file("src")),
         EntryChange::Remove(String::from("src")),
@@ -303,7 +303,7 @@ fn a_relisted_directory_forgets_its_folders_answers() {
     let mut probes = Probes::new();
     let _ = probes.ask(&held);
     let _ = probes.ask(&other);
-    assert!(answer_all(&mut probes, Ok(text())));
+    assert!(answer_all(&mut probes, &Ok(text())));
     let in_flight = path(&["Users", "docs"]);
     let _ = probes.ask(&in_flight);
     let batch = probes.next_batch().expect("a batch");

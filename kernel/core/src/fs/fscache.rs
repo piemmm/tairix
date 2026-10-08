@@ -699,6 +699,24 @@ impl<F> CachedFs<F> {
 }
 
 impl<F: FilesystemRead> CachedFs<F> {
+    /// Drop the listings that embed `node`'s metadata after a change to it
+    /// made through `dir`: `dir`'s own, or every directory's when `node` has
+    /// other names, since nothing records which directories hold them.
+    fn invalidate_listings_embedding(&mut self, dir: u64, node: u64) {
+        let names = match self.stat.get(&node) {
+            Some(entry) => Ok(entry.info.nlink),
+            None => self
+                .inner
+                .node_info(NodeId::from_raw(node))
+                .map(|info| info.nlink),
+        };
+        if matches!(names, Ok(names) if names <= 1) {
+            self.invalidate_dirents(dir);
+        } else {
+            self.invalidate_every_dirent();
+        }
+    }
+
     /// What kind of node `node` is, asked only while something on the volume
     /// is watched: whether moving it can change what a watched path reaches,
     /// or who may list beneath it.
@@ -812,6 +830,20 @@ impl<F: FilesystemRead> CachedFs<F> {
             else {
                 return;
             };
+            if self.remove_entry(&key).is_some() {
+                self.accounting.record_invalidation();
+            }
+        }
+    }
+
+    /// Drop every cached directory entry of every directory.
+    fn invalidate_every_dirent(&mut self) {
+        while let Some(key) = self
+            .dirent
+            .keys()
+            .next()
+            .map(|(d, cursor)| KeyRef::Dirent(*d, *cursor))
+        {
             if self.remove_entry(&key).is_some() {
                 self.accounting.record_invalidation();
             }
@@ -1185,9 +1217,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.link(dir, name, node);
         let dir_raw = dir.raw();
         self.invalidate_lookups(dir_raw);
-        self.invalidate_dirents(dir_raw);
-        self.invalidate_stat(dir_raw);
         self.invalidate_stat(node.raw());
+        self.invalidate_listings_embedding(dir_raw, node.raw());
+        self.invalidate_stat(dir_raw);
         if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
             changes.linked(dir, name, node);
         }
@@ -1224,9 +1256,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.write_at(dir, name, offset, data);
         match target {
             Ok(Some(node)) => {
+                self.invalidate_listings_embedding(dir.raw(), node);
                 self.invalidate_stat(node);
                 self.invalidate_data(node);
-                self.invalidate_dirents(dir.raw());
             }
             Ok(None) => {
                 self.invalidate_lookup(dir.raw(), name);
@@ -1246,9 +1278,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.truncate(dir, name, size);
         match target {
             Ok(Some(node)) => {
+                self.invalidate_listings_embedding(dir.raw(), node);
                 self.invalidate_stat(node);
                 self.invalidate_data(node);
-                self.invalidate_dirents(dir.raw());
             }
             Ok(None) => {
                 self.invalidate_lookup(dir.raw(), name);

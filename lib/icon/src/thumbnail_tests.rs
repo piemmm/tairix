@@ -14,6 +14,8 @@ use crate::artwork::{
     Resolved,
 };
 use crate::desk::{ArtworkDesk, ArtworkJob};
+use crate::picture::Fitted;
+use tairix_geometry::Rect;
 
 const PATH: &str = "/Users/ann/UserFiles/Pictures/cat.png";
 const SIDE: u32 = 4;
@@ -27,11 +29,15 @@ const LISTED: FileId = FileId {
     node: 42,
 };
 
+/// The version of its data the fixture's listing named.
+const LISTED_GEN: u64 = 77;
+
 /// An in-memory picture file.
 struct Memory {
     bytes: Vec<u8>,
     modified: Time64,
     id: FileId,
+    content_gen: u64,
 }
 
 impl ArtworkDocument for Memory {
@@ -40,6 +46,7 @@ impl ArtworkDocument for Memory {
             size: self.bytes.len() as u64,
             modified: self.modified,
             id: self.id,
+            content_gen: self.content_gen,
         }
     }
 
@@ -57,6 +64,7 @@ struct Files {
     bytes: Vec<u8>,
     modified: Time64,
     id: FileId,
+    content_gen: u64,
     opens: usize,
 }
 
@@ -66,6 +74,7 @@ impl Files {
             bytes,
             modified: WRITTEN,
             id: LISTED,
+            content_gen: LISTED_GEN,
             opens: 0,
         }
     }
@@ -83,6 +92,7 @@ impl ArtworkReader for Files {
                 bytes: self.bytes.clone(),
                 modified: self.modified,
                 id: self.id,
+                content_gen: self.content_gen,
             }) as Box<dyn ArtworkDocument>
         })
     }
@@ -95,6 +105,8 @@ struct Decoder {
     streamed: Vec<u8>,
     readings: Vec<Reading>,
     short: bool,
+    /// Where the fitted picture lies, when not the whole square.
+    bounds: Option<Rect>,
 }
 
 impl ArtworkRasteriser for Decoder {
@@ -107,7 +119,7 @@ impl ArtworkRasteriser for Decoder {
         side: u32,
         reading: Reading,
         document: &mut dyn ArtworkDocument,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Fitted> {
         self.readings.push(reading);
         let length = document.stamp().size;
         let mut offset = 0;
@@ -117,8 +129,11 @@ impl ArtworkRasteriser for Decoder {
             self.streamed.extend_from_slice(&run[..got]);
             offset += got as u64;
         }
-        let side = side as usize;
-        Some(vec![0x80; if self.short { 3 } else { side * side * 4 }])
+        let square = side as usize;
+        Some(Fitted {
+            pixels: vec![0x80; if self.short { 3 } else { square * square * 4 }],
+            bounds: self.bounds.unwrap_or(Rect::new(0, 0, side, side)),
+        })
     }
 }
 
@@ -129,9 +144,12 @@ fn key(size: u64, modified: Time64, reading: Reading) -> ArtworkKey {
 fn key_of(size: u64, modified: Time64, id: FileId, reading: Reading) -> ArtworkKey {
     ArtworkKey::Thumbnail(Thumbnail {
         path: String::from(PATH),
-        size,
-        modified,
-        id,
+        stamp: DocumentStamp {
+            size,
+            modified,
+            id,
+            content_gen: LISTED_GEN,
+        },
         reading,
     })
 }
@@ -147,7 +165,10 @@ fn a_thumbnail_streams_its_file_to_the_rasteriser_and_draws_its_reply() {
         SIDE,
     )
     .expect("a picture");
-    assert_eq!((picture.width(), picture.height()), (SIDE, SIDE));
+    assert_eq!(
+        (picture.surface().width(), picture.surface().height()),
+        (SIDE, SIDE)
+    );
     assert_eq!(
         decoder.streamed,
         [1, 2, 3, 4, 5, 6, 7],
@@ -193,6 +214,24 @@ fn a_file_replaced_since_its_listing_is_not_drawn() {
     };
     assert!(render_artwork(
         &mut swapped,
+        &mut decoder,
+        &key(7, WRITTEN, Reading::Signature),
+        SIDE
+    )
+    .is_none());
+    assert!(decoder.readings.is_empty() && decoder.streamed.is_empty());
+}
+
+/// A file whose data has moved to another version since it was listed is not
+/// the picture the key names, even with its length and time unchanged: not a
+/// byte of it is read.
+#[test]
+fn a_file_at_another_version_than_listed_is_not_drawn() {
+    let mut decoder = Decoder::default();
+    let mut rewritten = Files::holding(vec![1, 2, 3, 4, 5, 6, 7]);
+    rewritten.content_gen = LISTED_GEN + 1;
+    assert!(render_artwork(
+        &mut rewritten,
         &mut decoder,
         &key(7, WRITTEN, Reading::Signature),
         SIDE
@@ -331,4 +370,42 @@ fn an_icon_batch_is_not_held_back_by_waiting_thumbnails() {
         desk.deliver(&job, None).wake(),
         "a thumbnail is shown though another waits"
     );
+}
+
+/// A thumbnail is framed at the bounds the rasteriser fitted its picture to,
+/// and a frame outside the square is refused rather than drawn.
+#[test]
+fn a_thumbnail_is_framed_where_its_picture_lies_and_a_wild_frame_is_refused() {
+    let fitted = Rect::new(0, 1, SIDE, SIDE - 2);
+    let mut files = Files::holding(vec![1, 2, 3]);
+    let mut decoder = Decoder {
+        bounds: Some(fitted),
+        ..Decoder::default()
+    };
+    let picture = render_artwork(
+        &mut files,
+        &mut decoder,
+        &key(3, WRITTEN, Reading::Signature),
+        SIDE,
+    )
+    .expect("a picture");
+    assert_eq!(picture.frame(), Some(fitted));
+
+    for wild in [Rect::new(1, 0, SIDE, SIDE), Rect::new(0, 0, 0, SIDE)] {
+        let mut files = Files::holding(vec![1, 2, 3]);
+        let mut decoder = Decoder {
+            bounds: Some(wild),
+            ..Decoder::default()
+        };
+        assert!(
+            render_artwork(
+                &mut files,
+                &mut decoder,
+                &key(3, WRITTEN, Reading::Signature),
+                SIDE
+            )
+            .is_none(),
+            "{wild:?}"
+        );
+    }
 }

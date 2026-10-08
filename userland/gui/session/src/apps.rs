@@ -59,7 +59,7 @@ use tairix_abi::{AppIdentity as AttestedApp, AppInfoHeader, Errno, ProcId, Publi
 use tairix_geometry::Scale;
 use tairix_icon::{
     ArtworkCache, ArtworkDocument, ArtworkOutcome, ArtworkRasteriser, ArtworkReader,
-    ArtworkResolver, IconKind, IconPicture, IconRequest, Reading, MAX_ARTWORK_BYTES,
+    ArtworkResolver, Fitted, IconKind, IconPicture, IconRequest, Reading, MAX_ARTWORK_BYTES,
 };
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::{Region, Surface};
@@ -820,13 +820,14 @@ pub trait IconRasteriser {
     fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>>;
 
     /// Draw the picture `document` holds, read as `reading` says, fitted
-    /// inside a `side`-pixel square, or refuse. The default refuses.
+    /// inside a `side`-pixel square with where in it the picture lies, or
+    /// refuse. The default refuses.
     fn thumbnail(
         &mut self,
         _side: u32,
         _reading: Reading,
         _document: &mut dyn ArtworkDocument,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Fitted> {
         None
     }
 }
@@ -870,7 +871,7 @@ impl<D: IconRasteriser> ArtworkRasteriser for ArtworkSandbox<D> {
         side: u32,
         reading: Reading,
         document: &mut dyn ArtworkDocument,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Fitted> {
         self.0.thumbnail(side, reading, document)
     }
 }

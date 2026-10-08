@@ -47,22 +47,24 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use alloc::boxed::Box;
 use tairix_abi::appinfo::BUNDLE_SUFFIX;
 use tairix_abi::BundleEntry;
 use tairix_appstore::{decode_manifest, identity_roots, manifest_path};
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
-use tairix_raster::{Color, Surface};
+
+use tairix_geometry::Point;
+use tairix_raster::{cast_shadow, Color, ShadowCast, Surface};
 use tairix_reclaim::{
     working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
 };
 
 use crate::badge::badge_picture;
-use crate::folder::{card_slots, paper_card, FolderSample, MIN_COMPOSITE_SIDE};
+use crate::folder::{card_slots, paper_card, print_card, FolderSample, MIN_COMPOSITE_SIDE};
 use crate::glyph::{builtin_icon, IconKind};
-use crate::thumbnail::{render_thumbnail, ArtworkDocument, Reading, Thumbnail};
-use tairix_abi::fs::FileId;
-use tairix_abi::time::Time64;
+use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
+use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Reading, Thumbnail};
 
 /// Where the OS ships its desktop graphics assets.
 pub const GRAPHICS_DIR: &str = "/System/Graphics";
@@ -174,7 +176,8 @@ pub trait ArtworkRasteriser {
 
     /// Decode the picture `document` holds, its format read as `reading`
     /// says, fitted inside a `side`-pixel square of straight-alpha RGBA8 and
-    /// centred on it, or refuse with `None`.
+    /// centred on it, with where in the square the picture lies, or refuse
+    /// with `None`.
     ///
     /// The default refuses, which is right for a rasteriser of icons alone.
     fn thumbnail(
@@ -182,7 +185,7 @@ pub trait ArtworkRasteriser {
         _side: u32,
         _reading: Reading,
         _document: &mut dyn ArtworkDocument,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Fitted> {
         None
     }
 }
@@ -207,7 +210,7 @@ impl<T: ArtworkRasteriser + ?Sized> ArtworkRasteriser for &mut T {
         side: u32,
         reading: Reading,
         document: &mut dyn ArtworkDocument,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Fitted> {
         (**self).thumbnail(side, reading, document)
     }
 }
@@ -217,7 +220,7 @@ pub enum Resolved {
     /// The decode has run. `None` is a refusal — an absent, over-long, or
     /// undecodable asset — which the cache retains just like artwork, so the
     /// same bad asset is never read twice.
-    Done(Option<Surface>),
+    Done(Option<Artwork>),
     /// Nobody has decoded it yet. The cache retains nothing and the draw site
     /// falls back to the tier below, which for the last tier is the built-in
     /// glyph; the same lookup answers with pixels once the producer has them.
@@ -284,8 +287,8 @@ impl<R: ArtworkReader, D: ArtworkRasteriser> InlineArtwork<R, D> {
 impl<R: ArtworkReader, D: ArtworkRasteriser> ArtworkResolver for InlineArtwork<R, D> {
     fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
         // A thumbnail reads and decodes a whole picture file, which a thread
-        // that owes a frame cannot afford: the tile draws its class picture.
-        if matches!(key, ArtworkKey::Thumbnail(_)) {
+        // that owes a frame cannot afford: the tile draws the tier below.
+        if key.is_thumbnail_class() {
             return Resolved::Done(None);
         }
         Resolved::Done(render_artwork(
@@ -317,17 +320,13 @@ pub(crate) enum OwnIcon<'a> {
         home: Option<&'a str>,
     },
     /// A folder's picture of what it holds.
-    Folder(FolderSample),
+    Folder(&'a FolderSample),
     /// A picture file drawn as its own content.
     Thumbnail {
         /// The file's absolute path.
         path: &'a str,
-        /// Its length when it was listed.
-        size: u64,
-        /// Its modification time when it was listed.
-        modified: Time64,
-        /// The file it was when it was listed.
-        id: FileId,
+        /// The version of the file the listing named.
+        stamp: DocumentStamp,
         /// How its format is read.
         reading: Reading,
     },
@@ -392,35 +391,32 @@ impl<'a> IconRequest<'a> {
         }
     }
 
-    /// A picture file at `path`, listed as file `id` at `size` bytes and
-    /// modified at `modified`, drawn as its own content and falling back to
-    /// `kind` where that will not serve.
+    /// A picture file at `path`, at the version its listing named, drawn as
+    /// its own content and falling back to `kind` where that will not serve.
     #[must_use]
     pub const fn thumbnail(
         kind: IconKind,
         path: &'a str,
-        size: u64,
-        modified: Time64,
-        id: FileId,
+        stamp: DocumentStamp,
         reading: Reading,
     ) -> Self {
         Self {
             kind,
             own: Some(OwnIcon::Thumbnail {
                 path,
-                size,
-                modified,
-                id,
+                stamp,
                 reading,
             }),
         }
     }
 
-    /// A picture of a folder holding `sample`: its cards standing in it,
+    /// A picture of a folder holding `sample`: its cards fanned out of it,
     /// falling back to the plain filled folder where that picture will not
-    /// draw, and the plain filled folder outright for an empty sample.
+    /// draw, and the plain filled folder outright for an empty sample. While
+    /// the members' own pictures are produced the folder draws its cards as
+    /// their kinds.
     #[must_use]
-    pub const fn folder(sample: FolderSample) -> Self {
+    pub fn folder(sample: &'a FolderSample) -> Self {
         Self {
             kind: IconKind::FolderFilled,
             own: if sample.is_empty() {
@@ -440,8 +436,15 @@ impl<'a> IconRequest<'a> {
     /// The candidates this request resolves through, in the order they are
     /// tried. The one statement of the desktop's icon-resolution order.
     pub(crate) fn tiers(self) -> impl Iterator<Item = Tier<'a>> {
+        let kinds = match self.own {
+            Some(OwnIcon::Folder(sample)) if sample.has_pictures() => {
+                Some(Tier::FolderKinds(sample))
+            }
+            _ => None,
+        };
         [
             self.own.map(Tier::Own),
+            kinds,
             Some(Tier::Raster(self.kind)),
             Some(Tier::Vector(self.kind)),
         ]
@@ -457,6 +460,8 @@ impl<'a> IconRequest<'a> {
 pub(crate) enum Tier<'a> {
     /// The thing's own icon.
     Own(OwnIcon<'a>),
+    /// A folder holding pictures, drawn with each picture card as its kind.
+    FolderKinds(&'a FolderSample),
     /// The class's shipped raster master.
     Raster(IconKind),
     /// The class's shipped vector master.
@@ -473,66 +478,19 @@ impl Tier<'_> {
                 name: String::from(name),
                 home: home.map(String::from),
             },
-            Self::Own(OwnIcon::Folder(sample)) => ArtworkKey::Folder(sample),
+            Self::Own(OwnIcon::Folder(sample)) => ArtworkKey::Folder(sample.clone()),
+            Self::FolderKinds(sample) => ArtworkKey::Folder(sample.kinds_only()),
             Self::Own(OwnIcon::Thumbnail {
                 path,
-                size,
-                modified,
-                id,
+                stamp,
                 reading,
             }) => ArtworkKey::Thumbnail(Thumbnail {
                 path: String::from(path),
-                size,
-                modified,
-                id,
+                stamp,
                 reading,
             }),
             Self::Raster(kind) => ArtworkKey::Asset(icon_artwork_path(kind)),
             Self::Vector(kind) => ArtworkKey::Asset(icon_vector_path(kind)),
-        }
-    }
-}
-
-/// The picture a draw site was handed for an icon.
-///
-/// The two are drawn differently, so which one it is travels with it rather
-/// than being inferred: shipped artwork already carries its own colours, while
-/// a glyph mask carries only coverage and takes the colour the drawing control
-/// chooses for its state.
-#[derive(Copy, Clone, Debug)]
-pub enum IconPicture<'a> {
-    /// Ready-coloured artwork: composited as it is.
-    Artwork(&'a Surface),
-    /// A built-in glyph's coverage mask: composited tinted
-    /// ([`Surface::blit_tinted`]).
-    Mask(&'a Surface),
-}
-
-impl<'a> IconPicture<'a> {
-    /// `surface` as `kind`'s built-in picture: ready-coloured for a kind drawn
-    /// as a badge, a mask to be tinted for any other.
-    #[must_use]
-    pub const fn builtin(kind: IconKind, surface: &'a Surface) -> Self {
-        if kind.badge().is_some() {
-            Self::Artwork(surface)
-        } else {
-            Self::Mask(surface)
-        }
-    }
-
-    /// The shipped artwork this picture is, or `None` when it is a glyph mask.
-    ///
-    /// For a caller that *stores* a picture instead of drawing it now — a
-    /// taskbar slot keeping its application's icon, a library row keeping its
-    /// entry's: a mask takes its colour from whichever control draws it, so it
-    /// is not finished pixels and cannot be held as though it were. Such a
-    /// caller stores nothing and lets the drawing control resolve the glyph
-    /// through its own cache at paint time.
-    #[must_use]
-    pub const fn artwork(self) -> Option<&'a Surface> {
-        match self {
-            Self::Artwork(art) => Some(art),
-            Self::Mask(_) => None,
         }
     }
 }
@@ -552,6 +510,21 @@ pub trait IconArtwork {
     /// cache to rasterise into, and the caller falls back to drawing the glyph
     /// inline.
     fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>>;
+
+    /// [`artwork`](Self::artwork), casting `shadow` beneath the picture when
+    /// one is given: the same picture, with the soft shadow its own coverage
+    /// casts, retained beside it so no frame blurs.
+    ///
+    /// The default casts none, which is right for a lookup that retains
+    /// nothing.
+    fn shadowed(
+        &mut self,
+        request: IconRequest<'_>,
+        side: u32,
+        _shadow: Option<ShadowCast>,
+    ) -> Option<IconPicture<'_>> {
+        self.artwork(request, side)
+    }
 }
 
 /// The refusing read-and-decode seam: no asset is ever produced.
@@ -601,33 +574,50 @@ impl IconArtwork for NoArtwork {
 /// entry, so a store full of broken artwork cannot grow the cache past its
 /// budget.
 ///
+/// The key it is retained under is charged with it: a folder's key holds its
+/// members' paths, which no fixed per-entry figure can bound.
+///
 /// Public only because it names the value type of the cache
 /// [`artwork_cache`] builds and [`ArtworkCache::new`] takes; the outcome
 /// itself is reached through [`ArtworkCache::path_artwork`].
-pub struct CachedArtwork(Option<Surface>);
+pub struct CachedArtwork {
+    artwork: Option<Artwork>,
+    key_bytes: usize,
+}
 
 impl CachedArtwork {
-    /// The retained surface, if this decode produced one.
-    fn surface(&self) -> Option<&Surface> {
-        self.0.as_ref()
+    /// `artwork`, retained under `key`.
+    fn new(artwork: Option<Artwork>, key: &ArtworkKey) -> Self {
+        Self {
+            artwork,
+            key_bytes: key.heap_bytes(),
+        }
+    }
+
+    /// The retained picture, if this decode produced one.
+    fn artwork(&self) -> Option<&Artwork> {
+        self.artwork.as_ref()
     }
 }
 
 impl CachedBytes for CachedArtwork {
     fn payload_bytes(&self) -> usize {
-        self.0.as_ref().map_or(0, CachedBytes::payload_bytes)
+        self.artwork
+            .as_ref()
+            .map_or(0, CachedBytes::payload_bytes)
+            .saturating_add(self.key_bytes)
     }
 
     fn wipe(&mut self) {
-        if let Some(surface) = self.0.as_mut() {
-            surface.wipe();
+        if let Some(artwork) = self.artwork.as_mut() {
+            artwork.wipe();
         }
     }
 }
 
-/// Bytes of bookkeeping each retained decode costs beyond its pixels: the
-/// asset path the entry is keyed by (bounded by the shared path cap), the
-/// pixel side, the recency index node, and the map nodes holding them.
+/// Bytes of bookkeeping each retained decode costs beyond its pixels and the
+/// heap its key holds: the key itself, the pixel side, the recency index node,
+/// and the map nodes holding them.
 ///
 /// Both consumers build their cache with this one value so a change to the
 /// budget's per-entry overhead cannot diverge between them.
@@ -713,6 +703,47 @@ pub enum ArtworkKey {
     Folder(FolderSample),
     /// A picture file drawn as its own content.
     Thumbnail(Thumbnail),
+    /// The soft shadow the picture retained under `of` casts as `cast` says,
+    /// cast in this process from that picture's own coverage.
+    Shadow {
+        /// The cache key — artwork and side — of the picture the shadow is
+        /// cast from, so a lookup moves the picture's key in rather than
+        /// copying it.
+        of: Box<(ArtworkKey, u32)>,
+        /// How it is cast.
+        cast: ShadowCast,
+    },
+}
+
+impl ArtworkKey {
+    /// Whether producing this reads a picture file's own content — a
+    /// thumbnail, or a folder whose cards show its members' pictures — which
+    /// is queued apart from icons, never decoded inline, and drawn as the
+    /// tier below while it is produced.
+    #[must_use]
+    pub fn is_thumbnail_class(&self) -> bool {
+        match self {
+            Self::Thumbnail(_) => true,
+            Self::Folder(sample) => sample.has_pictures(),
+            _ => false,
+        }
+    }
+
+    /// The bytes this key holds on the heap, which a cache retaining an entry
+    /// under it charges.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Asset(path) | Self::Bundle(path) => path.capacity(),
+            Self::Program { name, home } => {
+                name.capacity() + home.as_ref().map_or(0, String::capacity)
+            }
+            Self::Builtin(_) => 0,
+            Self::Folder(sample) => sample.heap_bytes(),
+            Self::Thumbnail(thumbnail) => thumbnail.path.capacity(),
+            Self::Shadow { of, .. } => core::mem::size_of::<(Self, u32)>() + of.0.heap_bytes(),
+        }
+    }
 }
 
 /// The outcome of building one cache slot.
@@ -724,7 +755,7 @@ enum Slot {
     /// Produced but not retained (pressure forbids growth, or the cache has
     /// disabled itself), so it is handed straight back: no borrow can be
     /// served from the cache, but the pixels themselves exist.
-    Uncached(Option<Surface>),
+    Uncached(Option<Artwork>),
     /// The resolver has not produced it yet. Nothing is retained and no later
     /// tier is tried, because whether one is even reached depends on this
     /// answer.
@@ -835,7 +866,7 @@ impl ArtworkCache {
     ) -> Option<&Surface> {
         let key = (ArtworkKey::Asset(String::from(path)), side);
         let _ = self.build_slot(&key, resolver);
-        self.borrow_slot(&key)
+        self.borrow_slot(&key).map(Artwork::surface)
     }
 
     /// The picture for `request` at `side` pixels: the thing's own icon when
@@ -856,17 +887,96 @@ impl ArtworkCache {
     /// still being produced stops the walk, because whether the next tier is
     /// reached at all depends on what this one turns out to be. The request
     /// therefore costs exactly the reads a synchronous walk would, spread over
-    /// as many frames as it has tiers to try.
+    /// as many frames as it has tiers to try. A thumbnail-class tier is the
+    /// exception: the tier below it is drawn while it is produced.
     pub fn artwork(
         &mut self,
         resolver: &mut dyn ArtworkResolver,
         request: IconRequest<'_>,
         side: u32,
     ) -> Option<IconPicture<'_>> {
+        let served = self.serve(resolver, request, side)?;
+        self.picture(&served.key, served.mask)
+    }
+
+    /// [`artwork`](Self::artwork), with the soft shadow the picture casts as
+    /// `cast` says beneath it, or none for no cast.
+    ///
+    /// The shadow is cast once per picture, side and cast, in this process,
+    /// from the picture's own coverage, and retained beside it as an entry of
+    /// its own — so a frame composites a mask and never blurs, and pressure
+    /// may take a shadow without taking its picture. A shadow that cannot be
+    /// cast or kept is withheld for this draw
+    /// ([`IconPicture::shadow_withheld`]) and asked for again next time, so a
+    /// draw site neither blurs it itself nor loses it for good.
+    pub fn shadowed(
+        &mut self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+        cast: Option<ShadowCast>,
+    ) -> Option<IconPicture<'_>> {
+        let ServedPicture { key, mask } = self.serve(resolver, request, side)?;
+        let Some(cast) = cast else {
+            return self.picture(&key, mask);
+        };
+        let shadow = (
+            ArtworkKey::Shadow {
+                of: Box::new(key),
+                cast,
+            },
+            side,
+        );
+        // The picture's key now lives in the shadow's, moved rather than copied.
+        let ArtworkKey::Shadow { of: key, .. } = &shadow.0 else {
+            return None;
+        };
+        if self.entries.find(&(), &shadow).is_none() {
+            // Only a cast shadow is kept: a picture not retained, or memory that
+            // could not be had, is asked about again rather than remembered.
+            if let Some((cast_mask, _)) = self
+                .borrow_slot(key)
+                .and_then(|picture| cast_shadow(picture.surface(), cast))
+            {
+                let cached = CachedArtwork::new(Some(Artwork::new(cast_mask)), &shadow.0);
+                self.entries.retain(&(), shadow.clone(), cached);
+            }
+        }
+        let picture = self.picture(key, mask)?;
+        Some(match self.borrow_slot(&shadow) {
+            Some(retained) => picture.with_shadow(CastShadow {
+                mask: retained.surface(),
+                offset: {
+                    let (x, y) = cast.origin();
+                    Point::new(x, y)
+                },
+            }),
+            None => picture.withholding_shadow(),
+        })
+    }
+
+    /// Walk `request`'s tiers at `side`, building each slot it reaches, and
+    /// answer where the picture that serves is retained: a tier's artwork, or
+    /// failing every tier the kind's built-in picture. `None` only when even
+    /// the built-in picture is too dear to retain, for the caller to draw it
+    /// inline.
+    ///
+    /// A deferring `resolver` walks the same order one tier per answer: a tier
+    /// still being produced stops the walk, because whether the next tier is
+    /// reached at all depends on what this one turns out to be — except a
+    /// thumbnail-class tier, whose picture always replaces the tier below once
+    /// it lands, so that tier is drawn meanwhile.
+    fn serve(
+        &mut self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+    ) -> Option<ServedPicture> {
         for tier in request.tiers() {
             let key = (tier.cache_key(), side);
             match self.build_slot(&key, resolver) {
-                Slot::Served => return self.borrow_slot(&key).map(IconPicture::Artwork),
+                Slot::Served => return Some(ServedPicture { key, mask: false }),
+                Slot::Pending if key.0.is_thumbnail_class() => {}
                 // Nothing is being retained, so a later tier could only
                 // repeat the same refusal at the cost of another decode. The
                 // glyph below is still reached: it costs no decode at all, and
@@ -876,31 +986,33 @@ impl ArtworkCache {
                 Slot::Empty => {}
             }
         }
-        self.builtin(request.icon_kind(), side)
+        // The built-in picture is resolved here rather than through the
+        // resolver because it needs neither a read nor a sandbox: the vector
+        // art is compiled in, and resolving it synchronously puts a picture
+        // on screen in the first frame that asks.
+        let kind = request.icon_kind();
+        let key = (ArtworkKey::Builtin(kind), side);
+        self.entries.get_or_build(&(), key.clone(), || {
+            Some(CachedArtwork::new(
+                builtin_picture(kind, side).map(Artwork::new),
+                &key.0,
+            ))
+        })?;
+        Some(ServedPicture {
+            key,
+            mask: kind.badge().is_none(),
+        })
     }
 
-    /// The retained built-in picture for `kind` at `side`, rasterising it on a
-    /// miss.
-    ///
-    /// Resolved here rather than through the [`ArtworkResolver`] because it
-    /// needs neither: the vector art is first-party and compiled in, so there
-    /// is nothing to read and nothing untrusted to decode in a sandbox. That
-    /// also keeps it *synchronous* — the picture is on screen in the first
-    /// frame that asks for it, where an asset may take a frame or two to
-    /// arrive.
-    fn builtin(&mut self, kind: IconKind, side: u32) -> Option<IconPicture<'_>> {
-        let key = (ArtworkKey::Builtin(kind), side);
-        match self.entries.get_or_build(&(), key.clone(), || {
-            Some(CachedArtwork(builtin_picture(kind, side)))
-        }) {
-            // Retained: read it back out of the slot it now occupies.
-            Some(_) => self
-                .borrow_slot(&key)
-                .map(|surface| IconPicture::builtin(kind, surface)),
-            // Too tight to retain, so there is nothing to borrow. The caller
-            // draws the glyph inline this frame rather than nothing at all.
-            None => None,
-        }
+    /// The picture retained where `served` says, as a draw site is handed it.
+    fn picture(&self, key: &(ArtworkKey, u32), mask: bool) -> Option<IconPicture<'_>> {
+        let artwork = self.borrow_slot(key)?;
+        let picture = if mask {
+            IconPicture::mask(artwork.surface())
+        } else {
+            IconPicture::coloured(artwork.surface())
+        };
+        Some(picture.with_frame(artwork.frame()))
     }
 
     /// The picture for `request` at `side` pixels, copied out, together with
@@ -930,13 +1042,18 @@ impl ArtworkCache {
                 // Nothing is being retained, so a later tier could only
                 // repeat the same refusal at the cost of another decode.
                 Slot::Uncached(artwork) => {
-                    return artwork.map_or(ArtworkOutcome::Refused, ArtworkOutcome::Ready)
+                    return artwork.map_or(ArtworkOutcome::Refused, |artwork| {
+                        ArtworkOutcome::Ready(artwork.into_surface())
+                    })
                 }
                 Slot::Empty => {}
             }
         }
         served
-            .and_then(|key| self.borrow_slot(&key).cloned())
+            .and_then(|key| {
+                self.borrow_slot(&key)
+                    .map(|artwork| artwork.surface().clone())
+            })
             .map_or(ArtworkOutcome::Refused, ArtworkOutcome::Ready)
     }
 
@@ -956,11 +1073,14 @@ impl ArtworkCache {
     ) {
         for tier in request.tiers() {
             let key = (tier.cache_key(), side);
-            match self.entries.peek(&(), &key) {
+            match self.entries.peek(&(), &key).map(CachedArtwork::artwork) {
                 // This tier will serve, so no later one is reached.
-                Some(CachedArtwork(Some(_))) => return,
+                Some(Some(_)) => return,
                 // A retained refusal: the next tier is the one that matters.
-                Some(CachedArtwork(None)) => {}
+                Some(None) => {}
+                // A thumbnail-class tier draws the tier below until it lands,
+                // so that one is wanted too.
+                None if key.0.is_thumbnail_class() => resolver.prefetch(&key.0, side),
                 None => {
                     resolver.prefetch(&key.0, side);
                     return;
@@ -975,7 +1095,7 @@ impl ArtworkCache {
         let mut pending = false;
         let built = match self.entries.get_or_build(&(), key.clone(), || {
             match resolver.resolve(&key.0, key.1) {
-                Resolved::Done(artwork) => Some(CachedArtwork(artwork)),
+                Resolved::Done(artwork) => Some(CachedArtwork::new(artwork, &key.0)),
                 Resolved::Pending => {
                     pending = true;
                     None
@@ -984,9 +1104,9 @@ impl ArtworkCache {
         }) {
             Some(Served::Uncached(artwork)) => {
                 resolver.declined(&key.0, key.1);
-                Slot::Uncached(artwork.0)
+                Slot::Uncached(artwork.artwork)
             }
-            Some(served) if served.surface().is_some() => Slot::Served,
+            Some(served) if served.artwork().is_some() => Slot::Served,
             _ => Slot::Empty,
         };
         if pending {
@@ -1001,9 +1121,16 @@ impl ArtworkCache {
     /// Returning the admitted value directly would tie the borrow to the
     /// `&mut` build call, so the read-back is how a surface leaves as a shared
     /// borrow the caller can hold while drawing.
-    fn borrow_slot(&self, key: &(ArtworkKey, u32)) -> Option<&Surface> {
-        self.entries.peek(&(), key).and_then(CachedArtwork::surface)
+    fn borrow_slot(&self, key: &(ArtworkKey, u32)) -> Option<&Artwork> {
+        self.entries.peek(&(), key).and_then(CachedArtwork::artwork)
     }
+}
+
+/// Where the picture a request resolved to is retained, and whether it is a
+/// glyph mask the drawing control tints.
+struct ServedPicture {
+    key: (ArtworkKey, u32),
+    mask: bool,
 }
 
 /// Read, rasterise, and verify whatever one cache slot names (the cache-miss
@@ -1019,49 +1146,67 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
     rasteriser: &mut D,
     key: &ArtworkKey,
     side: u32,
-) -> Option<Surface> {
+) -> Option<Artwork> {
     match key {
-        ArtworkKey::Asset(path) => render_icon(reader, rasteriser, path, side),
+        ArtworkKey::Asset(path) => render_icon(reader, rasteriser, path, side).map(Artwork::new),
         ArtworkKey::Bundle(dir) => {
             let path = bundle_icon_path(reader, dir)?;
-            render_icon(reader, rasteriser, &path, side)
+            render_icon(reader, rasteriser, &path, side).map(Artwork::new)
         }
         ArtworkKey::Program { name, home } => program_bundles(name, home.as_deref())
             .into_iter()
             .find_map(|dir| bundle_icon_path(reader, &dir))
-            .and_then(|path| render_icon(reader, rasteriser, &path, side)),
+            .and_then(|path| render_icon(reader, rasteriser, &path, side))
+            .map(Artwork::new),
         // Built-in art is first-party and compiled into this binary, so the
-        // cache rasterises it in place and no resolver is ever handed one.
-        ArtworkKey::Builtin(kind) => builtin_picture(*kind, side),
-        ArtworkKey::Folder(sample) => folder_picture(reader, rasteriser, *sample, side),
+        // cache rasterises it in place and no resolver is ever handed one;
+        // a shadow is cast in place from a picture already retained.
+        ArtworkKey::Builtin(kind) => builtin_picture(*kind, side).map(Artwork::new),
+        ArtworkKey::Shadow { .. } => None,
+        ArtworkKey::Folder(sample) => {
+            folder_picture(reader, rasteriser, sample, side).map(Artwork::new)
+        }
         ArtworkKey::Thumbnail(thumbnail) => render_thumbnail(reader, rasteriser, thumbnail, side),
     }
 }
 
-/// A folder's picture of `sample` at `side` pixels: its back, a card for each
-/// kind standing in its mouth, and its front over them. `None` where the
-/// back or front will not draw, or the cards would be too small to read, so
-/// the request falls to the plain filled folder.
+/// A folder's picture of `sample` at `side` pixels: its back, its cards fanned
+/// out of its mouth, and its front over them. `None` where the back or front
+/// will not draw, or the cards would be too small to read, so the request
+/// falls to the plain filled folder.
+///
+/// A picture card prints the member's own picture, decoded at the folder's
+/// side so the decode is the one the member's own tile asks for; a member
+/// that will not decode draws its kind's card instead.
 fn folder_picture<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
     reader: &mut R,
     rasteriser: &mut D,
-    sample: FolderSample,
+    sample: &FolderSample,
     side: u32,
 ) -> Option<Surface> {
     if side < MIN_COMPOSITE_SIDE {
         return None;
     }
-    let mut part = |kind: IconKind, side: u32| {
+    let part = |reader: &mut R, rasteriser: &mut D, kind: IconKind, side: u32| {
         render_icon(reader, rasteriser, &icon_artwork_path(kind), side)
             .or_else(|| render_icon(reader, rasteriser, &icon_vector_path(kind), side))
     };
-    let back = part(IconKind::FolderBack, side)?;
-    let front = part(IconKind::FolderFront, side)?;
+    let back = part(reader, rasteriser, IconKind::FolderBack, side)?;
+    let front = part(reader, rasteriser, IconKind::FolderFront, side)?;
     let mut picture = Surface::new(side, side)?;
     picture.blit(0, 0, &back);
-    for ((x, y, card_side), kind) in card_slots(sample, side) {
-        let card = part(kind, card_side).or_else(|| paper_card(kind, card_side))?;
-        picture.blit(x, y, &card);
+    for (place, card) in card_slots(sample, side) {
+        let printed = card.picture().and_then(|thumbnail| {
+            let artwork = render_thumbnail(reader, rasteriser, thumbnail, side)?;
+            print_card(artwork.surface(), artwork.frame()?, place.side)
+        });
+        let drawn = if let Some(print) = printed {
+            print
+        } else {
+            let kind = card.kind();
+            part(reader, rasteriser, kind, place.side).or_else(|| paper_card(kind, place.side))?
+        };
+        picture.blit_transformed(&drawn, place.transform());
     }
     picture.blit(0, 0, &front);
     Some(picture)
@@ -1189,6 +1334,15 @@ impl<'a> IconArtworkSource<'a> {
 impl IconArtwork for IconArtworkSource<'_> {
     fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>> {
         self.cache.artwork(self.resolver, request, side)
+    }
+
+    fn shadowed(
+        &mut self,
+        request: IconRequest<'_>,
+        side: u32,
+        shadow: Option<ShadowCast>,
+    ) -> Option<IconPicture<'_>> {
+        self.cache.shadowed(self.resolver, request, side, shadow)
     }
 }
 

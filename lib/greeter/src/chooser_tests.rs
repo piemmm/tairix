@@ -468,9 +468,21 @@ fn the_painted_tile_is_the_rectangle_the_pointer_is_tested_against() {
             tile.origin.x + i32::try_from(tile.width / 2).expect("a small tile"),
             tile.origin.y + i32::try_from(tile.height / 2).expect("a small tile"),
         );
-        assert_eq!(chooser.hit(middle, SCREEN, Scale::ONE), Some(slot));
+        assert_eq!(
+            chooser.hit(middle, SCREEN, Scale::ONE, &theme()),
+            Some(slot)
+        );
+        let corner = Point::new(tile.origin.x + 1, tile.origin.y + 1);
+        assert_eq!(
+            chooser.hit(corner, SCREEN, Scale::ONE, &theme()),
+            None,
+            "the ground around a tile's disc and name is no tile"
+        );
     }
-    assert_eq!(chooser.hit(Point::new(1, 1), SCREEN, Scale::ONE), None);
+    assert_eq!(
+        chooser.hit(Point::new(1, 1), SCREEN, Scale::ONE, &theme()),
+        None
+    );
 }
 
 /// The whole round trip on a grid that has wrapped into two rows: every

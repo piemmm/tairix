@@ -60,13 +60,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::render::{grid_metrics, grid_tile, TILE_LAYOUT};
+use tairix_browse::render::{entry_body, grid_metrics, grid_tile, TILE_LAYOUT};
 use tairix_browse::{
     applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
     DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, LinkTarget, Listing,
     NewEntry, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
+use tairix_controls::IconTile;
 use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest, Landed};
 use tairix_proglib::{Catalog, EntryId};
@@ -823,6 +824,7 @@ impl<S: DirectorySource> Desktop<S> {
         artwork: &mut dyn IconArtwork,
         area: Rect,
     ) {
+        let shadow = IconTile::shadow_cast(scale, theme);
         self.visit_icons(
             layout,
             scale,
@@ -830,7 +832,7 @@ impl<S: DirectorySource> Desktop<S> {
             |bounds| !bounds.intersection(&area).is_empty(),
             |icon| {
                 let tile = grid_tile(icon.entry, self.icon_state(icon.index), icon.kind);
-                let art = artwork.artwork(icon.request, icon.side);
+                let art = artwork.shadowed(icon.request, icon.side, shadow);
                 tile.render(surface, icon.bounds, scale, theme, art);
             },
         );
@@ -871,6 +873,17 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
+    /// The icon whose tile's body — its picture and name, not the ground
+    /// around them — covers screen position `at`, through the shared grid
+    /// hit-test.
+    fn icon_at(&self, layout: &GridView, at: Point, scale: Scale, theme: &Theme) -> Option<usize> {
+        let index = layout.index_at(DESKTOP_SCROLL, at)?;
+        let cell = shown_whole(layout, index)?;
+        entry_body(self.entries.get(index)?, cell, scale, theme)?
+            .contains(at)
+            .then_some(index)
+    }
+
     /// The composed control state of the icon at `index`: selected, hovered,
     /// and — when the desktop holds the keyboard and this is the selection —
     /// focused.
@@ -894,8 +907,14 @@ impl<S: DirectorySource> Desktop<S> {
     /// The folder icon a drop at screen position `at` lands in, or `None`
     /// for the desktop's own folder.
     #[must_use]
-    pub fn drop_icon_at(&self, at: Point, layout: &GridView) -> Option<usize> {
-        index_at(layout, at).filter(|&index| {
+    pub fn drop_icon_at(
+        &self,
+        at: Point,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<usize> {
+        self.icon_at(layout, at, scale, theme).filter(|&index| {
             self.entries
                 .get(index)
                 .is_some_and(|entry| entry.kind().resolved() == Some(EntryKind::Directory))
@@ -933,8 +952,15 @@ impl<S: DirectorySource> Desktop<S> {
 
     /// Pointer motion to screen position `at`, which drives the hover
     /// highlight.
-    pub fn pointer_moved(&mut self, at: Point, layout: &GridView, damage: &mut Region) {
-        let hovered = index_at(layout, at);
+    pub fn pointer_moved(
+        &mut self,
+        at: Point,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let hovered = self.icon_at(layout, at, scale, theme);
         if self.hovered != hovered {
             Self::mark_cell(layout, self.hovered, damage);
             Self::mark_cell(layout, hovered, damage);
@@ -946,11 +972,15 @@ impl<S: DirectorySource> Desktop<S> {
     ///
     /// A press on an icon selects it and arms the double-click engine, so a
     /// second press on the same icon within the shared window activates it. A
-    /// press on empty desktop clears the selection.
+    /// press on empty desktop — the ground around an icon's picture and name
+    /// included — clears the selection.
+    #[allow(clippy::too_many_arguments)] // The press, the field it lands on, and the round's report.
     pub fn press(
         &mut self,
         at: Point,
         layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
         now_ns: u64,
         apps: &[AppAssociation],
         damage: &mut Region,
@@ -960,7 +990,7 @@ impl<S: DirectorySource> Desktop<S> {
         // selection or merely claims focus.
         self.focused = true;
         Self::mark_cell(layout, self.selected, damage);
-        let Some(index) = index_at(layout, at) else {
+        let Some(index) = self.icon_at(layout, at, scale, theme) else {
             self.selected = None;
             return DesktopOutcome::ignored();
         };
@@ -993,8 +1023,15 @@ impl<S: DirectorySource> Desktop<S> {
     /// It names no [`DesktopAction`]: the menu is the seat's one chain, opened
     /// by the embedder that owns it, so the desktop model describes the rows
     /// and never asks for a surface.
-    pub fn context_press(&mut self, at: Point, layout: &GridView, damage: &mut Region) -> bool {
-        let on_icon = index_at(layout, at);
+    pub fn context_press(
+        &mut self,
+        at: Point,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        let on_icon = self.icon_at(layout, at, scale, theme);
         if let Some(index) = on_icon {
             if self.selected != Some(index) {
                 Self::mark_cell(layout, self.selected, damage);
@@ -1306,12 +1343,6 @@ fn bundle_label(name: &str) -> String {
     name.strip_suffix(tairix_abi::BUNDLE_SUFFIX)
         .unwrap_or(name)
         .to_string()
-}
-
-/// The icon at screen position `at`, through the shared grid hit-test.
-fn index_at(layout: &GridView, at: Point) -> Option<usize> {
-    let index = layout.index_at(DESKTOP_SCROLL, at)?;
-    shown_whole(layout, index).map(|_| index)
 }
 
 /// Where the icon at `index` shows on screen, when the field shows it whole.

@@ -54,6 +54,8 @@ pub mod desk;
 pub mod folder;
 pub mod glyph;
 pub mod load;
+pub mod picture;
+pub mod store;
 pub mod svg;
 mod symbol;
 pub mod thumbnail;
@@ -66,15 +68,17 @@ pub use account::{monogram_disc, monogram_of, FALLBACK_MONOGRAM};
 pub use artwork::{
     artwork_cache, artwork_kind_for_file, builtin_picture, glyph_mask, icon_artwork_path,
     icon_vector_path, render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser,
-    ArtworkReader, ArtworkResolver, CachedArtwork, IconArtwork, IconArtworkSource, IconPicture,
-    IconRequest, InlineArtwork, NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES,
-    GRAPHICS_DIR, ICONS_DIR, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
+    ArtworkReader, ArtworkResolver, CachedArtwork, IconArtwork, IconArtworkSource, IconRequest,
+    InlineArtwork, NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR,
+    ICONS_DIR, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
 pub use badge::BadgeHue;
 pub use desk::{ArtworkDesk, ArtworkJob, Delivered, Landed};
-pub use folder::FolderSample;
+pub use folder::{DrawnCard, FolderSample, SampleCard};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
+pub use picture::{Artwork, CastShadow, Fitted, IconPicture};
+pub use store::{StoreFile, StoreKey, ThumbnailStore};
 pub use svg::decode as decode_svg;
 #[cfg(feature = "rt")]
 pub use thumbnail::RtDocument;

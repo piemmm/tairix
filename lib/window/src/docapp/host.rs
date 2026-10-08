@@ -48,7 +48,7 @@ use super::{DocumentView, Relayout, Request, ViewOutcome};
 use crate::app::{self, fail, report, RtWindowTransport, Wake, WindowPane};
 use crate::appbar::{declaration, declare_app_bar, is_quit, QUIT_ROW};
 use crate::client::{
-    key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage,
+    key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage_list,
     scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Parked, Repaint, Target,
     WindowClient, WindowEvents,
 };
@@ -547,28 +547,19 @@ impl<A: DocumentApp> DocWindow<A> {
             owed
         };
         let mode = *self.pane.mode();
-        let Some(area) = present_damage(&mode, repaint, &self.damage) else {
+        let Some(parts) = present_damage_list(&mode, repaint, &self.damage) else {
             self.damage.clear();
             return Ok(());
         };
-        let whole = [Rect::new(0, 0, mode.width_px, mode.height_px)];
-        let parts = if repaint == Repaint::Reported && !self.damage.is_empty() {
-            self.damage.rects()
-        } else {
-            &whole
-        };
         let (view, layout, focused) = (&self.view, &self.layout, self.focused);
-        for part in parts {
-            let Some((x, y)) = part.surface_origin() else {
-                continue;
-            };
+        for part in parts.rects() {
             self.surface
-                .with_clip(x, y, part.width, part.height, |clipped| {
+                .with_clip(part.x, part.y, part.width_px, part.height_px, |clipped| {
                     render(clipped, view, layout, focused);
                 });
         }
         self.damage.clear();
-        self.pane.present(client, &self.surface, area)
+        self.pane.present_list(client, &self.surface, &parts)
     }
 }
 

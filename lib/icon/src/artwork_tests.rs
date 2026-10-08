@@ -22,11 +22,12 @@ use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 use super::{
     artwork_cache, artwork_kind_for_file, glyph_mask, icon_artwork_path, icon_vector_path,
     ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver,
-    IconArtwork, IconArtworkSource, IconPicture, IconRequest, InlineArtwork, NoArtwork, Resolved,
-    Surface, MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
+    IconArtwork, IconArtworkSource, IconRequest, InlineArtwork, NoArtwork, Resolved, Surface,
+    MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
+use crate::picture::{Artwork, IconPicture};
 use tairix_svg::font::NoFonts;
 
 /// A reader over an in-memory file table that counts every read, so a test
@@ -303,14 +304,14 @@ fn a_kind_with_no_class_master_is_remembered_as_having_none() {
     assert!(
         matches!(
             c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8),
-            Some(IconPicture::Mask(_))
+            Some(p) if p.is_mask()
         ),
         "neither class master resolved, so the built-in glyph answers"
     );
     assert_eq!(reader.reads, 2, "each class format was tried once");
     assert!(matches!(
         c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8),
-        Some(IconPicture::Mask(_))
+        Some(p) if p.is_mask()
     ));
     assert_eq!(reader.reads, 2, "both refusals were retained");
 }
@@ -869,7 +870,9 @@ impl ArtworkResolver for Deferring {
         self.asked.push((key.clone(), side));
         self.ready
             .remove(&(key.clone(), side))
-            .map_or(Resolved::Pending, Resolved::Done)
+            .map_or(Resolved::Pending, |art| {
+                Resolved::Done(art.map(Artwork::new))
+            })
     }
 
     fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
@@ -924,7 +927,7 @@ fn a_pending_tier_stops_the_walk_rather_than_falling_through() {
     let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
     assert!(matches!(
         c.artwork(&mut deferring, request, 8),
-        Some(IconPicture::Mask(_))
+        Some(p) if p.is_mask()
     ));
     assert_eq!(
         deferring.asked,
@@ -950,7 +953,7 @@ fn a_landed_refusal_advances_the_walk_one_tier_at_a_time() {
     assert!(
         matches!(
             c.artwork(&mut deferring, request, 8),
-            Some(IconPicture::Mask(_))
+            Some(p) if p.is_mask()
         ),
         "the own-icon tier refused, so the next tier is only now asked for"
     );
@@ -1072,7 +1075,7 @@ fn a_warm_up_skips_the_tiers_already_refused() {
     deferring.land(&raster, 8, None);
     assert!(matches!(
         c.artwork(&mut deferring, request, 8),
-        Some(IconPicture::Mask(_))
+        Some(p) if p.is_mask()
     ));
 
     deferring.warmed.clear();
@@ -1242,7 +1245,7 @@ fn a_glyph_is_resolved_once_however_many_times_it_is_drawn() {
     let request = IconRequest::kind(IconKind::Refresh);
 
     let first = c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 18);
-    let Some(IconPicture::Mask(mask)) = first else {
+    let Some(mask) = first.filter(|p| p.is_mask()).map(IconPicture::surface) else {
         panic!("the glyph tier always resolves");
     };
     assert_eq!(mask.width(), 18);
@@ -1254,7 +1257,7 @@ fn a_glyph_is_resolved_once_however_many_times_it_is_drawn() {
     for _ in 0..99 {
         assert!(matches!(
             c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 18),
-            Some(IconPicture::Mask(_))
+            Some(p) if p.is_mask()
         ));
     }
     assert_eq!(
@@ -1263,8 +1266,10 @@ fn a_glyph_is_resolved_once_however_many_times_it_is_drawn() {
     );
 
     // A different pixel side is a different picture, so it resolves on its own.
-    let Some(IconPicture::Mask(other)) =
-        c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 24)
+    let Some(other) = c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 24)
+        .filter(|p| p.is_mask())
+        .map(IconPicture::surface)
     else {
         panic!("the glyph tier always resolves at any side");
     };
@@ -1280,8 +1285,9 @@ fn a_badge_is_retained_ready_coloured() {
     let mut ras = SquareRasteriser;
     let request = IconRequest::kind(IconKind::Display);
 
-    let Some(IconPicture::Artwork(badge)) =
-        c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 22)
+    let Some(badge) = c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 22)
+        .and_then(IconPicture::artwork)
     else {
         panic!("a category's built-in picture is artwork, not a mask");
     };
@@ -1291,7 +1297,7 @@ fn a_badge_is_retained_ready_coloured() {
     for _ in 0..10 {
         assert!(matches!(
             c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 22),
-            Some(IconPicture::Artwork(_))
+            Some(p) if !p.is_mask()
         ));
     }
     assert_eq!(c.charged_bytes(), charged, "the badge is rasterised once");
@@ -1312,4 +1318,97 @@ fn one_glyph_mask_serves_every_tint() {
         .find(|pixel| pixel.a == 255)
         .expect("the glyph covers some pixel fully");
     assert_eq!((opaque.r, opaque.g, opaque.b), (255, 255, 255));
+}
+
+/// A shadow that cannot be cast is withheld for the draw and remembered
+/// nowhere, so the picture is asked about again rather than left unshadowed
+/// for the rest of the session.
+#[test]
+fn a_shadow_that_cannot_be_cast_is_withheld_and_not_remembered() {
+    use tairix_raster::ShadowCast;
+
+    let mut c = cache();
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::kind(IconKind::Refresh);
+    c.artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 18)
+        .expect("served");
+    let charged = c.charged_bytes();
+    let none = ShadowCast {
+        drop_x: 0,
+        drop_y: 1,
+        radius: 0,
+    };
+    let picture = c
+        .shadowed(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            request,
+            18,
+            Some(none),
+        )
+        .expect("served");
+    assert!(picture.shadow().is_none());
+    assert!(picture.shadow_withheld(), "the draw site casts none itself");
+    assert_eq!(c.charged_bytes(), charged, "no refusal is kept");
+}
+
+/// A shadowed picture is the same picture, casting the soft shadow its own
+/// coverage casts from where the cast says; the shadow is cast once and then
+/// served from the cache, so a frame composites a mask and never blurs.
+#[test]
+fn a_shadow_is_cast_once_from_the_served_picture_and_retained() {
+    use tairix_raster::ShadowCast;
+
+    let mut c = cache();
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::kind(IconKind::Refresh);
+    let cast = ShadowCast {
+        drop_x: 0,
+        drop_y: 1,
+        radius: 1,
+    };
+
+    let picture = c
+        .shadowed(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            request,
+            18,
+            Some(cast),
+        )
+        .expect("the glyph tier always resolves");
+    assert!(picture.is_mask());
+    let shadow = picture.shadow().expect("the picture casts a shadow");
+    let (x, y) = cast.origin();
+    assert_eq!((shadow.offset.x, shadow.offset.y), (x, y));
+    assert_eq!(shadow.mask.width(), 18 + 2 * cast.reach());
+    let charged = c.charged_bytes();
+
+    for _ in 0..10 {
+        let again = c
+            .shadowed(
+                &mut InlineArtwork::new(&mut reader, &mut ras),
+                request,
+                18,
+                Some(cast),
+            )
+            .expect("served again");
+        assert!(again.shadow().is_some());
+    }
+    assert_eq!(c.charged_bytes(), charged, "the shadow is cast once");
+
+    // The unshadowed lookups of the same request carry no shadow.
+    let plain = c
+        .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 18)
+        .expect("served");
+    assert!(plain.shadow().is_none());
+    let uncast = c
+        .shadowed(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            request,
+            18,
+            None,
+        )
+        .expect("served");
+    assert!(uncast.shadow().is_none());
 }

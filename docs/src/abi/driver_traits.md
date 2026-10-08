@@ -353,10 +353,13 @@ trait**, `FilesystemRead`, not an added method on the frozen one
 
 The surface is allocation-free: a `NodeId` is an opaque,
 implementation-minted token (`NodeId::NONE` is reserved), `NodeInfo`
-reports `{ kind, size, allocated }` — `allocated` being the bytes of
-on-disk storage the node's data really occupies, from the format's own
-allocation tracking (ext4 `i_blocks`, the clusters a FAT file's size needs
-or a FAT directory's chain, ARXFS mapped extents).
+reports `{ kind, nlink, size, allocated, times, content_gen }` —
+`allocated` being the bytes of on-disk storage the node's data really
+occupies, from the format's own allocation tracking (ext4 `i_blocks`, the
+clusters a FAT file's size needs or a FAT directory's chain, ARXFS mapped
+extents), and `content_gen` the version of the node's data, which the volume
+never hands out twice (`NodeInfo::NO_CONTENT_GEN`, `0`, where the format keeps
+none: ext4, FAT32 and ADFS).
 
 `read_dir` hands a visitor the directory's entries in order, each a
 `DirEntry { node, info, next_cursor }` with its name borrowed from the

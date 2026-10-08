@@ -226,7 +226,7 @@ mod render {
 
     use crate::atlas;
     use crate::client::{install_test_transport, set_glyph_cache};
-    use crate::font::{BitmapFont, TextLine, ELLIPSIS};
+    use crate::font::{BitmapFont, Cut, TextLine, ELLIPSIS};
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
 
     const WHITE: Color = Color::rgb(255, 255, 255);
@@ -671,6 +671,7 @@ mod render {
             text,
             start,
             elided: false,
+            tail: "",
         }
     }
 
@@ -1048,6 +1049,168 @@ mod render {
         }
     }
 
+    /// What a line cut in its middle draws: its head, whether the mark
+    /// follows, and the tail after the mark.
+    fn cut_drawn(line: TextLine<'_>) -> (&str, bool, &str) {
+        (line.text, line.elided, line.tail)
+    }
+
+    /// The width a cut line occupies: head, mark and tail.
+    fn cut_width(font: BitmapFont, line: TextLine<'_>) -> u32 {
+        drawn_width(font, drawn(line)) + font.text_width(line.tail)
+    }
+
+    /// The name cut a file name's tile asks for: its extension kept.
+    fn name_cut(name: &str) -> Cut {
+        Cut::Middle {
+            keep: name.len() - name.rfind('.').unwrap_or(name.len()),
+        }
+    }
+
+    #[test]
+    fn a_name_that_fits_its_lines_is_wrapped_and_never_cut() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let name = "verylongfilename.jpg";
+        let lines: Vec<_> = font
+            .wrap_with_cut(name, 14 * cell, 2, name_cut(name))
+            .map(cut_drawn)
+            .collect();
+        assert_eq!(
+            lines,
+            [("verylongfilena", false, ""), ("me.jpg", false, "")]
+        );
+    }
+
+    #[test]
+    fn a_name_that_outgrows_its_lines_is_cut_in_the_middle_keeping_its_extension() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        assert_eq!(font.text_width(ELLIPSIS), cell, "the mark is one cell here");
+        let name = "averyveryverylongfilename.jpg";
+        let lines: Vec<_> = font
+            .wrap_with_cut(name, 10 * cell, 2, name_cut(name))
+            .collect();
+        assert_eq!(cut_drawn(lines[0]), ("averyveryv", false, ""));
+        // Nine cells beside the mark: the tail takes half, four, which is
+        // exactly the extension, and the head the five left.
+        assert_eq!(cut_drawn(lines[1]), ("erylo", true, ".jpg"));
+        assert_eq!(cut_width(font, lines[1]), 10 * cell);
+
+        // One line: the whole name is cut, start and end kept.
+        let one: Vec<_> = font
+            .wrap_with_cut(
+                "verylongfilename.jpg",
+                14 * cell,
+                1,
+                name_cut("verylongfilename.jpg"),
+            )
+            .map(cut_drawn)
+            .collect();
+        assert_eq!(one, [("verylon", true, "me.jpg")]);
+    }
+
+    #[test]
+    fn an_extension_wider_than_half_the_line_takes_the_room_it_needs() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let name = "abcdefghijklmnop.mdown";
+        let line = font
+            .wrap_with_cut(name, 10 * cell, 1, name_cut(name))
+            .next()
+            .expect("a line");
+        assert_eq!(cut_drawn(line), ("abc", true, ".mdown"));
+        // An ending longer than the whole room keeps as much of the end as
+        // fits, and nothing of the start.
+        let name = "a.verylongextension";
+        let line = font
+            .wrap_with_cut(name, 6 * cell, 1, name_cut(name))
+            .next()
+            .expect("a line");
+        assert_eq!(cut_drawn(line), ("", true, "nsion"));
+    }
+
+    #[test]
+    fn a_middle_cut_in_a_proportional_face_keeps_a_prefix_and_a_suffix_within_the_width() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let name = "MMMMiiiiWWWWiiiiMMMM report.jpeg";
+        let full = font.text_width(name);
+        for width in [full / 4, full / 3, full / 2] {
+            let lines: Vec<_> = font.wrap_with_cut(name, width, 1, name_cut(name)).collect();
+            let [line] = lines.as_slice() else {
+                panic!("one line at {width}");
+            };
+            assert!(line.elided, "{width}: the name outgrows the line");
+            assert!(name.starts_with(line.text), "{line:?}");
+            assert!(name.ends_with(line.tail), "{line:?}");
+            assert!(
+                cut_width(font, *line) <= width,
+                "{line:?} overflows {width}"
+            );
+            let ending = line.tail.rsplit_once('.').map(|(_, extension)| extension);
+            assert!(ending == Some("jpeg") || font.text_width(".jpeg") > width / 2);
+        }
+    }
+
+    #[test]
+    fn a_middle_cut_that_drops_later_paragraphs_marks_the_end_instead() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        let lines: Vec<_> = font
+            .wrap_with_cut("first\nsecond.txt", 10 * cell, 1, Cut::Middle { keep: 4 })
+            .map(cut_drawn)
+            .collect();
+        assert_eq!(lines, [("first", true, "")]);
+    }
+
+    #[test]
+    fn a_box_narrower_than_the_mark_draws_no_cut_line() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let width = font.text_width(ELLIPSIS) - 1;
+        let lines: Vec<_> = font
+            .wrap_with_cut("a long name.txt", width, 1, Cut::Middle { keep: 4 })
+            .collect();
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn every_middle_cut_line_fits_its_width_and_locates_its_parts() {
+        install();
+        let font = BitmapFont::console();
+        let cell = font.cell_width();
+        for text in LAID_OUT_TEXTS {
+            for cells in 1..=10 {
+                for max_lines in 1..=3 {
+                    for keep in 0..=4 {
+                        let width = cells * cell;
+                        let lines: Vec<_> = font
+                            .wrap_with_cut(text, width, max_lines, Cut::Middle { keep })
+                            .collect();
+                        assert!(lines.len() <= max_lines, "{text:?} at {cells} cells");
+                        for (index, &laid) in lines.iter().enumerate() {
+                            assert!(cut_width(font, laid) <= width, "{laid:?} overflows");
+                            assert!(laid.tail.is_empty() || index + 1 == lines.len());
+                            assert!(laid.tail.is_empty() || laid.elided, "{laid:?}");
+                            assert_eq!(&text[laid.range()], laid.text, "{laid:?}");
+                            assert!(text.trim_end().ends_with(laid.tail), "{laid:?} in {text:?}");
+                            assert!(
+                                laid.tail.is_empty()
+                                    || laid.end() <= text.trim_end().len() - laid.tail.len(),
+                                "{laid:?}: head and tail overlap in {text:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn laid_out_lines_tile_the_text_they_came_from() {
         install();
@@ -1072,6 +1235,7 @@ mod render {
                     text: "",
                     start: 0,
                     elided: false,
+                    tail: "",
                 });
                 assert_eq!(last.end(), text.len());
                 assert!(
@@ -1103,7 +1267,8 @@ mod render {
             TextLine {
                 text: "",
                 start: 3,
-                elided: false
+                elided: false,
+                tail: "",
             }
         );
         // An empty buffer is one empty line: the caret still has a home.
@@ -1113,7 +1278,8 @@ mod render {
             [TextLine {
                 text: "",
                 start: 0,
-                elided: false
+                elided: false,
+                tail: "",
             }]
         );
     }
@@ -1134,7 +1300,8 @@ mod render {
             TextLine {
                 text: "c",
                 start: 2,
-                elided: false
+                elided: false,
+                tail: "",
             }
         );
     }

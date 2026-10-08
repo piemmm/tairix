@@ -94,6 +94,7 @@ impl FilesystemRead for MockFs {
                 size: 0,
                 allocated: 0,
                 times: MOCK_TIMES,
+                content_gen: 0,
             }),
             KERNEL => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -101,6 +102,7 @@ impl FilesystemRead for MockFs {
                 size: KERNEL_BODY.len() as u64,
                 allocated: KERNEL_BODY.len() as u64,
                 times: MOCK_TIMES,
+                content_gen: 0,
             }),
             README => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -108,6 +110,7 @@ impl FilesystemRead for MockFs {
                 size: README_BODY.len() as u64,
                 allocated: README_BODY.len() as u64,
                 times: MOCK_TIMES,
+                content_gen: 0,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -197,6 +200,7 @@ impl FilesystemRead for BadFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             DOCS => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -204,6 +208,7 @@ impl FilesystemRead for BadFs {
                 size: 3,
                 allocated: 3,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -244,6 +249,7 @@ impl FilesystemRead for BadFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             },
             next_cursor: 1,
         };
@@ -1084,6 +1090,7 @@ impl FilesystemRead for SecMockFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             SECRET_FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -1091,6 +1098,7 @@ impl FilesystemRead for SecMockFs {
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -1137,6 +1145,7 @@ impl FilesystemRead for SecMockFs {
                 size: SECRET_BODY.len() as u64,
                 allocated: SECRET_BODY.len() as u64,
                 times: NodeTimes::default(),
+                content_gen: 0,
             },
             next_cursor: 1,
         };
@@ -1451,6 +1460,7 @@ impl FilesystemRead for StuckCursorFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             })
         } else {
             Err(DriverError::NotFound)
@@ -1488,6 +1498,7 @@ impl FilesystemRead for StuckCursorFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             },
             next_cursor: cursor,
         };
@@ -1791,6 +1802,7 @@ impl FilesystemRead for NoLinksFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             DOCS => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -1798,6 +1810,7 @@ impl FilesystemRead for NoLinksFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             _ => Err(DriverError::NotFound),
         }
@@ -2510,6 +2523,7 @@ impl FilesystemRead for RefusingFs {
             size: 0,
             allocated: 0,
             times: MOCK_TIMES,
+            content_gen: 0,
         })
     }
 

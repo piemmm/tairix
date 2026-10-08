@@ -9,13 +9,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::Errno;
 use tairix_geometry::Rect;
 use tairix_parallel::{JobRunner, Reversed, SERIAL};
 use tairix_raster::{Color, Pixel, Surface};
 
-use super::{decode, encode};
+use super::{decode, decode_list, encode};
 
 const WIDTH: u32 = 40;
 const HEIGHT: u32 = 24;
@@ -213,6 +213,62 @@ fn a_sub_rectangle_touches_nothing_outside_itself() {
             assert_eq!(target.get(x, y), Some(want), "at ({x}, {y})");
         }
     }
+}
+
+/// A list converts each of its rectangles and reports what each changed; one
+/// refused anywhere in it writes none of the others, so a hostile present
+/// never half-converts a window.
+#[test]
+fn a_list_converts_each_part_and_refused_anywhere_writes_nothing() {
+    let mode = packed(DisplayFormat::Rgba8888);
+    let source = painted();
+    let mut frame = frame_for(&mode);
+    encode(&source, &mut frame, &mode, whole(), &splitting()).expect("encode");
+    let first = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 2,
+    };
+    let second = DamageRect {
+        x: 6,
+        y: 3,
+        width_px: 2,
+        height_px: 2,
+    };
+    let mut target = blank();
+    let mut reported = Vec::new();
+    let both = DamageList::new(&[first, second]).expect("a list");
+    decode_list(&frame, &mut target, &mode, &both, &splitting(), |rect| {
+        reported.push(rect);
+    })
+    .expect("decode");
+    assert_eq!(reported, [Rect::new(0, 0, 4, 2), Rect::new(6, 3, 2, 2)]);
+
+    let past = DamageRect {
+        x: 0,
+        y: HEIGHT - 1,
+        width_px: WIDTH,
+        height_px: 2,
+    };
+    let refused = DamageList::new(&[first, past]).expect("a list");
+    let mut untouched = blank();
+    reported.clear();
+    assert_eq!(
+        decode_list(
+            &frame,
+            &mut untouched,
+            &mode,
+            &refused,
+            &splitting(),
+            |rect| {
+                reported.push(rect);
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(untouched.pixels(), blank().pixels(), "nothing was written");
+    assert!(reported.is_empty());
 }
 
 /// Every refusal shape, asserted to leave the target exactly as it was: a

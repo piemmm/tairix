@@ -115,6 +115,37 @@ impl Accelerator {
     }
 }
 
+/// A change to the listing's selection as a whole, which a key or the context
+/// menu asks for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SelectionVerb {
+    /// Select every entry the listing holds.
+    All,
+    /// Drop the whole selection.
+    Clear,
+}
+
+impl SelectionVerb {
+    /// The verb `key` asks for: `Ctrl+A` selects every entry and `Ctrl+Shift+A`
+    /// clears the selection. Either case of the letter is accepted, since
+    /// `Shift` may deliver it upper-case.
+    #[must_use]
+    pub fn of_key(key: KeyValue, modifiers: Modifiers) -> Option<Self> {
+        match key {
+            KeyValue::Char(ch)
+                if modifiers.ctrl && !modifiers.alt && ch.eq_ignore_ascii_case(&'a') =>
+            {
+                Some(if modifiers.shift {
+                    Self::Clear
+                } else {
+                    Self::All
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "chrome_tests.rs"]
 mod tests;

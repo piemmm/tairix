@@ -24,10 +24,10 @@
 //! of the box that spans them.
 
 use tairix_abi::display_ipc::{
-    decode_mode_reply, DamageList, DisplayRequest, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
+    decode_mode_reply, DisplayRequest, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
 };
 use tairix_abi::driver::display::{
-    DamageRect, Display, DisplayMode, DisplayPower, MAX_DAMAGE_RECTS,
+    DamageList, DamageRect, Display, DisplayMode, DisplayPower, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{DriverError, Errno};

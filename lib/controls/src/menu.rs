@@ -570,7 +570,7 @@ impl MenuItem {
                     (cursor, iy, icon_slot),
                     IconKind::AppBundle,
                     Color::from(label_color),
-                    Some(IconPicture::Artwork(art)),
+                    Some(IconPicture::coloured(art)),
                     FULL_COLOUR,
                 ),
                 (None, Some(kind)) => {

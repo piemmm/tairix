@@ -2968,6 +2968,7 @@ impl<B: Block> Ext4<B> {
             size,
             allocated,
             times: inode.times,
+            content_gen: NodeInfo::NO_CONTENT_GEN,
         })
     }
 }

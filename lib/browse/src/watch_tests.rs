@@ -73,6 +73,7 @@ fn record(name: &[u8]) -> DirEntry<'_> {
         id: FileId::NONE,
         nlink: 1,
         name,
+        content_gen: 0,
     }
 }
 
@@ -230,7 +231,7 @@ fn a_changed_folder_keeps_its_occupancy_until_probed_again() {
     let probed = browser.entries()[1].occupancy();
     assert_eq!(
         probed,
-        Occupancy::NonEmpty(tairix_icon::FolderSample::default())
+        &Occupancy::NonEmpty(tairix_icon::FolderSample::default())
     );
     let mut fresh = Entry::directory("src");
     fresh = Entry::new(
@@ -245,7 +246,7 @@ fn a_changed_folder_keeps_its_occupancy_until_probed_again() {
     let src = &browser.entries()[1];
     assert_eq!(
         src.occupancy(),
-        Occupancy::NonEmpty(tairix_icon::FolderSample::default()),
+        &Occupancy::NonEmpty(tairix_icon::FolderSample::default()),
         "no blink back to plain"
     );
     assert!(src.needs_occupancy_probe(), "but it is asked again");

@@ -237,9 +237,22 @@ pub struct NodeInfo {
     /// stamp the format does not keep is [`Time64::UNIX_EPOCH`] (ARXFS, for
     /// instance, tracks no access time), never a fabricated wall time.
     pub times: NodeTimes,
+    /// The node's content generation: a value the volume assigns to each
+    /// version of the node's data and never hands out twice — not after a
+    /// crash, and not after a fall-back to an older committed root — so the
+    /// node's identity and this name exactly one version of its content.
+    /// Metadata changes leave it alone and no caller can set it.
+    ///
+    /// [`Self::NO_CONTENT_GEN`] where the format keeps none (ext4, FAT32,
+    /// ADFS), and a consumer then treats no value as exact.
+    pub content_gen: u64,
 }
 
 impl NodeInfo {
+    /// The [`content_gen`](Self::content_gen) a format that keeps none
+    /// reports: no version of any content is ever named by it.
+    pub const NO_CONTENT_GEN: u64 = 0;
+
     /// The [`nlink`](Self::nlink) a format that records no per-node name
     /// count reports.
     ///
@@ -1315,6 +1328,7 @@ mod tests {
                     size: 0,
                     allocated: 0,
                     times: NodeTimes::default(),
+                    content_gen: 0,
                 })
             } else if node == FILE {
                 Ok(NodeInfo {
@@ -1323,6 +1337,7 @@ mod tests {
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),
+                    content_gen: 0,
                 })
             } else {
                 Err(DriverError::NotFound)
@@ -1381,6 +1396,7 @@ mod tests {
                     size: FILE_BODY.len() as u64,
                     allocated: FILE_BODY.len() as u64,
                     times: NodeTimes::default(),
+                    content_gen: 0,
                 },
                 next_cursor: 1,
             };

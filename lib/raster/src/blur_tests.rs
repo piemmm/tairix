@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::{
-    box_blur, box_blur_coverage, soften_coverage, BlurScratch, Frosting, Reciprocal,
-    RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
+    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Frosting, Reciprocal,
+    ShadowCast, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
 };
 use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
 use crate::dither::DitherRow;
@@ -1602,4 +1602,46 @@ fn the_backdrop_is_read_from_the_destination_wherever_it_holds_it() {
             );
         }
     }
+}
+
+/// A shadow is the picture's coverage dropped and softened: its mask reaches
+/// the cast's reach past the dropped picture on every side and nothing above
+/// a shadow that falls down, and it is densest under the picture's middle.
+#[test]
+fn a_cast_shadow_is_the_pictures_coverage_dropped_and_softened() {
+    let mut picture = Surface::new(8, 8).expect("a picture");
+    picture.fill(crate::color::Color::rgb(255, 0, 0));
+    let cast = ShadowCast {
+        drop_x: 0,
+        drop_y: 1,
+        radius: 1,
+    };
+    let (mask, (left, top)) = cast_shadow(&picture, cast).expect("a shadow");
+    // Reach 3: three columns either side, two rows above (the drop eats one)
+    // and the drop plus the reach below.
+    assert_eq!(cast.reach(), 3);
+    assert_eq!((left, top), (-3, -2));
+    assert_eq!((mask.width(), mask.height()), (14, 14));
+    let middle = mask
+        .get(mask.width() / 2, mask.height() / 2)
+        .expect("in the mask");
+    assert_eq!(
+        middle.a, 255,
+        "solid coverage stays solid under the picture"
+    );
+    let corner = mask.get(0, 0).expect("in the mask");
+    assert!(
+        corner.a < 16,
+        "the falloff reaches nothing at the corner: {corner:?}"
+    );
+    for pixel in mask.pixels() {
+        assert!(pixel.r == pixel.a && pixel.g == pixel.a && pixel.b == pixel.a);
+    }
+}
+
+/// A cast that softens nothing casts nothing.
+#[test]
+fn a_cast_of_no_radius_casts_no_shadow() {
+    let picture = Surface::new(4, 4).expect("a picture");
+    assert!(cast_shadow(&picture, ShadowCast::default()).is_none());
 }

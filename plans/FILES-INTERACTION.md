@@ -5,14 +5,20 @@ shared engine (`lib/browse`) gains the interaction a desktop file manager is
 judged by: marquee and modifier selection, drag-and-drop between its windows
 and onto the desktop, a New ▸ submenu, one window per folder, and icons that
 show what a folder holds and what a picture looks like. Its type and tiles are
-tightened, and the user's home gains a `UserFiles` tree.
+tightened, and the user's home gains a `UserFiles` tree. Names keep their
+extension over two lines, a selected name renames in place when clicked, a
+folder's icon fans out the files inside it, tiles leave real ground between
+them, icons cast soft shadows, the marquee keeps up with the pointer, and
+thumbnails persist across sessions on volumes that can say exactly when a
+file's content changed.
 
 Read first: `plans/NEW-FILEMANAGER.md` (the engine/app split this keeps: every
 model in `lib/browse`, the app only wires and paints, and the window never
 waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 `plans/ICONS.md` (asset tiers and the sandboxed decode cache),
-`plans/USERS.md` (the home shape), `plans/POINTING.md`, and
-`docs/src/desktop/apps.md` (the launch funnel and open-target queue).
+`plans/USERS.md` (the home shape), `plans/POINTING.md`,
+`docs/src/desktop/apps.md` (the launch funnel and open-target queue),
+`docs/src/filesystem/arxfs-spec.md` and `plans/APPDATA.md` (FI24, FI25).
 
 ## Ledger
 
@@ -33,6 +39,16 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI13 | The resumable listing: `fs_readdir` reads a directory a batch at a time under the POSIX stream contract (closes D674) | done |
 | FI14 | Reduced decodes: every format `decode_fitted` reads decodes into its box with memory bounded by the output (closes D598) | done |
 | FI15 | A lossy WEBP's fitted decode reconstructs a macroblock row at a time, holding no whole plane | done |
+| FI16 | A tile's name is the whole name over two lines, cut in its middle when it outgrows them so its extension always shows | done |
+| FI17 | Clicking the name of the one selected item renames it in place once the click can no longer be a double-click | done |
+| FI18 | A folder's icon fans out the files inside it: photos as their own pictures, other files as their kind, repeated as the folder holds them | done |
+| FI19 | The marquee keeps up: input drained before a paint, each damaged rectangle painted alone, and a window present carrying a rectangle list | done |
+| FI20 | A tile's body is its picture and its name: the press target and the plate hug it, and the cell around it is ground a band starts on | done |
+| FI21 | Select All (`Ctrl+A`) and Clear Selection (`Ctrl+Shift+A`) in the window's menu | done |
+| FI22 | A thumbnail is framed by a one-pixel line around the picture's own bounds | done |
+| FI23 | Every icon a tile draws casts a small soft shadow, cast once per picture and retained | done |
+| FI24 | ARXFS keeps a per-file content generation, reported by `fs_stat` and every directory record | done |
+| FI25 | Thumbnails persist in the file manager's own store, keyed by content generation, so a picture is decoded once per version | done |
 
 ## FI1 — item names one point smaller
 
@@ -380,11 +396,273 @@ macroblock state, and the result is pinned bit-identical to the whole-frame
 decode over drawn keyframes under every filter (`vp8_tests.rs`); no pinned
 frame yet uses segments or filter deltas (`plans/OPEN-DEFECTS.md` D803).
 
+## FI16 — a name keeps its extension
+
+A tile names its entry exactly as the volume holds it; nothing is ever
+stripped. What lost the extension was the cut: one line, elided at its end.
+
+- `render::TILE_LAYOUT` reserves two name lines, in the manager's grid and on
+  the desktop, and the cell grows by one line.
+- `BitmapFont::wrap_with_cut(text, width, lines, cut)` breaks as
+  `wrap_to_width` does — at whitespace, mid-word when a word outgrows the line —
+  and with `Cut::Middle { keep }`, when the name outgrows its lines, cuts the
+  **last** line in its middle: that line's start, the mark, and the name's end.
+  The end takes half the room, or the width of the name's last `keep` bytes
+  when that is more, so the extension survives whatever is cut. A line is
+  `TextLine { text, elided, tail }`; the mark sits between `text` and `tail`,
+  and `tail` is empty for every line `Cut::End` lays out.
+- `IconTile::with_name_cut(cut)` asks for that cut; `render::name_cut` keeps
+  whatever ends the name — the extension after its last dot, or the file type
+  after its last comma — from the one `Ending` parse the registry classifies
+  with. Every other tile and text block keeps the end cut.
+
+## FI17 — click a selected name to rename it
+
+- A primary press on the **name** of the entry that was already the one
+  selected entry — the grid tile's drawn name lines, the list row's name cell —
+  that is released without travelling past the drag slop arms a rename. It
+  opens once the desktop's double-click interval has passed since the release:
+  the first moment the click can no longer pair into an activation. A second
+  press inside the interval is a double-click and activates.
+- Anything else disarms it: another press, a key, a scroll, a drag, a menu or
+  overlay opening, a navigation or a listing change that moves the entry, and
+  the window losing the keyboard. A press on a window that did not hold the
+  keyboard selects and never arms, so the click that brings a window forward
+  does not start editing.
+- The wait is a deadline folded into the loop's one parked wait beside the
+  marquee's step (`gesture::RenameArm`); there is no periodic timer.
+- A listing change carries an armed click with its entry
+  (`RenameArm::follow`), and a replaced listing lets it go. The rename opens
+  only on the entry still chosen alone, with nothing holding the listing.
+- The keyboard is tracked from the focus reports (`gesture::Keyboard`): the
+  session reports a window coming forward and then delivers the press that
+  brought it, so a press straight after a gain never arms. It reports every
+  move of the keyboard, not only a press's — a raise from the icon bar, a
+  popup, a closed window — reconciling what the apps were told with where the
+  keyboard rests after each routed seat outcome and each served request, so a
+  window that lost it knows before its next press.
+- A due rename is checked on every turn of the loop, the turn that serves a
+  running copy or delete included, and its opening repaints the entry and its
+  field, not the window.
+- Every way a rename opens — `F2`, the menu, New ▸, a click — selects the name's
+  **stem**, everything before its extension (`rename_selection`), so typing
+  replaces the name and keeps the extension. A name with no extension and a
+  folder are selected whole; a bundle selects its stem and keeps `.app`.
+- While the field is open a press inside it reaches the field (caret, drag
+  selection). A press outside it commits: a refused name keeps the field open
+  with its reason and the press is spent; an unchanged name closes the field
+  and the press then acts as it would have; an accepted one closes it and the
+  press is spent too, since the folder may have re-sorted under the pointer
+  (`gesture::RenameCommit`).
+
+## FI18 — a folder fans out what it holds
+
+- `FolderSample` holds up to three `SampleCard`s, each a member's kind or a
+  member **picture** (its `Thumbnail` key: path, identity, size, modification
+  time, content generation, reading). The probe keeps what each record of its
+  batch already carries, so no member is opened or statted to choose it. A
+  picture card is a regular file with an identity whose type has a reading,
+  exactly as `entry_icon` decides a tile's thumbnail.
+- **Variety first, then fill.** One card for each of the most frequent families
+  in turn; any cards left go round the families again, in the same order, while
+  a family has members not yet shown. Within a family, members come in the
+  batch's order. A folder of photos shows three of its photos; of text files,
+  three text cards; of photos and one PDF, two photos and the PDF; of one file,
+  one card.
+- The picture is the folder's back, the cards fanned — each turned a few degrees
+  about its foot so they rise out of the mouth as a spread — and the front. A
+  picture card is the member's thumbnail on a white print with a fixed-ink edge;
+  any other card is its kind's artwork, or its glyph on paper. A member that
+  will not decode draws its kind's card instead; only a back or front that will
+  not draw degrades the picture to the plain filled folder.
+- `Surface::blit_transformed` (`lib/raster`) is the one transformed blit: an
+  inverse-mapped bilinear sample of premultiplied pixels, clipped to the
+  destination, whose edges anti-alias against transparency.
+- A sample holding a picture reads member files, so it is thumbnail-class work:
+  queued apart, served after icons and probes, swept when nothing asks. Its
+  request carries the same sample with every picture card as its kind as the
+  next tier, and a thumbnail-class tier still being produced does not stop the
+  walk: the tile draws the tier below until the pictures land. The inline
+  resolver declines thumbnail-class keys, so a program with no worker draws the
+  kinds.
+- A card thumbnail comes from FI25's store when the member's tile-side picture
+  is held there (resampled to the card), and otherwise is decoded at the tile
+  side, stored, and resampled — so opening the folder later costs no decode.
+- One folder is one worker job, so it reads no more than one thumbnail may: a
+  member larger than a third of `MAX_THUMBNAIL_BYTES`
+  (`FolderSample::MAX_CARD_BYTES`) is drawn as its kind, and a document opened
+  meanwhile waits behind no more than a single picture would make it.
+- The cards are shared (`Arc<[SampleCard]>`): the listing entry, every cache key
+  naming the folder and its kinds-only view hold one copy, so a key costs no
+  allocation per frame, and a sample's equality is over its cards as drawn, so
+  a kinds-only view is the same picture as any sample drawing those kinds.
+- A cache key holding member paths is charged for them: an entry's metadata
+  charge is its key's real heap size beside the fixed bookkeeping.
+
+## FI19 — the marquee keeps up
+
+What made the band lag was the loop, not the sweep: every queued motion sample
+cost a whole paint and a blocking present, a burst left a backlog that stayed,
+and each paint redrew everything under the band because its edge damage was
+merged into the box spanning it.
+
+- The manager applies every queued event before it paints, up to one mailbox's
+  worth so a flood cannot hold the frame off. Each round's exact damage folds
+  into its window's `tairix_window::Owed` account — clipped to the window and
+  merged by least growth, so it stays bounded across any burst — and each
+  window that owes is painted and presented once a turn. The present is
+  synchronous, so it paces the window: input that arrives while one is in
+  flight is applied together by the next turn, and a burst costs one frame.
+  The turn that serves a running copy or delete drains the same way.
+- A turn paints each owed rectangle under its own clip, and the grid and list
+  skip, before composing it, every entry whose cell the clip excludes; the
+  rail, the toolbar and the scrollbar are skipped likewise for a rectangle
+  that misses them, so a part inside the listing composes only the listing.
+  A growing band costs its moving edges, not its area.
+- `WindowRequest::Present` carries a `DamageList`, the display protocol's one
+  definition: the frame encode, the session's decode and the compositor's
+  damage are each the rectangles rather than the box spanning them. A round
+  reporting more than `MAX_DAMAGE_RECTS` merges the pair whose union grows
+  least until the list fits, and any two that overlap merge, so a list's
+  rectangles are disjoint: one naming overlapping rectangles is refused at
+  decode, and the session checks every rectangle before converting any, so a
+  present converts each pixel at most once and a refused one writes nothing.
+
+## FI20 — ground between tiles
+
+- A tile's **body** is its picture and its name's drawn lines, each widened by a
+  half inset (`TileLayout::body_rect`): the press target, the hover and
+  selection plate, the drop-target outline, and what a marquee has to touch.
+  The rest of the cell is ground, so a press there clears the selection and
+  starts a band exactly as between cells, and a name drawn on one line leaves
+  the second line's space as ground too.
+- A hit-test stays arithmetic to the cell and then tests that one entry's body.
+  A band selects an entry whose body it touches: a cell whose picture it touches
+  is certain, a cell it misses entirely is not, and only the cells along its
+  edges are tested by body, so a sweep still visits only the entries entering
+  or leaving it.
+- Bodies never meet: the cell keeps an inset either side of the widest body,
+  and the grid keeps its gap between cells, so two half insets and a gap of
+  ground lie between tiles side by side, and at least a half inset and a gap
+  between rows, however the window is sized.
+- The desktop's icon field takes the same body.
+
+## FI21 — Select All and Clear Selection
+
+The context menu gains **Select All** (`Ctrl+A`) and **Clear Selection**
+(`Ctrl+Shift+A`) as a group after Paste. Select All is enabled while some entry
+is unselected; Clear Selection while anything is selected. Both accelerators
+work wherever the listing holds the keyboard, and the repaint is the entries
+whose mark changed.
+
+## FI22 — a thumbnail's frame
+
+A thumbnail is drawn with a one-pixel frame in the theme's `frame` role, so a
+picture whose edge matches the window's ground still reads as a picture. The
+frame follows the picture's own bounds, not the square it was centred in: the
+sandbox reply states the fitted rectangle, the host refuses one outside the
+square or empty, and the cache keeps it beside the pixels. The frame is drawn
+at paint time, so it follows a theme change; it lies on the picture's outermost
+pixels, so nothing is drawn outside the slot.
+
+## FI23 — icons cast shadows
+
+Every picture a grid tile draws — artwork, thumbnail, folder fanout, or glyph —
+casts a small soft shadow: its own coverage dropped below it and softened, in
+the theme's `drop_shadow` colour, reaching `icon_shadow_reach`
+(`IconTile::shadow_cast`). `tairix_raster::cast_shadow` is the one recipe for
+a shadow cast from a picture's coverage (the pointer's shadow is built from it
+too). The mask is cast once per (picture, side, cast) and retained as its own
+artwork-cache entry (`IconArtwork::shadowed`), so a frame blits a mask and
+never blurs; a tile asked to cast one (`IconTile::with_picture_shadow`) and
+handed no retained mask casts it from the picture it draws, so a cached and an
+uncached picture draw alike. Only a cast mask is kept: a shadow that cannot be
+cast or kept — memory short — is withheld for that draw
+(`IconPicture::shadow_withheld`), which the tile draws as no shadow rather
+than blurring itself, and asked for again on the next. The reach is less than the tile's inset, so a
+shadow never paints outside the cell and damage stays per cell. The greeter's
+account tiles and every other control draw none.
+
+## FI24 — the content generation
+
+- ARXFS gives every file and link a **content generation**: a new one with every
+  change to its data — creation, a write, a truncate or extend — and nothing else
+  moves it. Metadata (mode, owner, times, attributes, a rename, a second name)
+  leaves it alone, and no caller can set it.
+- It is drawn from one **volume-wide sequence** the transaction root carries,
+  not counted per inode: a crash can roll an inode back, and an inode number
+  handed out in a lost transaction can be handed out again, but a generation is
+  never repeated, so (volume, inode, generation) names one version of one file's
+  content.
+- The first data change of a mount advances the sequence by a stride (2³²) past
+  the committed value, commits, and flushes the slot before its operation
+  returns. Calls are exclusive, so no reader sees a generation of the mount
+  before the stride is on the medium; what a lost transaction or a fall-back to
+  an older ring slot can have handed out is bounded by the dirty-age window and
+  write-back cap, far below the stride. A mount that changes no file's data
+  writes nothing for it, and a write of no bytes or a truncate to the current
+  size changes no data.
+- It is minted by the call that changes the data, in the transaction that
+  persists the change, so a reader that sees the same generation before and
+  after reading read one version.
+- `NodeInfo::content_gen`, `FileStat::content_gen` and `DirEntry::content_gen`
+  report it (ARXFS format version 3); `0` means the volume keeps none (ext4,
+  FAT32, ADFS, covered mount points), and a consumer then treats no value as
+  exact.
+
+## FI25 — thumbnails that persist
+
+- **Exact or not at all.** Only a file whose listing reports a content
+  generation is stored; anything else decodes as before and lives in memory
+  only. A stored picture is keyed by (volume, inode, content generation,
+  reading), so a changed file is a different key and a stale picture cannot be
+  served.
+- **One side.** A blob holds pictures of one side: the grid tile's picture,
+  the only side the file manager draws a thumbnail at, and the side every
+  folder card is decoded at before it is resampled. It is laid out for the side
+  of a run's first thumbnail; after a scale change within a run, pictures
+  decode into memory as before, and the next run lays the blob out afresh at
+  the new side, since none it held fits.
+- **Nothing browsed is written.** The store is one blob in the file manager's
+  own bulk store (`Library/Apps/os.tairix.files/Blobs/thumbnails`), reachable
+  only by this application through the app-data service; another program, and
+  the account's own shell, cannot read or plant a picture in it.
+- **A hit is re-proven.** Serving a stored picture opens the file under the
+  user's own identity without following a link and compares its stamp —
+  identity, size, modification time, generation — with the key, exactly as a
+  fresh decode does, so a file the user can no longer open is never pictured.
+  No content is read.
+- **A fresh decode is stored only if it read one version**: the generation is
+  read again after the upload, and a decode that raced a write is drawn but not
+  kept.
+- **The decoder revision** the pictures were drawn by
+  (`tairix_sandbox::imagerender::THUMBNAIL_REVISION`) is in the header, so a
+  decoder or fitting change forgets every picture an earlier one drew, and a
+  blob shorter than its layout — another instance cut short mid-format — is
+  laid out afresh rather than adopted. A lookup reads into a fallible buffer:
+  short of memory, it misses.
+- **The format** is a header naming the side and slot count, a table of slot
+  headers, and the slots: a key hashes to a four-way set (a fixed seed, so the
+  next run finds it), a lookup reads that set's four headers and then one
+  payload, and an insert takes the key's own slot, an empty one, or the set's
+  oldest by insertion — a hit writes nothing. A slot's header carries a
+  checksum over itself and its payload and goes down after the payload, so a
+  torn write reads as an empty slot. The file is sized to the blob's extent
+  ceiling, written sparsely, and needs no scan at start; a header for another
+  side or version reformats it.
+- **No lock.** The store lives on the reader thread alone. A second instance
+  opens the same blob — a delegated descriptor takes no advisory lock — and
+  the slots are what make that safe: two instances writing one slot leave a
+  header and a payload that do not check out, which reads as empty, never as
+  the wrong picture.
+
 ## Sequencing
 
 FI1–FI3 are the type and tile change. FI7 precedes FI8 and FI9 (both build on
 the drawn multi-selection). FI5 precedes FI4. FI6 is independent. FI13 precedes
 FI11 and FI14 precedes FI12; FI12 builds on FI11's artwork-desk work.
+FI16 precedes FI20 (a body is measured from the laid-out name). FI24 precedes
+FI25, and FI25 precedes FI18, whose card thumbnails come from the store.
 
 ## Not in this plan
 

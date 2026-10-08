@@ -460,6 +460,20 @@ impl TextEditor {
         self.caret = self.text.len();
     }
 
+    /// Select `range` of the buffer, each end clamped to the text and drawn
+    /// back to a character boundary, the caret at its end.
+    fn select(&mut self, range: core::ops::Range<usize>) {
+        let floor = |at: usize| {
+            let mut at = at.min(self.text.len());
+            while !self.text.is_char_boundary(at) {
+                at -= 1;
+            }
+            at
+        };
+        self.anchor = floor(range.start);
+        self.caret = floor(range.end).max(self.anchor);
+    }
+
     /// Clear the buffer and reset the caret. Returns whether anything was
     /// removed.
     ///
@@ -1138,6 +1152,16 @@ impl TextField {
     #[must_use]
     pub fn with_text(mut self, text: impl AsRef<str>) -> Self {
         self.core.editor.set_text(text.as_ref());
+        self
+    }
+
+    /// This field with `range` of its text selected and the caret at the
+    /// range's end — a rename opening with a name's stem selected, so typing
+    /// replaces it and keeps its extension. Each end is clamped to the text
+    /// and drawn back to a character boundary.
+    #[must_use]
+    pub fn with_selection(mut self, range: core::ops::Range<usize>) -> Self {
+        self.core.editor.select(range);
         self
     }
 

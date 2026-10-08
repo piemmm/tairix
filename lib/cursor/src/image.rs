@@ -7,11 +7,8 @@
 //! hotspot where the artwork puts it.
 
 use tairix_geometry::Point;
-use tairix_raster::{
-    soften_coverage, Color, Pixel, Region, ResampleScratch, Surface, SOFTEN_PASSES,
-};
+use tairix_raster::{cast_shadow, Color, Region, ResampleScratch, ShadowCast, Surface};
 use tairix_reclaim::CachedBytes;
-use tairix_util::fallible;
 
 use crate::store::CURSOR_BASE_SIDE_PX;
 
@@ -87,13 +84,6 @@ impl CursorImage {
         self.surface.height()
     }
 
-    /// Row `ly` of the image, left to right, or `None` past its last row.
-    fn row(&self, ly: u32) -> Option<&[Pixel]> {
-        let width = usize::try_from(self.width()).ok()?;
-        let start = usize::try_from(ly).ok()?.checked_mul(width)?;
-        self.surface.pixels().get(start..start.checked_add(width)?)
-    }
-
     /// This image over the soft shadow it casts, or `None` when the memory
     /// for it cannot be had.
     ///
@@ -111,53 +101,15 @@ impl CursorImage {
                 (scaled + u64::from(CURSOR_BASE_SIDE_PX / 2)) / u64::from(CURSOR_BASE_SIDE_PX);
             u32::try_from(rounded).unwrap_or(u32::MAX).max(1)
         };
-        let (drop_x, drop_y) = (at_side(SHADOW_DROP_X), at_side(SHADOW_DROP_Y));
-        let radius = at_side(SHADOW_SOFTNESS);
-        let reach = radius.checked_mul(SOFTEN_PASSES)?;
-        let left = reach.saturating_sub(drop_x);
-        let top = reach.saturating_sub(drop_y);
-        let width = left
-            .checked_add(self.width())?
-            .checked_add(drop_x)?
-            .checked_add(reach)?;
-        let height = top
-            .checked_add(self.height())?
-            .checked_add(drop_y)?
-            .checked_add(reach)?;
-
-        let across = usize::try_from(width).ok()?;
-        let down = usize::try_from(height).ok()?;
-        let count = across.checked_mul(down)?;
-        let mut levels = fallible::filled(count, 0u8)?;
-        let mut aux = fallible::filled(count, 0u8)?;
-        let cast_x = usize::try_from(left.checked_add(drop_x)?).ok()?;
-        let cast_y = usize::try_from(top.checked_add(drop_y)?).ok()?;
-        for ly in 0..self.height() {
-            let (Some(source), Ok(row)) = (self.row(ly), usize::try_from(ly)) else {
-                return None;
-            };
-            let start = (cast_y + row) * across + cast_x;
-            let target = levels.get_mut(start..start + source.len())?;
-            for (level, pixel) in target.iter_mut().zip(source) {
-                *level = pixel.a;
-            }
-        }
-        soften_coverage(
-            &mut levels,
-            across,
-            down,
-            usize::try_from(radius).ok()?,
-            &mut aux,
-        );
-
-        let mut surface = Surface::new(width, height)?;
-        let ink = SHADOW_INK.premultiply();
-        for (pixel, level) in surface.pixels_mut().iter_mut().zip(&levels) {
-            *pixel = ink.scale_alpha(*level);
-        }
-        let (Ok(x), Ok(y)) = (i32::try_from(left), i32::try_from(top)) else {
-            return None;
+        let cast = ShadowCast {
+            drop_x: at_side(SHADOW_DROP_X),
+            drop_y: at_side(SHADOW_DROP_Y),
+            radius: at_side(SHADOW_SOFTNESS),
         };
+        let (mask, (left, top)) = cast_shadow(&self.surface, cast)?;
+        let mut surface = Surface::new(mask.width(), mask.height())?;
+        surface.blit_tinted(0, 0, &mask, SHADOW_INK);
+        let (x, y) = (left.checked_neg()?, top.checked_neg()?);
         surface.blit(x, y, &self.surface);
         Some(Self {
             surface,

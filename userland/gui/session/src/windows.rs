@@ -20,7 +20,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::{DesktopInfo, Motion};
-use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DisplayMode};
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation,
@@ -351,6 +351,19 @@ pub struct SessionWindows {
     /// the one the user is working in, which a window that only took the
     /// keyboard by opening is not.
     worked_in: Option<u64>,
+}
+
+/// The reports that move apps told the keyboard rests on `told` to where it
+/// rests `now`: the window that lost it learns first, then the one that gained
+/// it, and nothing when it has not moved.
+pub fn focus_reports(told: Option<u64>, now: Option<u64>) -> impl Iterator<Item = WindowEvent> {
+    let moved = told != now;
+    let report = move |window: Option<u64>, focused: bool| {
+        window
+            .filter(|_| moved)
+            .map(|window_id| WindowEvent::Focus { window_id, focused })
+    };
+    report(told, false).into_iter().chain(report(now, true))
 }
 
 impl SessionWindows {
@@ -1349,7 +1362,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         window_id: u64,
         surface: &DisplayMode,
         frame: &[u8],
-        damage: DamageRect,
+        damage: &DamageList,
     ) -> Result<(), Errno> {
         let Some(record) = self.windows.records.get(&window_id) else {
             return Err(Errno::NotFound);
@@ -1383,9 +1396,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             wm,
             surface.width_px,
             surface.height_px,
-            |content| match winframe::decode(frame, content, surface, damage, runner) {
-                Ok(changed) => (Ok(()), changed),
-                Err(err) => (Err(err), Rect::EMPTY),
+            |content, changed| {
+                winframe::decode_list(frame, content, surface, damage, runner, |rect| {
+                    changed.add(rect);
+                })
             },
         ) else {
             return Err(Errno::NotFound);
@@ -1963,14 +1977,14 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::window_ipc::{DocumentName, PreviewSubject};
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
     use tairix_wm::{InputEvent, PointerButton, ResizeEdge};
 
-    use crate::tests::{window_owner, RefusingRelay};
+    use crate::tests::{whole, window_owner, RefusingRelay};
     use alloc::string::String;
     use tairix_window::OpenEntry;
 
@@ -2301,7 +2315,7 @@ mod tests {
             let mut host = self.host();
             host.window_opened(owner, id, &m, "open", WindowSizing::default())
                 .expect("opens");
-            host.window_presented(id, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            host.window_presented(id, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
         }
 
@@ -2322,6 +2336,20 @@ mod tests {
     /// one from a window that has the keyboard but nothing from the user, or
     /// from an application with no window at all, still reaches the instance
     /// but brings nothing forward.
+    /// Apps hear the keyboard move the way it moved, lost before gained, and
+    /// hear nothing when it did not: a window raised from its slot takes it
+    /// from the one that had it, a press on the desktop takes it from all.
+    #[test]
+    fn the_keyboard_is_reported_lost_before_it_is_gained() {
+        let focus = |window_id, focused| WindowEvent::Focus { window_id, focused };
+        let reports = |told, now| super::focus_reports(told, now).collect::<Vec<_>>();
+        assert_eq!(reports(Some(1), Some(2)), [focus(1, false), focus(2, true)]);
+        assert_eq!(reports(None, Some(2)), [focus(2, true)]);
+        assert_eq!(reports(Some(1), None), [focus(1, false)]);
+        assert!(reports(Some(3), Some(3)).is_empty());
+        assert!(reports(None, None).is_empty());
+    }
+
     #[test]
     fn a_hand_over_lends_a_raise_only_from_the_window_the_user_works_in() {
         let mut bench = HandOverBench::with_resident();
@@ -2588,12 +2616,12 @@ mod tests {
                     1,
                     &m,
                     &frame,
-                    DamageRect {
+                    &one(DamageRect {
                         x: 2,
                         y: 1,
                         width_px: 1,
                         height_px: 1,
-                    },
+                    }),
                 )
                 .expect("presents");
             }
@@ -2683,7 +2711,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
+            host.window_presented(7, &m, &[0u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
         }
         let window = compositor.window(wm).expect("live");
@@ -2738,7 +2766,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], whole(&m))
+            host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
         }
         assert!(
@@ -2791,7 +2819,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
         }
         assert_eq!(shown(&mut windows), alloc::vec![1]);
@@ -2813,7 +2841,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents again");
         }
         assert_eq!(shown(&mut windows), Vec::<u64>::new());
@@ -2839,7 +2867,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("re-attached and presents");
         }
         assert_eq!(shown(&mut windows), alloc::vec![1]);
@@ -2878,7 +2906,7 @@ mod tests {
                 .expect("opens");
             host.window_opened(owner, 2, &m, "two", WindowSizing::default())
                 .expect("opens");
-            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
         }
         // Only the window that painted; its sibling is still awaited.
@@ -2898,7 +2926,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(2, &m, &[0u8; 4 * 4 * 4], whole(&m))
+            host.window_presented(2, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
         }
         assert_eq!(shown(&mut windows), alloc::vec![2]);
@@ -2935,7 +2963,7 @@ mod tests {
             for (id, title) in [(1, "one"), (2, "two")] {
                 host.window_opened(owner, id, &m, title, WindowSizing::default())
                     .expect("opens");
-                host.window_presented(id, &m, &[0u8; 4 * 4 * 4], whole(&m))
+                host.window_presented(id, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                     .expect("presents");
             }
             assert_eq!(
@@ -3064,19 +3092,14 @@ mod tests {
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
             // A frame shorter than the mode describes is refused.
-            assert!(host.window_presented(1, &m, &[0u8; 4], whole(&m)).is_err());
+            assert!(host.window_presented(1, &m, &[0u8; 4], &whole(&m)).is_err());
         }
         assert_eq!(shown(&mut windows), Vec::<u64>::new());
     }
 
-    /// Damage covering the whole of `m`.
-    fn whole(m: &DisplayMode) -> DamageRect {
-        DamageRect {
-            x: 0,
-            y: 0,
-            width_px: m.width_px,
-            height_px: m.height_px,
-        }
+    /// Damage of the single rectangle `rect`.
+    fn one(rect: DamageRect) -> DamageList {
+        DamageList::new(&[rect]).expect("a non-empty rectangle")
     }
 
     /// The windows `windows` reports as newly on screen, in report order.
@@ -3187,7 +3210,7 @@ mod tests {
         let present = |host: &mut ShellWindowHost<'_>, (width, height): (u32, u32)| {
             let m = mode(width, height, DisplayFormat::Rgba8888);
             let frame = alloc::vec![0u8; (width as usize) * (height as usize) * 4];
-            host.window_presented(3, &m, &frame, whole(&m))
+            host.window_presented(3, &m, &frame, &whole(&m))
                 .expect("presents");
         };
         hosted(&mut shell, &mut compositor, &mut windows, |host| {
@@ -3301,7 +3324,7 @@ mod tests {
         hosted(&mut shell, &mut compositor, &mut windows, |host| {
             let m = mode(width_px, height_px, DisplayFormat::Rgba8888);
             let frame = alloc::vec![0u8; (width_px as usize) * (height_px as usize) * 4];
-            host.window_presented(3, &m, &frame, whole(&m))
+            host.window_presented(3, &m, &frame, &whole(&m))
                 .expect("presents");
         });
         assert_eq!(
@@ -3336,35 +3359,30 @@ mod tests {
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
             .expect("opens");
         let frame = [0u8; 4 * 4 * 4];
-        let full = DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 4,
-            height_px: 4,
-        };
+        let full = whole(&m);
         // Damage outside the surface.
         assert_eq!(
             host.window_presented(
                 1,
                 &m,
                 &frame,
-                DamageRect {
+                &one(DamageRect {
                     x: 3,
                     y: 3,
                     width_px: 2,
                     height_px: 2
-                }
+                })
             ),
             Err(Errno::OutOfRange)
         );
         // A frame shorter than the damage needs.
         assert_eq!(
-            host.window_presented(1, &m, &frame[..8], full),
+            host.window_presented(1, &m, &frame[..8], &full),
             Err(Errno::OutOfRange)
         );
         // An unknown window.
         assert_eq!(
-            host.window_presented(99, &m, &frame, full),
+            host.window_presented(99, &m, &frame, &full),
             Err(Errno::NotFound)
         );
     }
@@ -3385,12 +3403,7 @@ mod tests {
         let mut windows = SessionWindows::new();
         let mut picker = RecordingSlot::default();
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        let full = DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 8,
-            height_px: 8,
-        };
+        let full = whole(&m);
         let frame = [0x40u8; 8 * 8 * 4];
         let wm = {
             let mut host = ShellWindowHost {
@@ -3409,7 +3422,7 @@ mod tests {
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
-            host.window_presented(1, &m, &frame, full)
+            host.window_presented(1, &m, &frame, &full)
                 .expect("the first present lands");
             host.windows.records.get(&1).expect("live").wm
         };
@@ -3446,7 +3459,7 @@ mod tests {
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
-        host.window_presented(1, &m, &next, full)
+        host.window_presented(1, &m, &next, &full)
             .expect("a present at the app's own geometry still lands");
         let content = compositor
             .window(wm)
@@ -3475,12 +3488,7 @@ mod tests {
         let mut picker = RecordingSlot::default();
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         let frame = [0x40u8; 8 * 8 * 4];
-        let full = DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 8,
-            height_px: 8,
-        };
+        let full = whole(&m);
         {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
@@ -3498,7 +3506,7 @@ mod tests {
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
-            host.window_presented(1, &m, &frame, full)
+            host.window_presented(1, &m, &frame, &full)
                 .expect("first present lands");
         }
         // Drain the damage the open and the first present produced.
@@ -3519,7 +3527,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(1, &m, &frame, full)
+            host.window_presented(1, &m, &frame, &full)
                 .expect("the repeat present is accepted");
         }
         assert!(
@@ -3538,12 +3546,7 @@ mod tests {
         let mut picker = RecordingSlot::default();
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         let mut frame = [0x40u8; 8 * 8 * 4];
-        let full = DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 8,
-            height_px: 8,
-        };
+        let full = whole(&m);
         {
             let mut host = ShellWindowHost {
                 shell: &mut shell,
@@ -3561,7 +3564,7 @@ mod tests {
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
-            host.window_presented(1, &m, &frame, full)
+            host.window_presented(1, &m, &frame, &full)
                 .expect("first present lands");
         }
         compositor.composite();
@@ -3585,7 +3588,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(1, &m, &frame, full)
+            host.window_presented(1, &m, &frame, &full)
                 .expect("the second present lands");
         }
         assert_eq!(
@@ -3604,12 +3607,7 @@ mod tests {
         let mut windows = SessionWindows::new();
         let mut picker = RecordingSlot::default();
         let m = mode(8, 8, DisplayFormat::Rgba8888);
-        let full = DamageRect {
-            x: 0,
-            y: 0,
-            width_px: 8,
-            height_px: 8,
-        };
+        let full = whole(&m);
         // One whole frame of a known colour, then one long enough for the
         // first rows but short of the last.
         let landed: Vec<u8> = [0x11u8, 0x22, 0x33, 0xFF].repeat(8 * 8);
@@ -3631,10 +3629,10 @@ mod tests {
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
-            host.window_presented(1, &m, &landed, full)
+            host.window_presented(1, &m, &landed, &full)
                 .expect("the first present lands");
             assert_eq!(
-                host.window_presented(1, &m, &short, full),
+                host.window_presented(1, &m, &short, &full),
                 Err(Errno::OutOfRange)
             );
         }
@@ -4110,18 +4108,8 @@ mod tests {
         host.window_opened(window_owner(1), window_id, &m, "app", sizing)
             .expect("opens");
         let frame = alloc::vec![0u8; (width as usize) * (height as usize) * 4];
-        host.window_presented(
-            window_id,
-            &m,
-            &frame,
-            DamageRect {
-                x: 0,
-                y: 0,
-                width_px: width,
-                height_px: height,
-            },
-        )
-        .expect("presents");
+        host.window_presented(window_id, &m, &frame, &whole(&m))
+            .expect("presents");
         host.windows.records.get(&window_id).expect("live").wm
     }
 
@@ -5247,7 +5235,7 @@ mod tests {
         host.window_opened(window_owner(1), 1, &m, "opened", WindowSizing::default())
             .expect("opens");
         host.window_retitled(1, "before").expect("retitles");
-        host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+        host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
             .expect("presents");
         let wm = host.windows.records.get(&1).expect("live").wm;
         assert_eq!(
@@ -5277,7 +5265,7 @@ mod tests {
 
         host.window_retitled(1, "released").expect("retitles");
         host.windows.content_released(1);
-        host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
+        host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
             .expect("presents");
         assert_eq!(
             composited(host.windows, host.compositor),
@@ -5585,7 +5573,7 @@ mod tests {
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
+            host.window_presented(7, &m, &[0u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
         }
         assert!(

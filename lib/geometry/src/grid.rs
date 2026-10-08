@@ -92,6 +92,25 @@ impl GridRun {
         }
     }
 
+    /// The run of each cell's part from `offset` to `offset + extent` within
+    /// it, clamped to the cell: same count and stride, so a range of these
+    /// parts names the same cells as the run it came from.
+    #[must_use]
+    pub const fn within(&self, offset: u32, extent: u32) -> Self {
+        let offset = if offset < self.cell {
+            offset
+        } else {
+            self.cell
+        };
+        let room = self.cell - offset;
+        Self {
+            count: self.count,
+            stride: self.stride,
+            lead: self.lead.saturating_add(offset),
+            cell: if extent < room { extent } else { room },
+        }
+    }
+
     /// How many cells the axis holds.
     #[must_use]
     pub const fn count(&self) -> usize {

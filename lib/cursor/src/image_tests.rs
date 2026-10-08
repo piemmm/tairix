@@ -33,19 +33,6 @@ fn alpha_in(image: &CursorImage, (x0, y0): (u32, u32), (x1, y1): (u32, u32)) -> 
 }
 
 #[test]
-fn a_row_is_the_images_own_pixels_and_none_past_its_last() {
-    let image = block(8, 2, Point::ORIGIN);
-    for ly in 0..8 {
-        let row = image.row(ly).expect("inside the image");
-        assert_eq!(row.len(), 8);
-        for (lx, pixel) in (0..).zip(row) {
-            assert_eq!(Some(*pixel), image.surface().get(lx, ly));
-        }
-    }
-    assert_eq!(image.row(8), None);
-}
-
-#[test]
 fn a_shadow_lies_beneath_the_artwork_below_and_to_its_right() {
     let side = CURSOR_BASE_SIDE_PX;
     let original = block(side, 8, Point::new(8, 8));

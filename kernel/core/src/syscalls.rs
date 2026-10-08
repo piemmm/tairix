@@ -46009,6 +46009,7 @@ mod tests {
                     gid: 1000,
                     id: tairix_abi::FileId::NONE,
                     times: tairix_abi::NodeTimes::default(),
+                    content_gen: 0,
                 },
                 open_err: None,
                 write_accept: None,
@@ -46847,6 +46848,7 @@ mod tests {
                 id: tairix_abi::FileId { volume, node: 5 },
                 nlink: 2,
                 name: alloc::string::String::from("Logs"),
+                content_gen: 0,
             },
             crate::fs::ReaddirEntry {
                 kind: FileKind::Regular,
@@ -46856,6 +46858,7 @@ mod tests {
                 id: tairix_abi::FileId { volume, node: 6 },
                 nlink: 3,
                 name: alloc::string::String::from("motd"),
+                content_gen: 0,
             },
         ]
     }
@@ -47018,6 +47021,7 @@ mod tests {
             gid: 1000,
             id: tairix_abi::FileId::NONE,
             times: tairix_abi::NodeTimes::default(),
+            content_gen: 0,
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(
@@ -47670,6 +47674,7 @@ mod tests {
             gid: 1000,
             id: file_id,
             times: tairix_abi::NodeTimes::default(),
+            content_gen: 0,
         };
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(

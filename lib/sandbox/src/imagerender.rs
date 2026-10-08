@@ -205,6 +205,9 @@ const REPLY_PIXELS: u8 = 1;
 const REPLY_FONTS_NEEDED: u8 = 2;
 /// Acknowledgement of a supplied glyph table.
 const REPLY_FONTS_STORED: u8 = 3;
+/// Thumbnail success reply tag: the square's side, where the picture lies in
+/// it (left, top, width, height), then the square's pixels.
+const REPLY_FITTED: u8 = 19;
 
 /// Icon refusal wire codes.
 const REFUSAL_MALFORMED_REQUEST: u8 = 1;
@@ -458,10 +461,13 @@ impl ImageRenderService {
         let image =
             tairix_image::decode_fitted_as(format, &bytes, &limits, fit).map_err(refused)?;
         drop(bytes);
-        let rgba = letterbox(image.width(), image.height(), image.pixels(), side)?;
-        let mut w = Writer::with_capacity(5 + 4 + rgba.len());
-        w.u8(REPLY_PIXELS);
+        let (rgba, placed) = letterbox(image.width(), image.height(), image.pixels(), side)?;
+        let mut w = Writer::with_capacity(1 + 4 * 5 + rgba.len());
+        w.u8(REPLY_FITTED);
         w.u32(side);
+        for at in [placed.left, placed.top, placed.width, placed.height] {
+            w.u32(at);
+        }
         w.bytes(&rgba);
         Ok(w.finish())
     }
@@ -582,13 +588,18 @@ fn rasterise_png(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
 /// scaling implementation, so a downscale blends (never nearest-neighbour)
 /// exactly as the wallpaper path's resampling does.
 fn scale_to_square(src_w: u32, src_h: u32, src: &[u8], side: u32) -> Result<Vec<u8>, IconRefusal> {
-    place_in_square(src_w, src_h, src, side, fit_within(src_w, src_h, side))
+    place_in_square(src_w, src_h, src, side, fit_within(src_w, src_h, side)).map(|(rgba, _)| rgba)
 }
 
 /// [`scale_to_square`], except that a picture smaller than the square is
 /// drawn at its own size rather than blurred up to fill it: what a thumbnail
 /// shows of a small file is the file.
-fn letterbox(src_w: u32, src_h: u32, src: &[u8], side: u32) -> Result<Vec<u8>, IconRefusal> {
+fn letterbox(
+    src_w: u32,
+    src_h: u32,
+    src: &[u8],
+    side: u32,
+) -> Result<(Vec<u8>, Placed), IconRefusal> {
     let (fit_w, fit_h) = fit_within(src_w, src_h, side);
     let fit = if fit_w > src_w || fit_h > src_h {
         (src_w, src_h)
@@ -598,15 +609,25 @@ fn letterbox(src_w: u32, src_h: u32, src: &[u8], side: u32) -> Result<Vec<u8>, I
     place_in_square(src_w, src_h, src, side, fit)
 }
 
+/// Where a picture was placed within its square.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Placed {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+}
+
 /// Resample straight-alpha RGBA8 `src` (`src_w`×`src_h`) to `fit` and centre
-/// it in a `side`×`side` buffer of transparent padding.
+/// it in a `side`×`side` buffer of transparent padding, answering where it
+/// was placed.
 fn place_in_square(
     src_w: u32,
     src_h: u32,
     src: &[u8],
     side: u32,
     (fit_w, fit_h): (u32, u32),
-) -> Result<Vec<u8>, IconRefusal> {
+) -> Result<(Vec<u8>, Placed), IconRefusal> {
     let mut out = vec![0u8; pixel_buffer_len(side, side)];
     let x0 = (side - fit_w) / 2;
     let y0 = (side - fit_h) / 2;
@@ -614,7 +635,15 @@ fn place_in_square(
     let fitted =
         resample(&image, image.whole(), fit_w, fit_h).map_err(|_| IconRefusal::Unrenderable)?;
     splice_rows(&fitted, fit_w, x0, side, y0, fit_h, &mut out);
-    Ok(out)
+    Ok((
+        out,
+        Placed {
+            left: x0,
+            top: y0,
+            width: fit_w,
+            height: fit_h,
+        },
+    ))
 }
 
 /// The largest `(width, height)` no bigger than `side` on either axis that
@@ -768,7 +797,7 @@ pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     side: u32,
     format: Option<ViewFormat>,
-) -> Result<Vec<u8>, IconRasterFailure> {
+) -> Result<tairix_icon::Fitted, IconRasterFailure> {
     if side == 0 || side > MAX_ICON_SIDE {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
     }
@@ -781,7 +810,7 @@ pub fn render_thumbnail<L: Launcher, S: tairix_log::Sink>(
         let reply = sandbox
             .request(&request)
             .map_err(IconRasterFailure::Sandbox)?;
-        decode_icon_reply(&reply, side)
+        decode_fitted_reply(&reply, side)
     })
 }
 
@@ -793,6 +822,11 @@ pub enum ThumbnailFailure {
     /// The worker would not draw it.
     Render(IconRasterFailure),
 }
+
+/// The revision of the pixels [`thumbnail`] draws, raised whenever a decoder
+/// or the fitting changes them, so a store keeping thumbnails across runs
+/// forgets every picture an earlier revision drew.
+pub const THUMBNAIL_REVISION: u32 = 1;
 
 /// Stream `document` to the worker and draw it as its own content at `side`
 /// pixels, its format read as `reading` says: the whole of what a thumbnail
@@ -806,7 +840,7 @@ pub fn thumbnail<L: Launcher, S: tairix_log::Sink>(
     side: u32,
     reading: tairix_icon::Reading,
     document: &mut dyn tairix_icon::ArtworkDocument,
-) -> Result<Vec<u8>, ThumbnailFailure> {
+) -> Result<tairix_icon::Fitted, ThumbnailFailure> {
     let length = usize::try_from(document.stamp().size).map_err(|_| {
         ThumbnailFailure::Upload(UploadFailure::Document(DocumentFailure::Refused(
             DocumentRefusal::TooLarge,
@@ -927,16 +961,58 @@ fn decode_icon_reply(reply: &[u8], side: u32) -> Result<Vec<u8>, IconRasterFailu
             }
             Ok(pixels.to_vec())
         }
-        REPLY_ERROR => {
-            let code = r.u8().map_err(|_| IconRasterFailure::ReplyMalformed)?;
-            if !r.is_exhausted() {
-                return Err(IconRasterFailure::ReplyMalformed);
-            }
-            let refusal = IconRefusal::from_wire(code).ok_or(IconRasterFailure::ReplyMalformed)?;
-            Err(IconRasterFailure::Refused(refusal))
-        }
+        REPLY_ERROR => Err(refusal_in(&mut r)),
         _ => Err(IconRasterFailure::ReplyMalformed),
     }
+}
+
+/// The refusal the rest of an error reply names, or a malformed reply.
+fn refusal_in(r: &mut Reader<'_>) -> IconRasterFailure {
+    match r.u8() {
+        Ok(code) if r.is_exhausted() => IconRefusal::from_wire(code).map_or(
+            IconRasterFailure::ReplyMalformed,
+            IconRasterFailure::Refused,
+        ),
+        _ => IconRasterFailure::ReplyMalformed,
+    }
+}
+
+/// Decode and validate the worker's thumbnail reply fail-closed: the square
+/// asked for, and a placement that is non-empty and lies inside it.
+fn decode_fitted_reply(reply: &[u8], side: u32) -> Result<tairix_icon::Fitted, IconRasterFailure> {
+    let malformed = |_| IconRasterFailure::ReplyMalformed;
+    let mut r = Reader::new(reply);
+    match r.u8().map_err(malformed)? {
+        REPLY_FITTED => {}
+        REPLY_ERROR => return Err(refusal_in(&mut r)),
+        _ => return Err(IconRasterFailure::ReplyMalformed),
+    }
+    if r.u32().map_err(malformed)? != side {
+        return Err(IconRasterFailure::ReplyMalformed);
+    }
+    let (left, top, width, height) = (
+        r.u32().map_err(malformed)?,
+        r.u32().map_err(malformed)?,
+        r.u32().map_err(malformed)?,
+        r.u32().map_err(malformed)?,
+    );
+    let within =
+        |at: u32, extent: u32| extent > 0 && at.checked_add(extent).is_some_and(|end| end <= side);
+    if !within(left, width) || !within(top, height) {
+        return Err(IconRasterFailure::ReplyMalformed);
+    }
+    let expected = pixel_buffer_len(side, side);
+    let pixels = r.bytes(expected).map_err(malformed)?;
+    if pixels.len() != expected || !r.is_exhausted() {
+        return Err(IconRasterFailure::ReplyMalformed);
+    }
+    let (Ok(x), Ok(y)) = (i32::try_from(left), i32::try_from(top)) else {
+        return Err(IconRasterFailure::ReplyMalformed);
+    };
+    Ok(tairix_icon::Fitted {
+        pixels: pixels.to_vec(),
+        bounds: tairix_geometry::Rect::new(x, y, width, height),
+    })
 }
 
 // ---------------------------------------------------------------------

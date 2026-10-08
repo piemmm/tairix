@@ -430,7 +430,7 @@ fn taskbar_item_artwork_replaces_the_builtin_glyph_at_any_slot_shape() {
             bounds,
             Scale::ONE,
             &theme,
-            Some(IconPicture::Artwork(&art)),
+            Some(IconPicture::coloured(&art)),
         );
         assert!(has_pixel(&s, magenta));
     }
@@ -582,7 +582,7 @@ fn tray_surface_with_artwork(sig: &TraySignal, theme: &Theme, colour: Color) -> 
         bounds,
         Scale::ONE,
         theme,
-        Some(IconPicture::Artwork(&art)),
+        Some(IconPicture::coloured(&art)),
     );
     s
 }

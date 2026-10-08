@@ -40,7 +40,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DisplayFormat, DisplayMode};
 use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
@@ -434,7 +434,7 @@ pub trait WindowHost {
         window_id: u64,
         surface: &DisplayMode,
         frame: &[u8],
-        damage: DamageRect,
+        damage: &DamageList,
     ) -> Result<(), Errno>;
 
     /// A validated `Resize` re-mapped live `window_id` onto a fresh frame
@@ -1741,7 +1741,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 damage,
             } => status(
                 reply,
-                self.present(host, caller, window_id, frame_index, damage),
+                self.present(host, caller, window_id, frame_index, &damage),
             ),
             WindowRequest::Close { window_id } => {
                 status(reply, self.close(host, caller, window_id))
@@ -2181,15 +2181,16 @@ impl<M: ShmMapper> WindowServer<M> {
         caller: ProcId,
         window_id: u64,
         frame_index: u32,
-        damage: DamageRect,
+        damage: &DamageList,
     ) -> Result<(), Errno> {
         let record = owned_window(&self.windows, caller, window_id)?;
         if frame_index >= record.frame_count {
             return Err(Errno::OutOfRange);
         }
-        damage
-            .validate_in(&record.surface)
-            .map_err(|_| Errno::LengthOutOfRange)?;
+        for rect in damage.rects() {
+            rect.validate_in(&record.surface)
+                .map_err(|_| Errno::LengthOutOfRange)?;
+        }
         // A window whose frames the session released holds no pixels to
         // present. Refusing typed is what lets a client re-attach on its next
         // paint instead of writing into a mapping neither side has.

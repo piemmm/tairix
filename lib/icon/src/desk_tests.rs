@@ -27,8 +27,8 @@ fn request(path: &str) -> IconRequest<'_> {
 }
 
 /// A distinguishable picture, so a test can tell one delivery from another.
-fn picture(side: u32) -> Surface {
-    Surface::new(side, side).expect("a square surface")
+fn picture(side: u32) -> Artwork {
+    Artwork::new(tairix_raster::Surface::new(side, side).expect("a square surface"))
 }
 
 fn is_pending(resolved: &Resolved) -> bool {
@@ -94,7 +94,7 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
     );
 
     match desk.collect(&asset("/a.png"), 8) {
-        Resolved::Done(Some(art)) => assert_eq!(art.width(), 8),
+        Resolved::Done(Some(art)) => assert_eq!(art.surface().width(), 8),
         _ => panic!("the delivered picture was not served"),
     }
     assert!(
@@ -586,11 +586,14 @@ fn a_teardown_drops_the_unreported_batch() {
 fn thumbnail(name: &str) -> ArtworkKey {
     ArtworkKey::Thumbnail(crate::Thumbnail {
         path: alloc::format!("/Users/ann/UserFiles/Pictures/{name}"),
-        size: 1,
-        modified: tairix_abi::time::Time64::UNIX_EPOCH,
-        id: tairix_abi::fs::FileId {
-            volume: [1; 16],
-            node: 1,
+        stamp: crate::DocumentStamp {
+            size: 1,
+            modified: tairix_abi::time::Time64::UNIX_EPOCH,
+            id: tairix_abi::fs::FileId {
+                volume: [1; 16],
+                node: 1,
+            },
+            content_gen: 1,
         },
         reading: crate::Reading::Signature,
     })

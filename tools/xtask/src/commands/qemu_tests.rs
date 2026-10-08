@@ -14871,8 +14871,9 @@ fn reconstruct_pick_click(
     ))
 }
 
-/// Centre of the window-local rectangle a browser view draws entry `index` in,
-/// through the **production** renderer's own geometry.
+/// Centre of the window-local rectangle a press on entry `index` lands on — a
+/// list row, or a grid tile's body — through the **production** renderer's own
+/// geometry.
 ///
 /// The one inverse every reconstruction of a browsed surface reads, so a
 /// change to the engine's row or tile layout moves the script's aim with the
@@ -14887,7 +14888,7 @@ fn browsed_entry_centre<S: tairix_browse::DirectorySource>(
     what: &str,
 ) -> Result<tairix_geometry::Point, String> {
     rect_centre(
-        tairix_browse::render::entry_rect(
+        tairix_browse::render::entry_target(
             browser,
             RECONSTRUCTION_SCALE,
             theme,

@@ -68,6 +68,9 @@ pub struct ReaddirEntry {
     /// ([`NodeInfo::SINGLE_NAME`](tairix_abi::driver::filesystem::NodeInfo::SINGLE_NAME)
     /// for a format that keeps no count).
     pub nlink: u32,
+    /// The node's content generation, as [`FileStat::content_gen`] reports
+    /// it for the same node.
+    pub content_gen: u64,
     /// The entry's name (a single component, never `.`/`..`).
     pub name: String,
 }
@@ -100,6 +103,7 @@ impl ReaddirEntry {
             modified: entry.modified,
             id: entry.id,
             nlink: entry.nlink,
+            content_gen: entry.content_gen,
             name,
         }
     }
@@ -114,6 +118,7 @@ impl ReaddirEntry {
             modified: self.modified,
             id: self.id,
             nlink: self.nlink,
+            content_gen: self.content_gen,
             name: self.name.as_bytes(),
         }
     }

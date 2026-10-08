@@ -123,6 +123,7 @@ impl MemFs {
                     id: FileId::NONE,
                     nlink: 1,
                     name: name.to_string(),
+                    content_gen: 0,
                 });
             }
         }
@@ -243,6 +244,7 @@ impl FilesystemService for MemFs {
                 gid: 0,
                 id: FileId::NONE,
                 times: NodeTimes::default(),
+                content_gen: 0,
             });
         }
         if is_dir {
@@ -256,6 +258,7 @@ impl FilesystemService for MemFs {
                 gid: 0,
                 id: FileId::NONE,
                 times: NodeTimes::default(),
+                content_gen: 0,
             });
         }
         Err(Errno::NotFound)

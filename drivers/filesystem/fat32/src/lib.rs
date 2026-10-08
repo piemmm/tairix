@@ -2252,6 +2252,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
                 size: 0,
                 allocated,
                 times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             })
         } else {
             Ok(NodeInfo {
@@ -2260,6 +2261,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
                 size: u64::from(node_size(node)),
                 allocated,
                 times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             })
         }
     }
@@ -2387,6 +2389,7 @@ impl<B: Block> Fat32<B> {
                 },
                 allocated: self.allocation(entry.cluster, entry.is_dir, entry.size)?,
                 times: entry.times,
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             };
             let listed = DirEntry {
                 node: Self::entry_node(&entry),

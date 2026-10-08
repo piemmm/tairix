@@ -102,7 +102,11 @@ over a resolution-independent design grid, so the same glyph is
   icons a frame without copying; a bad, absent, oversize, or wrong-shaped
   asset yields a cached `None` (`AGENTS.md` §2.9). `IconArtworkSource` hands a
   renderer a plain `IconArtwork` lookup, and `NoArtwork` is the all-glyph
-  lookup a headless build or a test uses.
+  lookup a headless build or a test uses. A retained `Artwork` may carry the
+  rectangle its picture was fitted to (a thumbnail's, `Fitted`), which a draw
+  outlines, and `IconArtwork::shadowed` serves a picture with the soft shadow
+  cast once from its coverage and retained as its own entry
+  (`ArtworkKey::Shadow`).
 - `ArtworkResolver` is the seam between deciding what a draw needs and
   producing it, because a read plus a sandbox round trip must never happen
   inside a paint. `InlineArtwork` reads and decodes on the calling thread; a
@@ -121,17 +125,27 @@ over a resolution-independent design grid, so the same glyph is
   thread, or syscall, so its whole policy is host-tested, and it lives here
   beside the contract it implements because two processes drive it — the
   desktop session from a worker thread behind the runtime's futex mutex
-  (`plans/FIX-DESKTOP.md` DESK-8), the file manager from its own event loop
-  (`plans/NEW-FILEMANAGER.md`), and `userland/apps/*` may not depend on
+  (`plans/FIX-DESKTOP.md` DESK-8), the file manager from the reader thread its
+  listings share (`plans/NEW-FILEMANAGER.md`), and `userland/apps/*` may not depend on
   `userland/gui/*` (`AGENTS.md` §17.4). An answer handed over is forgotten —
   the cache owns it, so a later miss is a genuine one and is produced again.
   A decode the cache *refused* is held as declined instead, which is what stops
   a landing chasing its own tail; `retry_declined` re-offers it on the pressure
   band's own wake.
-- `folder` — `FolderSample`, what a folder holds as its picture draws it (up to
-  three kinds, most frequent family first), and the card placement and
-  fixed-ink paper card the folder composite (`IconRequest::folder`) is built
-  from (`plans/FILES-INTERACTION.md` FI11).
+- `folder` — `FolderSample`, what a folder holds as its picture draws it: up to
+  three `SampleCard`s, each a member's kind or a member photo as its
+  `Thumbnail` (one past `FolderSample::MAX_CARD_BYTES` is its kind), shared
+  between every key naming the folder and chosen variety first and then
+  filled; and the fanned card slots,
+  the white print a photo is set on, and the fixed-ink paper card the folder
+  composite (`IconRequest::folder`) is built from
+  (`plans/FILES-INTERACTION.md` FI11, FI18).
+- `store` — `ThumbnailStore`, thumbnails kept across runs in one blob of an
+  application's own bulk store, keyed by (volume, inode, content generation,
+  reading) so only an exact version is ever served, in a blob laid out for one
+  side and one thumbnail-decoder revision: four-way sets of checksummed slots,
+  no scan to open, torn or interleaved writes reading as empty
+  (`plans/FILES-INTERACTION.md` FI25).
 
 ## Asset model
 

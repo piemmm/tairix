@@ -1301,21 +1301,62 @@ fn render_into_a_tiny_viewport_does_not_panic() {
     assert_eq!(surface.height(), 3);
 }
 
-/// A tile is exactly as tall as its picture and one name line under it: the
-/// picture keeps the side tiles have always drawn, while the name sits half an
-/// inset beneath it rather than a whole one, and nothing is left over below.
+/// A tile is exactly as tall as its picture and two name lines under it: the
+/// picture keeps the side tiles have always drawn, the name sits half an inset
+/// beneath it, and nothing is left over below.
 #[test]
-fn a_grid_tile_is_as_tall_as_its_picture_and_one_name_line() {
+fn a_grid_tile_is_as_tall_as_its_picture_and_two_name_lines() {
     use crate::render::{grid_metrics, TILE_LAYOUT};
 
     let theme = Theme::dark();
-    for (percent, picture, height) in [(100, 42, 78), (200, 84, 156)] {
+    for (percent, picture, height) in [(100, 42, 94), (200, 84, 188)] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
         let tiles = grid_metrics(scale, &theme);
         assert_eq!(tiles.cell_height, height, "at {percent}%");
         let cell = Rect::new(0, 0, tiles.cell_width, tiles.cell_height);
         assert_eq!(TILE_LAYOUT.icon_side(cell, scale, &theme), picture);
-        assert_eq!(TILE_LAYOUT.label_lines(cell, scale, &theme), 1);
+        assert_eq!(TILE_LAYOUT.label_lines(cell, scale, &theme), 2);
+    }
+}
+
+/// A tile keeps whatever ends a name whole when it has to cut it: the
+/// extension after the last dot, or a RISC OS file type after the last comma.
+#[test]
+fn a_tile_cuts_a_name_in_its_middle_keeping_its_ending() {
+    use crate::render::name_cut;
+    use tairix_font::Cut;
+
+    for (name, keep) in [
+        ("holiday.jpeg", 5),
+        ("archive.tar.gz", 3),
+        ("Sprites,ff9", 4),
+        ("Makefile", 0),
+        (".profile", 0),
+        ("Editor.app", 4),
+    ] {
+        assert_eq!(name_cut(name), Cut::Middle { keep }, "{name}");
+    }
+}
+
+/// A rename opens with the name's stem selected — what typing replaces —
+/// keeping what ends it; a folder's name is selected whole.
+#[test]
+fn a_rename_selects_the_stem_and_keeps_the_ending() {
+    use crate::rename_selection;
+
+    for (entry, range) in [
+        (Entry::file("holiday.jpeg"), 0..7),
+        (Entry::file("Sprites,ff9"), 0..7),
+        (Entry::file("archive.tar.gz"), 0..11),
+        (Entry::file("Makefile"), 0..8),
+        (Entry::file(".profile"), 0..8),
+        (
+            Entry::new("Editor.app", EntryKind::Bundle, 0, Time64::UNIX_EPOCH),
+            0..6,
+        ),
+        (Entry::directory("v1.2"), 0..4),
+    ] {
+        assert_eq!(rename_selection(&entry), range, "{}", entry.name());
     }
 }
 
@@ -1424,6 +1465,7 @@ fn encoded_stream(children: &[(&[u8], FileKind)]) -> Vec<u8> {
             id: tairix_abi::FileId::NONE,
             nlink: 1,
             name,
+            content_gen: 0,
         }
         .encode_into(&mut buf[off..])
         .expect("fits");
@@ -1534,10 +1576,11 @@ fn entries_from_dir_stream_maps_names_and_kinds_in_order() {
     );
 }
 
-/// A listed entry names the file its record named, which a thumbnail
-/// checks an open against.
+/// A listed entry names the file, and the version of its data, its record
+/// named — which a thumbnail checks an open against — and a new version is a
+/// changed listing.
 #[test]
-fn a_listed_entry_names_the_file_its_record_named() {
+fn a_listed_entry_names_the_file_and_version_its_record_named() {
     let id = tairix_abi::FileId {
         volume: [3; 16],
         node: 9,
@@ -1550,12 +1593,26 @@ fn a_listed_entry_names_the_file_its_record_named() {
         modified: Time64::UNIX_EPOCH,
         id,
         nlink: 1,
+        content_gen: 42,
         name: b"cat.png",
     }
     .encode_into(&mut buf)
     .expect("fits");
     let entries = entries_from_dir_stream("/", &buf[..len], &mut NoLinks).expect("valid stream");
-    assert_eq!(entries.iter().map(Entry::id).collect::<Vec<_>>(), [id]);
+    let [entry] = entries.as_slice() else {
+        panic!("one entry: {entries:?}");
+    };
+    assert_eq!(
+        entry.stamp(),
+        tairix_icon::DocumentStamp {
+            size: 5,
+            modified: Time64::UNIX_EPOCH,
+            id,
+            content_gen: 42,
+        }
+    );
+    let rewritten = entry.clone().with_content_gen(43);
+    assert!(!entry.same_listing(&rewritten), "a new version is a change");
 }
 
 #[test]
@@ -1739,6 +1796,7 @@ fn encoded_stream_meta(children: &[(&[u8], FileKind, u64, Time64)]) -> Vec<u8> {
             id: tairix_abi::FileId::NONE,
             nlink: 1,
             name,
+            content_gen: 0,
         }
         .encode_into(&mut buf[off..])
         .expect("fits");
@@ -2310,6 +2368,24 @@ fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
     let first = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 0).expect("cut, not gone");
     assert_eq!(first.top(), i32::try_from(header).unwrap());
     assert_eq!(first.height, metrics.cell_height - offset);
+    // The cut tile is hit on its name, which shows; the ground beside it is
+    // not the tile.
+    let across = i32::try_from(metrics.cell_width / 2).unwrap();
+    let name = crate::render::TILE_LAYOUT
+        .label_rect(
+            Rect::new(0, 0, metrics.cell_width, metrics.cell_height),
+            Scale::ONE,
+            &theme,
+        )
+        .expect("a name band");
+    let on_name = Point::new(
+        first.left() + across,
+        first.top() + name.top() + 2 - i32::try_from(offset).unwrap(),
+    );
+    assert_eq!(
+        entry_index_at(&browser, Scale::ONE, &theme, vp, BAND, on_name),
+        Some(0)
+    );
     assert_eq!(
         entry_index_at(
             &browser,
@@ -2319,7 +2395,7 @@ fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
             BAND,
             Point::new(first.left() + 1, first.top())
         ),
-        Some(0)
+        None
     );
     // The third line of tiles shows only its head at the foot, and is hit
     // there all the same.
@@ -2335,7 +2411,7 @@ fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
             &theme,
             vp,
             BAND,
-            Point::new(foot.left() + 1, foot.bottom() - 1)
+            Point::new(foot.left() + across, foot.bottom() - 1)
         ),
         Some(per_line * 2)
     );
@@ -2611,7 +2687,20 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
         first.left() > 0,
         "the shared-out width reaches the row's leading end: {first:?}"
     );
-    // A click just inside that tile resolves to entry 0.
+    // A click on that tile's picture resolves to entry 0, and one on the
+    // ground in its cell's corner to none.
+    let core = crate::render::tile_core(Scale::ONE, &theme).center();
+    assert_eq!(
+        entry_index_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            BAND,
+            Point::new(first.left() + core.x, first.top() + core.y)
+        ),
+        Some(0)
+    );
     assert_eq!(
         entry_index_at(
             &browser,
@@ -2621,7 +2710,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
             BAND,
             Point::new(first.left() + 1, first.top() + 1)
         ),
-        Some(0)
+        None
     );
     // The margin before it belongs to no entry.
     assert_eq!(
@@ -2664,7 +2753,7 @@ impl RecordingArtwork {
 impl IconArtwork for RecordingArtwork {
     fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>> {
         self.asked.push((request.icon_kind(), side));
-        Some(IconPicture::Artwork(&self.art))
+        Some(IconPicture::coloured(&self.art))
     }
 }
 
@@ -2672,6 +2761,52 @@ impl IconArtwork for RecordingArtwork {
 fn shows(surface: &Surface, color: Color) -> bool {
     let wanted = color.premultiply();
     (0..surface.height()).any(|y| (0..surface.width()).any(|x| surface.get(x, y) == Some(wanted)))
+}
+
+/// A frame painted a damaged part at a time draws the rail, the toolbar and
+/// the scrollbar only for the parts that reach them, so a part inside the
+/// listing asks the artwork for none of their icons.
+#[test]
+fn a_part_inside_the_listing_draws_none_of_the_chrome() {
+    use crate::chrome::{ManagerToolModel, MANAGER_TOOLS};
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 400, 300);
+    let places = Places::new(&home(), &[]);
+    let mut browser = many_files(20);
+    browser.set_view_mode(ViewMode::Grid);
+    let chrome = crate::ManagerChrome {
+        tools: MANAGER_TOOLS,
+        tool_model: ManagerToolModel::new(true),
+        sidebar: Some(&places),
+        toolbar: BAND,
+    };
+    let colour = Color::rgb(255, 0, 255);
+    let mut whole = RecordingArtwork::new(24, colour);
+    paint(&browser, Scale::ONE, &theme, window, &chrome, &mut whole);
+    assert!(
+        whole.asked.iter().any(|(kind, _)| *kind != IconKind::File),
+        "the whole frame draws the chrome's icons"
+    );
+
+    let mut part = RecordingArtwork::new(24, colour);
+    let mut surface = Surface::new(window.width, window.height).expect("surface");
+    surface.with_clip(300, 200, 40, 40, |surface| {
+        crate::render_into(
+            surface,
+            &browser,
+            Scale::ONE,
+            &theme,
+            window,
+            &chrome,
+            &mut part,
+        );
+    });
+    assert!(
+        part.asked.iter().all(|(kind, _)| *kind == IconKind::File),
+        "{:?}",
+        part.asked
+    );
 }
 
 #[test]
@@ -3637,6 +3772,58 @@ mod rename_model {
         assert_eq!(
             crate::render::selection_name_rect(&browser, Scale::ONE, &theme, viewport, BAND),
             None
+        );
+    }
+
+    /// A press on an entry's name lands on its drawn text, in both views: the
+    /// list row's name cell rather than its icon or trailing columns, and the
+    /// tile's lines below its picture, each inside what a press on the entry
+    /// hits at all.
+    #[test]
+    fn a_press_on_the_name_lands_on_its_drawn_text_in_both_views() {
+        use crate::layout::ViewMode;
+
+        let theme = Theme::dark();
+        let viewport = Rect::new(0, 0, 400, 300);
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        for view in [ViewMode::List, ViewMode::Grid] {
+            browser.set_view_mode(view);
+            let target =
+                crate::render::entry_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+                    .expect("the entry is pressable");
+            let name =
+                crate::render::entry_name_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+                    .expect("and so is its name");
+            assert_eq!(
+                name.intersection(&target),
+                name,
+                "{view:?}: {name:?} of {target:?}"
+            );
+            assert!(
+                name.width < target.width || name.height < target.height,
+                "{view:?}: the name is part of the entry: {name:?} of {target:?}"
+            );
+            let centre = tairix_geometry::Point::new(
+                name.left() + i32::try_from(name.width / 2).expect("small"),
+                name.top() + i32::try_from(name.height / 2).expect("small"),
+            );
+            assert_eq!(
+                crate::render::entry_index_at(&browser, Scale::ONE, &theme, viewport, BAND, centre),
+                Some(1),
+                "{view:?}: a press on the name is a press on its entry"
+            );
+        }
+        browser.set_view_mode(ViewMode::Grid);
+        let tile = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+            .expect("the tile");
+        let name =
+            crate::render::entry_name_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+                .expect("the tile's name");
+        assert!(name.top() > tile.top(), "the picture is not the name");
+        assert_eq!(
+            crate::render::entry_name_target(&browser, Scale::ONE, &theme, viewport, BAND, 99),
+            None,
+            "no entry, no name"
         );
     }
 }
@@ -5823,6 +6010,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
         ContextCommand::Rename,
         ContextCommand::Cut,
         ContextCommand::Copy,
+        ContextCommand::ClearSelection,
         ContextCommand::Properties,
         ContextCommand::Delete,
     ] {
@@ -5834,6 +6022,40 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
         );
     }
     assert!(!menu.is_enabled(ContextCommand::Paste));
+}
+
+#[test]
+fn select_all_needs_an_entry_left_and_clear_selection_a_selection() {
+    use crate::chrome::{ContextCommand, ContextMenuModel};
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    let nothing = ContextMenuModel::for_browser(&browser, false);
+    assert_eq!(nothing.reason(ContextCommand::SelectAll), "");
+    assert_eq!(
+        nothing.reason(ContextCommand::ClearSelection),
+        "nothing selected"
+    );
+
+    browser.select(1).expect("one entry");
+    let one = ContextMenuModel::for_browser(&browser, false);
+    assert!(one.is_enabled(ContextCommand::SelectAll));
+    assert!(one.is_enabled(ContextCommand::ClearSelection));
+
+    browser.select_all();
+    let every = ContextMenuModel::for_browser(&browser, false);
+    assert_eq!(
+        every.reason(ContextCommand::SelectAll),
+        "everything is selected"
+    );
+    assert!(every.is_enabled(ContextCommand::ClearSelection));
+
+    let mut empty = Browser::open_root(MockFs::fixture()).expect("root");
+    empty.open_index(2).expect("enter System");
+    empty.open_index(0).expect("enter the empty Fonts");
+    assert_eq!(
+        ContextMenuModel::for_browser(&empty, false).reason(ContextCommand::SelectAll),
+        "the folder is empty"
+    );
 }
 
 #[test]
@@ -5968,6 +6190,8 @@ fn context_commands_list_covers_every_variant_once() {
             ContextCommand::Cut,
             ContextCommand::Copy,
             ContextCommand::Paste,
+            ContextCommand::SelectAll,
+            ContextCommand::ClearSelection,
             ContextCommand::Properties,
             ContextCommand::Delete,
         ]
@@ -6059,7 +6283,10 @@ fn new_sits_above_properties_and_offers_folder_then_the_documents() {
         AppMenuRowView::Item(item) => item.label,
         _ => "",
     };
-    assert_eq!(label_at(new_at - 2), "Paste");
+    assert_eq!(label_at(new_at - 2), "Clear Selection");
+    assert_eq!(label_at(new_at - 3), "Select All");
+    assert!(matches!(rows[new_at - 4].0, AppMenuRowView::Separator));
+    assert_eq!(label_at(new_at - 5), "Paste");
     assert_eq!(label_at(new_at + 2), "Properties");
 
     let children: alloc::vec::Vec<_> = rows
@@ -7510,6 +7737,7 @@ fn props_stat(kind: FileKind, mode: u32) -> FileStat {
             accessed: Time64::UNIX_EPOCH,
             changed: Time64::from_secs(1_700_000_000),
         },
+        content_gen: 0,
     }
 }
 
@@ -10049,7 +10277,7 @@ mod occupancy {
 
     use tairix_abi::fs::FileKind;
     use tairix_abi::time::Time64;
-    use tairix_icon::FolderSample;
+    use tairix_icon::{FolderSample, SampleCard};
 
     use crate::entry::{EntryKind, Occupancy};
     use crate::media::{folder_sample, icon_for_entry};
@@ -10186,6 +10414,7 @@ mod occupancy {
                 id: tairix_abi::fs::FileId::NONE,
                 nlink: 1,
                 name: name.as_bytes(),
+                content_gen: 0,
             }
             .encode_into(&mut record)
             .expect("encodes");
@@ -10202,13 +10431,13 @@ mod occupancy {
             ("b.jpg", FileKind::Regular),
             ("notes.txt", FileKind::Regular),
         ]);
-        for (records, want) in [
-            (Vec::new(), Probe::Empty),
-            (
-                held,
-                Probe::Holds(FolderSample::new([IconKind::ImageJpeg, IconKind::Text])),
-            ),
-        ] {
+        // The listing names no file, so the pictures are drawn as their kind.
+        let want = FolderSample::new([
+            SampleCard::Kind(IconKind::ImageJpeg),
+            SampleCard::Kind(IconKind::Text),
+            SampleCard::Kind(IconKind::ImageJpeg),
+        ]);
+        for (records, want) in [(Vec::new(), Probe::Empty), (held, Probe::Holds(want))] {
             let mut source = VfsDirectorySource::probing(
                 |_: &str| Err::<Vec<u8>, _>(Errno::NotImplemented),
                 NoLinks,
@@ -10232,41 +10461,129 @@ mod occupancy {
         );
     }
 
-    /// The sample is the most frequent families first, each as its most
-    /// frequent kind, ties going to whichever was seen first; folders and
+    /// One listed member of the folder `/d`: identified when `node` is
+    /// non-zero.
+    fn member(name: &'static str, kind: FileKind, node: u64) -> tairix_abi::fs::DirEntry<'static> {
+        tairix_abi::fs::DirEntry {
+            kind,
+            size: 64,
+            allocated: 64,
+            modified: Time64::from_secs(1_700_000_000),
+            id: if node == 0 {
+                tairix_abi::fs::FileId::NONE
+            } else {
+                tairix_abi::fs::FileId {
+                    volume: [5; 16],
+                    node,
+                }
+            },
+            nlink: 1,
+            name: name.as_bytes(),
+            content_gen: 0,
+        }
+    }
+
+    /// What each card of `sample` is: the member's kind, and the path of the
+    /// picture it prints, if it prints one.
+    fn cards(sample: &FolderSample) -> Vec<(IconKind, Option<String>)> {
+        sample
+            .cards()
+            .map(|card| {
+                (
+                    card.kind(),
+                    card.picture().map(|picture| picture.path.clone()),
+                )
+            })
+            .collect()
+    }
+
+    fn sample_of(members: &[tairix_abi::fs::DirEntry<'_>]) -> FolderSample {
+        folder_sample(&["d".to_string()], members.iter().copied())
+    }
+
+    /// Variety first: one card for each of the most frequent families, ties
+    /// going to whichever was seen first, each the family's first member in
+    /// listing order — an identified picture as its own content. Folders and
     /// files of no recognised type make no card, and a bundle is a program.
     #[test]
-    fn a_folder_sample_ranks_families_then_kinds_by_count_then_first_sight() {
-        let sample = |entries: &[(&str, FileKind)]| folder_sample(&[], entries.iter().copied());
+    fn a_folder_sample_shows_each_frequent_family_first() {
+        let sample = sample_of(&[
+            member("song.mp3", FileKind::Regular, 1),
+            member("a.png", FileKind::Regular, 2),
+            member("b.jpg", FileKind::Regular, 3),
+            member("c.jpg", FileKind::Regular, 4),
+            member("film.mkv", FileKind::Regular, 5),
+            member("other.mp3", FileKind::Regular, 6),
+            member("blob.bin", FileKind::Regular, 7),
+            member("Folder", FileKind::Directory, 8),
+            member("Paint.app", FileKind::Directory, 9),
+        ]);
         assert_eq!(
-            sample(&[
-                ("song.mp3", FileKind::Regular),
-                ("a.png", FileKind::Regular),
-                ("b.jpg", FileKind::Regular),
-                ("c.jpg", FileKind::Regular),
-                ("film.mkv", FileKind::Regular),
-                ("other.mp3", FileKind::Regular),
-                ("blob.bin", FileKind::Regular),
-                ("Folder", FileKind::Directory),
-                ("Paint.app", FileKind::Directory),
-            ]),
-            FolderSample::new([IconKind::ImageJpeg, IconKind::Audio, IconKind::Video]),
+            cards(&sample),
+            [
+                (IconKind::ImagePng, Some(String::from("/d/a.png"))),
+                (IconKind::Audio, None),
+                (IconKind::Video, None),
+            ],
             "three pictures, two songs, then a video and a program tied, the video seen first"
         );
-        assert_eq!(
-            sample(&[
-                ("b.txt", FileKind::Regular),
-                ("a.rs", FileKind::Regular),
-                ("Tool.app", FileKind::Directory),
-            ]),
-            FolderSample::new([IconKind::Text, IconKind::AppBundle]),
-            "a tie between kinds goes to the first seen"
-        );
-        assert!(sample(&[
-            ("Folder", FileKind::Directory),
-            ("x.bin", FileKind::Regular)
+        assert!(sample_of(&[
+            member("Folder", FileKind::Directory, 1),
+            member("x.bin", FileKind::Regular, 2),
         ])
         .is_empty());
+    }
+
+    /// Then fill: cards left over go round the families again while one has
+    /// members not yet shown, so a folder of photos shows three of them, of
+    /// text three text cards, and of photos and one PDF two photos and the PDF.
+    #[test]
+    fn a_folder_sample_fills_from_the_families_it_holds() {
+        let photos = sample_of(&[
+            member("1.jpg", FileKind::Regular, 1),
+            member("2.jpg", FileKind::Regular, 2),
+            member("3.jpg", FileKind::Regular, 3),
+            member("4.jpg", FileKind::Regular, 4),
+        ]);
+        assert_eq!(
+            cards(&photos),
+            ["/d/1.jpg", "/d/2.jpg", "/d/3.jpg"]
+                .map(|path| (IconKind::ImageJpeg, Some(String::from(path))))
+        );
+        let mixed = sample_of(&[
+            member("1.jpg", FileKind::Regular, 1),
+            member("2.jpg", FileKind::Regular, 2),
+            member("report.pdf", FileKind::Regular, 3),
+            member("3.jpg", FileKind::Regular, 4),
+        ]);
+        assert_eq!(
+            cards(&mixed),
+            [
+                (IconKind::ImageJpeg, Some(String::from("/d/1.jpg"))),
+                (IconKind::Pdf, None),
+                (IconKind::ImageJpeg, Some(String::from("/d/2.jpg"))),
+            ]
+        );
+        let text = sample_of(&[
+            member("a.txt", FileKind::Regular, 1),
+            member("b.txt", FileKind::Regular, 2),
+            member("c.txt", FileKind::Regular, 3),
+            member("d.txt", FileKind::Regular, 4),
+        ]);
+        assert_eq!(cards(&text), vec![(IconKind::Text, None); 3]);
+        let one = sample_of(&[member("only.txt", FileKind::Regular, 1)]);
+        assert_eq!(cards(&one), [(IconKind::Text, None)]);
+    }
+
+    /// A picture the listing names no file for, or one that is a link, is
+    /// drawn as its kind: there is nothing an open could be checked against.
+    #[test]
+    fn an_unidentified_or_linked_picture_is_drawn_as_its_kind() {
+        let sample = sample_of(&[
+            member("plain.png", FileKind::Regular, 0),
+            member("link.png", FileKind::Symlink, 2),
+        ]);
+        assert!(!sample.has_pictures(), "{sample:?}");
     }
 
     #[test]
@@ -10335,7 +10652,7 @@ mod occupancy {
         }
 
         assert_eq!(probes_of(&tally, "/locked"), 1);
-        assert_eq!(browser.entries()[0].occupancy(), Occupancy::Indeterminate);
+        assert_eq!(browser.entries()[0].occupancy(), &Occupancy::Indeterminate);
         assert_eq!(
             icon_for_entry(&browser.entries()[0], browser.components()),
             IconKind::Folder
@@ -10378,15 +10695,15 @@ mod occupancy {
         resolve_visible(&mut browser);
         assert_eq!(
             browser.entries()[0].occupancy(),
-            Occupancy::Unprobed,
+            &Occupancy::Unprobed,
             "a pending probe must not latch an answer"
         );
         resolve_visible(&mut browser);
-        assert_eq!(browser.entries()[0].occupancy(), Occupancy::Unprobed);
+        assert_eq!(browser.entries()[0].occupancy(), &Occupancy::Unprobed);
         resolve_visible(&mut browser);
         assert_eq!(
             browser.entries()[0].occupancy(),
-            Occupancy::NonEmpty(FolderSample::default())
+            &Occupancy::NonEmpty(FolderSample::default())
         );
     }
 
@@ -10434,7 +10751,7 @@ mod occupancy {
         let tally = source.tally();
         let mut refused = Browser::open_root(source).expect("root");
         assert!(!resolve_visible(&mut refused));
-        assert_eq!(refused.entries()[1].occupancy(), Occupancy::Indeterminate);
+        assert_eq!(refused.entries()[1].occupancy(), &Occupancy::Indeterminate);
         assert!(!resolve_visible(&mut refused));
         assert_eq!(probes_of(&tally, "/bb-full"), 1, "never asked again");
 
@@ -10474,7 +10791,7 @@ mod occupancy {
         assert!(browser
             .entries()
             .iter()
-            .all(|entry| entry.occupancy() == Occupancy::Unprobed));
+            .all(|entry| entry.occupancy() == &Occupancy::Unprobed));
     }
 
     #[test]
@@ -10490,9 +10807,17 @@ mod occupancy {
 
         // A reload probes every folder again, but shows each previous answer
         // meanwhile rather than blinking back to the plain folder.
-        let answered: Vec<Occupancy> = browser.entries().iter().map(Entry::occupancy).collect();
+        let answered: Vec<Occupancy> = browser
+            .entries()
+            .iter()
+            .map(|entry| entry.occupancy().clone())
+            .collect();
         browser.refresh().expect("refresh");
-        let shown: Vec<Occupancy> = browser.entries().iter().map(Entry::occupancy).collect();
+        let shown: Vec<Occupancy> = browser
+            .entries()
+            .iter()
+            .map(|entry| entry.occupancy().clone())
+            .collect();
         assert_eq!(shown, answered);
         assert!(browser
             .entries()

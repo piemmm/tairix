@@ -965,6 +965,21 @@ fn a_floating_surface_casts_a_translucent_shadow_darker_than_the_desktop() {
     }
 }
 
+/// An icon's shadow stays within the inset a tile keeps around its picture,
+/// so it never paints outside the tile it belongs to.
+#[test]
+fn an_icon_casts_a_shadow_inside_its_tiles_inset() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let metrics = theme.metrics();
+        assert!(metrics.icon_shadow_reach > 0, "{}", theme.name());
+        assert!(
+            metrics.icon_shadow_reach < metrics.control_inset / 2,
+            "{}: the shadow reaches past the gap below a tile's picture",
+            theme.name()
+        );
+    }
+}
+
 #[test]
 fn builtins_share_metrics_fonts_and_cursors() {
     // Corner radii, fonts, and cursors are appearance-independent house
@@ -1484,6 +1499,7 @@ fn sample_metrics() -> Metrics {
         window_backdrop_blur: 10,
         popup_corner_radius: 4,
         drop_shadow_reach: 5,
+        icon_shadow_reach: 2,
         border_thickness: 1,
         scrollbar_breadth: 12,
         min_thumb_length: 20,
@@ -1573,6 +1589,7 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
         assert_eq!(derived.title_bar_height, normal.title_bar_height);
         assert_eq!(derived.scrollbar_breadth, normal.scrollbar_breadth);
         assert_eq!(derived.drop_shadow_reach, normal.drop_shadow_reach);
+        assert_eq!(derived.icon_shadow_reach, normal.icon_shadow_reach);
     }
     assert_eq!(normal.at_density(Density::Normal), normal);
 }

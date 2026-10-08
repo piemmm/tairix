@@ -270,7 +270,15 @@ fn a_relist_keeps_the_selection_on_the_same_named_icon() {
     let folder = holding(vec![file("b.txt"), file("c.txt")]);
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(desktop.entries()[1].name(), "c.txt");
 
     // A file appears ahead of it: the selection follows the name, not the
@@ -290,7 +298,15 @@ fn a_relist_that_removes_the_selected_icon_selects_nothing() {
     let folder = holding(vec![file("a.txt"), file("b.txt")]);
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt")])));
     assert!(desktop.relist());
     assert_eq!(desktop.selected(), None);
@@ -345,7 +361,15 @@ fn every_relist_the_session_asks_for_reads_the_folder() {
 fn a_reported_change_merges_in_place_and_repaints_only_the_cells_it_moved() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("c.txt"), file("e.txt")]);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     let damage = damage_of(|damage| {
         assert!(desktop.apply_changes(vec![EntryChange::Upsert(file("d.txt"))], layout_of, damage,));
     });
@@ -387,13 +411,29 @@ fn a_reported_change_moving_the_icons_ends_a_double_click_in_progress() {
     let mut desktop = desktop_of(vec![file("b.txt"), file("c.txt")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     desktop.apply_changes(
         vec![EntryChange::Upsert(file("a.txt"))],
         layout_of,
         &mut Region::new(),
     );
-    let acted = desktop.press(at, &layout, 1, &[], &mut Region::new());
+    let acted = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         acted.action, None,
         "a.txt is under the pointer now, unpressed"
@@ -406,10 +446,26 @@ fn a_relist_moving_the_icons_ends_a_double_click_in_progress() {
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("c.txt")])));
     assert!(desktop.relist());
-    let acted = desktop.press(at, &layout, 1, &[], &mut Region::new());
+    let acted = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         acted.action, None,
         "c.txt is under the pointer now, unpressed"
@@ -519,7 +575,15 @@ fn reading_back_a_folder_a_change_named_is_no_change() {
 fn a_reported_removal_takes_its_selection_and_an_unchanged_entry_costs_nothing() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     let damage = damage_of(|damage| {
         assert!(desktop.apply_changes(
             vec![EntryChange::Remove(String::from("b.txt"))],
@@ -545,29 +609,80 @@ fn a_reported_removal_takes_its_selection_and_an_unchanged_entry_costs_nothing()
 
 // --- Hover, selection, focus ---------------------------------------------
 
+/// The ground around an icon's picture and name is the desktop's: a press or
+/// a hover there is on no icon, though it lies inside the icon's cell.
+#[test]
+fn the_ground_in_an_icons_cell_is_the_desktops() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    assert_eq!(desktop.selected(), Some(0));
+
+    let corner = cell(&layout, 1);
+    let ground = Point::new(corner.left() + 1, corner.top() + 1);
+    desktop.pointer_moved(ground, &layout, Scale::ONE, &theme(), &mut Region::new());
+    assert_eq!(desktop.hovered(), None);
+    desktop.press(
+        ground,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &[],
+        &mut Region::new(),
+    );
+    assert_eq!(desktop.selected(), None);
+}
+
 #[test]
 fn hover_follows_the_pointer_and_damages_only_the_cells_it_moves_between() {
     let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
     let layout = layout_of(&desktop);
     let mut damage = Region::new();
 
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, &mut damage);
+    desktop.pointer_moved(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut damage,
+    );
     assert_eq!(damage.rects(), [cell(&layout, 0)]);
     assert_eq!(desktop.hovered(), Some(0));
 
     damage.clear();
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, &mut damage);
+    desktop.pointer_moved(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut damage,
+    );
     assert!(damage.is_empty(), "the same icon is not a change");
 
     // Moving between icons costs both cells and nothing between them: the one
     // that lost the highlight and the one that took it.
     damage.clear();
-    desktop.pointer_moved(centre_of(&layout, 1), &layout, &mut damage);
+    desktop.pointer_moved(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut damage,
+    );
     assert_eq!(damage.rects(), [cell(&layout, 0), cell(&layout, 1)]);
     assert_eq!(desktop.hovered(), Some(1));
 
     damage.clear();
-    desktop.pointer_moved(EMPTY_DESKTOP, &layout, &mut damage);
+    desktop.pointer_moved(EMPTY_DESKTOP, &layout, Scale::ONE, &theme(), &mut damage);
     assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(desktop.hovered(), None);
 }
@@ -616,7 +731,7 @@ fn a_column_the_field_cannot_hold_whole_is_left_out() {
         );
 
         let damage = damage_of(|damage| {
-            desktop.pointer_moved(sliver.center(), &layout, damage);
+            desktop.pointer_moved(sliver.center(), &layout, Scale::ONE, &theme(), damage);
         });
         assert_eq!(
             desktop.hovered(),
@@ -631,7 +746,13 @@ fn a_column_the_field_cannot_hold_whole_is_left_out() {
 fn leaving_the_desktop_clears_the_hover() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, &mut Region::new());
+    desktop.pointer_moved(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut Region::new(),
+    );
     assert_eq!(
         damage_of(|damage| {
             desktop.pointer_left(&layout, damage);
@@ -655,24 +776,56 @@ fn a_press_selects_an_icon_and_a_press_on_empty_desktop_clears_it() {
     let layout = layout_of(&desktop);
     let mut damage = Region::new();
 
-    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut damage);
+    desktop.press(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut damage,
+    );
     assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(desktop.selected(), Some(1));
     assert!(desktop.is_focused(), "a press moves focus to the desktop");
 
     // A selection that moves costs the icon it left and the icon it landed on.
     damage.clear();
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut damage);
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut damage,
+    );
     assert_eq!(damage.rects(), [cell(&layout, 0), cell(&layout, 1)]);
     assert_eq!(desktop.selected(), Some(0));
 
     damage.clear();
-    desktop.press(EMPTY_DESKTOP, &layout, 0, &[], &mut damage);
+    desktop.press(
+        EMPTY_DESKTOP,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut damage,
+    );
     assert_eq!(damage.rects(), [cell(&layout, 0)]);
     assert_eq!(desktop.selected(), None);
 
     damage.clear();
-    desktop.press(EMPTY_DESKTOP, &layout, 0, &[], &mut damage);
+    desktop.press(
+        EMPTY_DESKTOP,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut damage,
+    );
     assert!(
         damage.is_empty(),
         "clearing an empty selection changes nothing"
@@ -697,7 +850,15 @@ fn focus_moves_the_ring_onto_the_selection_and_costs_nothing_without_one() {
         "and none disappeared"
     );
 
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert!(desktop.is_focused(), "a press claims the keyboard");
     assert_eq!(
         damage_of(|damage| desktop.set_focused(false, &layout, damage)).rects(),
@@ -827,7 +988,15 @@ fn a_key_release_and_an_unknown_key_change_nothing() {
 fn escape_clears_the_selection() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         damage_of(|damage| {
             desktop.key(escape(), true, &layout, &[], damage);
@@ -852,8 +1021,24 @@ fn double_clicking_a_folder_opens_the_file_manager_at_its_path() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
-    let acted = desktop.press(at, &layout, 1, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    let acted = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         acted.action,
         Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
@@ -867,10 +1052,26 @@ fn double_clicking_an_application_bundle_launches_its_run_binary() {
     let mut desktop = desktop_of(vec![bundle("Chess.app")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
-            .press(at, &layout, 1, &[], &mut Region::new())
+            .press(
+                at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                1,
+                &[],
+                &mut Region::new()
+            )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Users/ada/Desktop/Chess.app/Run".to_string(),
@@ -885,10 +1086,26 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
     let mut desktop = desktop_of(vec![file("notes.txt")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
-            .press(at, &layout, 1, &editor(), &mut Region::new())
+            .press(
+                at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                1,
+                &editor(),
+                &mut Region::new()
+            )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/Edit.app/Run".to_string(),
@@ -910,9 +1127,25 @@ fn a_file_opened_with_an_editor_carries_the_editor_s_signed_claim_to_edit() {
         .into_iter()
         .map(AppAssociation::writing_documents)
         .collect();
-    desktop.press(at, &layout, 0, &writer, &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &writer,
+        &mut Region::new(),
+    );
     let Some(DesktopAction::Activate(DesktopActivation::Launch { document, .. })) = desktop
-        .press(at, &layout, 1, &writer, &mut Region::new())
+        .press(
+            at,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            1,
+            &writer,
+            &mut Region::new(),
+        )
         .action
     else {
         panic!("a double-click on a file launches its application");
@@ -925,8 +1158,24 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
     let mut desktop = desktop_of(vec![file("mystery.qqq")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
-    let acted = desktop.press(at, &layout, 1, &editor(), &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    let acted = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &editor(),
+        &mut Region::new(),
+    );
     assert_eq!(
         acted.action,
         Some(DesktopAction::Refuse(
@@ -1015,10 +1264,26 @@ fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
     let mut desktop = desktop_of(vec![link("Chess", LinkTarget::Bundle, "/Apps/chess.app")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
-            .press(at, &layout, 1, &[], &mut Region::new())
+            .press(
+                at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                1,
+                &[],
+                &mut Region::new()
+            )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/chess.app/Run".to_string(),
@@ -1036,10 +1301,26 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
     ]);
     let layout = layout_of(&desktop);
     let folder_at = centre_of(&layout, 0);
-    desktop.press(folder_at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        folder_at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
-            .press(folder_at, &layout, 1, &[], &mut Region::new())
+            .press(
+                folder_at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                1,
+                &[],
+                &mut Region::new()
+            )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
             path: "/Users/ada/Desktop/Work".to_string(),
@@ -1047,10 +1328,26 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
         "a directory the link names is opened through the link, which the kernel resolves"
     );
     let file_at = centre_of(&layout, 1);
-    desktop.press(file_at, &layout, 2, &editor(), &mut Region::new());
+    desktop.press(
+        file_at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        2,
+        &editor(),
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
-            .press(file_at, &layout, 3, &editor(), &mut Region::new())
+            .press(
+                file_at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                3,
+                &editor(),
+                &mut Region::new()
+            )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/Edit.app/Run".to_string(),
@@ -1069,8 +1366,24 @@ fn double_clicking_a_shortcut_whose_target_has_gone_is_refused_with_its_reason()
     let mut desktop = desktop_of(vec![link("Chess", LinkTarget::Dangling, "/Apps/chess.app")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
-    let acted = desktop.press(at, &layout, 1, &editor(), &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    let acted = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &editor(),
+        &mut Region::new(),
+    );
     assert_eq!(
         acted.action,
         Some(DesktopAction::Refuse(
@@ -1093,10 +1406,26 @@ fn a_shortcut_that_names_nothing_at_all_is_refused_rather_than_opened() {
     )]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
-            .press(at, &layout, 1, &[], &mut Region::new())
+            .press(
+                at,
+                &layout,
+                Scale::ONE,
+                &theme(),
+                1,
+                &[],
+                &mut Region::new()
+            )
             .action,
         Some(DesktopAction::Refuse(
             "desktop: the shortcut 'Chess' names nothing\n".to_string()
@@ -1118,7 +1447,15 @@ fn enter_activates_the_selection_and_does_nothing_with_no_selection() {
         damage.is_empty(),
         "there was nothing to activate or repaint"
     );
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(
         desktop
             .key(enter(), true, &layout, &[], &mut Region::new())
@@ -1134,9 +1471,25 @@ fn two_slow_clicks_are_two_clicks_not_an_activation() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
     let past = desktop.settings().double_click.saturating_total_nanos() + 1;
-    let late = desktop.press(at, &layout, past, &[], &mut Region::new());
+    let late = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        past,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(late.action, None);
 }
 
@@ -1149,8 +1502,24 @@ fn the_icons_pair_clicks_under_the_chosen_interval() {
     let _ = desktop.apply_settings(settings);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
-    let slow = desktop.press(at, &layout, 1_000_000_000, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    let slow = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1_000_000_000,
+        &[],
+        &mut Region::new(),
+    );
     assert!(
         slow.action.is_some(),
         "a second press a second later is within a 1.5 s interval"
@@ -1166,8 +1535,22 @@ fn every_icon_the_column_shows_is_painted_even_with_no_artwork_at_all() {
     let theme = theme();
     let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
     desktop.set_focused(true, &layout, &mut Region::new());
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
-    desktop.pointer_moved(centre_of(&layout, 1), &layout, &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme,
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    desktop.pointer_moved(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme,
+        &mut Region::new(),
+    );
 
     desktop.render(
         &mut surface,
@@ -1300,7 +1683,15 @@ fn each_arrangement_lays_the_column_out_at_its_own_corner_and_hit_tests_there() 
         );
         // The icon the user can see is the icon a press lands on, whichever
         // corner the column grew from.
-        desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+        desktop.press(
+            centre_of(&layout, 0),
+            &layout,
+            Scale::ONE,
+            &theme(),
+            0,
+            &[],
+            &mut Region::new(),
+        );
         assert_eq!(desktop.selected(), Some(0), "{icons:?} hit-test");
         cells.push(bounds);
     }
@@ -1449,8 +1840,22 @@ fn a_new_sort_order_reorders_the_icons_shown_without_reading_the_folder() {
     ]);
     let mut desktop = desktop_over(&folder);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
-    desktop.pointer_moved(centre_of(&layout, 1), &layout, &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    desktop.pointer_moved(
+        centre_of(&layout, 1),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        &mut Region::new(),
+    );
 
     desktop
         .apply_settings(arranged_by(IconFlow::default(), IconSort::Size))
@@ -1464,7 +1869,15 @@ fn a_new_sort_order_reorders_the_icons_shown_without_reading_the_folder() {
         None,
         "the cell under the pointer changed"
     );
-    let acted = desktop.press(centre_of(&layout, 0), &layout, 1, &[], &mut Region::new());
+    let acted = desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &[],
+        &mut Region::new(),
+    );
     assert_eq!(acted.action, None, "c.txt was never pressed before");
 }
 
@@ -1478,7 +1891,7 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
 
     let mut damage = Region::new();
     assert!(
-        desktop.context_press(at, &layout, &mut damage),
+        desktop.context_press(at, &layout, Scale::ONE, &theme(), &mut damage),
         "the press landed on an icon, so the menu offers `Open`"
     );
     assert_eq!(damage.rects(), [cell(&layout, 1)]);
@@ -1489,7 +1902,7 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
     );
 
     damage.clear();
-    assert!(desktop.context_press(at, &layout, &mut damage));
+    assert!(desktop.context_press(at, &layout, Scale::ONE, &theme(), &mut damage));
     assert!(damage.is_empty(), "the selection did not move");
 }
 
@@ -1497,11 +1910,19 @@ fn a_secondary_press_on_an_icon_selects_it_and_asks_for_the_menu() {
 fn a_secondary_press_on_the_backdrop_leaves_the_selection_untouched() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    desktop.press(
+        centre_of(&layout, 0),
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
 
     let mut damage = Region::new();
     assert!(
-        !desktop.context_press(EMPTY_DESKTOP, &layout, &mut damage),
+        !desktop.context_press(EMPTY_DESKTOP, &layout, Scale::ONE, &theme(), &mut damage),
         "a press on empty backdrop has nothing to open"
     );
     assert!(damage.is_empty(), "the backdrop menu moves no highlight");
@@ -1517,8 +1938,24 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
-    desktop.press(at, &layout, 0, &[], &mut Region::new());
-    let clicked = desktop.press(at, &layout, 1, &[], &mut Region::new());
+    desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        0,
+        &[],
+        &mut Region::new(),
+    );
+    let clicked = desktop.press(
+        at,
+        &layout,
+        Scale::ONE,
+        &theme(),
+        1,
+        &[],
+        &mut Region::new(),
+    );
 
     assert_eq!(
         desktop.command(PinboardCommand::Open, &[]).action,

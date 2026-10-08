@@ -56,6 +56,7 @@ pub mod round;
 pub mod scan;
 pub mod shape;
 pub mod surface;
+mod transformed;
 
 #[cfg(test)]
 mod tests;
@@ -65,7 +66,8 @@ pub use artwork::{
     for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
 pub use blur::{
-    box_blur, box_blur_coverage, soften_coverage, BlurScratch, Frosting, SOFTEN_PASSES,
+    box_blur, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Frosting, ShadowCast,
+    SOFTEN_PASSES,
 };
 pub use color::{
     blend_solid_span, blend_span, div255, div255_biased, mix_span, Color, Pixel, ROUND_NEAREST,

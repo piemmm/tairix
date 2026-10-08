@@ -40,7 +40,7 @@
 
 use core::ops::Range;
 
-use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
 use tairix_abi::Errno;
 use tairix_geometry::Rect;
 use tairix_parallel::JobRunner;
@@ -314,6 +314,31 @@ pub fn decode(
         },
     );
     Ok(changed.rect())
+}
+
+/// [`decode`] for every rectangle of `damage`, handing each changed
+/// sub-rectangle to `changed`. Every rectangle's shape is checked before a
+/// pixel is written, so a refusal writes nothing, and the list's rectangles are
+/// disjoint, so no pixel is converted twice.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shape validation reports for any of the rectangles.
+pub fn decode_list(
+    frame: &[u8],
+    surface: &mut Surface,
+    mode: &DisplayMode,
+    damage: &DamageList,
+    runner: &dyn JobRunner,
+    mut changed: impl FnMut(Rect),
+) -> Result<(), Errno> {
+    for rect in damage.rects() {
+        Shape::resolve(mode, surface, *rect, frame.len())?;
+    }
+    for rect in damage.rects() {
+        changed(decode(frame, surface, mode, *rect, runner)?);
+    }
+    Ok(())
 }
 
 /// One band of a [`decode`]: the surface rows it owns, and the box of pixels it

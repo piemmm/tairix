@@ -1625,3 +1625,30 @@ fn a_field_leaves_its_owner_every_chord_but_select_all() {
     assert!(owner_chord(Key::Char('a'), held(true, true, false)));
     assert!(!owner_chord(Key::Char('s'), held(false, false, false)));
 }
+
+/// A field opened with part of its text selected replaces just that part on
+/// the first keystroke — how a rename keeps a name's extension.
+#[test]
+fn a_selection_given_at_opening_is_what_typing_replaces() {
+    let mut field = TextField::new()
+        .with_text("holiday.jpeg")
+        .with_selection(0..7);
+    field.set_focused(true);
+    field.on_key(Key::Char('x'), NONE_MODS, bounds(), &mut sink());
+    assert_eq!(field.text(), "x.jpeg");
+}
+
+/// A selection reaching past the text, or into a character, is drawn back to
+/// what the text holds rather than refused or split.
+#[test]
+fn a_selection_given_at_opening_is_clamped_to_whole_characters() {
+    let mut field = TextField::new().with_text("née.txt").with_selection(0..2);
+    field.set_focused(true);
+    field.on_key(Key::Char('N'), NONE_MODS, bounds(), &mut sink());
+    assert_eq!(field.text(), "Née.txt", "the cut drew back off the é");
+
+    let mut past = TextField::new().with_text("ab").with_selection(1..99);
+    past.set_focused(true);
+    past.on_key(Key::Char('z'), NONE_MODS, bounds(), &mut sink());
+    assert_eq!(past.text(), "az");
+}

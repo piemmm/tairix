@@ -123,15 +123,19 @@ different ways:
   *name* resolves to, through the program-store order, with the asking
   session's own home root. What a surface listing *processes* asks for (see
   below).
-- `IconRequest::thumbnail(kind, path, size, modified, id, reading)` — a
-  picture file drawn as its own content, keyed by the path and by the file's
-  identity, size and modification time as its listing reported, so a changed
-  or replaced file is decoded afresh. The reader opens it without following a
+- `IconRequest::thumbnail(kind, path, stamp, reading)` — a picture file drawn
+  as its own content, keyed by the path and by the `DocumentStamp` its listing
+  reported (identity, size, modification time, content generation), so a
+  changed or replaced file is decoded afresh. The reader opens it without following a
   link (`ArtworkReader::open`, the production `RtDocument` under the `rt`
   feature); a key naming no identity, a file past `MAX_THUMBNAIL_BYTES`, or an
   open handle whose `DocumentStamp` differs from the key is refused before a
   byte is read, and the rasteriser streams it to the sandbox
-  (`ArtworkRasteriser::thumbnail`). Both seams decline by default, and the
+  (`ArtworkRasteriser::thumbnail`), which answers the picture centred in the
+  square with the rectangle it was fitted to (`Fitted`). The host refuses a
+  rectangle outside the square or empty, and the cache keeps it beside the
+  pixels (`Artwork::framed`), so a draw outlines the picture's own bounds in
+  the theme's `frame` role rather than the square it sits in. Both seams decline by default, and the
   inline resolver declines a thumbnail outright: a whole file's read and
   decode is not work for a thread that owes a frame. The desk queues
   thumbnails apart and hands them out with `next_thumbnail`, after every icon,
@@ -140,12 +144,25 @@ different ways:
   nothing asked for since the last sweep and wipes any drawn and never
   collected; `MAX_WANTED_THUMBNAILS` bounds what queues between sweeps.
 - `IconRequest::folder(sample)` — a folder drawn as a picture of what it
-  holds: the `FolderBack` artwork, a card per kind in its `FolderSample`, and
-  the `FolderFront` over them, composed once per (sample, side) and cached
-  under `ArtworkKey::Folder`. A card with no artwork tier is its glyph on a
-  fixed-ink paper card, so the picture does not change with the theme. An
-  empty sample, a side under `MIN_COMPOSITE_SIDE`, or a back or front that will
-  not draw resolves the plain `FolderFilled` picture instead.
+  holds: the `FolderBack` artwork, up to three cards from its `FolderSample`
+  fanned out of the mouth — each turned a few degrees about its foot and drawn
+  through `Surface::blit_transformed` — and the `FolderFront` over them,
+  composed once per (sample, side) and cached under `ArtworkKey::Folder`. A
+  `SampleCard::Picture` is a member's thumbnail, decoded at the folder's own
+  side (so it shares the member's own tile thumbnail, and its persistent copy)
+  and printed on a white card with a fixed-ink edge; a `SampleCard::Kind` is its
+  kind's artwork, or its glyph on a fixed-ink paper card, so the picture does
+  not change with the theme. A picture that will not decode draws its kind's
+  card, and a member past `FolderSample::MAX_CARD_BYTES` — a third of
+  `MAX_THUMBNAIL_BYTES` — is its kind outright, so a folder's one worker job
+  reads no more than one thumbnail may. The cards are one shared slice, so
+  every key naming a folder costs a reference count rather than a copy, and
+  a sample's equality is over its cards as drawn (`FolderSample::cards`). A
+  sample holding a picture reads member files, so it is thumbnail-class
+  work, and its request carries the same sample with every picture as its kind
+  as the tier below, drawn until the pictures land. An empty sample, a side
+  under `MIN_COMPOSITE_SIDE`, or a back or front that will not draw resolves
+  the plain `FolderFilled` picture instead.
 
 A bundle's manifest is authored by whoever built the bundle, so it is treated
 as untrusted input at that boundary: it is read under the ABI's own wire
@@ -172,6 +189,15 @@ sink)` builds the cache identically for both consumers, and
 plain `IconArtwork` lookup that knows nothing about I/O. `NoArtwork` is the
 all-built-in lookup a headless build or a test uses — it never resolves any
 artwork, so every draw site falls back to its built-in picture.
+
+A picture's soft shadow is its own entry: `IconArtwork::shadowed(request,
+side, cast)` resolves the picture and then the shadow `cast` throws from its
+coverage (`tairix_raster::cast_shadow`), retained under `ArtworkKey::Shadow`
+beside the picture it was cast from, so a frame blits a mask and never blurs.
+A shadow is cast in this process from pixels already retained, so no resolver
+is handed one. Only a cast mask is kept: one that cannot be cast or kept is
+withheld for that draw (`IconPicture::shadow_withheld`) — the tile then draws
+none rather than blurring itself — and asked for again next time.
 
 A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon
@@ -200,6 +226,11 @@ which is either a wrong picture on screen or a read and a round trip per icon
 per frame. On an output whose frame is a mebibyte or less the whole budget sits
 inside the reserve and no band takes a decoded icon at all; above that, severe
 and critical take what is held above the reserve.
+
+An entry is charged its key's heap bytes beside its pixels
+(`ArtworkKey::heap_bytes`) — a folder key names its members' paths, a program
+key its name and home — so the keys of a large listing count against the
+budget rather than growing beside it.
 
 Where retention genuinely is refused — an entry larger than what the budget can
 hold, or an output whose budget is smaller than one decode — the decode cannot
@@ -307,7 +338,11 @@ short of the memory that would have held them. The cache says so
 A pending tier **stops** the walk rather than falling through, because whether
 a later tier is reached at all depends on what this one turns out to be. A
 deferred request therefore costs exactly the reads a synchronous walk would,
-spread over as many answers as it has tiers to try.
+spread over as many answers as it has tiers to try. The exception is a
+thumbnail-class tier — a thumbnail, or a folder whose sample holds a picture
+(`ArtworkKey::is_thumbnail_class`): it is queued behind every icon and always
+replaces the tier below once it lands, so the walk goes on and draws that tier
+meanwhile, and `prefetch` asks for both.
 
 `ArtworkCache::prefetch` is what keeps that spreading invisible. A caller that
 knows what it is *about* to draw asks for it there, and the cache asks the
@@ -326,6 +361,47 @@ when the window opens — asks `owned_artwork` and receives an `ArtworkOutcome`:
 (ask again when the producer says the decode has landed). `owned_artwork` also
 hands back a decode the cache was too tight to retain, rather than throwing
 those pixels away.
+
+## Thumbnails that persist
+
+`ThumbnailStore` keeps decoded thumbnails across runs in one blob of an
+application's own bulk store (`plans/FILES-INTERACTION.md` FI25; the file
+manager is its consumer, through its `ArtworkRasteriser::thumbnail`).
+`ThumbnailStore::serve(reading, document, decode)` answers the stored picture
+of the open document's version, or decodes and keeps it.
+
+- **Exact or not at all.** A `StoreKey` is (volume, inode, content generation,
+  reading), built only from a stamp naming an identity and a non-zero
+  generation (`StoreKey::of`), so a changed file is another key and a file on a
+  volume that keeps no generation is decoded and never stored.
+- **A hit is still re-proven.** The store is consulted only after
+  `render_thumbnail` has opened the file without following a link and matched
+  its stamp to the listing's, so a file the user can no longer open is never
+  pictured; a hit reads no content.
+- **Only a decode of one version is kept.** After the decode the document is
+  stamped again through its open handle (`ArtworkDocument::restamp`); a decode
+  that raced a write is drawn and not stored.
+- **The blob** is a checksummed header naming the version, side, decoder
+  revision and sets, a table of
+  64-byte slot headers, and page-aligned payloads of `side`×`side` RGBA8. A key
+  hashes, with a fixed seed, to one four-way set: a lookup reads the set's four
+  headers and one payload, and an insert takes the key's own way, an empty one,
+  or the set's oldest by insertion, so a hit writes nothing. The blob is sized
+  to the extent ceiling it is given, written sparsely, and needs no scan to
+  open; a header for another version, side, revision, set count or way count,
+  or a blob shorter than the layout, formats it afresh. The revision is the
+  thumbnail decoder's (`tairix_sandbox::imagerender::THUMBNAIL_REVISION`),
+  raised when a decoder or the fitting changes its pixels, so a fix to either
+  is never hidden behind pictures drawn before it. A lookup reads into a
+  fallible buffer, so a store short of memory misses rather than aborting.
+- **Torn writes read as empty.** A slot header carries a CRC-32C over itself
+  and its payload and is written after the payload, so a crash mid-slot — or
+  two instances writing one way at once, since a delegated blob takes no
+  advisory lock — leaves a slot that does not check out, never the wrong
+  picture.
+
+`StoreFile` is the positioned I/O it runs over: `tairix_rt::File` under the
+`rt` feature, an in-memory blob in its tests.
 
 ## Stability
 

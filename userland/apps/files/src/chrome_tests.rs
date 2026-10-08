@@ -5,7 +5,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Accelerator, Chrome};
+use super::{Accelerator, Chrome, SelectionVerb};
 use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
 use tairix_browse::{ManagerTool, Places, ToolbarBand, ToolbarCommand};
 
@@ -130,6 +130,55 @@ fn a_key_a_field_moves_or_types_with_is_no_accelerator() {
     ] {
         assert_eq!(
             Accelerator::of(key, modifiers),
+            None,
+            "{key:?} {modifiers:?}"
+        );
+    }
+}
+
+#[test]
+fn ctrl_a_selects_every_entry_and_ctrl_shift_a_clears_the_selection() {
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    let ctrl_shift = Modifiers {
+        shift: true,
+        ..ctrl
+    };
+    for letter in ['a', 'A'] {
+        assert_eq!(
+            SelectionVerb::of_key(KeyValue::Char(letter), ctrl),
+            Some(SelectionVerb::All)
+        );
+        assert_eq!(
+            SelectionVerb::of_key(KeyValue::Char(letter), ctrl_shift),
+            Some(SelectionVerb::Clear),
+            "Shift may deliver {letter:?}"
+        );
+    }
+}
+
+#[test]
+fn a_plain_or_alt_a_is_no_selection_verb() {
+    let alt_ctrl = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    for (key, modifiers) in [
+        (KeyValue::Char('a'), Modifiers::default()),
+        (KeyValue::Char('a'), alt_ctrl),
+        (
+            KeyValue::Char('x'),
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        ),
+    ] {
+        assert_eq!(
+            SelectionVerb::of_key(key, modifiers),
             None,
             "{key:?} {modifiers:?}"
         );

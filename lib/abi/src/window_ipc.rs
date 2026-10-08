@@ -38,7 +38,7 @@ use core::cmp::Ordering;
 
 use crate::bounded_text::{BoundedText, WideText};
 use crate::desktop::DesktopInfo;
-use crate::driver::display::{DamageRect, DisplayFormat};
+use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS, NO_RECT};
 use crate::input::KeyInput;
 use crate::input::Modifiers;
 use crate::input::PointerButtonCode;
@@ -2139,8 +2139,10 @@ pub enum WindowRequest {
         window_id: u64,
         /// Index of the frame inside the window's region.
         frame_index: u32,
-        /// The changed rectangle; never empty.
-        damage: DamageRect,
+        /// The changed rectangles, each non-empty: the edits themselves, so
+        /// the session converts and recomposes what moved rather than the box
+        /// spanning it.
+        damage: DamageList,
     },
     /// Close window `window_id`, tearing down its region mapping and its
     /// taskbar entry.
@@ -2856,12 +2858,15 @@ const OP_QUERY_DRAG_SPOT: u16 = 35;
 /// length — the frame is as long as the operation needs and no longer.
 const REQUEST_HEADER_LEN: usize = 8;
 
-/// Encoded size of a [`WindowRequest::Present`]: the header, the window id,
-/// the frame index, and the four-word damage rectangle.
+/// Encoded size of a [`WindowRequest::Present`] naming no rectangle: the
+/// header, the window id, the frame index, and the rectangle count. Each
+/// rectangle adds [`PRESENT_RECT_LEN`].
 ///
 /// This is the hottest operation on the channel — one per composited frame
-/// per window — so it is deliberately the shortest frame that carries it.
-const PRESENT_WIRE_LEN: usize = 36;
+/// per window — so the frame is as long as the rectangles it names.
+const PRESENT_WIRE_LEN: usize = 24;
+/// Encoded size of one damage rectangle a present names: four words.
+const PRESENT_RECT_LEN: usize = 16;
 /// Encoded size of a request whose whole operand block is one window id
 /// ([`WindowRequest::Close`], [`WindowRequest::TakePickedName`]).
 const WINDOW_ID_WIRE_LEN: usize = REQUEST_HEADER_LEN + 8;
@@ -3281,7 +3286,7 @@ impl WindowRequest {
         match *self {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
-            Self::Present { .. } => PRESENT_WIRE_LEN,
+            Self::Present { ref damage, .. } => PRESENT_WIRE_LEN + damage.len() * PRESENT_RECT_LEN,
             Self::Close { .. }
             | Self::TakePickedName { .. }
             | Self::TakeDropTarget { .. }
@@ -3585,10 +3590,14 @@ impl WindowRequest {
         {
             put_u64(out, 8, window_id);
             put_u32(out, 16, frame_index);
-            put_u32(out, 20, damage.x);
-            put_u32(out, 24, damage.y);
-            put_u32(out, 28, damage.width_px);
-            put_u32(out, 32, damage.height_px);
+            put_u32(out, 20, u32::try_from(damage.len()).unwrap_or(0));
+            for (index, rect) in damage.rects().iter().enumerate() {
+                let at = PRESENT_WIRE_LEN + index * PRESENT_RECT_LEN;
+                put_u32(out, at, rect.x);
+                put_u32(out, at + 4, rect.y);
+                put_u32(out, at + 8, rect.width_px);
+                put_u32(out, at + 12, rect.height_px);
+            }
         }
     }
 
@@ -4120,24 +4129,33 @@ fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 }
 
 /// Decode the operands of a [`WindowRequest::Present`]: the window, the
-/// frame index, and the damage rectangle, which is never empty.
+/// frame index, and one to [`MAX_DAMAGE_RECTS`] damage rectangles, none of
+/// them empty, the frame exactly as long as the count says.
 fn read_present(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    exact_len(bytes, PRESENT_WIRE_LEN)?;
+    if bytes.len() < PRESENT_WIRE_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let count = usize::try_from(read_u32(bytes, 20))
+        .ok()
+        .filter(|count| (1..=MAX_DAMAGE_RECTS).contains(count))
+        .ok_or(Errno::LengthOutOfRange)?;
+    exact_len(bytes, PRESENT_WIRE_LEN + count * PRESENT_RECT_LEN)?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let frame_index = read_u32(bytes, 16);
-    let damage = DamageRect {
-        x: read_u32(bytes, 20),
-        y: read_u32(bytes, 24),
-        width_px: read_u32(bytes, 28),
-        height_px: read_u32(bytes, 32),
-    };
-    if damage.width_px == 0 || damage.height_px == 0 {
-        return Err(Errno::LengthOutOfRange);
+    let mut rects = [NO_RECT; MAX_DAMAGE_RECTS];
+    for (index, rect) in rects.iter_mut().take(count).enumerate() {
+        let at = PRESENT_WIRE_LEN + index * PRESENT_RECT_LEN;
+        *rect = DamageRect {
+            x: read_u32(bytes, at),
+            y: read_u32(bytes, at + 4),
+            width_px: read_u32(bytes, at + 8),
+            height_px: read_u32(bytes, at + 12),
+        };
     }
     Ok(WindowRequest::Present {
         window_id,
         frame_index,
-        damage,
+        damage: DamageList::new(&rects[..count])?,
     })
 }
 
@@ -7402,16 +7420,17 @@ mod tests {
         OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
         OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
         PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET,
-        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET,
-        PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET,
-        QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET,
-        RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN,
-        SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET,
-        SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET,
-        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
-        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
-        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
-        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN, PRESENT_WIRE_LEN,
+        PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
+        PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
+        RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
+        REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET,
+        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
+        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
+        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
+        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
         WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
         WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
@@ -7424,7 +7443,7 @@ mod tests {
     use super::{PreviewOutcome, PreviewSubject};
     use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
-    use crate::driver::display::{DamageRect, DisplayFormat};
+    use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS};
     use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
     use crate::pinboard_ipc::PinboardDocument;
     use crate::seat::SEATMGR_ENDPOINT;
@@ -7542,12 +7561,28 @@ mod tests {
         WindowRequest::Present {
             window_id: 3,
             frame_index: 1,
-            damage: DamageRect {
+            damage: DamageList::new(&[DamageRect {
                 x: 10,
                 y: 20,
                 width_px: 30,
                 height_px: 40,
-            },
+            }])
+            .expect("one rectangle"),
+        }
+    }
+
+    /// A present naming as many rectangles as one may.
+    fn widest_present() -> WindowRequest {
+        let rects: [DamageRect; MAX_DAMAGE_RECTS] = core::array::from_fn(|index| DamageRect {
+            x: u32::try_from(index).expect("small") * 10,
+            y: 4,
+            width_px: 8,
+            height_px: 2,
+        });
+        WindowRequest::Present {
+            window_id: 3,
+            frame_index: 0,
+            damage: DamageList::new(&rects).expect("as many as one may"),
         }
     }
 
@@ -7868,6 +7903,7 @@ mod tests {
         visit(sample_create());
         visit(sample_create_popup());
         visit(sample_present());
+        visit(widest_present());
         visit(WindowRequest::Close { window_id: 9 });
         each_pick_request(&mut visit);
         visit(WindowRequest::Resize {
@@ -8056,9 +8092,9 @@ mod tests {
     /// the frame were shared again.
     #[test]
     fn present_frames_are_short() {
-        assert_eq!(sample_present().wire_len(), PRESENT_WIRE_LEN);
-        assert_eq!(PRESENT_WIRE_LEN, 36);
-        const { assert!(PRESENT_WIRE_LEN * 4 < WindowRequest::MAX_WIRE_LEN) };
+        assert_eq!(sample_present().wire_len(), 40, "one rectangle");
+        assert_eq!(widest_present().wire_len(), 152, "the most a present names");
+        assert!(widest_present().wire_len() * 4 < WindowRequest::MAX_WIRE_LEN);
     }
 
     /// A menu holds its rows' text in one block, so neither the model nor
@@ -8205,7 +8241,10 @@ mod tests {
             "the widest open defines the endpoint's receive bound"
         );
         // And the hot path is untouched by carrying it.
-        assert_eq!(sample_present().wire_len(), PRESENT_WIRE_LEN);
+        assert_eq!(
+            sample_present().wire_len(),
+            PRESENT_WIRE_LEN + PRESENT_RECT_LEN
+        );
     }
 
     /// Every field an open states is bounded and checked, and a frame whose
@@ -10318,13 +10357,13 @@ mod tests {
     #[test]
     fn present_refuses_an_empty_damage_rectangle_and_a_zero_id() {
         let mut zero_width = sample_present().frame();
-        zero_width[28..32].copy_from_slice(&0u32.to_le_bytes());
+        zero_width[32..36].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_width),
             Err(Errno::LengthOutOfRange)
         );
         let mut zero_height = sample_present().frame();
-        zero_height[32..36].copy_from_slice(&0u32.to_le_bytes());
+        zero_height[36..40].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_height),
             Err(Errno::LengthOutOfRange)
@@ -10338,6 +10377,27 @@ mod tests {
             WindowRequest::from_bytes(&zero_close),
             Err(Errno::OutOfRange)
         );
+    }
+
+    /// A present names one to eight rectangles and is exactly as long as the
+    /// count it states: no count, too many, or a frame cut short or padded
+    /// out is refused rather than read.
+    #[test]
+    fn present_refuses_a_count_its_frame_does_not_carry() {
+        let frame = sample_present().frame();
+        for (count, refusal) in [
+            (0u32, Errno::LengthOutOfRange),
+            (2, Errno::BufferTooSmall),
+            (9, Errno::LengthOutOfRange),
+            (u32::MAX, Errno::LengthOutOfRange),
+        ] {
+            let mut lying = frame;
+            lying[20..24].copy_from_slice(&count.to_le_bytes());
+            assert_eq!(WindowRequest::from_bytes(&lying), Err(refusal), "{count}");
+        }
+        assert!(WindowRequest::from_bytes(&frame.over_long(0)).is_err());
+        let widest = widest_present();
+        assert_eq!(WindowRequest::from_bytes(&widest.frame()), Ok(widest));
     }
 
     /// The serving session identity the reply tests stamp.

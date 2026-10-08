@@ -267,6 +267,7 @@ impl FilesystemRead for RwMockFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             }),
             RwNode::File(data) => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -275,6 +276,7 @@ impl FilesystemRead for RwMockFs {
                 // Heap-backed: the bytes held are the storage occupied.
                 allocated: data.len() as u64,
                 times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             }),
             RwNode::Link(target) => Ok(NodeInfo {
                 kind: NodeKind::Symlink,
@@ -282,6 +284,7 @@ impl FilesystemRead for RwMockFs {
                 size: target.len() as u64,
                 allocated: target.len() as u64,
                 times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
             }),
         }
     }

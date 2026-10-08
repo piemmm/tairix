@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
-use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
 use tairix_abi::input::{
     KeyInput, KeyValue, Modifiers as WireModifiers, NamedKeyCode, PointerButtonCode,
 };
@@ -151,6 +151,10 @@ impl Repaint {
 /// presented already holds the rest of the window's current pixels: a
 /// single-frame region the app writes each rectangle into as it goes, never an
 /// alternate buffer whose other pixels are a frame behind.
+///
+/// This is the box spanning everything reported, for an app that repaints one
+/// box; an app that paints each reported rectangle alone presents them as
+/// they are ([`present_damage_list`]).
 #[must_use]
 pub fn present_damage(mode: &DisplayMode, repaint: Repaint, damage: &Region) -> Option<DamageRect> {
     match repaint {
@@ -158,6 +162,118 @@ pub fn present_damage(mode: &DisplayMode, repaint: Repaint, damage: &Region) -> 
         Repaint::Whole => Some(DamageRect::full(mode)),
         Repaint::Reported => {
             Some(damage_in(mode, damage.bounds()).unwrap_or_else(|| DamageRect::full(mode)))
+        }
+    }
+}
+
+/// The rectangles a round presents, each clipped to the window, or `None` when
+/// it presents nothing: [`present_damage`]'s three cases, for an app that
+/// paints each reported rectangle under its own clip. More rectangles than a
+/// present carries are merged the least they can be ([`DamageList::fitted`]),
+/// so a band's moving edges stay its edges rather than becoming its area.
+#[must_use]
+pub fn present_damage_list(
+    mode: &DisplayMode,
+    repaint: Repaint,
+    damage: &Region,
+) -> Option<DamageList> {
+    let mut owed = Owed::new();
+    owed.owe(mode, repaint, damage);
+    owed.take(mode)
+}
+
+/// What a window owes the screen across the rounds since it last presented:
+/// the strongest conclusion they reached, and the rectangles they reported.
+///
+/// A loop that drains its input before painting folds each round in here and
+/// presents once, so a burst of pointer samples costs one frame rather than
+/// one each. Rectangles are clipped to the window as they are folded and
+/// merged by least growth ([`DamageList::fitted`]), so the account stays
+/// bounded however long the burst, and a band's moving edges stay its edges
+/// rather than becoming its area.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Owed {
+    repaint: Repaint,
+    parts: Option<DamageList>,
+}
+
+impl Default for Owed {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Owed {
+    /// Nothing owed.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            repaint: Repaint::Nothing,
+            parts: None,
+        }
+    }
+
+    /// Whether nothing is owed.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        matches!(self.repaint, Repaint::Nothing)
+    }
+
+    /// Whether every pixel is owed.
+    #[must_use]
+    pub const fn is_whole(&self) -> bool {
+        matches!(self.repaint, Repaint::Whole)
+    }
+
+    /// Owe every pixel.
+    pub fn owe_whole(&mut self) {
+        *self = Self {
+            repaint: Repaint::Whole,
+            parts: None,
+        };
+    }
+
+    /// Fold in one round over a window shaped as `mode`: its conclusion, and
+    /// the region it reported.
+    ///
+    /// A reported round naming nothing inside the window still moved pixels it
+    /// could not place, so it owes the whole window: over-covering costs
+    /// pixels, while under-covering would leave a stale frame on screen,
+    /// because the session copies only what a present declares.
+    pub fn owe(&mut self, mode: &DisplayMode, repaint: Repaint, damage: &Region) {
+        match (self.repaint, repaint) {
+            (_, Repaint::Nothing) | (Repaint::Whole, _) => {}
+            (_, Repaint::Whole) => self.owe_whole(),
+            (_, Repaint::Reported) => {
+                let mut reported = damage
+                    .rects()
+                    .iter()
+                    .filter_map(|rect| damage_in(mode, *rect))
+                    .peekable();
+                if reported.peek().is_none() {
+                    self.owe_whole();
+                    return;
+                }
+                let held = self.parts.take();
+                self.parts = DamageList::fitted(
+                    held.iter()
+                        .flat_map(DamageList::rects)
+                        .copied()
+                        .chain(reported),
+                );
+                self.repaint = Repaint::Reported;
+            }
+        }
+    }
+
+    /// The rectangles to paint and present for a window shaped as `mode`,
+    /// leaving nothing owed, or `None` when nothing was.
+    pub fn take(&mut self, mode: &DisplayMode) -> Option<DamageList> {
+        let Self { repaint, parts } = core::mem::take(self);
+        match repaint {
+            Repaint::Nothing => None,
+            Repaint::Reported => parts,
+            Repaint::Whole => DamageList::fitted([DamageRect::full(mode)]),
         }
     }
 }
@@ -782,7 +898,7 @@ impl<T: WindowTransport> WindowClient<T> {
         &mut self,
         window_id: u64,
         frame_index: u32,
-        damage: DamageRect,
+        damage: DamageList,
     ) -> Result<(), Errno> {
         let request = WindowRequest::Present {
             window_id,
@@ -1510,12 +1626,12 @@ impl<T: WindowTransport> WindowClient<T> {
         self.present(
             window_id,
             frame_index,
-            DamageRect {
+            DamageList::new(&[DamageRect {
                 x: 0,
                 y: 0,
                 width_px: record.width_px,
                 height_px: record.height_px,
-            },
+            }])?,
         )?;
         Ok(true)
     }

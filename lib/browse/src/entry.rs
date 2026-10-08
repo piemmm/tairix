@@ -18,7 +18,7 @@ use alloc::string::String;
 
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
-use tairix_icon::FolderSample;
+use tairix_icon::{DocumentStamp, FolderSample};
 
 /// What a listed symbolic link's target resolves to.
 ///
@@ -238,7 +238,7 @@ pub fn is_bundle_name(name: &str) -> bool {
 /// Only a plain directory has a meaningful occupancy: a bundle is a sealed
 /// unit that draws its own icon and a file has no children, so neither is
 /// ever probed.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum Occupancy {
     /// Not yet asked — the entry has never been probed.
     #[default]
@@ -257,7 +257,7 @@ impl Occupancy {
     /// What a folder's picture shows of this answer: the sample it draws its
     /// contents from, or `None` for the plain folder every other answer draws.
     #[must_use]
-    pub(crate) const fn pictured(self) -> Option<FolderSample> {
+    pub(crate) const fn pictured(&self) -> Option<&FolderSample> {
         match self {
             Self::NonEmpty(sample) => Some(sample),
             Self::Unprobed | Self::Empty | Self::Indeterminate => None,
@@ -274,6 +274,7 @@ pub struct Entry {
     size: u64,
     modified: Time64,
     id: FileId,
+    content_gen: u64,
     occupancy: Occupancy,
     /// The occupancy shown is from before a change to this folder: it stays
     /// drawn, so the icon does not blink, until a fresh probe replaces it.
@@ -291,6 +292,7 @@ impl Entry {
             size,
             modified,
             id: FileId::NONE,
+            content_gen: 0,
             occupancy: Occupancy::Unprobed,
             stale: false,
         }
@@ -301,6 +303,14 @@ impl Entry {
     #[must_use]
     pub const fn with_id(mut self, id: FileId) -> Self {
         self.id = id;
+        self
+    }
+
+    /// This entry, naming the version of the file's data it was listed at
+    /// (`0` where the volume keeps none).
+    #[must_use]
+    pub const fn with_content_gen(mut self, content_gen: u64) -> Self {
+        self.content_gen = content_gen;
         self
     }
 
@@ -377,6 +387,25 @@ impl Entry {
         self.id
     }
 
+    /// The version of the file's data the listing saw, `0` where the volume
+    /// keeps none.
+    #[must_use]
+    pub const fn content_gen(&self) -> u64 {
+        self.content_gen
+    }
+
+    /// Which version of which file the listing named: what an open of it
+    /// must report before a byte of it is drawn.
+    #[must_use]
+    pub const fn stamp(&self) -> DocumentStamp {
+        DocumentStamp {
+            size: self.size,
+            modified: self.modified,
+            id: self.id,
+            content_gen: self.content_gen,
+        }
+    }
+
     /// `true` if the entry is a directory the browser can descend into (never
     /// true for a [`Bundle`](EntryKind::Bundle)).
     #[must_use]
@@ -405,12 +434,12 @@ impl Entry {
 
     /// What the browser knows about this entry's contents.
     #[must_use]
-    pub const fn occupancy(&self) -> Occupancy {
-        self.occupancy
+    pub const fn occupancy(&self) -> &Occupancy {
+        &self.occupancy
     }
 
     /// Record the answer a probe gave for this entry.
-    pub const fn set_occupancy(&mut self, occupancy: Occupancy) {
+    pub fn set_occupancy(&mut self, occupancy: Occupancy) {
         self.occupancy = occupancy;
         self.stale = false;
     }
@@ -425,13 +454,14 @@ impl Entry {
             && self.size == other.size
             && self.modified == other.modified
             && self.id == other.id
+            && self.content_gen == other.content_gen
     }
 
     /// Carry `previous`'s occupancy over to this, its replacement after a
     /// change, to be shown until a fresh probe replaces it.
     pub(crate) fn inherit_occupancy(&mut self, previous: &Self) {
         if self.is_directory() && previous.is_directory() {
-            self.occupancy = previous.occupancy;
+            self.occupancy = previous.occupancy.clone();
             self.stale = true;
         }
     }

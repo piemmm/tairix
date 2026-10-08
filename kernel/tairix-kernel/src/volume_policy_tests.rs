@@ -35,6 +35,7 @@ impl FilesystemRead for TwoNodeFs {
                 size: 0,
                 allocated: 0,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             FILE => Ok(NodeInfo {
                 kind: NodeKind::RegularFile,
@@ -42,6 +43,7 @@ impl FilesystemRead for TwoNodeFs {
                 size: 7,
                 allocated: 512,
                 times: NodeTimes::default(),
+                content_gen: 0,
             }),
             _ => Err(DriverError::NotFound),
         }

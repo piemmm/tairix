@@ -432,6 +432,49 @@ fn a_second_name_invalidates_the_nodes_cached_stat() {
     );
 }
 
+/// A write or a truncate through one name of a file that has another refreshes
+/// the listing holding the other name too, not only the directory written
+/// through — and so does the link that gave it the second name.
+#[test]
+fn a_change_through_one_name_refreshes_a_listing_holding_another() {
+    let mut cache = fixture(b"body");
+    let root = cache.root();
+    let dir = dir_of(&mut cache);
+    let file = file_of(&mut cache);
+    cache
+        .create(root, b"other", NodeKind::Directory)
+        .expect("mkdir");
+    let other = cache.lookup(root, b"other").expect("other resolves");
+    let first_listed_info = |cache: &mut CachedFs<Counting<RwMockFs>>, dir| {
+        listed(cache, dir, 0, &[]).expect("lists")[0].0.info
+    };
+    assert_eq!(
+        first_listed_info(&mut cache, dir).nlink,
+        1,
+        "warm the listing"
+    );
+    cache.link(other, b"alias", file).expect("a second name");
+    assert_eq!(
+        first_listed_info(&mut cache, dir).nlink,
+        2,
+        "the link moved the count"
+    );
+
+    assert_eq!(
+        first_listed_info(&mut cache, other).size,
+        4,
+        "warm the other listing"
+    );
+    cache
+        .write_at(dir, b"file.txt", 4, b" grown")
+        .expect("write through the first name");
+    assert_eq!(first_listed_info(&mut cache, other).size, 10, "a write");
+    cache
+        .truncate(dir, b"file.txt", 2)
+        .expect("truncate through the first name");
+    assert_eq!(first_listed_info(&mut cache, other).size, 2, "a truncate");
+}
+
 #[test]
 fn create_invalidates_directory_listings() {
     let mut cache = fixture(b"x");

@@ -194,7 +194,7 @@ plan's ledger. A `blocked` row names its blocker.
 | NEW-SWITCHBOARD | The Switchboard window (`plans/NEW-SWITCHBOARD.md`) | in progress |
 | NEW-DESKTOP-SETTINGS | The Settings application (`plans/NEW-DESKTOP-SETTINGS.md`) | in progress |
 | NEW-FILEMANAGER | The graphical file manager (`plans/NEW-FILEMANAGER.md`) | in progress |
-| FILES-INTERACTION | The file manager's selection, drag-and-drop, New ▸, one window per folder, folder cards and thumbnails (`plans/FILES-INTERACTION.md`) | done |
+| FILES-INTERACTION | The file manager's selection, drag-and-drop, New ▸, one window per folder, two-line names, in-place rename, fanned folder cards, and thumbnails kept per content version (`plans/FILES-INTERACTION.md`) | done |
 | GUI-TERMINAL | `terminal.app` (`plans/GUI-TERMINAL.md`) | in progress |
 | PINBOARD | The wallpaper, the Desktop folder and the backdrop menu (`plans/PINBOARD.md`) | blocked: P9's picked-directory listing needs an ABI decision on `FilePicked` |
 | ICONS | Icon artwork tiers and the sandboxed decode cache (`plans/ICONS.md`) | in progress |

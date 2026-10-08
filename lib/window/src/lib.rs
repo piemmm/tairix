@@ -81,8 +81,9 @@ pub use appbar::{
 };
 pub use client::{
     damage_in, key_input_event, pinch_input_events, pointer_input_events, pointer_point,
-    present_damage, scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Parked,
-    Repaint, Target, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
+    present_damage, present_damage_list, scroll_input_events, DeclaredTip, EventDrain, EventError,
+    EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 #[cfg(feature = "rt")]

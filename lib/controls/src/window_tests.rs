@@ -1966,7 +1966,7 @@ fn an_identity_draws_its_artwork_and_falls_back_to_the_glyph() {
             bounds,
             Scale::ONE,
             &theme,
-            artwork.map(IconPicture::Artwork),
+            artwork.map(IconPicture::coloured),
         );
         surface
     };
@@ -2031,7 +2031,7 @@ fn the_identity_artwork_desaturates_with_the_frame() {
             bounds,
             Scale::ONE,
             &theme,
-            Some(IconPicture::Artwork(&art)),
+            Some(IconPicture::coloured(&art)),
         );
         surface
     };

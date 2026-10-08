@@ -43,6 +43,22 @@ limpa a seleção. Arrastar sobre um espaço vazio desenha uma caixa que
 seleciona tudo o que toca à medida que cresce; mantida no topo ou no fundo
 da listagem, esta desloca-se, e `Escape` desfaz o que a caixa selecionou.
 
+O espaço à volta de cada ícone e do seu nome conta como vazio, por isso uma
+caixa pode começar em qualquer ponto entre os itens. `Ctrl+A` seleciona tudo
+na listagem e `Ctrl+Shift+A` limpa a seleção; ambos estão também no menu de
+contexto.
+
+O nome de um item é mostrado por inteiro, em duas linhas quando delas
+precisa; um nome demasiado longo mesmo para elas mantém o início e o fim,
+com `…` no meio, para que a extensão esteja sempre à vista.
+
+`F2` muda o nome do item selecionado no próprio lugar, tal como clicar no
+nome do único item selecionado e esperar: o nome abre-se para edição assim
+que o clique já não pode ser um duplo clique. Fica selecionada a parte antes
+da extensão, por isso o que se escreve substitui o nome e mantém a extensão.
+`Enter`, ou um clique fora do nome, mantém o nome novo — um nome que o
+volume recusa fica aberto com o motivo — e `Escape` abandona-o.
+
 Arrastar os itens selecionados para outra janela do gestor de ficheiros,
 para uma pasta nela ou para o ambiente de trabalho copia-os para lá;
 mantendo `Shift` premido, move-os em vez disso. O ponteiro mostra um sinal

@@ -315,14 +315,14 @@ typedef struct tairix_spawn_attach {
 * asks for an fs_readdir() of the whole directory; GONE ends the watch. */
 #define TAIRIX_DIR_WATCH_LATENCY_MAX_NS 60000000000ull
 #define TAIRIX_DIR_CHANGE_BATCH_HEADER_LEN 8u
-#define TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER 324u
+#define TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER 332u
 #define TAIRIX_DIR_CHANGE_BATCH_FLAG_MORE 0x1u
 #define TAIRIX_DIR_WATCH_STATUS_CHANGES 0u
 #define TAIRIX_DIR_WATCH_STATUS_RESCAN 1u
 #define TAIRIX_DIR_WATCH_STATUS_GONE 2u
 #define TAIRIX_DIR_CHANGE_PRESENT 0u
 #define TAIRIX_DIR_CHANGE_ABSENT 1u
-#define TAIRIX_DIR_ENTRY_HEADER_LEN 60u
+#define TAIRIX_DIR_ENTRY_HEADER_LEN 68u
 
 /* fd_grant() write_ceiling that passes on the grantor's own reach: unbounded
 * for a file it opened itself, what it was handed for one it was delegated.

@@ -29,18 +29,21 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_colour::Rgba;
-use tairix_font::{BitmapFont, TextShadow};
+use tairix_font::{BitmapFont, Cut, TextShadow};
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::{IconKind, IconPicture};
+use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
+use tairix_raster::{
+    cast_shadow, div255, round_rect_coverage, BlurScratch, Color, ShadowCast, Surface,
+    SOFTEN_PASSES,
+};
 use tairix_theme::{SurfaceGround, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::damage;
 use crate::paint::{
-    bead_band, dominant_color, draw_outline, foreground, grab_after, heavy_contrast,
-    icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
+    bead_band, centre_x, centred_in, dominant_color, draw_outline, foreground, grab_after,
+    heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
     paint_count_badge, paint_drop_target, paint_icon_slot, paint_row, paint_run,
     paint_surface_plate, plate_border, plate_corner, pointer_activation, press_latch,
     rail_thickness, resolve_bead, role_font, route_pointer, row_content_span, run_width,
@@ -2103,10 +2106,12 @@ impl Card {
 /// state-and-actions surface* and wears a plate to bound the group it owns; a
 /// tile is one item among many and would only add a box per picture.
 ///
-/// State is what makes a tile paint anything behind its picture:
+/// State is what makes a tile paint anything behind its picture, over its body
+/// ([`TileLayout::body_rect`]) — the picture and the name's drawn lines — so the
+/// rest of its bounds stays the ground between tiles:
 /// * the pointer wash while hovered or pressed, in the shared plate colours;
-/// * the selection fill, the palette's accent at three tenths opacity over the
-///   whole tile, rounded like every other plate and laid crisply over a
+/// * the selection fill, the palette's accent at three tenths opacity, rounded
+///   like every other plate and laid crisply over a
 ///   frosted backdrop, so a selected item is plainly the accent while the
 ///   surface or wallpaper under it still reads through — the pointer washes
 ///   are different colours entirely, so neither can imitate it. An owner
@@ -2132,6 +2137,8 @@ pub struct IconTile {
     state: ControlState,
     selection_fade: Option<u8>,
     label_shadow: Option<TextShadow>,
+    name_cut: Cut,
+    casts_shadow: bool,
     layout: TileLayout,
 }
 
@@ -2146,6 +2153,8 @@ impl IconTile {
             state: ControlState::idle(),
             selection_fade: None,
             label_shadow: None,
+            name_cut: Cut::End,
+            casts_shadow: false,
             layout: TileLayout::new(1),
         }
     }
@@ -2200,6 +2209,24 @@ impl IconTile {
         self
     }
 
+    /// This tile with its picture casting the soft shadow
+    /// [`shadow_cast`](Self::shadow_cast) describes: the retained shadow a
+    /// shadowed picture brings, or one cast from the picture drawn when it
+    /// brings none, so a cached picture and an uncached one draw alike.
+    #[must_use]
+    pub fn with_picture_shadow(mut self) -> Self {
+        self.casts_shadow = true;
+        self
+    }
+
+    /// This tile with a name too long for its lines cut as `cut` says: a
+    /// file's tile cuts it in the middle so its extension always shows.
+    #[must_use]
+    pub fn with_name_cut(mut self, cut: Cut) -> Self {
+        self.name_cut = cut;
+        self
+    }
+
     /// Paint the tile into `surface` at `bounds` for the active theme.
     ///
     /// `artwork` is the item's own picture, pre-rasterised by the owner at
@@ -2229,25 +2256,88 @@ impl IconTile {
             return;
         }
         let ink = self.label_color(theme);
-        self.paint_backdrop(surface, (x, y, w, h), scale, theme);
-        if let Some((ix, iy, side)) = self.layout.icon_slot(bounds, scale, theme) {
-            paint_icon_slot(
-                surface,
-                (ix, iy, side),
-                self.icon,
-                ink,
-                artwork,
-                FULL_COLOUR,
-            );
+        let body = self
+            .layout
+            .body_rect(bounds, scale, theme, &self.label, self.name_cut)
+            .and_then(surface_rect);
+        if let Some(body) = body {
+            self.paint_backdrop(surface, body, scale, theme);
+        }
+        if let Some(slot) = self.layout.icon_slot(bounds, scale, theme) {
+            // Without a cache the built-in picture is rasterised here, once, so
+            // its shadow is cast from the very pixels the slot draws.
+            let built = artwork
+                .is_none()
+                .then(|| builtin_picture(self.icon, slot.2))
+                .flatten();
+            let picture = artwork.or_else(|| {
+                built
+                    .as_ref()
+                    .map(|surface| IconPicture::builtin(self.icon, surface))
+            });
+            if let Some(picture) = picture {
+                let at = centred_in(slot, picture.surface());
+                self.paint_picture_shadow(surface, picture, at, scale, theme);
+                paint_icon_slot(surface, slot, self.icon, ink, Some(picture), FULL_COLOUR);
+                if let Some(frame) = picture.frame() {
+                    paint_frame(surface, at, frame, scale, theme);
+                }
+            }
         }
         self.paint_label(surface, bounds, scale, theme, font, ink);
-        self.paint_bead(surface, (x, y, w, h), scale, theme);
+        self.paint_bead(surface, body.unwrap_or((x, y, w, h)), scale, theme);
     }
 
-    /// Paint whatever the tile's state puts *behind* its picture: the pointer
-    /// wash or the selection fill, then the keyboard Focus Ring. A resting,
-    /// unselected, unfocused tile paints nothing at all, which is what keeps an
-    /// icon view a field of pictures rather than a grid of plates.
+    /// Paint the shadow `picture`, drawn at `at`, casts: the one it brings, or
+    /// one cast from it here. A tile that casts none paints nothing.
+    fn paint_picture_shadow(
+        &self,
+        surface: &mut Surface,
+        picture: IconPicture<'_>,
+        at: (i32, i32),
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        if !self.casts_shadow || picture.shadow_withheld() {
+            return;
+        }
+        let tint = Color::from(theme.palette().drop_shadow);
+        let mut draw = |mask: &Surface, (dx, dy): (i32, i32)| {
+            surface.blit_tinted(at.0.saturating_add(dx), at.1.saturating_add(dy), mask, tint);
+        };
+        if let Some(shadow) = picture.shadow() {
+            draw(shadow.mask, (shadow.offset.x, shadow.offset.y));
+        } else if let Some((mask, origin)) =
+            Self::shadow_cast(scale, theme).and_then(|cast| cast_shadow(picture.surface(), cast))
+        {
+            draw(&mask, origin);
+        }
+    }
+
+    /// The soft shadow a tile's picture casts at `scale` under `theme`, for an
+    /// owner to ask its artwork for ([`IconArtwork::shadowed`]) — or `None` for
+    /// a theme that casts none.
+    ///
+    /// [`IconArtwork::shadowed`]: tairix_icon::IconArtwork::shadowed
+    #[must_use]
+    pub fn shadow_cast(scale: Scale, theme: &Theme) -> Option<ShadowCast> {
+        let reach = scale.scale_length(theme.metrics().icon_shadow_reach);
+        if reach == 0 || theme.palette().drop_shadow.a == 0 {
+            return None;
+        }
+        let radius = (reach / SOFTEN_PASSES).max(1);
+        Some(ShadowCast {
+            drop_x: 0,
+            drop_y: radius,
+            radius,
+        })
+    }
+
+    /// Paint whatever the tile's state puts *behind* its picture over its body
+    /// ([`TileLayout::body_rect`]): the pointer wash or the selection fill, then
+    /// the keyboard Focus Ring. A resting, unselected, unfocused tile paints
+    /// nothing at all, which is what keeps an icon view a field of pictures
+    /// rather than a grid of plates.
     fn paint_backdrop(
         &self,
         surface: &mut Surface,
@@ -2322,9 +2412,9 @@ impl IconTile {
     }
 
     /// Paint the tile's name under its picture: wrapped over as many whole
-    /// lines as the band holds, each centred, the last elided when the name
-    /// runs past them. A band with no room for a whole line draws nothing
-    /// rather than clipping a glyph.
+    /// lines as the band holds, each centred, the last cut as the tile's
+    /// [`Cut`] says when the name runs past them. A band with no room for a
+    /// whole line draws nothing rather than clipping a glyph.
     fn paint_label(
         &self,
         surface: &mut Surface,
@@ -2344,6 +2434,7 @@ impl IconTile {
             align: TextAlign::Centre,
             color,
             shadow: self.label_shadow,
+            cut: self.name_cut,
         }
         .paint(surface, &self.label, (band.left, band.top));
     }
@@ -2467,6 +2558,102 @@ impl TileLayout {
             .map_or(0, |band| band.lines)
     }
 
+    /// What a tile occupying `bounds` and named `label`, cut as `cut` says,
+    /// truly covers: its picture and its name's drawn lines, each with a half
+    /// inset of margin, within `bounds`. `None` when the tile draws nothing.
+    ///
+    /// The press target, the plate the tile's state paints, and what a band
+    /// must touch to select the tile; the rest of `bounds` is the ground the
+    /// tile stands on, so a short name leaves the space beside it as ground.
+    #[must_use]
+    pub fn body_rect(
+        self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        label: &str,
+        cut: Cut,
+    ) -> Option<Rect> {
+        let (_, margin) = tile_insets(scale, theme);
+        let core = self.core_rect(bounds, scale, theme).unwrap_or(Rect::EMPTY);
+        let name = self
+            .name_rect(bounds, scale, theme, label, cut)
+            .map_or(Rect::EMPTY, |name| grown(name, margin));
+        let body = core.union(&name).intersection(&bounds);
+        (!body.is_empty()).then_some(body)
+    }
+
+    /// The part of [`body_rect`](Self::body_rect) every tile occupying `bounds`
+    /// has whatever it is named: its picture, with the body's margin.
+    #[must_use]
+    pub fn core_rect(self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let (x, y, side) = self.icon_slot(bounds, scale, theme)?;
+        let (_, margin) = tile_insets(scale, theme);
+        let picture = Rect::new(to_i32(x), to_i32(y), side, side);
+        let core = grown(picture, margin).intersection(&bounds);
+        (!core.is_empty()).then_some(core)
+    }
+
+    /// Where a press on `label`'s drawn lines lands, for a tile occupying
+    /// `bounds` and named as [`body_rect`](Self::body_rect) is: the lines with
+    /// the body's margin, below the picture's. `None` when no name is drawn.
+    ///
+    /// The picture's margin and the name's overlap between them, and that strip
+    /// is the picture's, so a press meant for the picture never edits the name.
+    #[must_use]
+    pub fn name_target(
+        self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        label: &str,
+        cut: Cut,
+    ) -> Option<Rect> {
+        let (_, margin) = tile_insets(scale, theme);
+        let name =
+            grown(self.name_rect(bounds, scale, theme, label, cut)?, margin).intersection(&bounds);
+        let floor = self
+            .core_rect(bounds, scale, theme)
+            .map_or(name.top(), |core| core.bottom());
+        let top = name.top().max(floor);
+        let height = u32::try_from(i64::from(name.bottom()) - i64::from(top)).unwrap_or(0);
+        let target = Rect::new(name.left(), top, name.width, height);
+        (!target.is_empty()).then_some(target)
+    }
+
+    /// Where `label`'s drawn lines lie: its widest line centred in the band,
+    /// as many lines tall as are drawn.
+    fn name_rect(
+        self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        label: &str,
+        cut: Cut,
+    ) -> Option<Rect> {
+        let font = name_font(theme, scale);
+        let band = self.label_band(bounds, scale, theme, font)?;
+        let (width, lines) = TextBlock {
+            font,
+            width: band.right.saturating_sub(band.left),
+            lines: band.lines,
+            align: TextAlign::Centre,
+            color: Color::TRANSPARENT,
+            shadow: None,
+            cut,
+        }
+        .extent(label);
+        let lines = u32::try_from(lines).ok().filter(|lines| *lines > 0)?;
+        (width > 0).then(|| {
+            Rect::new(
+                to_i32(centre_x(width, band.left, band.right)),
+                to_i32(band.top),
+                width,
+                font.line_height().saturating_mul(lines),
+            )
+        })
+    }
+
     /// The rectangle a tile occupying `bounds` draws its **name** in: the
     /// column each line is centred in, from the first line's top down to the
     /// last line the band holds. `None` when the tile draws no name at all.
@@ -2542,6 +2729,44 @@ impl TileLayout {
             side,
         ))
     }
+}
+
+/// The one-pixel frame a thumbnail is drawn with, around `frame` — where the
+/// picture lies within its pixels, which sit at `origin` — in the theme's frame
+/// role, so a picture whose edge matches the ground still reads as a picture.
+/// It lies on the picture's outermost pixels, so it never leaves the slot.
+fn paint_frame(
+    surface: &mut Surface,
+    origin: (i32, i32),
+    frame: Rect,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let left = origin.0.saturating_add(frame.left());
+    let top = origin.1.saturating_add(frame.top());
+    let (Ok(x), Ok(y)) = (u32::try_from(left), u32::try_from(top)) else {
+        return;
+    };
+    let thickness = scale.scale_length(theme.metrics().border_thickness).max(1);
+    draw_outline(
+        surface,
+        x,
+        y,
+        frame.width,
+        frame.height,
+        thickness,
+        Color::from(theme.palette().frame),
+    );
+}
+
+/// `rect` with `by` pixels added to every side.
+fn grown(rect: Rect, by: u32) -> Rect {
+    Rect::new(
+        rect.left().saturating_sub_unsigned(by),
+        rect.top().saturating_sub_unsigned(by),
+        rect.width.saturating_add(by.saturating_mul(2)),
+        rect.height.saturating_add(by.saturating_mul(2)),
+    )
 }
 
 /// An icon tile's inset and the half inset that separates its name band from

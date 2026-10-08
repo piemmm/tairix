@@ -552,7 +552,7 @@ fn paint_library_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
                 local_rect(rect, origin),
                 scale,
                 theme,
-                popup.row_artwork(index).map(IconPicture::Artwork),
+                popup.row_artwork(index).map(IconPicture::coloured),
             );
         }
     });
@@ -760,7 +760,7 @@ fn slot_artwork<'a>(
     artwork: &'a mut dyn IconArtwork,
 ) -> Option<IconPicture<'a>> {
     match own {
-        Some(surface) => Some(IconPicture::Artwork(surface)),
+        Some(surface) => Some(IconPicture::coloured(surface)),
         None => artwork.artwork(IconRequest::kind(kind), side),
     }
 }

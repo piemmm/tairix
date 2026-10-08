@@ -105,8 +105,12 @@ so §2.12 takes precedence); the physical checksum is a first-party FNV-1a (a
 checksum is not a crypto primitive).
 
 Inodes are 256-byte records (inode 1 = root, the four §21 `Time64`
-timestamps inline) held in a copy-on-write **inode tree** keyed by inode
-number, so metadata scales past any fixed inode count. Each inode names the
+timestamps inline, and a file's or link's content generation) held in a
+copy-on-write **inode tree** keyed by inode number, so metadata scales past any
+fixed inode count. The generation comes from one volume-wide sequence in the
+transaction root; the first data change of a mount commits a stride past it
+and flushes it to the medium before returning, so no generation a reader saw
+is ever handed out again. Each inode names the
 root of its own copy-on-write **extent tree** mapping a logical block offset
 to a physical run `(start, length)`, so a file can span the whole volume and
 a contiguous write stays a single record. Both are the one generic B-tree in

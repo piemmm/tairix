@@ -2123,6 +2123,7 @@ name = "tairix-files"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appdata",
  "tairix-appstore",
  "tairix-browse",
  "tairix-controls",
@@ -2406,7 +2407,9 @@ dependencies = [
  "tairix-abi",
  "tairix-appstore",
  "tairix-colour",
+ "tairix-crc32c",
  "tairix-font",
+ "tairix-geometry",
  "tairix-hash",
  "tairix-log",
  "tairix-path",
@@ -2414,6 +2417,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-rt",
  "tairix-svg",
+ "tairix-util",
 ]
 
 [[package]]

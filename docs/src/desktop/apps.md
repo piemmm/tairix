@@ -333,12 +333,15 @@ it was. `Browser::is_listing` is what the shared renderer draws its cue from.
 
 ### Entries, kinds, and the shared sort
 
-An `Entry` carries its name, its `EntryKind`, its apparent `size`, and its
-last-modification `Time64` — the size and timestamp mapped straight from the
-one `fs_readdir` stream the source already produced (each
-`tairix_abi::fs::DirEntry` reports them, alongside the node identity and name
-count a hard-link-aware walk such as `du` keys on), so the browser never opens
-and `fs_stat`s every child to fill a listing (`AGENTS.md` §2.16). `EntryKind`
+An `Entry` carries its name, its `EntryKind`, its apparent `size`, its
+last-modification `Time64`, its node identity and its content generation — all
+mapped straight from the one `fs_readdir` stream the source already produced
+(each `tairix_abi::fs::DirEntry` reports them, alongside the name count a
+hard-link-aware walk such as `du` keys on), so the browser never opens and
+`fs_stat`s every child to fill a listing (`AGENTS.md` §2.16). `Entry::stamp`
+gathers the version of the file the listing named — length, time, identity and
+generation — as the `DocumentStamp` a thumbnail's open must report before a
+byte of it is drawn, and a new version of a file is a changed listing. `EntryKind`
 refines the VFS's file/directory/link split with the one distinction a
 manager must make structurally: a `<Name>.app` directory is a `Bundle` — a
 sealed unit the user launches, not a folder to descend into
@@ -901,9 +904,14 @@ artwork)` paints a command toolbar strip
 and the current directory into a caller-owned `tairix-raster` `Surface` the
 size of the viewport, in whichever of the two views the browser holds
 (`ViewMode::List` or `ViewMode::Grid`). The caller holds that surface for the
-life of its window, which is what makes a repaint clipped to the rectangles one
-round reported sound: every pixel outside the clip is the one already on
-screen. The **file manager opens on the icon
+life of its window, which is what makes a repaint clipped to reported
+rectangles sound: every pixel outside the clip is the one already on screen.
+The file manager applies every queued event before it paints, folding each
+round's damage into its window's `tairix_window::Owed` account, and paints
+each owed rectangle once a turn under its own clip; the views skip, before
+composing it, every entry whose cell the clip excludes, so a growing band
+costs its moving edges rather than its area (`plans/FILES-INTERACTION.md`
+FI19). The **file manager opens on the icon
 grid** (`MANAGER_VIEW_MODE`, with `MANAGER_TOOLBAR_BAND` saying no chrome band
 is drawn) and its toolbar toggle switches to the list; the engine's own default
 and the trusted file picker stay `List`, since a chooser wants names, sizes
@@ -935,7 +943,10 @@ at the epoch so a stampless file is never given a fabricated date, §21). In the
 icon over that same label, with no plate of its own, so a folder reads as a field
 of icons rather than a grid of boxes and only a hovered, selected, or focused
 entry paints anything behind its icon — wrapped into as many columns as fit the
-width; the two views share one selection model, so toggling never moves the
+width. A tile's name is whole, over two lines when it needs them, and a name
+too long for those is cut in its middle (`render::name_cut`) so its extension
+always shows; every picture casts a small soft shadow, and a thumbnail is
+outlined one pixel around its own bounds; the two views share one selection model, so toggling never moves the
 selection or re-reads the directory. The icon is `icon_for_entry(entry,
 parent)`: one classification both views and both consumers draw from
 (`AGENTS.md` §2.2) and a
@@ -1057,7 +1068,8 @@ under-report can only ever cost pixels, never leave a stale frame.
 ### Folder occupancy
 
 A folder that holds something is drawn as a picture of what it holds: the
-folder's back, up to three cards showing the kinds of file inside, and its
+folder's back, up to three cards fanned out of its mouth — a photo inside as
+its own thumbnail on a white print, any other file as its kind's card — and its
 front (`IconRequest::folder(sample)`). An empty, unknown or unprobed folder
 draws the plain `IconKind::Folder`. A directory's `size` is `0` and no VFS
 surface reports a child count, so occupancy is a separate read, and the engine
@@ -1073,8 +1085,13 @@ only ever draws an answer it has:
   open the directory, read **one** `PROBE_BUF_LEN` (4 KiB) batch, close —
   never a listing and never a walk. A batch costs the kernel what its buffer
   holds, so the cost does not grow with the child count. No bytes means empty;
-  otherwise `folder_sample` classifies the batch's names into at most three
-  kinds, the most frequent family first.
+  otherwise `folder_sample` chooses up to three cards from the batch's records,
+  variety first — one for each of the most frequent families in turn — then
+  filling from those families in the same order. A regular file with an
+  identity whose type has a reading is a picture card, keyed by the stamp its
+  record carries exactly as its own tile's thumbnail is, so choosing reads
+  nothing past the batch. A sample holding a picture is thumbnail-class
+  artwork: the folder draws its kinds until the photos land.
 - **A source that probes elsewhere answers `Pending`, and that is what lets the
   cue be resolved from inside a paint.** The source records the ask and
   returns `Pending`; a worker probes and the answer is drawn a frame later. So
@@ -1182,9 +1199,10 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   wrong, and stated once.
 - **A picture file is drawn as its own content.** A file whose type the shared
   raster decoders read asks for its thumbnail ahead of its class artwork
-  (`IconRequest::thumbnail`, keyed by the path, size and modification time its
-  listing reports, so a changed file is decoded afresh and a refusal is cached
-  under the same key). The reader opens it under the user's own identity,
+  (`IconRequest::thumbnail`, keyed by the path and the `DocumentStamp` its
+  listing reports — identity, size, modification time and content generation —
+  so a changed file is decoded afresh and a refusal is cached under the same
+  key). The reader opens it under the user's own identity,
   refuses one past `tairix_icon::MAX_THUMBNAIL_BYTES` or no longer what its
   listing described, and streams it to the sandbox, which decodes it fitted to
   the tile within `MAX_THUMBNAIL_PEAK_BYTES` and centres it, never enlarged.
@@ -1192,6 +1210,18 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   cues, and each is shown as it lands. Where there is no reader thread no
   thumbnail is drawn: a whole file's read and decode is not worth a frame. The
   desktop draws its picture files the same way.
+- **A thumbnail is decoded once per version.** The reader thread's rasteriser
+  keeps what it decodes in a `tairix_icon::ThumbnailStore` over the blob
+  `thumbnails` of the app's own bulk store, opened through the app-data service
+  on the first thumbnail and laid out for the thumbnail decoder's revision
+  (`plans/FILES-INTERACTION.md` FI25). Only a file whose
+  listing reports a content generation is kept, under (volume, inode,
+  generation, reading), so a stale picture cannot be served; a hit is served
+  only after the open has matched the listing's stamp, and a decode is kept
+  only when the open handle still reports that version afterwards. The blob
+  holds the grid tile's side, the side of the run's first thumbnail. A store the
+  service refuses is said once on stderr and the app decodes as before; a
+  second instance shares the blob, which its self-checking slots survive.
 - **The memory is governed and given back.** The cache is built through the one
   shared `tairix_icon::artwork_cache` constructor with the app's real seat,
   frame size, live pressure gauge, and audit sink, so it is classified and
@@ -1409,6 +1439,34 @@ cannot drift from where the renderer put it. Typing edits the name and live-vali
 breaks a rule or clashes with an existing sibling shows the reason in the
 field as you type. `Enter` commits and `Escape` abandons the edit.
 
+However the field opens — `F2`, the menu's **Rename**, New ▸, or a click — it
+selects the name's **stem** (`tairix_browse::rename_selection`): everything
+before the extension, so typing replaces the name and keeps the extension; a
+folder, and a name with no extension, are selected whole, and a bundle keeps
+`.app`. A press inside the field places the caret and a drag from it selects;
+a press outside commits the name as `Enter` does. An unchanged name closes
+the field and the press acts as it would have with none open; a rename that
+took closes it and spends the press, since the folder may have re-sorted
+under the pointer; a refused name keeps the field open with its reason and
+spends the press (`gesture::RenameCommit`).
+
+A click on the **name** of the one selected item renames it too
+(`plans/FILES-INTERACTION.md` FI17). The press arms a `gesture::RenameArm`
+only when it lands on the drawn name (`render::entry_name_target`) of the
+item already chosen alone, in a window that held the keyboard before it —
+the session reports a window coming forward and then delivers the press that
+brought it, so that press never arms (`gesture::Keyboard`), and it reports
+every other move of the keyboard — a raise from the icon bar, a popup, a
+closed window — before the next input. The field opens
+the desktop's double-click interval after the release, the first moment the
+click can no longer pair into an activation; the deadline is folded into the
+loop's one parked wait beside the marquee's step, so nothing polls, and is
+checked on the turns that serve a running copy or delete too; opening it
+repaints the item and its field. A drag, a
+second press, a key, a scroll, another button, or the window losing the
+keyboard lets the arm go; a listing change carries it with its item, and a
+replaced listing drops it.
+
 The typed name is spelled through the one shared `tairix_path::validate_file_name`
 rule (the same rule the browser's path components go through, `AGENTS.md`
 §2.2): non-empty, not `.`/`..`, no `/`, no control character or `:`, within
@@ -1509,8 +1567,12 @@ key selects the entry it rests on. `Browser` drives the set with the familiar
 gestures: a plain click or unmodified keyboard move selects one entry
 (`select`), a `Ctrl`-click toggles one (`toggle_selection`), a `Shift`-click
 selects the contiguous range from the anchor (`extend_selection_to`), Select
-All (`select_all`) marks everything, and a press on the listing's own ground
-clears it unless `Ctrl` or `Shift` is held. A plain press on an entry already
+All (`select_all`, `Ctrl+A` or the menu's **Select All**) marks everything,
+Clear Selection (`Ctrl+Shift+A` or the menu) empties it, and a press on the
+listing's own ground clears it unless `Ctrl` or `Shift` is held. The ground is
+everything outside the tiles' **bodies** (`render::entry_body`, a tile's
+picture and its name's drawn lines), so there is always room between items to
+start a band. A plain press on an entry already
 among several selected keeps them all, so a drag carries the whole selection,
 and selects that entry alone only when released without dragging; a
 right-click inside the selection keeps it too. Each operation bounds-checks its
