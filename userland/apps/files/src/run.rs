@@ -60,19 +60,19 @@
 //! zombie), and a launch refusal is stated fail-loud on `stderr`;
 //! `Backspace` goes up); `F2` renames the selected
 //! item through an inline `lib/controls` text field, committing over
-//! `fs_rename` under the user's own identity (a refusal is stated in the
-//! field, never a silent failure or a fabricated success); `Ctrl+X`/`Ctrl+C`
-//! capture the selection onto a cut/copy clipboard and `Ctrl+V` pastes it
-//! into the current directory — a same-volume move is one `fs_rename`, a
-//! cross-volume move is copy-then-delete, and a copy streams the bytes in
-//! bounded chunks, all under the user's own identity and stopping fail-loud
-//! on `stderr` at the first refusal; `Delete` opens a modal confirmation
-//! `Dialog` and, on confirm, removes the selection (recursively for a folder)
-//! over the user's own `fs_unlink`s, stopping and stating the reason on
-//! `stderr` on the first refusal; a `CloseRequested` from the desktop closes
-//! that window, which ends an ordinary file manager cleanly once it was its
-//! last. Every bring-up refusal exits fail-loud with a reserved code and a
-//! stated reason on `stderr`.
+//! `fs_rename` on the reader thread under the user's own identity (a refusal
+//! is stated in the field, never a silent failure or a fabricated success);
+//! `Ctrl+X`/`Ctrl+C` capture the selection onto a cut/copy clipboard and
+//! `Ctrl+V` pastes it into the current directory — a same-volume move is one
+//! `fs_rename`, a cross-volume move is copy-then-delete, and a copy streams
+//! the bytes in bounded chunks, all under the user's own identity and stopping
+//! fail-loud on `stderr` at the first refusal; `Delete` opens a modal
+//! confirmation `Dialog` and, on confirm, removes the selection (recursively
+//! for a folder) over the user's own `fs_unlink`s, stopping and stating the
+//! reason on `stderr` on the first refusal; a `CloseRequested` from the
+//! desktop closes that window, which ends an ordinary file manager cleanly
+//! once it was its last. Every bring-up refusal exits fail-loud with a
+//! reserved code and a stated reason on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -92,6 +92,7 @@ pub mod icons;
 pub mod listing;
 pub mod location;
 pub mod operation;
+pub mod rename;
 pub mod route;
 pub mod sidebar;
 
@@ -153,11 +154,11 @@ mod program {
         CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
         DirectorySource, Entry, EntryKind, Listing, ListingDesk, ListingJob, ManagerChrome,
         ManagerTool, ManagerToolModel, Marquee, NewEntry, OpenWithCandidate, OpenWithChooser,
-        OwnerChange, PasteItem, PasteStrategy, Places, Probe, Probes, ProgressModel, ProgressOp,
-        Properties, RenameError, RowList, RtLinkReader, ScrollColumn, Took, ToolbarBand,
-        ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId, WatchUpdate,
-        WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE,
-        MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
+        OwnerChange, PasteItem, PasteStrategy, PendingRename, Places, Probe, Probes, ProgressModel,
+        ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn, Took,
+        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
+        WatchUpdate, WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS,
+        MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -195,7 +196,10 @@ mod program {
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
-    use crate::operation::{operation_control, OperationControl};
+    use crate::operation::{
+        advance_for_a_slice, operation_control, progress_due, OperationControl,
+    };
+    use crate::rename::RenameEdit;
     use crate::sidebar::{self, press_point};
 
     /// Exit code when the initial directory listing was refused (no
@@ -602,7 +606,7 @@ mod program {
         /// to end rather than moving the listing under it.
         fn listing_is_held(&self) -> bool {
             self.menu.is_some()
-                || self.overlays.rename.is_some()
+                || self.overlays.rename.is_open()
                 || self.overlays.drag.is_some()
                 || self.overlays.carrying.is_some()
                 || matches!(self.overlays.sweep, Some(Sweep::Live(_)))
@@ -705,7 +709,8 @@ mod program {
 
         /// Open the rename New ▸ asked for once the listing shows the new
         /// entry, answering whether it opened. A focus moved elsewhere, a
-        /// navigation away, or a gesture holding the listing lets it go.
+        /// navigation away, a gesture holding the listing, or a rename still
+        /// with the volume lets it go.
         fn rename_arrived(&mut self, canvas: Canvas<'_>) -> bool {
             let Some((dir, name)) = self.overlays.rename_on_arrival.as_ref() else {
                 return false;
@@ -2807,6 +2812,9 @@ mod program {
     struct Work {
         /// The documents asked to be opened, each answered in turn.
         opens: tairix_util::defer::JobQueue<DocumentOpen, DocumentOpened>,
+        /// The renames committed and not yet answered, and the last ticket.
+        renames: tairix_util::defer::JobQueue<RenameJob, RenameDone>,
+        rename_tickets: u64,
         listings: ListingDesk<FilesClient>,
         /// Each browser window's watch of the directory it shows.
         watches: Watches<FilesClient, alloc::sync::Arc<WatchedDirectory>>,
@@ -2864,10 +2872,45 @@ mod program {
         result: Result<document::Opened, Errno>,
     }
 
+    /// A rename the loop prepared, for the reader to carry out.
+    struct RenameJob {
+        ticket: u64,
+        from: String,
+        to: String,
+    }
+
+    /// A [`RenameJob`] carried out, and what the volume said.
+    struct RenameDone {
+        ticket: u64,
+        moved: Result<(), Errno>,
+    }
+
+    /// The most renames the app holds in flight at once: a containment bound
+    /// on what commits can queue behind a slow or failing disk, not a
+    /// capacity; one past it is refused with its reason.
+    const RENAMES_MAX: usize = 16;
+
+    /// What handing a rename on came to: carried out at once, with no reader
+    /// to take it, or awaiting the reader under its ticket.
+    enum RenameSubmit {
+        Done(Result<(), Errno>),
+        Pending(u64),
+    }
+
+    /// Move `from` to `to` under the user's own identity.
+    fn rename_now(from: &str, to: &str) -> Result<(), Errno> {
+        match tairix_rt::fs_rename(from.as_bytes(), to.as_bytes()) {
+            0 => Ok(()),
+            ret => Err(Errno::from_syscall(ret)),
+        }
+    }
+
     /// One unit of work the reader took.
     enum Read {
         /// Open a document the user is waiting to see.
         Open(DocumentOpen),
+        /// Carry out a rename the user committed.
+        Rename(RenameJob),
         /// List this directory for the browser.
         List(ListingJob<FilesClient>),
         /// Drain a window's watch of the directory it shows.
@@ -2893,6 +2936,9 @@ mod program {
                     // A queue refused its room refuses every open, stating why.
                     opens: tairix_util::defer::JobQueue::with_capacity(DOCUMENT_OPENS_MAX)
                         .unwrap_or_default(),
+                    renames: tairix_util::defer::JobQueue::with_capacity(RENAMES_MAX)
+                        .unwrap_or_default(),
+                    rename_tickets: 0,
                     listings: ListingDesk::new(),
                     watches: Watches::new(),
                     listing_clients: FilesClients::default(),
@@ -2944,6 +2990,13 @@ mod program {
                             .lock()
                             .opens
                             .deliver(DocumentOpened { job, result })
+                    }
+                    Read::Rename(job) => {
+                        let moved = rename_now(&job.from, &job.to);
+                        self.work.lock().renames.deliver(RenameDone {
+                            ticket: job.ticket,
+                            moved,
+                        })
                     }
                     Read::List(job) => {
                         let (client, target) = (job.client(), job.target().to_vec());
@@ -3001,6 +3054,10 @@ mod program {
             // A document the user opened is what they are waiting for.
             if let Some(job) = work.opens.next_job() {
                 return Some(Read::Open(job));
+            }
+            // So is a rename: its editor waits on the answer.
+            if let Some(job) = work.renames.next_job() {
+                return Some(Read::Rename(job));
             }
             if let Some(job) = work.listings.next_job() {
                 return Some(Read::List(job));
@@ -3361,6 +3418,36 @@ mod program {
         /// Take the oldest document the reader opened, if one has.
         fn take_opened(&self) -> Option<DocumentOpened> {
             self.work.lock().opens.collect()
+        }
+
+        /// Hand `pending` to the reader, or carry it out here when there is
+        /// no reader to take it: a rename is a filesystem call the loop must
+        /// not wait on, but a recorded one nobody will answer would leave its
+        /// editor waiting for ever.
+        fn rename(&self, pending: &PendingRename) -> RenameSubmit {
+            let mut work = self.work.lock();
+            if work.stopping || work.alone {
+                drop(work);
+                return RenameSubmit::Done(rename_now(pending.from(), pending.to()));
+            }
+            work.rename_tickets = work.rename_tickets.wrapping_add(1);
+            let ticket = work.rename_tickets;
+            let job = RenameJob {
+                ticket,
+                from: String::from(pending.from()),
+                to: String::from(pending.to()),
+            };
+            if work.renames.submit(job).is_err() {
+                return RenameSubmit::Done(Err(Errno::LimitExceeded));
+            }
+            drop(work);
+            self.signal.notify_one();
+            RenameSubmit::Pending(ticket)
+        }
+
+        /// Take the oldest rename the reader carried out, if one has.
+        fn take_renamed(&self) -> Option<RenameDone> {
+            self.work.lock().renames.collect()
         }
 
         /// Ask for the places to be re-read, answering with them directly when
@@ -4004,8 +4091,8 @@ mod program {
     /// several nodes can be inspected at once and the listing stays usable
     /// while they are.
     struct Overlays {
-        /// The in-place rename editor, when open (`F2`).
-        rename: Option<TextField>,
+        /// The in-place rename editor (`F2`), and the rename with the volume.
+        rename: RenameEdit,
         /// The entry New ▸ made and the directory it made it in, whose rename
         /// opens once a listing there shows it.
         rename_on_arrival: Option<(Vec<String>, String)>,
@@ -4281,7 +4368,7 @@ mod program {
         T: WindowTransport,
     {
         let theme = grounds.popups;
-        let rename = overlays.rename.as_ref();
+        let rename = overlays.rename.field();
         let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
         // The rail owns the window's leading edge, so every overlay drawn over
@@ -4463,18 +4550,25 @@ mod program {
         // Rename mode: the inline editor owns the keyboard and the presses
         // inside it. A press outside commits the name, and acts as it would
         // with no editor open only when the name was unchanged.
-        if overlays.rename.is_some() {
+        if overlays.rename.is_open() {
             let frame = Frame {
                 scale,
                 theme,
                 viewport,
                 toolbar,
             };
-            return match rename_event(browser, &mut overlays.rename, frame, event, damage) {
-                RenameRouting::Taken(repaint, close) => (repaint, close),
-                RenameRouting::Committed => {
-                    let (repaint, close) = route_listing_event(win, acts, canvas, event, damage);
-                    (repaint.merged(Repaint::Whole), close)
+            return match rename_event(
+                browser,
+                &mut overlays.rename,
+                acts.reads,
+                frame,
+                event,
+                damage,
+            ) {
+                RenameRouting::Taken(repaint) => (repaint, false),
+                RenameRouting::Committed(closed) => {
+                    let (routed, close) = route_listing_event(win, acts, canvas, event, damage);
+                    (routed.merged(closed), close)
                 }
             };
         }
@@ -4483,71 +4577,61 @@ mod program {
 
     /// What routing an event to the open rename editor did.
     enum RenameRouting {
-        /// The editor took it, repainting as this says; `true` closes the
-        /// window.
-        Taken(Repaint, bool),
-        /// A press outside the editor closed it on an unchanged name; the
-        /// press routes on as though no editor had been open.
-        Committed,
+        /// The editor took it, repainting as this says.
+        Taken(Repaint),
+        /// A press outside the editor closed it on an unchanged name,
+        /// repainting as this says; the press routes on as though no editor
+        /// had been open.
+        Committed(Repaint),
     }
 
-    /// Route one event to the open rename editor.
+    /// Route one event to the open rename editor, reporting what it repainted
+    /// into `damage`.
     ///
     /// Keys edit, submit, or cancel ([`apply_rename_key`]); a press inside the
     /// field places the caret and a drag from it selects. A press outside it
     /// commits the name, and acts only when nothing moved
-    /// ([`RenameCommit::press_acts`]). Anything else leaves the edit untouched.
+    /// ([`RenameCommit::press_acts`]). Anything else leaves the edit untouched,
+    /// as does everything while the committed name is with the volume.
     fn rename_event<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
+        edit: &mut RenameEdit,
+        reads: &Reads,
         frame: Frame<'_>,
         event: &WindowEvent,
         damage: &mut Region,
     ) -> RenameRouting {
-        let Frame {
-            scale,
-            theme,
-            viewport,
-            toolbar,
-        } = frame;
         match event {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
-            } => {
-                let (changed, close) = apply_rename_key(
-                    browser, rename, scale, theme, viewport, toolbar, *key, *modifiers,
-                );
-                RenameRouting::Taken(whole_if(changed), close)
-            }
+            } => RenameRouting::Taken(apply_rename_key(
+                browser, edit, reads, frame, *key, *modifiers, damage,
+            )),
             WindowEvent::Pointer { x, y, action, .. } => {
                 let point = pointer_point(*x, *y);
-                let bounds = tairix_browse::render::selection_name_rect(
-                    browser, scale, theme, viewport, toolbar,
-                )
-                .unwrap_or(Rect::EMPTY);
+                let bounds = editor_rect(browser, frame).unwrap_or(Rect::EMPTY);
                 if matches!(action, PointerAction::Pressed(_)) && !bounds.contains(point) {
-                    return if commit_rename(browser, rename, scale, theme, viewport, toolbar)
-                        .press_acts()
-                    {
-                        RenameRouting::Committed
+                    let (commit, repaint) = commit_rename(browser, edit, reads, frame, damage);
+                    return if commit.press_acts() {
+                        RenameRouting::Committed(repaint)
                     } else {
-                        RenameRouting::Taken(Repaint::Whole, false)
+                        RenameRouting::Taken(repaint)
                     };
                 }
-                let Some(field) = rename.as_mut() else {
-                    return RenameRouting::Taken(Repaint::Nothing, false);
+                let Some(field) = edit.editing() else {
+                    return RenameRouting::Taken(Repaint::Nothing);
                 };
                 let mut moved = damage::sink();
                 for input in pointer_input_events(*action, point) {
-                    field.on_pointer(&input, bounds, scale, theme, &mut moved);
+                    field.on_pointer(&input, bounds, frame.scale, frame.theme, &mut moved);
                 }
                 for rect in moved.rects() {
                     damage.add(*rect);
                 }
-                RenameRouting::Taken(Repaint::reported_if(!moved.is_empty()), false)
+                RenameRouting::Taken(Repaint::reported_if(!moved.is_empty()))
             }
-            _ => RenameRouting::Taken(Repaint::Nothing, false),
+            _ => RenameRouting::Taken(Repaint::Nothing),
         }
     }
 
@@ -5111,7 +5195,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The key, its context, and the round's report.
     fn apply_nav_key<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
+        rename: &mut RenameEdit,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -6744,16 +6828,23 @@ mod program {
             // very path `F2` drives, so a name typed in the menu and one typed
             // in place cannot come to mean different things.
             MenuOutcome::Entered(item) => match context_choice_from_item(item) {
-                Some(ContextChoice::RenameCommit) => commit_menu_rename(
-                    browser,
-                    acts.menu.client,
-                    window,
-                    gesture,
-                    scale,
-                    theme,
-                    viewport,
-                    toolbar,
-                ),
+                Some(ContextChoice::RenameCommit) => {
+                    let frame = Frame {
+                        scale,
+                        theme,
+                        viewport,
+                        toolbar,
+                    };
+                    let repaint = commit_menu_rename(
+                        browser,
+                        &mut overlays.rename,
+                        acts.reads,
+                        (acts.menu.client, window, gesture),
+                        frame,
+                        damage,
+                    );
+                    return (repaint, false);
+                }
                 _ => (false, false),
             },
             MenuOutcome::Dismissed => (false, false),
@@ -6772,46 +6863,43 @@ mod program {
     /// frame and a name is wider than that; the session holds exactly one per
     /// window and hands it over once. Nothing held is an honest answer that
     /// renames nothing — a stale pull, or a commit the session could not keep
-    /// — and the rename itself is [`Browser::rename_selected`], the same
-    /// permission-checked `fs_rename` under the user's own identity that `F2`
-    /// runs, so a refusal is stated and the listing is untouched.
-    #[allow(clippy::too_many_arguments)] // The window's identity, its geometry, and the gesture.
+    /// — and the rename is prepared and handed on exactly as `F2`'s
+    /// ([`commit_rename`]): the same permission-checked `fs_rename` under the
+    /// user's own identity, off the loop, so a refusal is stated and the
+    /// listing is untouched.
     fn commit_menu_rename<S: DirectorySource>(
         browser: &mut Browser<S>,
-        client: &mut WindowClient<app::RtWindowTransport>,
-        window: u64,
-        gesture: &OpenMenuState,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        toolbar: ToolbarBand,
-    ) -> (bool, bool) {
+        edit: &mut RenameEdit,
+        reads: &Reads,
+        (client, window, gesture): (
+            &mut WindowClient<app::RtWindowTransport>,
+            u64,
+            &OpenMenuState,
+        ),
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> Repaint {
         let name = match client.take_menu_text(window, gesture.open_id) {
             Ok(Some(name)) => name,
-            Ok(None) => return (false, false),
+            Ok(None) => return Repaint::Nothing,
             Err(err) => {
                 report_error(&alloc::format!("typed name refused ({err})"));
-                return (false, false);
+                return Repaint::Nothing;
             }
         };
-        match browser.rename_selected(&name, |from, to| {
-            let ret = tairix_rt::fs_rename(from.as_bytes(), to.as_bytes());
-            if ret == 0 {
-                Ok(())
-            } else {
-                Err(Errno::from_syscall(ret))
-            }
-        }) {
-            Ok(()) | Err(RenameError::Unchanged) => {
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
-                (true, false)
-            }
-            Err(err) => {
-                let msg = err.message();
-                app::report(APP_NAME, msg);
-                (false, false)
-            }
+        if edit.in_flight() {
+            report_error("a rename is already being carried out");
+            return Repaint::Nothing;
         }
+        let pending = match browser.prepare_rename(&name) {
+            Ok(pending) => pending,
+            Err(RenameError::Unchanged) => return close_editor(browser, edit, frame, damage),
+            Err(err) => {
+                report_error(err.message());
+                return Repaint::Nothing;
+            }
+        };
+        submit_rename(browser, edit, reads, pending, frame, damage)
     }
 
     /// Hand the file the menu was opened on to the candidate application the
@@ -7509,13 +7597,14 @@ mod program {
         }
     }
 
-    /// Begin an in-place rename of the selected item: reveal the row so the
-    /// editor is on screen, then open a focused [`TextField`] pre-filled with
-    /// the current name (bounded by the kernel's own `FS_NAME_MAX`). With
-    /// nothing selected it is a no-op.
+    /// Begin an in-place rename of the selected item: open a focused
+    /// [`TextField`] pre-filled with the current name (bounded by the kernel's
+    /// own `FS_NAME_MAX`), then reveal the row so the editor is on screen.
+    /// With nothing selected, or a rename still with the volume, it is a
+    /// no-op.
     fn begin_rename<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
+        rename: &mut RenameEdit,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -7529,13 +7618,15 @@ mod program {
         }) else {
             return (false, false);
         };
-        tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
         let mut field = TextField::new()
             .with_text(&name)
             .with_max_len(FS_NAME_MAX)
             .with_selection(stem);
         field.set_focused(true);
-        *rename = Some(field);
+        if !rename.open(field) {
+            return (false, false);
+        }
+        tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
         (true, false)
     }
 
@@ -8236,98 +8327,245 @@ mod program {
         }
     }
 
-    /// Feed one key to the open rename editor. A submit commits the new name
-    /// through `fs_rename` (closing the editor and following the selection on
-    /// success, or stating the refusal reason in the field and staying open);
-    /// a cancel abandons the edit; an edit repaints and live-validates the
-    /// typed name so a clash or bad character is flagged as the user types.
-    #[allow(clippy::too_many_arguments)] // The editor, its geometry, and the key.
+    /// Feed one key to the open rename editor, reporting what it repainted
+    /// into `damage`. A submit commits the name ([`commit_rename`]), a cancel
+    /// abandons the edit, and an edit live-validates the typed name so a clash
+    /// or a bad character is flagged as the user types.
     fn apply_rename_key<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        toolbar: ToolbarBand,
+        edit: &mut RenameEdit,
+        reads: &Reads,
+        frame: Frame<'_>,
         key: KeyValue,
         modifiers: AbiModifiers,
-    ) -> (bool, bool) {
-        let (editor_key, mods) = to_editor_key(key, modifiers);
+        damage: &mut Region,
+    ) -> Repaint {
+        let (key, mods) = to_editor_key(key, modifiers);
         // The rectangle the editor is *drawn* at, so a caret the key moves
         // lands where its glyphs are.
-        let bounds =
-            tairix_browse::render::selection_name_rect(browser, scale, theme, viewport, toolbar)
-                .unwrap_or(Rect::EMPTY);
-        let action = match rename.as_mut() {
-            Some(field) => field.on_key(editor_key, mods, bounds, &mut damage::sink()),
-            None => return (false, false),
-        };
+        let bounds = editor_rect(browser, frame).unwrap_or(Rect::EMPTY);
+        let mut keyed = damage::sink();
+        let action = edit.key(key, mods, bounds, &mut keyed);
+        for rect in keyed.rects() {
+            damage.add(*rect);
+        }
+        let redrawn = Repaint::reported_if(!keyed.is_empty());
         match action {
-            Some(TextAction::Submitted) => {
-                let _ = commit_rename(browser, rename, scale, theme, viewport, toolbar);
-                (true, false)
-            }
-            Some(TextAction::Cancelled) => {
-                *rename = None;
-                (true, false)
-            }
+            Some(TextAction::Submitted) => commit_rename(browser, edit, reads, frame, damage).1,
             Some(TextAction::Edited) => {
-                let current = browser.chosen_name().map(ToString::to_string);
-                if let (Some(field), Some(current)) = (rename.as_mut(), current) {
-                    let text = field.text().to_string();
-                    let message = match validate_new_name(&text, &current, browser.entries()) {
+                let verdict = edit
+                    .field()
+                    .zip(browser.chosen_name())
+                    .map(|(field, current)| {
+                        validate_new_name(field.text(), current, browser.entries())
+                    });
+                if let (Some(verdict), Some(field)) = (verdict, edit.editing()) {
+                    field.set_message(match verdict {
                         Ok(()) | Err(RenameError::Unchanged) => None,
                         Err(err) => Some(String::from(err.message())),
-                    };
-                    field.set_message(message);
+                    });
                 }
-                (true, false)
+                redrawn
             }
-            None => (false, false),
+            Some(TextAction::Cancelled) | None => redrawn,
         }
     }
 
-    /// Commit the name typed into the open rename editor through `fs_rename`,
-    /// answering whether the editor closed.
-    ///
-    /// A name taken, or the name left as it was, closes it and the selection
-    /// follows the entry; a refusal keeps it open with the honest reason in the
-    /// field (never a silent or fabricated result) and the listing untouched.
+    /// Commit the open rename editor, reporting what it repainted into
+    /// `damage`: an unchanged name closes it, a bad one states why in it, and
+    /// a valid one goes to the volume — the editor closes, or states the
+    /// volume's refusal, once the answer lands.
     fn commit_rename<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        toolbar: ToolbarBand,
-    ) -> RenameCommit {
-        let Some(new_name) = rename.as_ref().map(|field| field.text().to_string()) else {
-            return RenameCommit::Refused;
+        edit: &mut RenameEdit,
+        reads: &Reads,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> (RenameCommit, Repaint) {
+        if edit.in_flight() {
+            return (RenameCommit::Submitted, Repaint::Nothing);
+        }
+        let Some(new_name) = edit.field().map(|field| field.text().to_string()) else {
+            return (RenameCommit::Refused, Repaint::Nothing);
         };
-        match browser.rename_selected(&new_name, |from, to| {
-            let ret = tairix_rt::fs_rename(from.as_bytes(), to.as_bytes());
-            if ret == 0 {
-                Ok(())
-            } else {
-                Err(Errno::from_syscall(ret))
-            }
-        }) {
-            outcome @ (Ok(()) | Err(RenameError::Unchanged)) => {
-                *rename = None;
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
-                if outcome.is_ok() {
-                    RenameCommit::Renamed
-                } else {
-                    RenameCommit::Unchanged
-                }
-            }
+        match browser.prepare_rename(&new_name) {
+            Ok(pending) => (
+                RenameCommit::Submitted,
+                submit_rename(browser, edit, reads, pending, frame, damage),
+            ),
+            Err(RenameError::Unchanged) => (
+                RenameCommit::Unchanged,
+                close_editor(browser, edit, frame, damage),
+            ),
             Err(err) => {
-                if let Some(field) = rename.as_mut() {
+                if let Some(field) = edit.editing() {
                     field.set_message(Some(String::from(err.message())));
                 }
-                RenameCommit::Refused
+                (
+                    RenameCommit::Refused,
+                    Repaint::reported_if(report_editor(browser, frame, damage)),
+                )
             }
         }
+    }
+
+    /// Hand `pending` to the volume, reporting what it repainted into
+    /// `damage`: nothing until the answer lands, unless there was no reader
+    /// to take it and it was carried out here.
+    fn submit_rename<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        edit: &mut RenameEdit,
+        reads: &Reads,
+        pending: PendingRename,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> Repaint {
+        match reads.rename(&pending) {
+            RenameSubmit::Done(moved) => {
+                apply_rename_outcome(browser, edit, &pending, moved, frame, damage)
+            }
+            RenameSubmit::Pending(ticket) => {
+                edit.submitted(ticket, pending);
+                Repaint::Nothing
+            }
+        }
+    }
+
+    /// Apply what the volume said to `pending`, reporting what it repainted
+    /// into `damage`: a rename that took re-lists the folder it was made in,
+    /// closing the editor and bringing the entry under its new name into
+    /// view, and a refusal states its reason in the editor, or on stderr once
+    /// that has closed.
+    fn apply_rename_outcome<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        edit: &mut RenameEdit,
+        pending: &PendingRename,
+        moved: Result<(), Errno>,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> Repaint {
+        match browser.finish_rename(pending, moved) {
+            Ok(true) => {
+                let closed = close_editor(browser, edit, frame, damage);
+                // A re-list read on the spot may have moved every entry; one
+                // under way repaints when it lands.
+                if browser.is_listing() {
+                    closed
+                } else {
+                    Repaint::Whole
+                }
+            }
+            Ok(false) => Repaint::Nothing,
+            Err(err) => {
+                if let Some(field) = edit.editing() {
+                    field.set_message(Some(String::from(err.message())));
+                    Repaint::reported_if(report_editor(browser, frame, damage))
+                } else {
+                    report_error(err.message());
+                    Repaint::Nothing
+                }
+            }
+        }
+    }
+
+    /// Close the rename editor and bring the chosen entry into view,
+    /// reporting both into `damage`.
+    fn close_editor<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        edit: &mut RenameEdit,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> Repaint {
+        let mut moved = edit.is_open() && report_editor(browser, frame, damage);
+        edit.close();
+        let mark = ViewMark::of(browser, frame);
+        tairix_browse::render::reveal_selection(
+            browser,
+            frame.scale,
+            frame.theme,
+            frame.viewport,
+            frame.toolbar,
+        );
+        moved |= mark.report(browser, frame, damage);
+        Repaint::reported_if(moved)
+    }
+
+    /// Where the rename editor is drawn: over the chosen entry's name, as far
+    /// as that shows.
+    fn editor_rect<S: DirectorySource>(browser: &Browser<S>, frame: Frame<'_>) -> Option<Rect> {
+        tairix_browse::render::selection_name_rect(
+            browser,
+            frame.scale,
+            frame.theme,
+            frame.viewport,
+            frame.toolbar,
+        )
+    }
+
+    /// Report where the rename editor is drawn into `damage`, answering
+    /// whether any of it shows.
+    fn report_editor<S: DirectorySource>(
+        browser: &Browser<S>,
+        frame: Frame<'_>,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(rect) = editor_rect(browser, frame) else {
+            return false;
+        };
+        damage.add(rect);
+        true
+    }
+
+    /// Apply every rename the reader has answered to the window still waiting
+    /// on it, answering whether one now owes a repaint. A window closed
+    /// meanwhile has nothing to show: the volume did what it said either way,
+    /// and the windows showing that folder follow its change.
+    fn collect_renames(
+        windows: &mut [OpenWindow],
+        reads: &Reads,
+        theme: &Theme,
+        scale: Scale,
+    ) -> bool {
+        let mut owed = false;
+        while let Some(done) = reads.take_renamed() {
+            let Some(win) = windows.iter_mut().find(|win| {
+                matches!(&win.kind, WindowKind::Browser(state)
+                    if state.overlays.rename.awaits(done.ticket))
+            }) else {
+                continue;
+            };
+            let mode = *win.pane.mode();
+            let Some(state) = win.browser() else {
+                continue;
+            };
+            let Some(pending) = state.overlays.rename.answered(done.ticket) else {
+                continue;
+            };
+            let frame = Frame {
+                scale,
+                theme,
+                viewport: Canvas {
+                    theme,
+                    mode: &mode,
+                    scale,
+                    chrome: state.chrome,
+                }
+                .viewport(&state.places),
+                toolbar: state.chrome.toolbar,
+            };
+            let mut damage = damage::sink();
+            let repaint = apply_rename_outcome(
+                &mut state.browser,
+                &mut state.overlays.rename,
+                &pending,
+                done.moved,
+                frame,
+                &mut damage,
+            );
+            owed |= repaint != Repaint::Nothing;
+            owe(win, repaint, &damage);
+        }
+        owed
     }
 
     /// Map the window channel's wire key event onto the desktop control
@@ -8411,7 +8649,7 @@ mod program {
     /// closed at start-up.
     fn initial_overlays() -> Overlays {
         Overlays {
-            rename: None,
+            rename: RenameEdit::default(),
             rename_on_arrival: None,
             delete: None,
             open_with: None,
@@ -8753,6 +8991,8 @@ mod program {
         });
         // The event a park woke for, served first by the turn after it.
         let mut woken = None;
+        // When a running operation's panel last showed its progress.
+        let mut progress_shown = 0u64;
         loop {
             // Report what the icon cache holds at the head of the turn: this
             // is the one point every path through the body passes through
@@ -8772,8 +9012,14 @@ mod program {
                 let finished = windows[busy]
                     .browser()
                     .and_then(|state| state.overlays.operation.as_mut())
-                    .is_some_and(advance_operation);
-                windows[busy].owed.owe_whole();
+                    .is_some_and(|operation| {
+                        advance_for_a_slice(|| advance_operation(operation), tairix_rt::clock_get)
+                    });
+                let now = tairix_rt::clock_get();
+                if progress_due(finished, now, progress_shown) {
+                    windows[busy].owed.owe_whole();
+                    progress_shown = now;
+                }
                 if finished {
                     // Re-list so the view reflects what actually remains — a
                     // partial removal (a refusal or a cancel) is shown
@@ -8854,6 +9100,7 @@ mod program {
                     }
                 }
                 serve_due(&mut windows, themes.active(), desktop.scale());
+                collect_renames(&mut windows, &reads, themes.active(), desktop.scale());
                 let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
                 if present_owed_windows(&mut windows, &mut client, grounds, &icons, desktop.scale())
                     .is_err()
@@ -8925,6 +9172,7 @@ mod program {
                 moved = true;
             }
             moved |= serve_due(&mut windows, themes.active(), desktop.scale());
+            moved |= collect_renames(&mut windows, &reads, themes.active(), desktop.scale());
             // A mount-table change the reader has answered: the rail is what
             // is mounted, so it is rebuilt and every window's copy with it.
             let landed = places_read

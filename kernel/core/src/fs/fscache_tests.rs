@@ -475,6 +475,126 @@ fn a_change_through_one_name_refreshes_a_listing_holding_another() {
     assert_eq!(first_listed_info(&mut cache, other).size, 2, "a truncate");
 }
 
+/// Every cached listing entry is indexed under the child it names, and the
+/// index holds nothing else — what keeps its per-entry charge honest.
+fn assert_index_matches(cache: &CachedFs<Counting<RwMockFs>>) {
+    assert_eq!(cache.embedded.len(), cache.dirent.len());
+    for (&(dir, cursor), entry) in &cache.dirent {
+        assert!(cache
+            .embedded
+            .contains(&(entry.entry.node.raw(), dir, cursor)));
+    }
+}
+
+/// A listing read again from the hole a change to one entry left passes the
+/// entries still cached beyond it, and charges none of them twice.
+#[test]
+fn refilling_a_hole_in_a_cached_listing_charges_each_entry_once() {
+    let mut cache = fixture(b"body");
+    let dir = dir_of(&mut cache);
+    for name in [&b"a"[..], b"b", b"c"] {
+        cache
+            .create(dir, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    listed(&mut cache, dir, 0, &[]).expect("warm the listing");
+    let first = cache
+        .dirent
+        .range((dir.raw(), 0)..=(dir.raw(), u64::MAX))
+        .next()
+        .map(|(_, entry)| entry.name.clone())
+        .expect("a cached entry");
+    cache.lookup(dir, &first).expect("the first entry resolves");
+    let charged = cache.accounting().class_bytes(ReclaimClass::FsMetadata);
+    let slots = cache.lru_meta.len();
+
+    cache.write_at(dir, &first, 0, b"x").expect("write");
+    let relisted = listed(&mut cache, dir, 0, &[]).expect("relist");
+
+    assert_eq!(relisted.len(), 4);
+    assert_eq!(
+        cache.accounting().class_bytes(ReclaimClass::FsMetadata),
+        charged
+    );
+    assert_eq!(cache.lru_meta.len(), slots, "one LRU slot per cached entry");
+    assert_index_matches(&cache);
+}
+
+/// A change to a node drops exactly the listing entries that embed its
+/// metadata — wherever it is named — and nothing else: a permission change or
+/// a write reaches the entry for the node's other name and leaves a bystander
+/// and the rest of its own directory cached, and adding to a directory drops
+/// that directory's own entry in its parent's listing.
+#[test]
+fn a_change_to_a_node_drops_exactly_the_listing_entries_naming_it() {
+    let mut cache = fixture(b"body");
+    let root = cache.root();
+    let dir = dir_of(&mut cache);
+    let file = file_of(&mut cache);
+    for name in [&b"other"[..], b"unrelated"] {
+        cache
+            .create(root, name, NodeKind::Directory)
+            .expect("mkdir");
+    }
+    let other = cache.lookup(root, b"other").expect("other resolves");
+    let unrelated = cache
+        .lookup(root, b"unrelated")
+        .expect("unrelated resolves");
+    cache.link(other, b"alias", file).expect("a second name");
+    cache
+        .create(unrelated, b"bystander", NodeKind::RegularFile)
+        .expect("create");
+    cache
+        .create(dir, b"sibling", NodeKind::RegularFile)
+        .expect("create");
+    let warm = |cache: &mut CachedFs<Counting<RwMockFs>>| {
+        for listing in [root, dir, other, unrelated] {
+            listed(cache, listing, 0, &[]).expect("lists");
+        }
+    };
+    let cached = |cache: &CachedFs<Counting<RwMockFs>>, listing: NodeId| -> Vec<Vec<u8>> {
+        cache
+            .dirent
+            .range((listing.raw(), 0)..=(listing.raw(), u64::MAX))
+            .map(|(_, entry)| entry.name.clone())
+            .collect()
+    };
+
+    warm(&mut cache);
+    let security = cache.security(file).expect("security");
+    cache.set_security(file, security).expect("set_security");
+    assert!(
+        cached(&cache, other).is_empty(),
+        "the other name's entry is dropped"
+    );
+    assert_eq!(
+        cached(&cache, dir),
+        vec![b"sibling".to_vec()],
+        "its own entry alone"
+    );
+    assert_eq!(cached(&cache, unrelated), vec![b"bystander".to_vec()]);
+
+    warm(&mut cache);
+    cache.write_at(dir, b"file.txt", 0, b"more").expect("write");
+    assert!(
+        cached(&cache, other).is_empty(),
+        "a write drops the other name's entry"
+    );
+    assert_eq!(cached(&cache, dir), vec![b"sibling".to_vec()]);
+    assert_eq!(cached(&cache, unrelated), vec![b"bystander".to_vec()]);
+
+    warm(&mut cache);
+    cache
+        .create(other, b"added", NodeKind::RegularFile)
+        .expect("create");
+    assert!(
+        !cached(&cache, root).contains(&b"other".to_vec()),
+        "the parent's entry for the changed directory is dropped"
+    );
+    assert!(cached(&cache, root).contains(&b"unrelated".to_vec()));
+    assert_index_matches(&cache);
+}
+
 #[test]
 fn create_invalidates_directory_listings() {
     let mut cache = fixture(b"x");

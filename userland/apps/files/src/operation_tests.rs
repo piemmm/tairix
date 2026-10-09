@@ -207,3 +207,72 @@ fn a_window_too_small_for_the_panel_resolves_no_cancel() {
         OperationControl::Cancel
     );
 }
+
+/// A turn steps the operation for half a desktop frame and no longer, always
+/// at least once, and stops the moment the operation finishes.
+#[test]
+fn a_turn_advances_the_operation_for_half_a_frame() {
+    use super::{advance_for_a_slice, OPERATION_SLICE_NS};
+    use core::cell::Cell;
+
+    let now = Cell::new(0u64);
+    let steps = Cell::new(0u32);
+    let finished = advance_for_a_slice(
+        || {
+            steps.set(steps.get() + 1);
+            now.set(now.get() + OPERATION_SLICE_NS.div_ceil(4));
+            false
+        },
+        || now.get(),
+    );
+    assert!(!finished);
+    assert_eq!(
+        steps.get(),
+        4,
+        "the slice is spent after its share of steps"
+    );
+
+    now.set(0);
+    steps.set(0);
+    let finished = advance_for_a_slice(
+        || {
+            steps.set(steps.get() + 1);
+            now.set(now.get() + 2 * OPERATION_SLICE_NS);
+            false
+        },
+        || now.get(),
+    );
+    assert!(!finished);
+    assert_eq!(
+        steps.get(),
+        1,
+        "a step longer than the slice still runs once"
+    );
+
+    steps.set(0);
+    let finished = advance_for_a_slice(
+        || {
+            steps.set(steps.get() + 1);
+            steps.get() == 2
+        },
+        || 0,
+    );
+    assert!(finished);
+    assert_eq!(steps.get(), 2, "it stops when the operation does");
+}
+
+/// The progress panel is shown once a desktop frame, however many turns that
+/// frame held, and always on the turn the operation finishes.
+#[test]
+fn the_progress_is_shown_once_a_frame_and_on_finishing() {
+    use super::progress_due;
+    use tairix_theme::Timeline;
+
+    let shown = 5_000_000;
+    assert!(!progress_due(false, shown + Timeline::FRAME_NS - 1, shown));
+    assert!(progress_due(false, shown + Timeline::FRAME_NS, shown));
+    assert!(
+        progress_due(true, shown, shown),
+        "the last state is always shown"
+    );
+}

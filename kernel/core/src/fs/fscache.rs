@@ -84,7 +84,7 @@
 //! rebuild, and teardown racing reclaim are impossible by construction
 //! rather than by locking discipline.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -118,6 +118,10 @@ const CHUNK: usize = PAGE_SIZE;
 /// LRU index) charged on top of an entry's payload so the ledger tracks
 /// real heap footprint, not just payload bytes.
 const ENTRY_OVERHEAD: usize = 96;
+
+/// What a cached listing entry adds to [`CachedFs::embedded`]: its key, in
+/// B-tree nodes at least half full, with their share of the nodes above.
+const EMBED_INDEX_OVERHEAD: usize = 3 * size_of::<(u64, u64, u64)>();
 
 /// Which cache pool a key lives in, for the LRU index.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -205,6 +209,11 @@ pub struct CachedFs<F> {
     /// the queried name instead of allocating a tuple key.
     lookup: BTreeMap<u64, BTreeMap<Vec<u8>, LookupEntry>>,
     dirent: BTreeMap<(u64, u64), DirentEntry>,
+    /// Each cached listing entry by `(child, dir, cursor)`, so a change to a
+    /// node drops exactly the entries embedding its metadata, in every
+    /// directory that names it. One flat set, so a node named once costs one
+    /// key rather than a tree of its own.
+    embedded: BTreeSet<(u64, u64, u64)>,
     data: BTreeMap<(u64, u64), DataEntry>,
     /// LRU index of the data pool, keyed by tick (oldest first).
     lru_data: BTreeMap<u64, KeyRef>,
@@ -307,6 +316,7 @@ impl<F> CachedFs<F> {
             sec: BTreeMap::new(),
             lookup: BTreeMap::new(),
             dirent: BTreeMap::new(),
+            embedded: BTreeSet::new(),
             data: BTreeMap::new(),
             lru_data: BTreeMap::new(),
             lru_meta: BTreeMap::new(),
@@ -436,7 +446,7 @@ impl<F> CachedFs<F> {
                 self.dirent
                     .get(&(*dir, *cursor))
                     .map_or(0, |e| e.name.len().saturating_add(size_of::<DirEntry>())),
-                ENTRY_OVERHEAD,
+                ENTRY_OVERHEAD + EMBED_INDEX_OVERHEAD,
             ),
             KeyRef::Data(file, base) => (
                 self.data.get(&(*file, *base)).map_or(0, |e| e.bytes.len()),
@@ -469,6 +479,7 @@ impl<F> CachedFs<F> {
             }
             KeyRef::Dirent(dir, cursor) => self.dirent.remove(&(*dir, *cursor)).map(|mut e| {
                 e.name.as_mut_slice().zeroize();
+                self.embedded.remove(&(e.entry.node.raw(), *dir, *cursor));
                 e.tick
             }),
             KeyRef::Data(file, base) => self.data.remove(&(*file, *base)).map(|mut e| {
@@ -527,6 +538,7 @@ impl<F> CachedFs<F> {
         self.stat.clear();
         self.sec.clear();
         self.dirent.clear();
+        self.embedded.clear();
         self.data.clear();
         self.lru_data.clear();
         self.lru_meta.clear();
@@ -607,9 +619,11 @@ impl<F> CachedFs<F> {
     fn admit_dirent(&mut self, dir: u64, cursor: u64, entry: DirEntry, mut name: Vec<u8>) {
         if name.len() <= MAX_COMPONENT_LEN {
             let payload = name.len().saturating_add(size_of::<DirEntry>());
-            if let Some(tick) = self.admit(KeyRef::Dirent(dir, cursor), payload, ENTRY_OVERHEAD) {
+            let metadata = ENTRY_OVERHEAD + EMBED_INDEX_OVERHEAD;
+            if let Some(tick) = self.admit(KeyRef::Dirent(dir, cursor), payload, metadata) {
                 self.dirent
                     .insert((dir, cursor), DirentEntry { entry, name, tick });
+                self.embedded.insert((entry.node.raw(), dir, cursor));
             } else {
                 name.as_mut_slice().zeroize();
             }
@@ -699,24 +713,6 @@ impl<F> CachedFs<F> {
 }
 
 impl<F: FilesystemRead> CachedFs<F> {
-    /// Drop the listings that embed `node`'s metadata after a change to it
-    /// made through `dir`: `dir`'s own, or every directory's when `node` has
-    /// other names, since nothing records which directories hold them.
-    fn invalidate_listings_embedding(&mut self, dir: u64, node: u64) {
-        let names = match self.stat.get(&node) {
-            Some(entry) => Ok(entry.info.nlink),
-            None => self
-                .inner
-                .node_info(NodeId::from_raw(node))
-                .map(|info| info.nlink),
-        };
-        if matches!(names, Ok(names) if names <= 1) {
-            self.invalidate_dirents(dir);
-        } else {
-            self.invalidate_every_dirent();
-        }
-    }
-
     /// What kind of node `node` is, asked only while something on the volume
     /// is watched: whether moving it can change what a watched path reaches,
     /// or who may list beneath it.
@@ -836,15 +832,18 @@ impl<F: FilesystemRead> CachedFs<F> {
         }
     }
 
-    /// Drop every cached directory entry of every directory.
-    fn invalidate_every_dirent(&mut self) {
+    /// Drop every cached listing entry that embeds `node`'s metadata, in
+    /// whichever directories name it.
+    fn invalidate_dirents_embedding(&mut self, node: u64) {
         while let Some(key) = self
-            .dirent
-            .keys()
+            .embedded
+            .range((node, 0, 0)..=(node, u64::MAX, u64::MAX))
             .next()
-            .map(|(d, cursor)| KeyRef::Dirent(*d, *cursor))
+            .copied()
         {
-            if self.remove_entry(&key).is_some() {
+            self.embedded.remove(&key);
+            let (_, dir, cursor) = key;
+            if self.remove_entry(&KeyRef::Dirent(dir, cursor)).is_some() {
                 self.accounting.record_invalidation();
             }
         }
@@ -1163,16 +1162,20 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
             at = entry.next_cursor;
         }
         self.accounting.record_miss(ReclaimClass::FsMetadata);
-        // Every entry the driver reads is kept to cache once it returns,
-        // keyed by the cursor it was read at.
+        // Each entry the driver reads is kept once it returns, keyed by the
+        // cursor it was read at; one still cached past a hole a change left is
+        // kept already, and charging it again would count it twice.
         let mut read: Vec<(u64, DirEntry, Vec<u8>)> = Vec::new();
         let mut key = at;
+        let cached = &self.dirent;
         let result = self
             .inner
             .read_dir(dir, at, &resume[..resume_len], &mut |entry, name| {
-                if let Some(copy) = Self::try_copy(name) {
-                    if read.try_reserve(1).is_ok() {
-                        read.push((key, *entry, copy));
+                if !cached.contains_key(&(dir_raw, key)) {
+                    if let Some(copy) = Self::try_copy(name) {
+                        if read.try_reserve(1).is_ok() {
+                            read.push((key, *entry, copy));
+                        }
                     }
                 }
                 let flow = visit(entry, name);
@@ -1202,6 +1205,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_lookups(dir_raw);
         self.invalidate_dirents(dir_raw);
         self.invalidate_stat(dir_raw);
+        self.invalidate_dirents_embedding(dir_raw);
         if let (Some(changes), Ok(node)) = (self.changes.as_mut(), result.as_ref()) {
             changes.added(dir, name, Some(*node));
         }
@@ -1217,9 +1221,11 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.link(dir, name, node);
         let dir_raw = dir.raw();
         self.invalidate_lookups(dir_raw);
+        self.invalidate_dirents(dir_raw);
+        self.invalidate_dirents_embedding(node.raw());
         self.invalidate_stat(node.raw());
-        self.invalidate_listings_embedding(dir_raw, node.raw());
         self.invalidate_stat(dir_raw);
+        self.invalidate_dirents_embedding(dir_raw);
         if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
             changes.linked(dir, name, node);
         }
@@ -1238,6 +1244,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_lookups(dir_raw);
         self.invalidate_dirents(dir_raw);
         self.invalidate_stat(dir_raw);
+        self.invalidate_dirents_embedding(dir_raw);
         if let (Some(changes), Ok(node)) = (self.changes.as_mut(), result.as_ref()) {
             changes.added(dir, name, Some(*node));
         }
@@ -1256,7 +1263,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.write_at(dir, name, offset, data);
         match target {
             Ok(Some(node)) => {
-                self.invalidate_listings_embedding(dir.raw(), node);
+                self.invalidate_dirents_embedding(node);
                 self.invalidate_stat(node);
                 self.invalidate_data(node);
             }
@@ -1278,7 +1285,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let result = self.inner.truncate(dir, name, size);
         match target {
             Ok(Some(node)) => {
-                self.invalidate_listings_embedding(dir.raw(), node);
+                self.invalidate_dirents_embedding(node);
                 self.invalidate_stat(node);
                 self.invalidate_data(node);
             }
@@ -1304,9 +1311,11 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         match target {
             Ok(Some(node)) => {
                 self.invalidate_lookups(dir_raw);
+                self.invalidate_dirents_embedding(node);
                 self.invalidate_node(node);
                 self.invalidate_dirents(dir_raw);
                 self.invalidate_stat(dir_raw);
+                self.invalidate_dirents_embedding(dir_raw);
             }
             Ok(None) => {
                 self.invalidate_lookups(dir_raw);
@@ -1359,7 +1368,10 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let src_raw = src_dir.raw();
         let dst_raw = dst_dir.raw();
         match overwritten {
-            Ok(Some(node)) => self.invalidate_node(node),
+            Ok(Some(node)) => {
+                self.invalidate_dirents_embedding(node);
+                self.invalidate_node(node);
+            }
             Ok(None) => {}
             Err(()) => {
                 self.purge();
@@ -1375,6 +1387,8 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_dirents(dst_raw);
         self.invalidate_stat(src_raw);
         self.invalidate_stat(dst_raw);
+        self.invalidate_dirents_embedding(src_raw);
+        self.invalidate_dirents_embedding(dst_raw);
         result
     }
 
@@ -1418,8 +1432,11 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
         let directory = self.watched_kind(Some(node.raw())) == Some(NodeKind::Directory);
         let result = self.inner.set_security(node, security);
         // Invalidate on success and failure alike; the next `security`
-        // re-reads the stored record.
+        // re-reads the stored record, and the change time every record of the
+        // node carries moved with it.
         self.invalidate_sec(node.raw());
+        self.invalidate_stat(node.raw());
+        self.invalidate_dirents_embedding(node.raw());
         if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
             changes.metadata(node);
             if directory {
@@ -1477,8 +1494,9 @@ where
         };
         // Invalidate on success and failure alike; the next `node_info`
         // re-reads the stored record (attribute blocks count against the
-        // inode's allocation).
+        // inode's allocation), and so does every listing entry naming it.
         self.invalidate_stat(node.raw());
+        self.invalidate_dirents_embedding(node.raw());
         if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
             changes.metadata(node);
         }
@@ -1503,6 +1521,7 @@ where
             None => return Err(DriverError::Unsupported),
         };
         self.invalidate_stat(node.raw());
+        self.invalidate_dirents_embedding(node.raw());
         if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
             changes.metadata(node);
         }

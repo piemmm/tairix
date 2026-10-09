@@ -1986,7 +1986,7 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
     // with the directory, so the file's own storage is what must return.
     fs.create(root, b"w", NodeKind::RegularFile)
         .expect("create");
-    let before_write = fs.free_count;
+    let before_write = fs.committed_free_count();
     let payload = compressible_cluster(&fs);
     assert_eq!(fs.write_at(root, b"w", 0, &payload), Ok(payload.len()));
     let (_, first) = extent_of(&mut fs, b"w", 0);
@@ -2021,9 +2021,9 @@ fn overwriting_and_removing_a_compressed_cluster_returns_its_space() {
         );
     }
     assert!(
-        fs.free_count >= before_write,
+        fs.committed_free_count() >= before_write,
         "no blocks leaked: {} < {before_write}",
-        fs.free_count
+        fs.committed_free_count()
     );
     // The mount-time rebuild reproduces the same used set, so nothing was
     // double-freed either.
@@ -2868,7 +2868,11 @@ fn assert_committed_state_unchanged(
     used_before: &BTreeSet<u64>,
     free_before: u64,
 ) {
-    assert_eq!(fs.free_count, free_before, "the free count is unchanged");
+    assert_eq!(
+        fs.committed_free_count(),
+        free_before,
+        "the free count is unchanged"
+    );
     let used_after = fs.used_blocks();
     assert_eq!(&used_after, used_before, "the used-block set is unchanged");
     let bs = 4096;
@@ -2931,7 +2935,7 @@ fn clean_scrub_finds_nothing_and_is_idempotent() {
         ARXFS::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
 
     let used_before = fs.used_blocks();
-    let free_before = fs.free_count;
+    let free_before = fs.committed_free_count();
     let report = scrub_full(&mut fs);
     assert_eq!(report.pass, PassVerdict::Complete);
     assert!(!report.found_faults(), "{report:?}");
@@ -3459,7 +3463,11 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
         at += 512;
         assert!(at < 1 << 20, "never ran out of space");
     }
-    assert!(fs.free_count <= 17, "free after filling: {}", fs.free_count);
+    assert!(
+        fs.committed_free_count() <= 17,
+        "free after filling: {}",
+        fs.committed_free_count()
+    );
 
     let report = scrub_full(&mut fs);
     assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
@@ -4032,7 +4040,7 @@ fn check_on_a_clean_volume_is_sound_and_rebuilds_nothing() {
         ARXFS::open(MemBlock::from_bytes(before.clone(), 4096, 512), &TEST_KEY).expect("reopen");
 
     let used_before = fs.used_blocks();
-    let free_before = fs.free_count;
+    let free_before = fs.committed_free_count();
     let sink = RecordingSink::new();
     let report = fs.check(&GrantAll, &sink).expect("check");
     assert!(report.complete);
@@ -4068,7 +4076,7 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
     let mut reference =
         ARXFS::open(MemBlock::from_bytes(bytes.clone(), 4096, 512), &TEST_KEY).expect("reference");
     let good_used = reference.used_blocks();
-    let good_count = reference.free_count;
+    let good_count = reference.committed_free_count();
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
     // Wreck the derived state: release a block the trees say is live, and
@@ -4085,7 +4093,11 @@ fn check_rebuilds_a_corrupt_free_space_derivation() {
         good_used,
         "the allocation map was rebuilt"
     );
-    assert_eq!(fs.free_count, good_count, "the free count was rebuilt");
+    assert_eq!(
+        fs.committed_free_count(),
+        good_count,
+        "the free count was rebuilt"
+    );
     // The volume is mountable and the structure is sound.
     assert_eq!(report.structure, StructureVerdict::Sound, "{report:?}");
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -6061,7 +6073,8 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         );
         let mapped_free = fs.total_blocks - fs.used_blocks().len() as u64;
         assert_eq!(
-            fs.free_count, mapped_free,
+            fs.committed_free_count(),
+            mapped_free,
             "the frozen handle's free count contradicts its own map"
         );
         // Reads still work on the frozen handle.
@@ -6229,12 +6242,12 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
         for map_pattern in 0..4u8 {
             let (mut fs, slot) = volatile_volume(Publish::PerOperation);
             let old_used = fs.used_blocks();
-            let old_free = fs.free_count;
+            let old_free = fs.committed_free_count();
             let root = fs.root();
             fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
                 .expect("write");
             let new_used = fs.used_blocks();
-            let new_free = fs.free_count;
+            let new_free = fs.committed_free_count();
             let map_start = fs.map_region_start();
             let map_end = map_start + fs.map_region_blocks();
             fs.block_mut().fail_flush = true;
@@ -6283,7 +6296,8 @@ fn a_failed_sync_rebuilds_every_partially_persisted_map() {
                 "wrong map for publish={publish}, pattern={map_pattern}"
             );
             assert_eq!(
-                reopened.free_count, expected_free,
+                reopened.committed_free_count(),
+                expected_free,
                 "wrong free count for publish={publish}, pattern={map_pattern}"
             );
         }
@@ -6304,7 +6318,7 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
     fs.create(root, b"taken", NodeKind::RegularFile)
         .expect("create");
     let before_used = fs.used_blocks();
-    let before_free = fs.free_count;
+    let before_free = fs.committed_free_count();
 
     assert_eq!(
         fs.create(root, b"taken", NodeKind::RegularFile),
@@ -6322,7 +6336,8 @@ fn a_refused_operation_leaves_the_allocation_map_exact_and_trusted() {
         "the refusal moved a bit in the allocation map"
     );
     assert_eq!(
-        fs.free_count, before_free,
+        fs.committed_free_count(),
+        before_free,
         "the refusal moved the free count"
     );
     let alloc = fs.allocator().expect("allocator");
@@ -6353,7 +6368,7 @@ fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
     fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
         .expect("write");
     let before_used = fs.used_blocks();
-    let before_free = fs.free_count;
+    let before_free = fs.committed_free_count();
     let old_root = fs.root_phys;
 
     // Rewriting the file releases its old data and metadata into the deferred
@@ -6380,7 +6395,8 @@ fn a_failed_commit_reserves_the_blocks_it_had_already_deferred_for_freeing() {
         "a failed commit left the map disagreeing with the committed trees"
     );
     assert_eq!(
-        fs.free_count, before_free,
+        fs.committed_free_count(),
+        before_free,
         "a failed commit moved the count"
     );
     let mut out = alloc::vec![0u8; VOLATILE_PAYLOAD.len()];
@@ -6414,14 +6430,14 @@ fn a_failed_sync_rebuilds_before_a_same_handle_check_and_write() {
     fs.write_at(root, b"new", 1, b"after recovery")
         .expect("same-handle write");
     let expected_used = fs.used_blocks();
-    let expected_free = fs.free_count;
+    let expected_free = fs.committed_free_count();
     FilesystemWrite::flush(&mut fs).expect("sync recovered mount");
 
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut reopened =
         ARXFS::open(MemBlock::from_bytes(bytes, CRASH_BS, CRASH_BC), &TEST_KEY).expect("reopen");
     assert_eq!(reopened.used_blocks(), expected_used);
-    assert_eq!(reopened.free_count, expected_free);
+    assert_eq!(reopened.committed_free_count(), expected_free);
 }
 
 #[test]
@@ -6440,7 +6456,7 @@ fn a_failed_sync_rebuilds_before_same_handle_growth() {
     fs.block_mut().enlarge_to(grown_blocks);
     assert_eq!(fs.grow(), Ok(1024));
     let expected_used = fs.used_blocks();
-    let expected_free = fs.free_count;
+    let expected_free = fs.committed_free_count();
     FilesystemWrite::flush(&mut fs).expect("sync grown volume");
 
     let bytes = fs.into_block().expect("the volume closes").bytes();
@@ -6450,7 +6466,7 @@ fn a_failed_sync_rebuilds_before_same_handle_growth() {
     )
     .expect("reopen grown volume");
     assert_eq!(reopened.used_blocks(), expected_used, "grown map mismatch");
-    assert_eq!(reopened.free_count, expected_free);
+    assert_eq!(reopened.committed_free_count(), expected_free);
 }
 
 #[test]
@@ -6691,7 +6707,7 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
         2,
         "two data blocks mapped"
     );
-    let free_before = fs.free_count;
+    let free_before = fs.committed_free_count();
 
     // Shrink to drop the hole only: data blocks remain, no free needed.
     fs.truncate(root, b"f", cap * 2).expect("drop hole");
@@ -6705,7 +6721,7 @@ fn sparse_truncate_down_frees_data_but_not_holes() {
     fs.truncate(root, b"f", cap).expect("drop a data block");
     assert_eq!(mapped_block_count(&mut fs, ino), 1, "one data block freed");
     assert!(
-        fs.free_count > free_before,
+        fs.committed_free_count() > free_before,
         "freeing a data block returns it to the free pool"
     );
 }
@@ -7168,10 +7184,10 @@ fn a_100_tib_volume_formats_mounts_and_serves_with_working_set_bounded_memory() 
         "the map region is {reserved} of {HUGE_BLOCK_COUNT} blocks"
     );
     assert!(
-        fs.free_count > HUGE_BLOCK_COUNT - reserved - 2000,
+        fs.committed_free_count() > HUGE_BLOCK_COUNT - reserved - 2000,
         "almost the entire device is free"
     );
-    assert!(fs.free_count < HUGE_BLOCK_COUNT);
+    assert!(fs.committed_free_count() < HUGE_BLOCK_COUNT);
 
     // Serve real I/O: create a file, write several blocks, read them back.
     let root = fs.root();
@@ -7763,7 +7779,7 @@ fn removing_a_file_frees_its_attribute_block() {
 /// blocks leaked").
 fn fs_free_count_after_reopen(bytes: alloc::vec::Vec<u8>) -> u64 {
     let fs = ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), &TEST_KEY).expect("reopen");
-    fs.free_count
+    fs.committed_free_count()
 }
 
 #[test]
@@ -8377,7 +8393,7 @@ fn synced_volume(files: u8) -> (alloc::vec::Vec<u8>, BTreeSet<u64>, u64) {
     }
     FilesystemWrite::flush(&mut fs).expect("sync");
     let used = fs.used_blocks();
-    let free = fs.free_count;
+    let free = fs.committed_free_count();
     (
         fs.into_block().expect("the volume closes").bytes(),
         used,
@@ -8414,7 +8430,8 @@ fn a_synced_volume_adopts_its_map_instead_of_walking_the_whole_volume() {
          (read {mount_reads} blocks)"
     );
     assert_eq!(
-        fs.free_count, free,
+        fs.committed_free_count(),
+        free,
         "the committed free count survives the mount"
     );
     assert_eq!(
@@ -8438,7 +8455,7 @@ fn a_volume_that_was_not_synced_rebuilds_its_map_at_the_next_mount() {
     fs.write_at(root, b"extra", 0, &alloc::vec![7u8; 9000])
         .expect("write");
     let live = fs.used_blocks();
-    let free = fs.free_count;
+    let free = fs.committed_free_count();
     let bytes = fs.into_block().expect("the volume closes").bytes();
 
     let mut reopened = ARXFS::open(counting(bytes, 4096, 2048), &TEST_KEY).expect("reopen");
@@ -8455,7 +8472,11 @@ fn a_volume_that_was_not_synced_rebuilds_its_map_at_the_next_mount() {
         live,
         "the rebuild reproduces the live map exactly"
     );
-    assert_eq!(reopened.free_count, free, "and the same free count");
+    assert_eq!(
+        reopened.committed_free_count(),
+        free,
+        "and the same free count"
+    );
 }
 
 #[test]
@@ -8560,7 +8581,7 @@ fn growing_past_the_region_relays_the_map_and_keeps_the_volume_sound() {
         fs.map_region_blocks() > small_region,
         "the wider volume needs a longer region"
     );
-    assert!(fs.free_count > 8000, "the added tail is free");
+    assert!(fs.committed_free_count() > 8000, "the added tail is free");
 
     // The relaid map still describes a sound volume: the old file reads back
     // and new space is allocatable out of the added tail.
@@ -9793,13 +9814,13 @@ fn free_after_discard(runs: u64, discard: Discard) -> (u64, u64, u32) {
     fs.create(root, b"frag", NodeKind::RegularFile)
         .expect("create");
     fs.commit().expect("commit");
-    let after_create = fs.free_count;
+    let after_create = fs.committed_free_count();
     let level = fragment(&mut fs, b"frag", runs);
     match discard {
         Discard::Truncate => fs.truncate(root, b"frag", 0).expect("truncate"),
         Discard::Remove => fs.remove(root, b"frag").expect("remove"),
     }
-    (fs.free_count, after_create, level)
+    (fs.committed_free_count(), after_create, level)
 }
 
 /// How [`free_after_discard`] gives the file's blocks back.
@@ -9849,7 +9870,7 @@ fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
     }
     fs.commit().expect("commit");
     let live = fs.used_blocks();
-    let free = fs.free_count;
+    let free = fs.committed_free_count();
 
     fs.rebuild_free_space().expect("rebuild the allocation map");
     assert_eq!(
@@ -9857,7 +9878,7 @@ fn rebuilding_free_space_over_a_deep_tree_reproduces_the_live_map() {
         live,
         "the rebuilt used set is the live one"
     );
-    assert_eq!(fs.free_count, free);
+    assert_eq!(fs.committed_free_count(), free);
     // The rebuild reads the trees a leaf at a time, so the only thing it holds
     // across the walk is the map's own bounded page cache.
     assert!(
@@ -10613,7 +10634,7 @@ fn a_delete_that_outruns_its_transaction_is_published_as_pending() {
     let mut fs = spanning_delete_volume();
     let root = fs.root();
     let ino = u64::from(file_ino(&mut fs, b"frag"));
-    let free_before = fs.free_count;
+    let free_before = fs.committed_free_count();
 
     fs.begin().expect("begin");
     fs.remove_inner(root, b"frag").expect("detach the name");
@@ -10629,7 +10650,7 @@ fn a_delete_that_outruns_its_transaction_is_published_as_pending() {
         "the name is gone in that same transaction"
     );
     assert!(
-        fs.free_count > free_before,
+        fs.committed_free_count() > free_before,
         "the first step still freed part of the tail"
     );
 
@@ -10658,7 +10679,7 @@ fn an_interrupted_delete_is_finished_by_the_next_mount() {
         let root = whole.root();
         whole.remove(root, b"frag").expect("remove");
         whole.flush().expect("publish");
-        whole.free_count
+        whole.committed_free_count()
     };
 
     fs.begin().expect("begin");
@@ -10681,7 +10702,8 @@ fn an_interrupted_delete_is_finished_by_the_next_mount() {
         Err(DriverError::NotFound)
     );
     assert_eq!(
-        fs.free_count, empty,
+        fs.committed_free_count(),
+        empty,
         "the resumed delete returned exactly the blocks an uninterrupted one does"
     );
     // The witness is untouched and the map agrees with the trees.
@@ -10825,7 +10847,7 @@ fn a_check_reclaims_an_orphan_through_the_pending_set() {
         .expect("create");
     fragment(&mut fs, b"orphan", SPANNING_EXTENTS);
     fs.flush().expect("publish");
-    let free_with_orphan = fs.free_count;
+    let free_with_orphan = fs.committed_free_count();
 
     // Detach the name without touching the inode, which is exactly the state a
     // damaged directory leaves behind.
@@ -10840,7 +10862,7 @@ fn a_check_reclaims_an_orphan_through_the_pending_set() {
     assert_eq!((report.orphaned_inodes, report.orphans_reclaimed), (1, 1));
     assert!(pending_deletes(&mut fs).is_empty(), "the drain finished it");
     assert!(
-        fs.free_count > free_with_orphan,
+        fs.committed_free_count() > free_with_orphan,
         "the orphan's blocks came back"
     );
     let live = fs.used_blocks();
@@ -10939,6 +10961,73 @@ fn a_content_generation_moves_with_the_data_and_nothing_else() {
     assert_ne!(others[0], others[1], "two files never share a version");
     fs.create(root, b"dir", NodeKind::Directory).expect("mkdir");
     assert_eq!(content_gen(&mut fs, b"dir"), NodeInfo::NO_CONTENT_GEN);
+}
+
+/// What a commit frees is not handed out while the slot that freed it may still
+/// be volatile: a power cut then leaves the older root the newest, and that
+/// root names those blocks. They stay reserved, though free on the committed
+/// volume, until the next barrier puts the slot on the medium.
+#[test]
+fn a_freed_block_is_held_until_the_slot_that_freed_it_is_durable() {
+    let (mut fs, _) = volatile_volume(Publish::PerOperation);
+    let root = fs.root();
+    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
+        .expect("write");
+    FilesystemWrite::flush(&mut fs).expect("sync");
+    let (_, extent) = extent_of(&mut fs, b"new", 0);
+    let freed = extent.phys..extent.phys + extent.stored;
+    fs.remove(root, b"new").expect("remove");
+    for block in freed.clone() {
+        assert!(
+            fs.bit_used(block).expect("read the map"),
+            "block {block} is allocatable while the slot freeing it may be volatile"
+        );
+        assert!(!fs.is_used(block), "and it is free on the committed volume");
+    }
+    fs.write_at(root, b"pad", 0, b"y").expect("a later commit");
+    for block in freed {
+        assert!(
+            !fs.bit_used(block).expect("read the map"),
+            "the barrier that made the slot durable released block {block}"
+        );
+    }
+}
+
+/// Holding a commit's frees never turns a delete into a refusal: on a full
+/// volume the very next write takes the room the delete made, the hold put on
+/// the medium and released first.
+#[test]
+fn a_delete_makes_room_for_the_very_next_write_on_a_full_volume() {
+    let (mut fs, _) = volatile_volume(Publish::PerOperation);
+    let root = fs.root();
+    let len = VOLATILE_PAYLOAD.len();
+    fs.write_at(root, b"new", 0, VOLATILE_PAYLOAD)
+        .expect("write");
+    fs.create(root, b"fill", NodeKind::RegularFile)
+        .expect("create fill");
+    // Unique and incompressible, so every block costs a block: neither dedupe
+    // nor compression can make room the delete did not.
+    let noise = |at: u64| -> alloc::vec::Vec<u8> {
+        let mut state = at ^ 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                (state >> 56) as u8
+            })
+            .collect()
+    };
+    let mut end = 0u64;
+    let full = loop {
+        match fs.write_at(root, b"fill", end, &noise(end)) {
+            Ok(stored) => end += stored as u64,
+            refused => break refused,
+        }
+    };
+    assert_eq!(full, Err(DriverError::NoSpace), "the volume is full");
+    fs.remove(root, b"new").expect("remove");
+    assert_eq!(fs.write_at(root, b"fill", end, &noise(end)), Ok(len));
 }
 
 /// A mount's stride is on the medium before its first change returns, even on

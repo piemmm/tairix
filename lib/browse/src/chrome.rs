@@ -22,7 +22,7 @@
 //!   ([`activate_selected`](crate::Browser::activate_selected)), Open With…
 //!   (the [`open_with`](crate::open_with) chooser over a regular file), Pin to
 //!   taskbar (the window channel's pin request over a bundle), Rename
-//!   ([`rename_selected`](crate::Browser::rename_selected)), Cut/Copy
+//!   ([`prepare_rename`](crate::Browser::prepare_rename)), Cut/Copy
 //!   ([`clipboard`](crate::Browser::clipboard)), Paste
 //!   ([`plan_paste`](crate::clipboard::plan_paste)), New ▸
 //!   ([`create_entry`](crate::Browser::create_entry)), Properties
@@ -391,7 +391,7 @@ pub enum ContextCommand {
     /// so neither has an application to choose.
     OpenWith,
     /// Rename the selected entry in place
-    /// ([`rename_selected`](Browser::rename_selected)).
+    /// ([`prepare_rename`](Browser::prepare_rename)).
     Rename,
     /// Capture the selection onto a move clipboard
     /// ([`clipboard`](Browser::clipboard) with [`ClipboardOp::Cut`](crate::clipboard::ClipboardOp::Cut)).

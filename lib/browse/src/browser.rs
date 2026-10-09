@@ -44,6 +44,32 @@ use crate::watch::{merge_changes, EntryChange, Placement};
 /// realistic session, so it is never a surprising "tiny" cut-off.
 pub(crate) const HISTORY_MAX: usize = 256;
 
+/// A rename of the chosen entry, validated and spelled
+/// ([`Browser::prepare_rename`]) and awaiting the move that carries it out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRename {
+    from: String,
+    to: String,
+    name: String,
+    /// The folder it was prepared in, which the view may have left by the
+    /// time it is carried out.
+    dir: Vec<String>,
+}
+
+impl PendingRename {
+    /// The entry's absolute path now.
+    #[must_use]
+    pub fn from(&self) -> &str {
+        &self.from
+    }
+
+    /// Its absolute path once renamed.
+    #[must_use]
+    pub fn to(&self) -> &str {
+        &self.to
+    }
+}
+
 /// A live view of one directory, with a selection cursor.
 ///
 /// `S` is the injected [`DirectorySource`]; on a running system it is backed
@@ -605,45 +631,49 @@ impl<S: DirectorySource> Browser<S> {
         Ok(())
     }
 
-    /// Rename the selected entry to `new_name`, applying the change through the
-    /// injected `rename` seam and re-reading the directory on success.
-    ///
-    /// `rename` receives the absolute source and destination paths and
-    /// performs the capability-checked `fs_rename` under the caller's own
-    /// identity — the engine adds no authority of its own (the trusted picker
-    /// composes the same [`Browser`] and never calls this). The seam returns
-    /// the kernel boundary's [`Errno`] on refusal.
-    ///
-    /// Transactional and fail closed: the name is validated
-    /// ([`validate_new_name`]) *before* any syscall, and a VFS refusal leaves
-    /// the listing exactly as it was. On success the directory is re-listed
-    /// and the selection follows the entry to its new name; a rename that
-    /// equals the current name is a no-op ([`RenameError::Unchanged`]) that
-    /// touches neither the VFS nor the view.
+    /// The rename of the chosen entry to `new_name`, prepared but not yet
+    /// carried out: the name is validated ([`validate_new_name`]) and both
+    /// absolute paths spelled, so the move itself — a filesystem call a
+    /// window must not wait on — can run wherever the caller runs it.
     ///
     /// # Errors
     ///
-    /// A [`RenameError`]: a spelling/clash/unchanged failure decided before the
-    /// syscall, [`RenameError::Refused`] when the VFS refuses the move, or
-    /// [`RenameError::Source`] when the post-rename re-list fails.
-    pub fn rename_selected<R>(&mut self, new_name: &str, rename: R) -> Result<(), RenameError>
-    where
-        R: FnOnce(&str, &str) -> Result<(), Errno>,
-    {
-        let current = self
-            .chosen_name()
-            .ok_or(RenameError::NoSelection)
-            .map(String::from)?;
-        validate_new_name(new_name, &current, &self.entries)?;
+    /// A [`RenameError`] decided before any syscall: no selection, a bad
+    /// spelling, a clash, or [`RenameError::Unchanged`] for the current name.
+    pub fn prepare_rename(&self, new_name: &str) -> Result<PendingRename, RenameError> {
+        let current = self.chosen_name().ok_or(RenameError::NoSelection)?;
+        validate_new_name(new_name, current, &self.entries)?;
+        Ok(PendingRename {
+            from: self.child_path(current)?,
+            to: self.child_path(new_name)?,
+            name: String::from(new_name),
+            dir: self.components.clone(),
+        })
+    }
 
-        let from = self.child_path(&current)?;
-        let to = self.child_path(new_name)?;
-        rename(&from, &to).map_err(RenameError::Refused)?;
-
+    /// Apply what carrying out `pending` came to, answering whether the view
+    /// re-listed to follow it: a refusal leaves the listing exactly as it was;
+    /// a rename that took re-lists the directory and moves the selection to
+    /// the entry under its new name — unless the view has left that folder
+    /// meanwhile, when there is nothing here to follow.
+    ///
+    /// # Errors
+    ///
+    /// [`RenameError::Refused`] for the volume's refusal, or
+    /// [`RenameError::Source`] when the re-list fails.
+    pub fn finish_rename(
+        &mut self,
+        pending: &PendingRename,
+        moved: Result<(), Errno>,
+    ) -> Result<bool, RenameError> {
+        moved.map_err(RenameError::Refused)?;
+        if self.components != pending.dir {
+            return Ok(false);
+        }
         self.refresh()
             .map_err(|err| RenameError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;
-        self.follow(new_name);
-        Ok(())
+        self.follow(&pending.name);
+        Ok(true)
     }
 
     /// Spell the validated absolute path of a child named `name` in the current

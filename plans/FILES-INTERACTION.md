@@ -449,11 +449,15 @@ stripped. What lost the extension was the cut: one line, elided at its end.
   replaces the name and keeps the extension. A name with no extension and a
   folder are selected whole; a bundle selects its stem and keeps `.app`.
 - While the field is open a press inside it reaches the field (caret, drag
-  selection). A press outside it commits: a refused name keeps the field open
-  with its reason and the press is spent; an unchanged name closes the field
-  and the press then acts as it would have; an accepted one closes it and the
-  press is spent too, since the folder may have re-sorted under the pointer
-  (`gesture::RenameCommit`).
+  selection). A press outside it commits: a name refused before any syscall
+  keeps the field open with its reason and the press is spent; an unchanged
+  name closes the field and the press then acts as it would have; a submitted
+  one spends the press too, since the folder may re-sort under the pointer
+  when it takes (`gesture::RenameCommit`). The move runs on the reader thread;
+  the field stays open until the volume answers, then closes or states the
+  volume's refusal. Meanwhile it takes no input and no other rename opens in
+  the window (`rename::RenameEdit`), so nothing typed is thrown away and an
+  answer reaches only the editor that asked.
 
 ## FI18 — a folder fans out what it holds
 

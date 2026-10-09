@@ -3530,9 +3530,6 @@ fn navigation_history_is_bounded_and_drops_the_oldest() {
 
 mod rename_model {
     use super::BAND;
-    use core::cell::RefCell;
-
-    use alloc::string::ToString;
 
     use tairix_abi::Errno;
     use tairix_geometry::{Rect, Scale};
@@ -3563,20 +3560,29 @@ mod rename_model {
         browser.select(0).expect("select Apps");
         assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
 
-        let seen = RefCell::new(None);
-        let result = browser.rename_selected("Downloads", |from, to| {
-            *seen.borrow_mut() = Some((from.to_string(), to.to_string()));
-            Ok(())
-        });
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(
-            *seen.borrow(),
-            Some(("/Apps".to_string(), "/Downloads".to_string()))
-        );
+        let pending = browser.prepare_rename("Downloads").expect("a valid rename");
+        assert_eq!((pending.from(), pending.to()), ("/Apps", "/Downloads"));
+        assert_eq!(browser.finish_rename(&pending, Ok(())), Ok(true));
         // The listing refreshed and the selection followed the entry.
         assert_eq!(names(&browser), ["Downloads", "Storage", "System", "Users"]);
         assert_eq!(focused(&browser).map(Entry::name), Some("Downloads"));
+    }
+
+    /// A rename answered after the view left its folder changes nothing here:
+    /// following its new name in another folder could select an unrelated
+    /// entry of that name.
+    #[test]
+    fn a_rename_answered_elsewhere_follows_nothing() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let pending = browser.prepare_rename("Downloads").expect("a valid rename");
+        browser.open_index(2).expect("enter System");
+        let before = focused(&browser).map(|entry| alloc::string::String::from(entry.name()));
+        assert_eq!(browser.finish_rename(&pending, Ok(())), Ok(false));
+        assert_eq!(
+            focused(&browser).map(|entry| alloc::string::String::from(entry.name())),
+            before
+        );
     }
 
     #[test]
@@ -3591,10 +3597,7 @@ mod rename_model {
             ("a/b", RenameError::Separator),
             ("bad:name", RenameError::Invalid),
         ] {
-            let result = browser.rename_selected(name, |_, _| {
-                panic!("the VFS must not be touched for an invalid name");
-            });
-            assert_eq!(result, Err(expected));
+            assert_eq!(browser.prepare_rename(name), Err(expected));
         }
         // The listing is untouched.
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
@@ -3605,10 +3608,7 @@ mod rename_model {
     fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Apps");
-        let result = browser.rename_selected("System", |_, _| {
-            panic!("a clashing rename must not reach the VFS");
-        });
-        assert_eq!(result, Err(RenameError::Clash));
+        assert_eq!(browser.prepare_rename("System"), Err(RenameError::Clash));
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
     }
 
@@ -3616,10 +3616,7 @@ mod rename_model {
     fn renaming_to_the_same_name_is_a_no_op() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Apps");
-        let result = browser.rename_selected("Apps", |_, _| {
-            panic!("an unchanged rename must not reach the VFS");
-        });
-        assert_eq!(result, Err(RenameError::Unchanged));
+        assert_eq!(browser.prepare_rename("Apps"), Err(RenameError::Unchanged));
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
     }
 
@@ -3627,8 +3624,11 @@ mod rename_model {
     fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(0).expect("select Apps");
-        let result = browser.rename_selected("Downloads", |_, _| Err(Errno::PermissionDenied));
-        assert_eq!(result, Err(RenameError::Refused(Errno::PermissionDenied)));
+        let pending = browser.prepare_rename("Downloads").expect("a valid rename");
+        assert_eq!(
+            browser.finish_rename(&pending, Err(Errno::PermissionDenied)),
+            Err(RenameError::Refused(Errno::PermissionDenied))
+        );
         // No refresh happened: the original listing and selection stand.
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
         assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
@@ -3643,8 +3643,7 @@ mod rename_model {
             .open_index(0)
             .expect("enter the empty Fonts directory");
         assert_eq!(focused(&browser).map(Entry::name), None);
-        let result = browser.rename_selected("x", |_, _| panic!("nothing to rename"));
-        assert_eq!(result, Err(RenameError::NoSelection));
+        assert_eq!(browser.prepare_rename("x"), Err(RenameError::NoSelection));
     }
 
     #[test]

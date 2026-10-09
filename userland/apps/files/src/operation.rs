@@ -20,7 +20,7 @@ use tairix_abi::window_ipc::WindowEvent;
 use tairix_browse::render::{content_area, progress_cancel_at};
 use tairix_browse::{Places, ToolbarBand};
 use tairix_geometry::{Rect, Scale};
-use tairix_theme::Theme;
+use tairix_theme::{Theme, Timeline};
 
 use crate::sidebar::press_point;
 
@@ -75,9 +75,9 @@ pub fn operation_control(
         },
         // Nothing else reaches the running operation. A redraw request needs no
         // arm of its own: the modal loop that polls this re-presents the
-        // progress panel in full on every pass, so the released pixels are back
-        // on the next step — and a released frame region is re-attached by the
-        // same present. A desktop change is already adopted by the caller
+        // progress panel in full once a desktop frame, so the released pixels
+        // are back within one — and a released frame region is re-attached by
+        // the same present. A desktop change is already adopted by the caller
         // before this is reached. The alternate close means "leave this folder",
         // which would move the listing the running operation is walking, so it
         // is ignored while the panel is up rather than deferred. An icon-bar
@@ -112,6 +112,33 @@ pub fn operation_control(
         | WindowEvent::PreviewRendered { .. }
         | WindowEvent::Pinch { .. } => OperationControl::Ignore,
     }
+}
+
+/// How long a turn advances a running operation before it serves input and
+/// paints: half a desktop frame, so input waits less than a frame and one
+/// present carries every step the frame made.
+pub const OPERATION_SLICE_NS: u64 = Timeline::FRAME_NS / 2;
+
+/// Run `step` until it reports the operation finished or the turn's slice,
+/// read from `clock`, is spent, answering whether it finished. At least one
+/// step runs, so an operation always moves.
+pub fn advance_for_a_slice(mut step: impl FnMut() -> bool, mut clock: impl FnMut() -> u64) -> bool {
+    let end = clock().saturating_add(OPERATION_SLICE_NS);
+    loop {
+        if step() {
+            return true;
+        }
+        if clock() >= end {
+            return false;
+        }
+    }
+}
+
+/// Whether the progress panel is shown this turn: once a desktop frame since
+/// it was last shown at `shown_ns`, and on the turn the operation finishes.
+#[must_use]
+pub const fn progress_due(finished: bool, now_ns: u64, shown_ns: u64) -> bool {
+    finished || now_ns.saturating_sub(shown_ns) >= Timeline::FRAME_NS
 }
 
 #[cfg(test)]

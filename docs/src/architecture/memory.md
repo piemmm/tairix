@@ -1419,12 +1419,15 @@ properties:
   engine share the single registered driver behind one `SleepLock`
   (`LateFilesystem::register` returns the leaked lock precisely so a
   second, coherence-breaking window over the same device cannot exist).
-- **Precise, fail-closed invalidation.** Writes/truncates drop the
-  file's chunks and stat and the listing written through — every
-  directory's listings when the file has another name, since each embeds
-  its size, times and content generation and nothing records which
-  directories hold the other names (a link drops them the same way, for
-  the name count); create/remove/rename drop the affected
+- **Precise, fail-closed invalidation.** A cached listing entry embeds
+  its child's metadata, and an index records which entries embed each
+  node, so any change to a node — a write or truncate, a link or unlink, a
+  permission or attribute change — drops exactly the entries naming it, in
+  whichever directories hold them, and leaves the rest of each listing
+  cached, so a later read fills only the hole and charges no entry twice; a
+  directory's own entry in its parent goes whenever entries are added to or
+  removed from it. Writes/truncates also drop the file's chunks
+  and stat; create/remove/rename drop the affected
   directory's *entire* lookup set (driver name matching may fold case),
   its directory entries, and its stat; an unidentifiable mutation
   target purges the whole cache; a detected ledger imbalance poisons

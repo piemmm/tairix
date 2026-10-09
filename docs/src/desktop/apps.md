@@ -541,8 +541,9 @@ the window carries on with no menu, never drawing one of its own.
 chevron on them means (`plans/NEW-MENUS.md` M6). **Rename** opens the in-place
 editor when clicked, and arriving on it opens a desktop-drawn quick-entry field
 pre-filled with the current name: type, press `Enter`, and the name is
-committed through the very same `Browser::rename_selected` — the same
-permission-checked `fs_rename` under the user's own identity — that `F2` runs.
+committed exactly as `F2` commits it — prepared by `Browser::prepare_rename`
+and carried out by the same permission-checked `fs_rename` under the user's
+own identity, off the event loop.
 The two answers are distinct ids, so neither can be read as the other, and the
 typed text is pulled from the desktop rather than delivered, because an event
 frame is far narrower than a name. **Open With…** opens the chooser when
@@ -1471,11 +1472,15 @@ The typed name is spelled through the one shared `tairix_path::validate_file_nam
 rule (the same rule the browser's path components go through, `AGENTS.md`
 §2.2): non-empty, not `.`/`..`, no `/`, no control character or `:`, within
 the name bound. A rename to the current name is a no-op that touches neither
-the VFS nor the view. A commit that survives validation is applied by
-`Browser::rename_selected`, which builds the two absolute paths and calls
-`fs_rename` **under the launching user's own identity — no new capability**:
-the per-inode owner/mode/ACL model gates the write exactly as it would from
-the shell. The whole operation is transactional and fail-closed — the name
+the VFS nor the view. A commit that survives validation is prepared by
+`Browser::prepare_rename`, which builds the two absolute paths, and the move
+itself — an `fs_rename` **under the launching user's own identity, no new
+capability**, gated by the per-inode owner/mode/ACL model exactly as from the
+shell — runs on the app's reader thread, never on the event loop that owes
+the user a frame: the editor stays open until the answer lands, taking no
+input and letting no other rename open meanwhile, and `Browser::finish_rename`
+applies it. With no reader thread the move runs where it is asked, slower but
+never wrong. The whole operation is transactional and fail-closed — the name
 is validated before any syscall, and a VFS refusal (a permission denial, a
 read-only mount, a lost race) leaves the listing untouched and states the
 kernel's reason in the field (`AGENTS.md` §2.24, §5.4), never a silent or
@@ -1747,10 +1752,13 @@ A long removal — and a long copy/paste — shows **progress** and can be
 the confirmed operation is handed to an *interleaved operation* the event loop
 advances a bounded slice at a time (`advance_operation`, up to
 `OPERATION_STEP_BUDGET` units of work per turn — one directory read, one unlink,
-one `fs_mkdir`, one copy chunk, or one rename): between slices it repaints a
-modal progress panel and polls the event mailbox *non-blocking* for a mid-run
-cancel or a close, so even a large recursive delete or a multi-gigabyte copy
-never freezes the window and never busy-spins — continuously stepping the walk
+one `fs_mkdir`, one copy chunk, or one rename), for half a desktop frame per
+turn (`OPERATION_SLICE_NS`): between turns it drains the event mailbox
+*non-blocking* for a mid-run cancel, a close, or another window's input, and
+the modal progress panel is presented once a desktop frame however many steps
+the frame carried, so even a large recursive delete or a multi-gigabyte copy
+never freezes the window, never paces its own work by its presents, and never
+busy-spins — continuously stepping the walk
 is genuine pending work, not a spin (`AGENTS.md` §2.23). A single `Operation`
 carries either a `DeleteWalk` (a delete) or a `Paste` state machine (a
 copy/move), so both drive through one interleaving path (`AGENTS.md` §2.2). The

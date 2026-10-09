@@ -191,17 +191,20 @@ can never diverge in navigation semantics, listing policy, or look.
   and a row its edge crosses is drawn whole, cut there, and pressed where it
   shows. A list, because the candidate set grows with the applications a user
   installs and no menu plate can promise to hold it.
-- **In-place rename** (`rename`, `Browser::rename_selected`): the model of
-  the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
-  host-tested without a kernel. `validate_new_name` spells the typed name
-  through the one shared `tairix_path::validate_file_name` rule and rejects a
-  clash with an existing sibling or a no-op rename to the same name;
-  `Browser::rename_selected` then applies it through an injected `fs_rename`
-  seam and re-lists, transactional and fail-closed — validated before any
-  syscall, a VFS refusal leaves the listing untouched, and the selection
-  follows the entry to its new name. The engine adds no authority (the write
-  is the caller's own permission-checked `fs_rename`, no new capability), so
-  the read-only picker composes the same `Browser` and never calls it.
+- **In-place rename** (`rename`, `Browser::prepare_rename` /
+  `Browser::finish_rename`): the model of the file manager's first write
+  operation (`plans/NEW-FILEMANAGER.md` FM5), host-tested without a kernel.
+  `validate_new_name` spells the typed name through the one shared
+  `tairix_path::validate_file_name` rule and rejects a clash with an existing
+  sibling or a no-op rename to the same name; `Browser::prepare_rename`
+  validates and spells both paths, the caller runs the `fs_rename` wherever it
+  may wait (the file manager's reader thread), and `Browser::finish_rename`
+  applies the answer, transactional and fail-closed — validated before any
+  syscall, a VFS refusal leaves the listing untouched, and a rename that took
+  re-lists and follows the entry to its new name unless the view has left that
+  folder, answering which. The engine adds no authority (the write is the
+  caller's own permission-checked `fs_rename`, no new capability), so the
+  read-only picker composes the same `Browser` and never calls it.
 - **Activation** (`activate`, `Browser::activate_selected` /
   `activate_index`): the one dispatch-by-kind decision behind a double-click
   or `Enter` (`plans/NEW-FILEMANAGER.md` FM6), so the file manager and the

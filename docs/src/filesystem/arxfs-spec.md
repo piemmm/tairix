@@ -950,6 +950,18 @@ window and the write-back cap, far below the stride, so the next mount starts
 beyond every generation a reader has seen. A rolled-back operation's
 generations are skipped, never handed out again.
 
+**A freed block is not reused before the slot that freed it is durable.** A
+commit marks what it freed free — its map image and the free count its root
+records describe the committed volume exactly — but holds those blocks
+reserved in RAM (the *embargo*) until a barrier puts its own slot on the
+medium: until then a power cut can leave the previous root the newest, and
+that root still names them, so an overwrite or a discard of one would
+corrupt it. The next commit's pre-slot barrier, an explicit sync's, or a
+flush the volume issues itself releases the embargo. A mutation that runs out
+of space while blocks are embargoed flushes, releases them and runs once more,
+so a delete always makes room for the very next write; a map rebuilt from the
+trees re-reserves the embargo, since no tree names it.
+
 **Durability vs. consistency.** Crash *consistency* depends on the mandatory
 pre-slot barrier: it makes every block the new root transitively names durable
 before either slot copy can publish that root. A barrier failure publishes

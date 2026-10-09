@@ -110,7 +110,9 @@ copy-on-write **inode tree** keyed by inode number, so metadata scales past any
 fixed inode count. The generation comes from one volume-wide sequence in the
 transaction root; the first data change of a mount commits a stride past it
 and flushes it to the medium before returning, so no generation a reader saw
-is ever handed out again. Each inode names the
+is ever handed out again. What a commit frees stays reserved until the slot
+that freed it is on the medium, so no block the newest durable root names is
+ever overwritten or discarded. Each inode names the
 root of its own copy-on-write **extent tree** mapping a logical block offset
 to a physical run `(start, length)`, so a file can span the whole volume and
 a contiguous write stays a single record. Both are the one generic B-tree in

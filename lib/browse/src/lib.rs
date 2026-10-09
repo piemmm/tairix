@@ -156,7 +156,7 @@ pub mod vfs;
 pub mod watch;
 
 pub use activate::{Activation, BundleIntent};
-pub use browser::Browser;
+pub use browser::{Browser, PendingRename};
 pub use chrome::{
     apply_command, context_choice_from_item, context_menu, ContextChoice, ContextCommand,
     ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand,

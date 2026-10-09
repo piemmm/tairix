@@ -303,8 +303,9 @@ impl Keyboard {
 /// What committing an inline rename did.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RenameCommit {
-    /// The entry took its new name, so its folder may re-sort.
-    Renamed,
+    /// The new name went to the volume, so the folder may re-sort when it
+    /// takes.
+    Submitted,
     /// The name was unchanged, so nothing moved.
     Unchanged,
     /// The name was refused; the editor stays open with its reason.
@@ -514,7 +515,7 @@ mod tests {
     #[test]
     fn only_a_commit_that_moved_nothing_lets_its_press_act() {
         assert!(RenameCommit::Unchanged.press_acts());
-        assert!(!RenameCommit::Renamed.press_acts());
+        assert!(!RenameCommit::Submitted.press_acts());
         assert!(!RenameCommit::Refused.press_acts());
     }
 

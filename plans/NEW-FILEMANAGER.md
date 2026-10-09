@@ -551,7 +551,7 @@ user pick any. See FM6b below.
   (write/delete) is gated in the app's own privileged tail, not by forking
   the engine.
 
-- **The window never waits on a disk** (`AGENTS.md` §28). Every unbounded read
+- **The window's reads run off its loop** (`AGENTS.md` §28). Every unbounded read
   the app makes runs on one reader thread: the directory the user navigated to
   (through `ListingDesk<FilesClient>`, committed by `Browser::resume`), the
   icon artwork every visible tile draws (recorded on `tairix_icon::ArtworkDesk`
@@ -571,6 +571,10 @@ user pick any. See FM6b below.
     since its first answer is always "not yet" and every candidate would look
     listable. The first window's read comes before any window exists; a later
     window's is taken on the loop (`plans/OPEN-DEFECTS.md` D454).
+  - The rename's move runs on the reader thread too; the other writes — New ▸'s
+    create, the Properties commits, the Trash folder, and each step of a
+    delete, paste or move to Trash — are still taken on the loop
+    (`plans/OPEN-DEFECTS.md` D815).
   - A kernel that grants no thread, or a pipe it refuses, leaves the reads on
     the loop, stated once: slower under load, never wrong.
 
@@ -1036,13 +1040,15 @@ binary supplies the inline text editor and the `fs_rename` seam.
   rename target and every path component obey one definition (§2.2). Two new
   `PathError` variants (`ReservedName`, `SeparatorInName`) name the leaf-only
   failures.
-- **Engine** (`lib/browse::rename` + `Browser::rename_selected`): `RenameError`
+- **Engine** (`lib/browse::rename` + `Browser::prepare_rename` /
+  `Browser::finish_rename`): `RenameError`
   (with a terse in-UI `message()`) and the pure `validate_new_name`
   (spelling + clash-with-a-different-sibling + no-op `Unchanged`).
-  `rename_selected` is transactional and fail-closed — validate before any
-  syscall, apply through an injected `fs_rename` seam under the user's own
-  identity (**no new capability**), then re-list and follow the selection to
-  the new name; a VFS refusal leaves the listing untouched and is surfaced as
+  The rename is transactional and fail-closed — `prepare_rename` validates
+  before any syscall and spells both paths, the app runs the `fs_rename` under
+  the user's own identity (**no new capability**) on its reader thread rather
+  than its event loop, and `finish_rename` re-lists and follows the selection
+  to the new name; a VFS refusal leaves the listing untouched and is surfaced as
   `RenameError::Refused(errno)` (§2.24, §5.4). The read-only picker composes
   the same `Browser` and never calls the write path.
 - **App** (`files.app`): `F2` opens the one shared `lib/controls::TextField`
@@ -1055,7 +1061,7 @@ binary supplies the inline text editor and the `fs_rename` seam.
   onto the `lib/input` vocabulary locally. The same rename is reachable without
   the in-place editor at all: the context menu's Rename row carries a
   quick-entry field as its child (`plans/NEW-MENUS.md` M6), and a name
-  committed there runs this very `rename_selected`.
+  committed there runs this very prepare-and-hand-on path.
 - Host tests (`lib/browse`, `lib/path`): valid commit-then-refresh with the
   selection following, each invalid-name class refused before any syscall,
   clash, no-op unchanged, VFS refusal surfaced, empty-directory no-selection,

@@ -52,7 +52,12 @@ version is the last one.
 Commands are fewer than blocks because the drain gathers adjacent staged blocks
 into runs, so the exact run-length histogram is part of the baseline too. Every
 commit issues exactly one barrier, save the map's once-per-sync-period
-clean-to-dirty transition. The figures are properties of the write path, not of
+clean-to-dirty transition and a mount's first data change, which also flushes
+the slot naming its content-generation stride. What a commit frees stays
+reserved until the next barrier puts its slot on the medium
+(`arxfs-spec.md` §14), so no operation joining a later transaction can
+overwrite a block the newest durable root names; a mutation that runs out of
+space while blocks are held flushes once and takes them. The figures are properties of the write path, not of
 the device measured on: the harness reproduces each of them on a 100 TiB volume,
 thirteen million times the size, to the command — and it holds the same
 independence for the operation *after a refused one*, which a rollback that

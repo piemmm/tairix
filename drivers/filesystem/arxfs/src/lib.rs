@@ -64,7 +64,7 @@ pub use tairix_abi::driver::filesystem::{
 use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
-use tairix_collections::RangeKey;
+use tairix_collections::{RangeKey, RangeSet};
 use tairix_crypto::{AeadKey, HmacSha256Key};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
@@ -1214,13 +1214,7 @@ impl<B: Block> ARXFS<B> {
         src_name: &[u8],
         dst_name: &[u8],
     ) -> Result<NodeId, DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.reflink_inner(dir, src_name, dst_name);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.reflink_inner(dir, src_name, dst_name))
     }
 
     /// Install a host-provided transform cache retaining decompressed
@@ -2083,6 +2077,10 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Finalize a committed transaction's allocation bookkeeping.
+    ///
+    /// Its barrier put the previous slot on the medium, so what that one freed
+    /// leaves the embargo; what this one freed takes its place until the next
+    /// barrier, since its own slot may still be volatile.
     fn finish_txn(&mut self) {
         self.schedule.closed();
         self.dirty.end_operation();
@@ -2095,10 +2093,97 @@ impl<B: Block> ARXFS<B> {
         // allocations recorded.
         alloc.txn_private.clear();
         let freed = core::mem::take(&mut alloc.txn_freed);
+        self.lift_embargo();
         for run in &freed {
-            self.enqueue_discard_run(run.start, run.end - run.start);
+            self.mark_run_used(run.start, run.end - run.start);
+        }
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.embargo = freed;
         }
         self.sample_pinned();
+    }
+
+    /// The free count of the committed volume: the map's, with the embargo it
+    /// holds reserved in RAM counted free, as it is on the volume.
+    fn committed_free_count(&self) -> u64 {
+        let embargoed = self.allocator().map_or(0, |alloc| alloc.embargo.covered());
+        self.free_count.saturating_add(embargoed)
+    }
+
+    /// Release the embargo — the slot that freed its runs is on the medium —
+    /// queuing each run for a discard, and answer the runs released.
+    fn lift_embargo(&mut self) -> RangeSet<u64> {
+        let Ok(alloc) = self.allocator_mut() else {
+            return RangeSet::new();
+        };
+        let released = core::mem::take(&mut alloc.embargo);
+        for run in &released {
+            self.mark_run_free(run.start, run.end - run.start);
+            self.enqueue_discard_run(run.start, run.end - run.start);
+        }
+        released
+    }
+
+    /// Write the map out and stamp it clean with the embargo released into it.
+    ///
+    /// The persist's own barrier puts the published slot on the medium and
+    /// nothing allocates before it, so the image it stamps clean holds no
+    /// block reserved only for want of a barrier; a persist that fails takes
+    /// the embargo back.
+    fn persist_map_released(&mut self) -> Result<(), DriverError> {
+        let released = self.lift_embargo();
+        let persisted = self.map_persist();
+        if persisted.is_err() {
+            for run in &released {
+                self.mark_run_used(run.start, run.end - run.start);
+            }
+            if let Ok(alloc) = self.allocator_mut() {
+                for run in &released {
+                    alloc.pending_discard.remove(run.clone());
+                }
+                alloc.embargo = released;
+            }
+        }
+        persisted
+    }
+
+    /// Put the embargo on the medium and release it, answering whether there
+    /// was any: the room a mutation that ran out of space may yet find.
+    fn release_embargo_durably(&mut self) -> Result<bool, DriverError> {
+        if self.allocator()?.embargo.is_empty() {
+            return Ok(false);
+        }
+        self.block.flush()?;
+        self.lift_embargo();
+        Ok(true)
+    }
+
+    /// Run one mutating operation: open it, and undo it if it fails. One that
+    /// ran out of space while recent commits' frees are embargoed is run once
+    /// more after they are put on the medium and released, so a delete makes
+    /// room for the very next write.
+    fn mutation<T>(
+        &mut self,
+        mut op: impl FnMut(&mut Self) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        self.deny_if_read_only()?;
+        let first = self.attempt(&mut op);
+        if matches!(first, Err(DriverError::NoSpace)) && self.release_embargo_durably()? {
+            return self.attempt(&mut op);
+        }
+        first
+    }
+
+    fn attempt<T>(
+        &mut self,
+        op: &mut impl FnMut(&mut Self) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        self.begin()?;
+        let result = op(self);
+        if result.is_err() {
+            self.rollback();
+        }
+        result
     }
 
     /// Queue a now-free run for a later device discard ([`Self::trim`]).
@@ -2223,7 +2308,7 @@ impl<B: Block> ARXFS<B> {
             pending_delete_root: self.pending_delete_root,
             alloc_map_start,
             alloc_map_covered: self.total_blocks,
-            free_count: self.free_count,
+            free_count: self.committed_free_count(),
             next_content_gen: self.next_content_gen,
         };
         root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
@@ -2403,7 +2488,7 @@ impl<B: Block> ARXFS<B> {
         // Leave the map stamped clean at the committed generation, so the very
         // first mount of a freshly built image adopts it instead of walking
         // the volume.
-        fs.map_persist()?;
+        fs.persist_map_released()?;
         Ok(fs)
     }
 
@@ -4195,13 +4280,7 @@ impl<B: Block> ARXFS<B> {
     /// * [`DriverError::NotFound`] if `node` does not name a live inode.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     pub fn set_security(&mut self, node: NodeId, sec: Security) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.set_security_inner(node, sec);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.set_security_inner(node, sec))
     }
 
     fn set_security_inner(&mut self, node: NodeId, sec: Security) -> Result<(), DriverError> {
@@ -5105,13 +5184,7 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
 
 impl<B: Block> FilesystemWrite for ARXFS<B> {
     fn create(&mut self, dir: NodeId, name: &[u8], kind: NodeKind) -> Result<NodeId, DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.create_inner(dir, name, kind);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.create_inner(dir, name, kind))
     }
 
     fn create_link(
@@ -5120,23 +5193,11 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         name: &[u8],
         target: &[u8],
     ) -> Result<NodeId, DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.create_link_inner(dir, name, target);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.create_link_inner(dir, name, target))
     }
 
     fn link(&mut self, dir: NodeId, name: &[u8], node: NodeId) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.link_inner(dir, name, node);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.link_inner(dir, name, node))
     }
 
     fn write_at(
@@ -5146,13 +5207,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         offset: u64,
         data: &[u8],
     ) -> Result<usize, DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.write_inner(dir, name, offset, data);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.write_inner(dir, name, offset, data))
     }
 
     /// Shrinking a very large file cannot fit one transaction, so a truncate
@@ -5165,25 +5220,11 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     /// it. That is the honest outcome: the bytes below that boundary were never
     /// touched, and the caller may simply ask again.
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let ino = match self.resolve_file(dir, name) {
-            Ok((ino, _)) => ino,
-            Err(err) => {
-                self.rollback();
-                return Err(err);
-            }
-        };
-        loop {
-            match self.truncate_step(ino, size) {
-                Ok(true) => return Ok(()),
-                Ok(false) => self.begin()?,
-                Err(err) => {
-                    self.rollback();
-                    return Err(err);
-                }
-            }
-        }
+        while !self.mutation(|fs| {
+            let (ino, _) = fs.resolve_file(dir, name)?;
+            fs.truncate_step(ino, size)
+        })? {}
+        Ok(())
     }
 
     /// The name goes in one bounded transaction, together with the first
@@ -5196,13 +5237,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     /// by the pending-delete set, so the next unlink or the next mount finishes
     /// it — nothing is leaked and nothing is unreachable-and-forgotten.
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.remove_inner(dir, name);
-        if result.is_err() {
-            self.rollback();
-            return result;
-        }
+        self.mutation(|fs| fs.remove_inner(dir, name))?;
         self.drain_pending_deletes()
     }
 
@@ -5216,13 +5251,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         dst_dir: NodeId,
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.rename_inner(src_dir, src_name, dst_dir, dst_name);
-        if result.is_err() {
-            self.rollback();
-            return result;
-        }
+        self.mutation(|fs| fs.rename_inner(src_dir, src_name, dst_dir, dst_name))?;
         self.drain_pending_deletes()
     }
 
@@ -5242,7 +5271,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         // next mount can adopt it instead of walking the volume; a crash
         // between syncs simply costs that walk. The map's own persist forces
         // the device cache, which is this sync's durability barrier too.
-        self.map_persist()
+        self.persist_map_released()
     }
 
     fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
@@ -5272,8 +5301,8 @@ impl<B: Block> FilesystemStats for ARXFS<B> {
         Ok(VolumeStats {
             block_size: as_u32(self.block_size),
             total_blocks: self.total_blocks,
-            free_blocks: self.free_count,
-            avail_blocks: self.free_count.saturating_sub(METADATA_RESERVE),
+            free_blocks: self.committed_free_count(),
+            avail_blocks: self.committed_free_count().saturating_sub(METADATA_RESERVE),
             files: 0,
             files_free: 0,
         })
@@ -5314,13 +5343,7 @@ impl<B: Block> FilesystemAttrs for ARXFS<B> {
     }
 
     fn set_attr(&mut self, node: NodeId, key: &[u8], value: &[u8]) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.set_attr_inner(node, key, value);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.set_attr_inner(node, key, value))
     }
 
     fn list_attr(
@@ -5345,12 +5368,6 @@ impl<B: Block> FilesystemAttrs for ARXFS<B> {
     }
 
     fn remove_attr(&mut self, node: NodeId, key: &[u8]) -> Result<(), DriverError> {
-        self.deny_if_read_only()?;
-        self.begin()?;
-        let result = self.remove_attr_inner(node, key);
-        if result.is_err() {
-            self.rollback();
-        }
-        result
+        self.mutation(|fs| fs.remove_attr_inner(node, key))
     }
 }

@@ -137,6 +137,12 @@ pub(crate) struct Allocator {
     /// twice by different paths counts once — the commit reads the blocks it
     /// holds to record the free count the committed volume will have.
     pub(crate) txn_freed: RangeSet<u64>,
+    /// Runs the last published transaction freed, held reserved until the
+    /// slot that published it is on the medium: before then a power cut can
+    /// leave the previous root the newest, and it still names them. Free on
+    /// the committed volume — the root's free count includes them — but never
+    /// handed out, overwritten or discarded while embargoed.
+    pub(crate) embargo: RangeSet<u64>,
     /// Freed runs awaiting a device discard.
     pub(crate) pending_discard: RangeSet<u64>,
     /// The bounded, rebuildable `(domain, length, logical hash) -> chunk`
@@ -271,6 +277,7 @@ impl Allocator {
             op_released: RangeSet::new(),
             op_deferred: RangeSet::new(),
             txn_freed: RangeSet::new(),
+            embargo: RangeSet::new(),
             pending_discard: RangeSet::new(),
             dedupe_index: DedupeIndex::new(),
         }
@@ -1103,6 +1110,14 @@ impl<B: Block> ARXFS<B> {
             self.mark_meta_used_checked(self.health_baseline_root)?;
         }
         self.mark_reachable_metadata()?;
+        // No tree names what the last commit freed, but it stays reserved
+        // until the slot that freed it is on the medium.
+        let embargo = core::mem::take(&mut self.allocator_mut()?.embargo);
+        let reserved = embargo
+            .iter()
+            .try_for_each(|run| self.mark_range_used(run.start, run.end - run.start));
+        self.allocator_mut()?.embargo = embargo;
+        reserved?;
         let alloc = self.allocator_mut()?;
         alloc.alloc_cursor = RING_BLOCKS;
         alloc.meta_cursor = covered.saturating_sub(1);
@@ -1180,20 +1195,27 @@ impl<B: Block> ARXFS<B> {
     /// trees, which the map's paged form no longer exposes as a single
     /// in-memory set. Reading the whole map is fine on a test-sized volume and
     /// deliberately not offered outside tests.
+    ///
+    /// The committed volume's: an embargoed run is reserved in RAM and free on
+    /// the volume.
     pub(crate) fn used_blocks(&mut self) -> alloc::collections::BTreeSet<u64> {
         self.map_fold_pending().expect("fold the pending marks");
         let mut used = alloc::collections::BTreeSet::new();
         for block in 0..self.total_blocks {
-            if self.bit_used(block).expect("read the allocation map") {
+            if self.is_used(block) {
                 used.insert(block);
             }
         }
         used
     }
 
-    /// Whether `block` is used, for tests that assert on allocation state.
+    /// Whether the committed volume uses `block`, for tests that assert on
+    /// allocation state.
     pub(crate) fn is_used(&mut self, block: u64) -> bool {
-        self.bit_used(block).expect("read the allocation map")
+        let embargoed = self
+            .allocator()
+            .is_ok_and(|alloc| alloc.embargo.contains(block));
+        !embargoed && self.bit_used(block).expect("read the allocation map")
     }
 
     /// The dedupe index of a writable handle.

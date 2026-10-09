@@ -7,7 +7,7 @@
 //! an existing sibling — runs in `cargo test` with no kernel. The app supplies
 //! only the `fs_rename` seam and the text editor; the decision of *whether* to
 //! call the VFS, and *what* the two paths are, lives in
-//! [`Browser::rename_selected`](crate::Browser::rename_selected).
+//! [`Browser::prepare_rename`](crate::Browser::prepare_rename) and [`Browser::finish_rename`](crate::Browser::finish_rename).
 //!
 //! Authority is unchanged: the rename is an ordinary permission-checked VFS
 //! call under the caller's own identity (no new capability), so the engine
