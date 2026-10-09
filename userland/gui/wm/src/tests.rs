@@ -9090,28 +9090,104 @@ fn repainting_part_of_the_desktop_layer_marks_only_that_part() {
     assert!(!c.has_damage(), "no pixel of the layer was asked for");
 }
 
-/// A repaint of a window's kept content copies its damage into storage the
-/// compositor keeps, so a repaint — every screensaver frame, every menu
-/// highlight — allocates nothing of its own once that storage has grown. The
-/// damage a composite drains is not reused, so the second repaint here is
-/// measured before any composite.
-#[test]
-fn a_repaint_of_kept_content_allocates_nothing_of_its_own() {
-    let mut c = new_compositor(mode(20, 20), BLUE).expect("compositor");
-    let id = c.add_window(Point::new(4, 5), opaque(8, 6, GREEN));
-    c.composite();
+/// A display that takes each present and counts it, copying nothing, so a
+/// metered frame measures the compositor's own allocations alone.
+struct TakingDisplay {
+    mode: DisplayMode,
+    presents: usize,
+}
+
+impl Display for TakingDisplay {
+    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
+        Ok(self.mode)
+    }
+
+    fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+        self.presents += 1;
+        Ok(())
+    }
+
+    fn present_rects(&mut self, _frame: &[u8], _damage: &[DamageRect]) -> Result<(), DriverError> {
+        self.presents += 1;
+        Ok(())
+    }
+}
+
+/// Damage of two rectangles inside an 8x6 window's content.
+fn two_rect_damage() -> Region {
     let mut area = Region::new();
     area.add(Rect::new(1, 2, 3, 2));
     area.add(Rect::new(0, 5, 8, 1));
-    let repaint = |c: &mut Compositor| {
-        c.repaint_window(id, (8, 6), &area, |surface, rects| {
-            paint_marked_rects(surface, rects, RED);
-        })
-    };
-    assert!(repaint(&mut c));
+    area
+}
 
-    let (repainted, metering) = tairix_fuzzseed::meter::metered(|| repaint(&mut c));
-    assert!(repainted);
+/// A repaint of a window's kept content — every screensaver frame, every menu
+/// highlight — copies its damage into storage the compositor keeps, and marks
+/// it into the damage buffer the last composite handed back, so it allocates
+/// nothing of its own.
+#[test]
+fn a_repaint_of_kept_content_allocates_nothing_of_its_own() {
+    let screen = mode(20, 20);
+    let mut c = new_compositor(screen, BLUE).expect("compositor");
+    let mut display = TakingDisplay {
+        mode: screen,
+        presents: 0,
+    };
+    let id = c.add_window(Point::new(4, 5), opaque(8, 6, GREEN));
+    let area = two_rect_damage();
+    let repaint = |c: &mut Compositor| {
+        let mut painted = 0;
+        let repainted = c.repaint_window(id, (8, 6), &area, |surface, rects| {
+            painted = rects.len();
+            paint_marked_rects(surface, rects, RED);
+        });
+        assert!(repainted);
+        assert_eq!(painted, 2, "the painter is handed both rectangles");
+    };
+    repaint(&mut c);
+    c.present(&mut display).expect("presented");
+
+    let ((), metering) = tairix_fuzzseed::meter::metered(|| repaint(&mut c));
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+}
+
+/// A frame that repaints part of the desktop layer and presents it — an icon
+/// hover, a selection, a crossfade step — allocates nothing of its own once
+/// the compositor's kept storage has grown: the repaint copies its damage into
+/// storage it keeps, and the composite reuses its plan, its hit list, its
+/// damage buffer and the region it presents.
+#[test]
+fn a_frame_repainting_the_desktop_allocates_nothing_of_its_own() {
+    let screen = mode(20, 20);
+    let mut c = new_compositor(screen, BLUE).expect("compositor");
+    let mut display = TakingDisplay {
+        mode: screen,
+        presents: 0,
+    };
+    c.set_desktop(ramp_surface(20));
+    let area = two_rect_damage();
+    let frame = |c: &mut Compositor, display: &mut TakingDisplay| {
+        let mut painted = 0;
+        let repainted = c.repaint_desktop(&area, |surface, rects| {
+            painted = rects.len();
+            paint_marked_rects(surface, rects, RED);
+        });
+        assert!(repainted);
+        assert_eq!(painted, 2, "the painter is handed both rectangles");
+        c.present(display).expect("presented");
+    };
+    // Installing the layer damaged the whole screen; the second frame is the
+    // shape the measured one has.
+    frame(&mut c, &mut display);
+    frame(&mut c, &mut display);
+
+    let presents = display.presents;
+    let ((), metering) = tairix_fuzzseed::meter::metered(|| frame(&mut c, &mut display));
+    assert_eq!(
+        display.presents,
+        presents + 1,
+        "the frame reached the display"
+    );
     assert_eq!(metering.allocations, 0, "{metering:?}");
 }
 

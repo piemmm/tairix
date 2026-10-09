@@ -7,11 +7,14 @@
 //! [`run_all`] against the selected implementation, and each
 //! `kernel/sched/<impl>` crate runs it against itself.
 //!
-//! The suite is deterministic and single-threaded: it drives `cpus`
+//! [`run_all`] is deterministic and single-threaded: it drives `cpus`
 //! simulated cores round-robin from one host thread, advancing
 //! [`TestArch`]'s tick counter explicitly. That keeps the assertions
 //! reproducible (no flaky tests) while still exercising
 //! the ≥ 4-core SMP paths (per-CPU queues, work stealing, IPI bookkeeping).
+//! [`run_races`] holds the few properties only real host threads can
+//! interleave, each repeated over enough rounds to reach the interleaving it
+//! guards.
 //!
 //! Only the public trait surface is used — no implementation internals —
 //! so the same source is a valid acceptance test for a future EEVDF, RT,
@@ -51,8 +54,11 @@ pub fn run_all<S: SchedulerPolicy<TestArch> + Send + Sync + 'static>() {
     a_stop_withdrawn_while_the_body_ran_leaves_its_request_standing::<S>();
     an_exit_over_a_stop_retires_the_task::<S>();
     a_wake_leaves_a_stopped_task_stopped::<S>();
+    a_continue_leaves_a_task_parked_under_a_stop_parked::<S>();
+    a_body_parking_as_a_stop_lands_stays_parked_beneath_it::<S>();
     a_task_stopped_while_queued_keeps_one_entry::<S>();
     a_task_retired_off_every_queue_leaves_no_record::<S>();
+    a_stop_landing_before_the_body_completes_without_running_it::<S>();
     cross_cpu_ipc_reply_wakes_the_caller_without_delay::<S>();
     a_yield_migration_announces_the_destination::<S>();
     lifecycle_error_codes::<S>();
@@ -455,8 +461,8 @@ where
 
 /// A wake does not end a stop: the broadcast wake a console byte sends every
 /// parked reader leaves a stopped one stopped and undispatched, so nothing
-/// need check for a stop when a task is next dispatched. Only `resume` makes
-/// it runnable again.
+/// need check for a stop when a task is next dispatched. It is kept for the
+/// `resume`, which runs the task.
 fn a_wake_leaves_a_stopped_task_stopped<S: SchedulerPolicy<TestArch>>() {
     let (arch, sched) = make::<S>(1, 64);
     arch.set_current_cpu(0);
@@ -475,7 +481,7 @@ fn a_wake_leaves_a_stopped_task_stopped<S: SchedulerPolicy<TestArch>>() {
     assert_eq!(sched.state_of(id), TaskState::Parked);
 
     assert_eq!(sched.stop(id), Ok(()));
-    assert_eq!(sched.state_of(id), TaskState::Stopped);
+    assert_eq!(sched.state_of(id), TaskState::StoppedParked);
     assert_eq!(
         sched.unpark(id),
         Ok(()),
@@ -484,7 +490,7 @@ fn a_wake_leaves_a_stopped_task_stopped<S: SchedulerPolicy<TestArch>>() {
     assert_eq!(
         sched.state_of(id),
         TaskState::Stopped,
-        "and does not end the stop"
+        "and does not end the stop, but leaves the task owed its run"
     );
     assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "never dispatched");
     assert_eq!(runs.load(Ordering::Relaxed), 1);
@@ -493,6 +499,110 @@ fn a_wake_leaves_a_stopped_task_stopped<S: SchedulerPolicy<TestArch>>() {
     assert_eq!(sched.state_of(id), TaskState::Ready);
     assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)), "resume runs it");
     assert_eq!(sched.state_of(id), TaskState::Exited);
+}
+
+/// A continue leaves a task that was parked when it was stopped parked, for
+/// the wake it waits on: whether it parked itself or was born parked, made
+/// runnable by the continue it would run with nothing woken — a thread before
+/// its creator had made it whole, a waiter before its condition held.
+fn a_continue_leaves_a_task_parked_under_a_stop_parked<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+    let runs = Arc::new(AtomicU64::new(0));
+    let body_runs = Arc::clone(&runs);
+    let waiter = sched
+        .spawn(0, Priority::Normal, move |_| {
+            if body_runs.fetch_add(1, Ordering::Relaxed) == 0 {
+                TaskAction::Park
+            } else {
+                TaskAction::Exit
+            }
+        })
+        .expect("spawn");
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(waiter)));
+    let unstarted = sched
+        .spawn_parked(0, Priority::Normal, |_| TaskAction::Exit)
+        .expect("spawn_parked");
+
+    for id in [waiter, unstarted] {
+        assert_eq!(sched.stop(id), Ok(()));
+        assert_eq!(sched.state_of(id), TaskState::StoppedParked);
+        assert_eq!(sched.resume(id), Ok(()));
+        assert_eq!(sched.state_of(id), TaskState::Parked, "parked again");
+    }
+    assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "nothing runs");
+    assert_eq!(sched.queue_depth(0), Ok(0));
+
+    assert_eq!(sched.unpark(waiter), Ok(()));
+    assert_eq!(
+        sched.step(0),
+        Ok(StepOutcome::Ran(waiter)),
+        "its wake runs it"
+    );
+    assert_eq!(runs.load(Ordering::Relaxed), 2);
+    assert_eq!(sched.unpark(unstarted), Ok(()));
+    assert_eq!(
+        sched.step(0),
+        Ok(StepOutcome::Ran(unstarted)),
+        "so does its start"
+    );
+}
+
+/// A body that parks as a stop lands on it ends parked beneath the stop: the
+/// continue leaves it parked unless its wake arrived meanwhile, which a park
+/// commit keeps rather than sleeping through.
+fn a_body_parking_as_a_stop_lands_stays_parked_beneath_it<S>()
+where
+    S: SchedulerPolicy<TestArch> + Send + Sync + 'static,
+{
+    for woken_first in [false, true] {
+        let (arch, sched) = make::<S>(1, 64);
+        arch.set_current_cpu(0);
+        let sched = Arc::new(sched);
+        let weak = Arc::downgrade(&sched);
+        let own = Arc::new(AtomicU64::new(0));
+        let body_own = Arc::clone(&own);
+        let runs = Arc::new(AtomicU64::new(0));
+        let body_runs = Arc::clone(&runs);
+        let id = sched
+            .spawn(0, Priority::Normal, move |_| {
+                if body_runs.fetch_add(1, Ordering::Relaxed) > 0 {
+                    return TaskAction::Exit;
+                }
+                if let Some(sched) = weak.upgrade() {
+                    let id = body_own.load(Ordering::Relaxed);
+                    sched.stop(id).expect("a stop lands on the running body");
+                    if woken_first {
+                        sched.unpark(id).expect("its wake arrives first");
+                    }
+                }
+                TaskAction::Park
+            })
+            .expect("spawn");
+        own.store(id, Ordering::Relaxed);
+
+        assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+        let held = if woken_first {
+            TaskState::Stopped
+        } else {
+            TaskState::StoppedParked
+        };
+        assert_eq!(sched.state_of(id), held, "woken first: {woken_first}");
+        assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "the stop holds it");
+
+        assert_eq!(sched.resume(id), Ok(()));
+        if !woken_first {
+            assert_eq!(sched.state_of(id), TaskState::Parked, "still waiting");
+            assert_eq!(sched.step(0), Ok(StepOutcome::Idle));
+            assert_eq!(sched.unpark(id), Ok(()));
+        }
+        assert_eq!(
+            sched.step(0),
+            Ok(StepOutcome::Ran(id)),
+            "woken first: {woken_first}: its wake runs it"
+        );
+        assert_eq!(runs.load(Ordering::Relaxed), 2);
+    }
 }
 
 /// A task stopped while queued keeps a single entry through its stop and
@@ -561,8 +671,9 @@ fn a_task_stopped_while_queued_keeps_one_entry<S: SchedulerPolicy<TestArch>>() {
 }
 
 /// A task retired while it holds neither a run-queue entry nor a CPU — never
-/// started, parked, or stopped — leaves no record behind: nothing would ever
-/// reach one again, so it would stay for the life of the scheduler.
+/// started, parked, stopped, or parked under a stop — leaves no record behind:
+/// nothing would ever reach one again, so it would stay for the life of the
+/// scheduler.
 fn a_task_retired_off_every_queue_leaves_no_record<S: SchedulerPolicy<TestArch>>() {
     let (arch, sched) = make::<S>(1, 64);
     arch.set_current_cpu(0);
@@ -579,8 +690,13 @@ fn a_task_retired_off_every_queue_leaves_no_record<S: SchedulerPolicy<TestArch>>
     assert_eq!(sched.stop(stopped), Ok(()));
     assert_eq!(sched.step(0), Ok(StepOutcome::Idle), "the stop completes");
     assert_eq!(sched.state_of(stopped), TaskState::Stopped);
+    let stopped_parked = sched
+        .spawn_parked(0, Priority::Normal, |_| TaskAction::Exit)
+        .expect("spawn_parked");
+    assert_eq!(sched.stop(stopped_parked), Ok(()));
+    assert_eq!(sched.state_of(stopped_parked), TaskState::StoppedParked);
 
-    for id in [unstarted, parked, stopped] {
+    for id in [unstarted, parked, stopped, stopped_parked] {
         assert_eq!(sched.exit(id), Ok(ExitDisposition::Quiesced));
         assert_eq!(sched.state_of(id), TaskState::Exited);
         assert_eq!(
@@ -595,6 +711,118 @@ fn a_task_retired_off_every_queue_leaves_no_record<S: SchedulerPolicy<TestArch>>
         );
     }
     assert_eq!(sched.live_task_count(), 0);
+}
+
+/// A stop landing after a dispatch claimed the task and before its body runs
+/// leaves the dispatch's current-task slot standing, nudges the CPU, and is
+/// completed without running the body. Clearing the slot made the task's next
+/// syscall unattributable, and a body run under the stop could hold a lone
+/// core with nothing left to preempt it.
+fn a_stop_landing_before_the_body_completes_without_running_it<S>()
+where
+    S: SchedulerPolicy<TestArch> + Send + Sync + 'static,
+{
+    let (arch, sched) = make::<S>(2, 64);
+    arch.set_current_cpu(0);
+    let sched = Arc::new(sched);
+    let runs = Arc::new(AtomicU64::new(0));
+    let body_runs = Arc::clone(&runs);
+    let id = sched
+        .spawn(0, Priority::Normal, move |_| {
+            body_runs.fetch_add(1, Ordering::Relaxed);
+            TaskAction::Yield
+        })
+        .expect("spawn");
+    let slot_held = Arc::new(AtomicU64::new(0));
+    let (hook_sched, hook_slot) = (Arc::clone(&sched), Arc::clone(&slot_held));
+    let nudges_before = arch.ipi_count(0) + arch.ipi_count(1);
+    arch.on_next_set_preemption(move || {
+        hook_sched
+            .stop(id)
+            .expect("a stop lands on the claimed task");
+        if hook_sched.current_task(0) == Some(id) {
+            hook_slot.store(1, Ordering::Relaxed);
+        }
+    });
+
+    assert_eq!(sched.step(0), Ok(StepOutcome::Ran(id)));
+    assert_eq!(
+        slot_held.load(Ordering::Relaxed),
+        1,
+        "the stop left the dispatch's current-task slot"
+    );
+    assert!(
+        arch.ipi_count(0) + arch.ipi_count(1) > nudges_before,
+        "the stop nudged the CPU running the task"
+    );
+    assert_eq!(
+        runs.load(Ordering::Relaxed),
+        0,
+        "no body ran under the stop"
+    );
+    assert_eq!(sched.run_count(id), Ok(0));
+    assert_eq!(sched.state_of(id), TaskState::Stopped);
+
+    sched.resume(id).expect("continue");
+    let ran = (0..2).find(|&cpu| sched.step(cpu) == Ok(StepOutcome::Ran(id)));
+    assert!(ran.is_some(), "the continued task runs");
+    assert_eq!(runs.load(Ordering::Relaxed), 1);
+}
+
+/// Run the properties that need real concurrency, on host threads. Complements
+/// [`run_all`], whose single-threaded properties cannot interleave two calls.
+///
+/// # Panics
+///
+/// Panics (failing the test) if any property does not hold.
+pub fn run_races<S: SchedulerPolicy<TestArch> + Send + Sync + 'static>() {
+    an_exit_racing_job_control_retires_the_task::<S>();
+}
+
+/// An exit racing a stop and continue of a task no CPU holds always retires
+/// it. A stop that took the body lock, even briefly, made the exit read it as a
+/// dispatch owning the task and report the kill deferred to a retire that no
+/// dispatch would ever perform.
+fn an_exit_racing_job_control_retires_the_task<S>()
+where
+    S: SchedulerPolicy<TestArch> + Send + Sync + 'static,
+{
+    extern crate std;
+    use core::sync::atomic::AtomicBool;
+
+    const ROUNDS: usize = 2000;
+    for round in 0..ROUNDS {
+        let (_arch, sched) = make::<S>(1, 64);
+        let id = sched
+            .spawn_parked(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn_parked");
+        let (racing, started) = (AtomicBool::new(true), AtomicBool::new(false));
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while racing.load(Ordering::Acquire) {
+                    let _ = sched.stop(id);
+                    let _ = sched.resume(id);
+                    started.store(true, Ordering::Release);
+                }
+            });
+            // The kill lands among the job control, at a varying offset.
+            while !started.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            for _ in 0..round % 64 {
+                core::hint::spin_loop();
+            }
+            let outcome = sched.exit(id);
+            racing.store(false, Ordering::Release);
+            outcome
+        });
+        assert_eq!(
+            outcome,
+            Ok(ExitDisposition::Quiesced),
+            "round {round}: no dispatch holds the task"
+        );
+        assert_eq!(sched.state_of(id), TaskState::Exited);
+    }
 }
 
 /// A task a yield moves to another CPU is announced to that CPU: an idle core

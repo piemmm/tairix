@@ -15,16 +15,17 @@ use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, SyscallNumber, WaitFlags, WaitStatus, WaitStatusRecord,
     SYSCALL_MAX_ARGS,
 };
-use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
+use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
-use tairix_arch_x86_64::userentry::UserMode;
+use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, KernelProcessWait, ProcessWait,
     RescheduleAction, SpawnMode, SpawnRequest, Yielder,
@@ -33,7 +34,7 @@ use tairix_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
     VirtAddr,
 };
-use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level, Sink};
@@ -404,7 +405,6 @@ fn build_el0_space(
 /// own kernel stack before every switch-in (isolation). Returns its task id.
 fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
-    let user_mode = UserMode::new();
     let pre_resume = move |kernel_stack_top: u64| {
         // `set_kernel_rsp0` repoints **both** this task's `syscall` entry
         // stack (`gs:0`) and its trap entry stack (`TSS.RSP0`) at its own
@@ -423,12 +423,18 @@ fn admit(sched: &Scheduler<X86_64Arch>, root_phys: u64, entry: UserEntry) -> u64
         // running dispatcher executes from — `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys) };
     };
-    let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+    let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so
         // its `pre_resume` hook reloaded CR3 + repointed the entry stack, and
         // the GDT user selectors / TSS / `syscall` entry + dispatch callback
         // are installed; the program's first `syscall` is handled.
-        unsafe { user_mode.enter_user(entry) }
+        unsafe {
+            UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            }
+            .enter(yielder)
+        }
     };
     match spawn_user_kthread(sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work) {
         Ok(id) => id,

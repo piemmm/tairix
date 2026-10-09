@@ -67,7 +67,7 @@ use tairix_kernel_irq::{IrqTable, UnsupportedController};
 use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
-use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
+use tairix_kernel_sched_eevdf::{Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{CapTable, ProcessId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;

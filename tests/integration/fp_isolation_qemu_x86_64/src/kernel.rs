@@ -13,16 +13,17 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
+use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
-use tairix_arch_x86_64::userentry::UserMode;
+use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread_with_stack, Admission, BoxStack,
     KernelStack, RescheduleAction, SpawnMode, SpawnRequest, Yielder,
@@ -297,7 +298,6 @@ const STACK_POISON: u8 = 0xA5;
 
 /// Admit a built space as a resumable user kthread.
 fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, entry: UserEntry) {
-    let user_mode = UserMode::new();
     let pre_resume = move |kernel_stack_top: u64| {
         if syscall_entry::set_kernel_rsp0(BOOT_CPU as usize, kernel_stack_top).is_err() {
             note(
@@ -311,12 +311,18 @@ fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, en
         // running dispatcher executes from — `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys) };
     };
-    let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+    let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so
         // its `pre_resume` hook reloaded CR3 + repointed the entry stack; the
         // GDT selectors / TSS / `syscall` entry + dispatch callback are
         // installed.
-        unsafe { user_mode.enter_user(entry) }
+        unsafe {
+            UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            }
+            .enter(yielder)
+        }
     };
     let Some(stack) = BoxStack::new() else {
         note(TEST_FAIL, "fp isolation: no kernel stack");

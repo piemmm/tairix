@@ -26,7 +26,9 @@
 //!   path a `yield` syscall takes, so the expired turn is honoured at
 //!   the first safe boundary. The running task can now overrun its
 //!   quantum by at most the remainder of one bounded syscall, never
-//!   indefinitely.
+//!   indefinitely. The shared return to user mode then looks once more
+//!   with interrupts masked ([`settle_before_user`]), so neither latch
+//!   set after that decision waits for the next interrupt.
 //! * **Clear** — the dispatcher calls `clear_preempt_pending`
 //!   immediately before switching a task in: the scheduler has just made
 //!   a fresh decision (and re-armed the one-shot for a contended CPU),
@@ -146,6 +148,13 @@ pub trait PreemptCompetitor: Sync {
     /// switch would. A *tickless* policy (EEVDF, MLFQ) implements this as
     /// a no-op, so a quiet core still takes no ticks.
     fn keep_periodic_tick(&self, cpu: CpuId);
+
+    /// Mask the calling CPU's interrupts, for the last look at its
+    /// reschedule latches before it returns to user mode: a latch set after
+    /// that look would otherwise wait for the next interrupt, which a lone
+    /// task on a tickless core may not take for a long time. The return to
+    /// user mode unmasks them.
+    fn mask_interrupts(&self);
 }
 
 /// The installed competitor gate, or `None` before the boot path wires it.
@@ -366,11 +375,7 @@ fn honour_latched_tick(cpu: CpuId) -> bool {
 /// from a context the dispatcher does not own).
 #[must_use]
 pub fn yield_if_owed() -> bool {
-    let Some(cpu) = crate::waitq::wait_arch().and_then(crate::waitq::WaitQueueArch::current_cpu)
-    else {
-        return false;
-    };
-    honour_latches(cpu)
+    current_cpu().is_some_and(honour_latches)
 }
 
 /// Discard any tick latched on `cpu` before the scheduler's current
@@ -414,7 +419,50 @@ pub(crate) fn clear_preempt_pending(cpu: CpuId) {
 /// suspension, never on a spurious call.
 #[must_use]
 pub fn preempt_current(cpu: CpuId) -> bool {
-    honour_latches(cpu)
+    honour_before_user(cpu)
+}
+
+/// Honour the calling CPU's reschedule latches before it enters user mode —
+/// returning from a syscall or a resolved fault, or a thread's first entry —
+/// leaving its interrupts masked for the entry.
+///
+/// A syscall body runs with interrupts on, so a reschedule IPI — a wake
+/// placed here, a stop or kill of this task — is latched while it runs and
+/// only a look made with interrupts masked is sure to see the last of them.
+/// Missed, it waits for the next interrupt, which a lone task on a tickless
+/// core may not take for a long time.
+pub fn settle_before_user() {
+    mask_interrupts();
+    if let Some(cpu) = current_cpu() {
+        let _ = honour_before_user(cpu);
+    }
+}
+
+/// Honour `cpu`'s latches until none is owed, masking interrupts again after
+/// each switch back in — which may resume the task on another CPU, and with
+/// them on — so the last look is made masked. Returns whether a task was
+/// suspended.
+fn honour_before_user(mut cpu: CpuId) -> bool {
+    let mut suspended = false;
+    while honour_latches(cpu) {
+        suspended = true;
+        mask_interrupts();
+        match current_cpu() {
+            Some(now) => cpu = now,
+            None => break,
+        }
+    }
+    suspended
+}
+
+fn mask_interrupts() {
+    if let Some(gate) = active_gate() {
+        gate.mask_interrupts();
+    }
+}
+
+fn current_cpu() -> Option<CpuId> {
+    crate::waitq::wait_arch().and_then(crate::waitq::WaitQueueArch::current_cpu)
 }
 
 /// Consume both of `cpu`'s reschedule latches and act on whichever is set.
@@ -492,9 +540,18 @@ mod tests {
         fn keep_periodic_tick(&self, cpu: CpuId) {
             self.periodic_rearms[cpu as usize].fetch_add(1, Ordering::Relaxed);
         }
+
+        fn mask_interrupts(&self) {
+            MASKS.with(|masks| masks.set(masks.get() + 1));
+        }
     }
 
     static TEST_COMPETITOR_GATE: TestCompetitorGate = TestCompetitorGate::new();
+
+    std::thread_local! {
+        /// How many times this test thread's preempt path masked interrupts.
+        static MASKS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    }
 
     // Per-thread competitor-gate override. The process-wide
     // `COMPETITOR_GATE` is set-once, so a parallel boot-phase test that
@@ -599,6 +656,29 @@ mod tests {
     #[test]
     fn preemption_count_out_of_range_cpu_reports_zero() {
         assert_eq!(preemption_count(u32::MAX), 0);
+    }
+
+    /// The settle before a return to user mode masks interrupts before it
+    /// looks and consumes both latches, so a reschedule IPI latched while a
+    /// syscall ran — a wake, a stop, a kill — is honoured there rather than
+    /// left waiting for the next interrupt.
+    #[test]
+    fn the_settle_before_user_masks_then_honours_both_latches() {
+        let cpu = crate::test_boot::claim_cpu();
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let masked_before = MASKS.with(core::cell::Cell::get);
+        crate::traps::on_reschedule_ipi(cpu);
+        note_preempt_tick(cpu);
+
+        mask_interrupts();
+        assert!(
+            !honour_before_user(cpu),
+            "no user task to suspend on the host"
+        );
+
+        assert_eq!(MASKS.with(core::cell::Cell::get), masked_before + 1);
+        assert!(!take_forced_yield(cpu), "the IPI's yield was honoured");
+        assert!(!take_preempt_pending(cpu), "and the tick");
     }
 
     /// A forced yield is consumed exactly once and needs no competitor

@@ -10,9 +10,14 @@
 //! stop, wake or kill did while it ran. One definition here, so the three
 //! policies carry only their own placement.
 
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use core::cell::Cell;
 use core::sync::atomic::{fence, AtomicBool, Ordering};
 
-use crate::{CpuId, SchedError, SchedResult, SchedulerArch, TaskAction, TaskState};
+use tairix_sync::RwLock;
+
+use crate::{CpuId, SchedError, SchedResult, SchedulerArch, TaskAction, TaskId, TaskState};
 
 /// The lifecycle state and wake token the handshake needs from a policy's own
 /// per-task record.
@@ -22,6 +27,9 @@ pub trait ParkableTask {
 
     /// Compare-exchange the state, reporting the observed value on failure.
     fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState>;
+
+    /// Store `new` unconditionally, returning the state it replaced.
+    fn swap_state(&self, new: TaskState) -> TaskState;
 
     /// Record that a wake arrived before the task committed to park, so the
     /// next park is cancelled.
@@ -44,21 +52,37 @@ pub trait ParkableTask {
     }
 }
 
-/// Claim `task` out of [`TaskState::Parked`] and admit it, reporting whether
-/// this call was the one that transitioned it.
+/// End a committed park with a wake: a parked task is made ready and
+/// admitted, and one a stop holds is left owed its run for the `resume`.
 ///
-/// The compare-exchange is what keeps the admission single when two wakers —
-/// or a waker and the task's own park commit — reach it together.
-fn claim_parked<T, F>(task: &T, admit: F) -> bool
+/// Each transition is a compare-exchange, which keeps the admission single
+/// when two wakers — or a waker and the task's own park commit — reach it
+/// together, and a stop or `resume` landing in between is followed to the
+/// state it left.
+fn deliver_wake<T, F>(task: &T, admit: F)
 where
     T: ParkableTask + ?Sized,
     F: FnOnce(&T),
 {
-    if task.cas_state(TaskState::Parked, TaskState::Ready).is_err() {
-        return false;
+    loop {
+        match task.load_state() {
+            TaskState::Parked => {
+                if task.cas_state(TaskState::Parked, TaskState::Ready).is_ok() {
+                    admit(task);
+                    return;
+                }
+            }
+            TaskState::StoppedParked => {
+                if task
+                    .cas_state(TaskState::StoppedParked, TaskState::Stopped)
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+            _ => return,
+        }
     }
-    admit(task);
-    true
 }
 
 /// Make `task` runnable, admitting it through `admit` when this call is the
@@ -66,8 +90,11 @@ where
 ///
 /// Cancellation-safe: a wake of a task that has not yet committed to park
 /// records a token rather than erroring, so it is never lost. A wake of a
-/// [`TaskState::Stopped`] task changes nothing — only `resume` ends a stop,
-/// and the task it re-runs re-checks whatever it waited for.
+/// stopped task leaves it stopped — only `resume` ends a stop — but is kept: a
+/// [`TaskState::StoppedParked`] task becomes [`TaskState::Stopped`], runnable
+/// once resumed, and a [`TaskState::Stopped`] one keeps the token, so a park
+/// it commits once resumed does not sleep through the wake that arrived
+/// meanwhile.
 ///
 /// # Errors
 /// [`SchedError::InvalidState`] only when the task is terminal, which is the
@@ -83,12 +110,13 @@ where
 {
     match task.load_state() {
         TaskState::Exited => Err(SchedError::InvalidState),
-        TaskState::Stopped => Ok(()),
-        // Already committed to park: claim it directly.
-        TaskState::Parked => {
-            if claim_parked(task, admit) {
-                return Ok(());
-            }
+        TaskState::Stopped => {
+            task.set_wake_pending();
+            Ok(())
+        }
+        // Already committed to park: end the park directly.
+        TaskState::Parked | TaskState::StoppedParked => {
+            deliver_wake(task, admit);
             match task.load_state() {
                 TaskState::Exited => Err(SchedError::InvalidState),
                 _ => Ok(()),
@@ -107,8 +135,12 @@ where
         | TaskState::StoppedOnCpu => {
             task.set_wake_pending();
             fence(Ordering::SeqCst);
-            if task.load_state() == TaskState::Parked && task.take_wake_pending() {
-                let _ = claim_parked(task, admit);
+            if matches!(
+                task.load_state(),
+                TaskState::Parked | TaskState::StoppedParked
+            ) && task.take_wake_pending()
+            {
+                deliver_wake(task, admit);
             }
             Ok(())
         }
@@ -118,7 +150,8 @@ where
 /// Complete a park the dispatcher has just published, re-admitting the task
 /// through `admit` when a wake raced the commit.
 ///
-/// The caller stores [`TaskState::Parked`] itself, together with whatever
+/// The caller stores [`TaskState::Parked`] — or [`TaskState::StoppedParked`],
+/// for a body that parked as a stop landed — itself, together with whatever
 /// per-CPU accounting the transition owes, and calls this to consume any token
 /// a waker left behind.
 pub fn commit_park<T, F>(task: &T, admit: F)
@@ -128,7 +161,7 @@ where
 {
     fence(Ordering::SeqCst);
     if task.take_wake_pending() {
-        let _ = claim_parked(task, admit);
+        deliver_wake(task, admit);
     }
 }
 
@@ -138,12 +171,19 @@ where
 /// scheduler next reaches it — the party that takes the entry, or the
 /// dispatch whose body returns, completes the stop — so a stop never leaves a
 /// stale entry for a later wake to queue beside, and no weight moves here. A
-/// parked task holds neither and is stopped at once.
+/// parked task holds neither and is stopped at once, still parked.
+///
+/// Returns the stop state the task is in afterwards. A task left
+/// [`TaskState::StoppedOnCpu`] is still executing, so the caller preempts its
+/// CPU ([`nudge_running`]): alone on a tickless core it may have no next
+/// quantum to stop at. Nothing else here touches the task's CPU, its
+/// current-task slot or its body lock, all of which belong to the dispatch
+/// running it.
 ///
 /// # Errors
 /// [`SchedError::InvalidState`] if the task is terminal. Stopping a task
 /// already stopped is `Ok`.
-pub fn stop_task<T>(task: &T) -> SchedResult<()>
+pub fn stop_task<T>(task: &T) -> SchedResult<TaskState>
 where
     T: ParkableTask + ?Sized,
 {
@@ -151,24 +191,26 @@ where
         let observed = task.load_state();
         let stopped = match observed {
             TaskState::Exited => return Err(SchedError::InvalidState),
-            TaskState::Stopped | TaskState::StoppedOnQueue | TaskState::StoppedOnCpu => {
-                return Ok(())
-            }
+            TaskState::Stopped
+            | TaskState::StoppedOnQueue
+            | TaskState::StoppedOnCpu
+            | TaskState::StoppedParked => return Ok(observed),
             TaskState::Ready => TaskState::StoppedOnQueue,
             TaskState::Running => TaskState::StoppedOnCpu,
-            TaskState::Parked => TaskState::Stopped,
+            TaskState::Parked => TaskState::StoppedParked,
         };
         if task.cas_state(observed, stopped).is_ok() {
-            return Ok(());
+            return Ok(stopped);
         }
     }
 }
 
 /// End a job-control stop, admitting the task through `admit` when the stop
-/// had completed and it holds no entry.
+/// had completed on a runnable task, which then holds no entry.
 ///
 /// A stop the scheduler has yet to complete is simply withdrawn: the task's
-/// entry, or its body on a CPU, still stands. Resuming a task that is not
+/// entry, or its body on a CPU, still stands. A task parked under the stop is
+/// left parked, for the wake it is waiting on. Resuming a task that is not
 /// stopped is `Ok` and changes nothing.
 ///
 /// # Errors
@@ -185,6 +227,7 @@ where
             TaskState::Ready | TaskState::Running | TaskState::Parked => return Ok(()),
             TaskState::StoppedOnQueue => TaskState::Ready,
             TaskState::StoppedOnCpu => TaskState::Running,
+            TaskState::StoppedParked => TaskState::Parked,
             TaskState::Stopped => {
                 if task.cas_state(TaskState::Stopped, TaskState::Ready).is_ok() {
                     admit(task);
@@ -246,7 +289,8 @@ where
             TaskState::Running
             | TaskState::Parked
             | TaskState::Stopped
-            | TaskState::StoppedOnCpu => return Taken::Spent,
+            | TaskState::StoppedOnCpu
+            | TaskState::StoppedParked => return Taken::Spent,
         }
     }
 }
@@ -256,7 +300,8 @@ where
 pub enum Settled {
     /// The task is [`TaskState::Exited`]: retire it.
     Retire,
-    /// The task is [`TaskState::Parked`] by its own request: finish with
+    /// The task is [`TaskState::Parked`] by its own request — or
+    /// [`TaskState::StoppedParked`], for one a stop landed on: finish with
     /// [`commit_park`].
     Park,
     /// The task yielded and is [`TaskState::Ready`] again: enqueue it.
@@ -290,19 +335,47 @@ pub fn observe_doom(mark: &AtomicBool) -> bool {
     mark.load(Ordering::Acquire)
 }
 
-/// Preempt the CPU executing a task this caller has just doomed, so it reaches
-/// its stopping point now: alone on a tickless core it may have no next
-/// quantum to stop at.
+/// Preempt the CPU executing a task this caller has just doomed or stopped, so
+/// it reaches its stopping point now: alone on a tickless core it may have no
+/// next quantum to stop at.
 ///
 /// `running` is the CPU whose current-task slot names the task. A dispatch
-/// publishes that slot before it takes the body lock, but nothing orders the
-/// two for a killer that saw only the lock, so the body can be owned while no
-/// slot the killer reads names it; every CPU is signalled then, since missing
-/// the one running the task leaves it running.
-pub fn nudge_doomed<A: SchedulerArch + ?Sized>(arch: &A, running: Option<CpuId>, cpus: u32) {
+/// publishes that slot only after claiming the task, and nothing orders the
+/// slot for a caller that saw only the claim or the body lock, so the task can
+/// be on a CPU while no slot the caller reads names it; every CPU is signalled
+/// then, since missing the one running the task leaves it running.
+pub fn nudge_running<A: SchedulerArch + ?Sized>(arch: &A, running: Option<CpuId>, cpus: u32) {
     match running {
         Some(cpu) => arch.send_ipi(cpu),
         None => (0..cpus).for_each(|cpu| arch.send_ipi(cpu)),
+    }
+}
+
+/// Retire `task` for an exit that holds its body lock, returning the state it
+/// left. [`TaskState::Exited`] means another party retired it first and owns
+/// its teardown. `depart` is [`settle`]'s.
+pub fn retire<T, D>(task: &T, depart: D) -> TaskState
+where
+    T: ParkableTask + ?Sized,
+    D: Fn(&dyn Fn() -> bool) -> bool,
+{
+    let left = Cell::new(TaskState::Exited);
+    depart(&|| {
+        left.set(task.swap_state(TaskState::Exited));
+        true
+    });
+    left.get()
+}
+
+/// Remove the record of `task`, admitted as `id`, from a policy's registry —
+/// unless the id has since been drawn again and names another task.
+pub fn drop_record<T>(tasks: &RwLock<BTreeMap<TaskId, Arc<T>>>, id: TaskId, task: &T) {
+    let mut tasks = tasks.write();
+    if tasks
+        .get(&id)
+        .is_some_and(|held| core::ptr::eq(Arc::as_ptr(held), task))
+    {
+        tasks.remove(&id);
     }
 }
 
@@ -315,8 +388,9 @@ pub fn nudge_doomed<A: SchedulerArch + ?Sized>(arch: &A, running: Option<CpuId>,
 /// `doomed` — a termination requested while the task ran, read through
 /// [`observe_doom`] — wins over anything but its own park, since a task parked
 /// inside a syscall holds kernel state only its own unwind can release. A stop
-/// wins over the body's own yield or park: either would leave the task where
-/// an ordinary wake could run it. `depart` performs a transition out of the
+/// wins over the body's own yield or park, so no ordinary wake can run the
+/// task; a park it asked for is kept beneath the stop, for the wake it waits
+/// on to end. `depart` performs a transition out of the
 /// competition together with whatever competing-weight accounting the policy
 /// keeps, and returns the transition's result.
 pub fn settle<T, D>(task: &T, action: TaskAction, doomed: bool, depart: D) -> Settled
@@ -331,6 +405,11 @@ where
             TaskState::Exited => return Settled::Retire,
             _ if exit => depart(&|| task.cas_state(observed, TaskState::Exited).is_ok())
                 .then_some(Settled::Retire),
+            TaskState::StoppedOnCpu if action == TaskAction::Park => depart(&|| {
+                task.cas_state(TaskState::StoppedOnCpu, TaskState::StoppedParked)
+                    .is_ok()
+            })
+            .then_some(Settled::Park),
             TaskState::StoppedOnCpu => depart(&|| {
                 task.cas_state(TaskState::StoppedOnCpu, TaskState::Stopped)
                     .is_ok()
@@ -347,7 +426,7 @@ where
                 .then_some(Settled::Requeue),
             // No transition reaches these from a task on a CPU; whoever put
             // the task there owns its next step.
-            TaskState::Parked => return Settled::Park,
+            TaskState::Parked | TaskState::StoppedParked => return Settled::Park,
             TaskState::Ready | TaskState::Stopped | TaskState::StoppedOnQueue => {
                 return Settled::Released
             }
@@ -361,8 +440,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use core::cell::Cell;
 
     /// A bare `ParkableTask` with no scheduler behind it: the handshake is
     /// pure state, so the model needs nothing more.
@@ -399,6 +476,10 @@ mod tests {
             } else {
                 Err(current)
             }
+        }
+
+        fn swap_state(&self, new: TaskState) -> TaskState {
+            self.state.replace(new)
         }
 
         fn set_wake_pending(&self) {
@@ -451,6 +532,10 @@ mod tests {
             } else {
                 Err(current)
             }
+        }
+
+        fn swap_state(&self, new: TaskState) -> TaskState {
+            self.state.replace(new)
         }
 
         fn set_wake_pending(&self) {}
@@ -560,7 +645,35 @@ mod tests {
         assert_eq!(unpark_task(&task, Model::admit), Ok(()));
         assert_eq!(task.load_state(), TaskState::Stopped);
         assert_eq!(task.admits.get(), 0);
-        assert!(!task.token.get(), "the resume re-runs it; no park is owed");
+    }
+
+    /// A thread stopped at the edge of a syscall that asked to park commits
+    /// that park once a continue resumes it. A wake that reached it while it
+    /// was stopped cancels the park rather than being lost to it, which would
+    /// leave the thread asleep on a wake already delivered.
+    #[test]
+    fn a_wake_while_stopped_cancels_the_park_committed_after_the_continue() {
+        let task = Model::new(TaskState::Stopped);
+        assert_eq!(unpark_task(&task, Model::admit), Ok(()));
+        assert_eq!(resume_task(&task, Model::admit), Ok(()));
+        assert_eq!(
+            task.load_state(),
+            TaskState::Ready,
+            "the continue re-runs it"
+        );
+        task.state.set(TaskState::Running);
+        let departures = Cell::new(0);
+        assert_eq!(
+            settle(&task, TaskAction::Park, false, counting(&departures)),
+            Settled::Park
+        );
+        commit_park(&task, Model::admit);
+        assert_eq!(task.load_state(), TaskState::Ready, "the wake was not lost");
+        assert_eq!(
+            task.admits.get(),
+            2,
+            "admitted by the continue and the wake"
+        );
     }
 
     /// A wake that reaches a running task whose stop is then withdrawn is
@@ -586,12 +699,16 @@ mod tests {
         for (from, to) in [
             (TaskState::Ready, TaskState::StoppedOnQueue),
             (TaskState::Running, TaskState::StoppedOnCpu),
-            (TaskState::Parked, TaskState::Stopped),
+            (TaskState::Parked, TaskState::StoppedParked),
         ] {
             let task = Model::new(from);
-            assert_eq!(stop_task(&task), Ok(()), "{from:?}");
+            assert_eq!(stop_task(&task), Ok(to), "{from:?}");
             assert_eq!(task.load_state(), to, "{from:?}");
-            assert_eq!(stop_task(&task), Ok(()), "{from:?}: a repeat stops nothing");
+            assert_eq!(
+                stop_task(&task),
+                Ok(to),
+                "{from:?}: a repeat stops nothing and reports where the task is"
+            );
             assert_eq!(task.load_state(), to, "{from:?}");
         }
         assert_eq!(
@@ -603,8 +720,100 @@ mod tests {
     #[test]
     fn a_stop_that_loses_a_race_is_decided_again() {
         let task = Raced::new(TaskState::Running, TaskState::Parked);
-        assert_eq!(stop_task(&task), Ok(()));
-        assert_eq!(task.load_state(), TaskState::Stopped);
+        assert_eq!(stop_task(&task), Ok(TaskState::StoppedParked));
+        assert_eq!(task.load_state(), TaskState::StoppedParked);
+    }
+
+    /// A stop holds a parked task where it is: the continue leaves it parked,
+    /// for the wake it waits on, and admits nothing. Resumed as runnable, a
+    /// thread born parked would run before its creator had made it whole, and
+    /// a waiter would run with nothing woken.
+    #[test]
+    fn a_parked_task_resumed_from_a_stop_is_parked_again() {
+        let task = Model::new(TaskState::Parked);
+        assert_eq!(stop_task(&task), Ok(TaskState::StoppedParked));
+        assert_eq!(resume_task(&task, Model::admit), Ok(()));
+        assert_eq!(task.load_state(), TaskState::Parked);
+        assert_eq!(task.admits.get(), 0, "nothing woke it");
+    }
+
+    /// A wake reaching a task parked under a stop is kept for the continue,
+    /// which then runs it; the stop still holds it until then.
+    #[test]
+    fn a_wake_while_parked_under_a_stop_runs_it_once_resumed() {
+        let task = Model::new(TaskState::Parked);
+        assert_eq!(stop_task(&task), Ok(TaskState::StoppedParked));
+        assert_eq!(unpark_task(&task, Model::admit), Ok(()));
+        assert_eq!(task.load_state(), TaskState::Stopped, "still held");
+        assert_eq!(task.admits.get(), 0);
+        assert_eq!(resume_task(&task, Model::admit), Ok(()));
+        assert_eq!(task.load_state(), TaskState::Ready);
+        assert_eq!(task.admits.get(), 1, "admitted once, by the continue");
+    }
+
+    /// A wake whose exchange loses to a continue follows the task to the park
+    /// the continue left it in and ends that, so it is not lost.
+    #[test]
+    fn a_wake_racing_the_continue_of_a_stopped_park_is_kept() {
+        let task = Raced::new(TaskState::StoppedParked, TaskState::Parked);
+        assert_eq!(unpark_task(&task, Raced::admit), Ok(()));
+        assert_eq!(task.load_state(), TaskState::Ready);
+        assert_eq!(task.admits.get(), 1);
+    }
+
+    /// A continue whose exchange loses to a wake finds the task owed its run,
+    /// and admits it.
+    #[test]
+    fn a_continue_racing_a_wake_of_a_stopped_park_runs_it() {
+        let task = Raced::new(TaskState::StoppedParked, TaskState::Stopped);
+        assert_eq!(resume_task(&task, Raced::admit), Ok(()));
+        assert_eq!(task.load_state(), TaskState::Ready);
+        assert_eq!(task.admits.get(), 1);
+    }
+
+    /// An exit decides its retirement on the state its swap replaced, so one
+    /// that finds the task already retired owns no teardown.
+    #[test]
+    fn a_retirement_reports_the_state_it_ended() {
+        for from in [
+            TaskState::Ready,
+            TaskState::Running,
+            TaskState::Parked,
+            TaskState::Stopped,
+            TaskState::StoppedOnQueue,
+            TaskState::StoppedOnCpu,
+            TaskState::StoppedParked,
+            TaskState::Exited,
+        ] {
+            let task = Model::new(from);
+            let departures = Cell::new(0);
+            assert_eq!(retire(&task, counting(&departures)), from, "{from:?}");
+            assert_eq!(task.load_state(), TaskState::Exited, "{from:?}");
+            assert_eq!(
+                departures.get(),
+                1,
+                "{from:?}: weight leaves through depart"
+            );
+        }
+    }
+
+    /// A record goes only with the task it was admitted for: once an id is
+    /// drawn again, the old task's last reference leaves the new one's alone.
+    #[test]
+    fn a_record_is_dropped_only_for_the_task_it_holds() {
+        let tasks: RwLock<BTreeMap<TaskId, Arc<u32>>> = RwLock::new(BTreeMap::new());
+        let old = Arc::new(1);
+        let new = Arc::new(2);
+        tasks.write().insert(7, Arc::clone(&new));
+        drop_record(&tasks, 7, &*old);
+        assert!(
+            tasks.read().contains_key(&7),
+            "a reissued id keeps its task"
+        );
+        drop_record(&tasks, 7, &*new);
+        assert!(!tasks.read().contains_key(&7));
+        drop_record(&tasks, 7, &*new);
+        assert!(tasks.read().is_empty(), "a repeat drop finds nothing");
     }
 
     #[test]
@@ -760,19 +969,48 @@ mod tests {
         assert_eq!(task.load_state(), TaskState::Exited);
     }
 
-    /// A body's own yield or park would leave a stopped task where a wake, or
-    /// its own queue entry, could run it.
+    /// A stop that landed while the body ran holds the task, so neither a
+    /// wake nor its own queue entry can run it: its yield ends stopped, and
+    /// its park ends parked beneath the stop.
     #[test]
     fn a_stop_that_landed_while_the_body_ran_wins_over_its_request() {
-        for action in [TaskAction::Yield, TaskAction::Park] {
-            let task = Model::new(TaskState::StoppedOnCpu);
-            assert_eq!(
-                settle_counting(&task, action, false),
-                (Settled::Released, 1),
-                "{action:?}"
-            );
-            assert_eq!(task.load_state(), TaskState::Stopped, "{action:?}");
-        }
+        let task = Model::new(TaskState::StoppedOnCpu);
+        assert_eq!(
+            settle_counting(&task, TaskAction::Yield, false),
+            (Settled::Released, 1)
+        );
+        assert_eq!(task.load_state(), TaskState::Stopped);
+
+        let task = Model::new(TaskState::StoppedOnCpu);
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Park, 1)
+        );
+        assert_eq!(task.load_state(), TaskState::StoppedParked);
+        commit_park(&task, Model::admit);
+        assert_eq!(
+            task.load_state(),
+            TaskState::StoppedParked,
+            "nothing woke it"
+        );
+    }
+
+    /// A wake that reached a body parking as a stop landed is kept by the park
+    /// commit for the continue, not slept through.
+    #[test]
+    fn a_park_a_stop_overtook_keeps_the_wake_that_raced_it() {
+        let task = Model::new(TaskState::StoppedOnCpu);
+        assert_eq!(unpark_task(&task, Model::admit), Ok(()), "a token");
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Park, 1)
+        );
+        commit_park(&task, Model::admit);
+        assert_eq!(task.load_state(), TaskState::Stopped, "owed its run");
+        assert_eq!(task.admits.get(), 0, "and still held");
+        assert_eq!(resume_task(&task, Model::admit), Ok(()));
+        assert_eq!(task.load_state(), TaskState::Ready);
+        assert_eq!(task.admits.get(), 1);
     }
 
     #[test]
@@ -798,10 +1036,18 @@ mod tests {
         let task = Model::new(TaskState::StoppedOnCpu);
         assert_eq!(
             settle_counting(&task, TaskAction::Park, true),
-            (Settled::Released, 1),
-            "the killer resumes a stopped thread so it can unwind"
+            (Settled::Park, 1),
+            "parked beneath the stop, it too must unwind before it can die"
         );
-        assert_eq!(task.load_state(), TaskState::Stopped);
+        assert_eq!(task.load_state(), TaskState::StoppedParked);
+        assert_eq!(resume_task(&task, Model::admit), Ok(()), "the killer");
+        assert_eq!(
+            unpark_task(&task, Model::admit),
+            Ok(()),
+            "resumes and wakes it"
+        );
+        assert_eq!(task.load_state(), TaskState::Ready);
+        assert_eq!(task.admits.get(), 1);
     }
 
     /// A compare-exchange that loses to a stop landing between the read and
@@ -836,22 +1082,26 @@ mod tests {
             );
             assert_eq!(task.load_state(), state, "{state:?}");
         }
-        let task = Model::new(TaskState::Parked);
-        assert_eq!(
-            settle_counting(&task, TaskAction::Yield, false),
-            (Settled::Park, 0)
-        );
+        for state in [TaskState::Parked, TaskState::StoppedParked] {
+            let task = Model::new(state);
+            assert_eq!(
+                settle_counting(&task, TaskAction::Yield, false),
+                (Settled::Park, 0),
+                "{state:?}"
+            );
+            assert_eq!(task.load_state(), state, "{state:?}");
+        }
     }
 
     #[test]
     fn a_doomed_task_no_cpu_names_is_nudged_everywhere() {
         let arch = crate::TestArch::new(3).expect("three CPUs");
-        nudge_doomed(&arch, Some(1), 3);
+        nudge_running(&arch, Some(1), 3);
         assert_eq!(
             (arch.ipi_count(0), arch.ipi_count(1), arch.ipi_count(2)),
             (0, 1, 0)
         );
-        nudge_doomed(&arch, None, 3);
+        nudge_running(&arch, None, 3);
         assert_eq!(
             (arch.ipi_count(0), arch.ipi_count(1), arch.ipi_count(2)),
             (1, 2, 1),

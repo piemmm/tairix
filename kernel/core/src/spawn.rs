@@ -32,7 +32,7 @@ use alloc::sync::Arc;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, SpawnSession};
-use tairix_arch_api::{EnterUser, UserEntry};
+use tairix_arch_api::{ContextSwitch, EnterUser, UserEntry};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{
     build_process_image, AddressSpace, AllocError, Frame, FrameAllocator, PageTable, PhysMap,
@@ -936,15 +936,27 @@ pub struct UserThreadEntry {
 }
 
 impl UserThreadEntry {
-    /// Diverge into user mode at [`Self::regs`].
+    /// Diverge into user mode at [`Self::regs`], from the body of the kthread
+    /// `yielder` drives.
     ///
     /// # Safety
     ///
     /// As [`EnterUser::enter_user`]: the thread's address space must be the
     /// active one on the calling CPU (its switch-in hook has run) and the
     /// user→kernel trap path installed, so its first syscall is handled.
-    pub unsafe fn enter(self) -> ! {
-        // SAFETY: forwarded contract.
+    pub unsafe fn enter<C: ContextSwitch + Copy>(
+        self,
+        yielder: &mut crate::kthread::Yielder<C>,
+    ) -> ! {
+        // A reschedule latched before the thread's first entry is honoured
+        // now rather than at its first interrupt. It returns with interrupts
+        // masked, so nothing suspends the thread between the note and the
+        // entry.
+        crate::preempt::settle_before_user();
+        yielder.note_user_entry();
+        // SAFETY: forwarded contract. A suspension above resumes through the
+        // thread's switch-in hook, which makes its address space active on
+        // whichever CPU resumes it.
         unsafe { self.port.enter_user(self.regs) }
     }
 }

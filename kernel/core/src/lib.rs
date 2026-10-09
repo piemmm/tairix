@@ -262,7 +262,7 @@ pub use panic::{fault_dump, handle_panic, panic_dump, PanicContext};
 pub use peerwatch::PeerWatch;
 pub use pipe::{Pipe, PipeEnd, PipeRole, PIPE_CAPACITY};
 pub use preempt::{
-    note_preempt_tick, preempt_current, preemption_count, take_preempt_pending,
+    note_preempt_tick, preempt_current, preemption_count, settle_before_user, take_preempt_pending,
     total_preemption_count, yield_if_owed,
 };
 pub use proc_id::{mint_proc_id, mint_proc_id_bootstrap};

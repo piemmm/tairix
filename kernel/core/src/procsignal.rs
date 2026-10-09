@@ -31,11 +31,12 @@ use tairix_collections::HashMap;
 use tairix_hash::BuildSipHash13;
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
-use tairix_kernel_sec::{CapTable, ProcessId, TaskId};
+use tairix_kernel_sec::{CapTable, JobGeneration, ProcessId, TaskId};
 use tairix_log::Sink;
 use tairix_sync::once::OnceCell;
 use tairix_sync::{IrqSafeSpinLock, RwLock, SpinLock};
 
+use crate::dispatch_slot::RescheduleAction;
 use crate::foreground::ForegroundOwner;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 
@@ -139,13 +140,22 @@ pub fn clear_intake(task: u64) {
 /// word the thread's own entry into the kernel sets, so a claim and an entry
 /// are each one read-modify-write and linearise against each other.
 ///
+/// The word also carries the job-control generation the thread was last
+/// given. A thread outside any kernel body is stopped by the scheduler, but
+/// one inside a body is never: it may hold kernel state another thread waits
+/// on — a lock handed to it on release — so it stops itself at the edge of
+/// the body instead, where it holds none ([`stop_at_edge`]).
+///
 /// The thread reaches its own gate through the copy its CPU publishes while it
 /// runs, so a syscall touches no structure another thread contends on;
 /// killers find it by id in the gate registry ([`install_gate`]).
 pub(crate) struct ThreadGate {
+    /// The thread this gate is.
+    task: u64,
     /// The process a death owed here tears down: the thread's own, for life.
     process: ProcessId,
-    /// [`IN_KERNEL`], the owed death's kind, and an `Exit`'s status.
+    /// [`IN_KERNEL`], the owed death's kind, the job-control generation, and
+    /// an `Exit`'s status.
     word: AtomicU64,
 }
 
@@ -156,7 +166,34 @@ const OWES_EXIT: u64 = 1 << 1;
 /// A [`DeferredTeardown::Plain`] is owed.
 const OWES_PLAIN: u64 = 1 << 2;
 const OWED: u64 = OWES_EXIT | OWES_PLAIN;
+/// The [`JobGeneration`] the thread was last given, between the owed death's
+/// kind and its status.
+const JOB_SHIFT: u32 = 3;
+const JOB_FIELD: u64 = ((1 << JobGeneration::BITS) - 1) << JOB_SHIFT;
 const STATUS_SHIFT: u32 = 32;
+const _: () = assert!(JOB_SHIFT + JobGeneration::BITS <= STATUS_SHIFT);
+
+/// What a thread at the edge of a kernel body owes before it may go on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Owed {
+    /// Nothing: the body runs.
+    Nothing,
+    /// A job-control stop, taken here, where the thread holds no kernel state.
+    Stop,
+    /// A death: the body is skipped and the boundary lands it.
+    Death,
+}
+
+/// What leaving a kernel body found.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Leave {
+    /// The thread has left the kernel.
+    Left,
+    /// The thread is still in the kernel and owes a stop it takes first.
+    Stop,
+    /// The thread has left the kernel owing this death, taken here.
+    Death(DeferredTeardown),
+}
 
 /// The `Exit` status a gate word's high half holds.
 const fn status_of(word: u64) -> i32 {
@@ -165,10 +202,31 @@ const fn status_of(word: u64) -> i32 {
 }
 
 impl ThreadGate {
-    const fn new(process: ProcessId) -> Self {
+    const fn new(task: u64, process: ProcessId) -> Self {
         Self {
+            task,
             process,
             word: AtomicU64::new(0),
+        }
+    }
+
+    /// The job-control generation `word` holds.
+    fn job_in(word: u64) -> JobGeneration {
+        JobGeneration::from_bits(u32::try_from((word & JOB_FIELD) >> JOB_SHIFT).unwrap_or(0))
+    }
+
+    /// `word` holding `job` as its generation.
+    fn with_job(word: u64, job: JobGeneration) -> u64 {
+        (word & !JOB_FIELD) | (u64::from(job.bits()) << JOB_SHIFT)
+    }
+
+    fn owed_at(word: u64) -> Owed {
+        if word & OWED != 0 {
+            Owed::Death
+        } else if Self::job_in(word).is_stopped() {
+            Owed::Stop
+        } else {
+            Owed::Nothing
         }
     }
 
@@ -203,29 +261,53 @@ impl ThreadGate {
     }
 
     /// Mark the thread as executing inside the kernel on its own stack,
-    /// reporting whether it already owes a death. Paired with
-    /// [`Self::exit_take`] by every kernel body a thread runs on its own stack.
+    /// reporting what it owes before its body may run. Paired with
+    /// [`Self::leave`] by every kernel body a thread runs on its own stack.
     ///
-    /// `true` obliges the caller to skip its body and go straight to its
-    /// boundary, which lands the death: a thread owing one may already have
-    /// been told to die, and the scheduler retires such a thread at its next
-    /// stopping point — which, inside a body, would free a stack whose frames
-    /// still own kernel state.
+    /// [`Owed::Death`] obliges the caller to skip its body and go straight to
+    /// its boundary, which lands the death: a thread owing one may already
+    /// have been told to die, and the scheduler retires such a thread at its
+    /// next stopping point — which, inside a body, would free a stack whose
+    /// frames still own kernel state. [`Owed::Stop`] obliges it to take the
+    /// stop first ([`stop_at_edge`]) and ask again ([`Self::owed`]).
     #[must_use]
-    pub(crate) fn enter(&self) -> bool {
-        self.owed_in(self.word.fetch_or(IN_KERNEL, Ordering::AcqRel))
-            .is_some()
+    pub(crate) fn enter(&self) -> Owed {
+        Self::owed_at(self.word.fetch_or(IN_KERNEL, Ordering::AcqRel))
     }
 
-    /// Mark the thread as leaving the kernel and take any death it owes.
-    ///
-    /// `Some(teardown)` obliges the caller to land the death now: the body has
-    /// unwound (every lock and buffer it held is released), so this is the
-    /// first safe point the thread can die at. The thread never returns to
-    /// user mode.
+    /// What the thread owes now: asked again at an edge once a stop taken
+    /// there has ended.
     #[must_use]
-    pub(crate) fn exit_take(&self) -> Option<DeferredTeardown> {
-        self.taken(self.word.swap(0, Ordering::AcqRel))
+    pub(crate) fn owed(&self) -> Owed {
+        Self::owed_at(self.ordered())
+    }
+
+    /// Leave a kernel body, taking any death the thread owes.
+    ///
+    /// [`Leave::Death`] obliges the caller to land the death now: the body has
+    /// unwound (every lock and buffer it held is released), so this is the
+    /// first safe point the thread can die at, and it never returns to user
+    /// mode. A thread `returning` to user mode while a stop is owed stays in
+    /// the kernel and takes the stop first ([`Leave::Stop`]); one leaving for
+    /// good — an exit — owes no stop. The generation itself stays: only a
+    /// continue moves it.
+    #[must_use]
+    pub(crate) fn leave(&self, returning: bool) -> Leave {
+        let mut word = self.word.load(Ordering::Acquire);
+        loop {
+            if returning && Self::owed_at(word) == Owed::Stop {
+                return Leave::Stop;
+            }
+            match self.word.compare_exchange_weak(
+                word,
+                word & JOB_FIELD,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(previous) => return self.taken(previous).map_or(Leave::Left, Leave::Death),
+                Err(current) => word = current,
+            }
+        }
     }
 
     /// Whether a death is owed here.
@@ -242,6 +324,16 @@ impl ThreadGate {
     /// Record `teardown` unless a death is already owed, reporting whether
     /// this claim recorded it and where the death is owed.
     fn claim(&self, teardown: DeferredTeardown) -> (bool, KillSite) {
+        self.claim_then(teardown, || {})
+    }
+
+    /// [`Self::claim`], running `recorded` the moment the death is on the
+    /// word and so takeable.
+    fn claim_then(&self, teardown: DeferredTeardown, recorded: impl FnOnce()) -> (bool, KillSite) {
+        // Counted before it can be owed, and uncounted only after: the count
+        // may read high but never below the deaths owed, so a dispatch that
+        // reads it zero has none to land.
+        OWED_KILLS.fetch_add(1, Ordering::Relaxed);
         let mut word = self.word.load(Ordering::Acquire);
         loop {
             let site = if word & IN_KERNEL == 0 {
@@ -250,6 +342,7 @@ impl ThreadGate {
                 KillSite::Boundary
             };
             if word & OWED != 0 {
+                OWED_KILLS.fetch_sub(1, Ordering::Relaxed);
                 return (false, site);
             }
             match self.word.compare_exchange_weak(
@@ -259,7 +352,7 @@ impl ThreadGate {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    OWED_KILLS.fetch_add(1, Ordering::Relaxed);
+                    recorded();
                     return (true, site);
                 }
                 Err(current) => word = current,
@@ -267,18 +360,66 @@ impl ThreadGate {
         }
     }
 
-    /// Take the death owed here, leaving the in-kernel mark as it was.
+    /// Take the death owed here, leaving the in-kernel mark and the
+    /// job-control generation as they were.
     fn take_owed(&self) -> Option<DeferredTeardown> {
-        self.taken(self.word.fetch_and(IN_KERNEL, Ordering::AcqRel))
+        self.taken(self.word.fetch_and(IN_KERNEL | JOB_FIELD, Ordering::AcqRel))
     }
 
-    /// Whether a death is owed here, read as a read-modify-write so it is
-    /// ordered against a claim racing it: a stop checks this after stopping
-    /// the thread, and a claim resumes the thread after recording, so one of
-    /// the two always sees the other.
-    fn kill_pending_ordered(&self) -> bool {
-        self.owed_in(self.word.fetch_or(0, Ordering::AcqRel))
-            .is_some()
+    /// The word, read as a read-modify-write: it sees every other party's
+    /// last write, and is ordered against them through the word's own
+    /// modification order, so two parties each acting on one location and
+    /// then reading this one cannot both miss each other.
+    fn ordered(&self) -> u64 {
+        self.word.fetch_or(0, Ordering::AcqRel)
+    }
+
+    /// Give a thread joining its group the group's generation as its own.
+    ///
+    /// Unconditional, since a fresh gate holds no decision to keep: compared,
+    /// a group past half the generation space would read older than the
+    /// fresh gate's, and the thread would ignore its job control.
+    pub(crate) fn adopt_job(&self, job: JobGeneration) {
+        let _ = self
+            .word
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                Some(Self::with_job(word, job))
+            });
+    }
+
+    /// Give the thread `job`, unless it already holds a newer one: a fan-out
+    /// that falls behind the next one cannot undo it.
+    pub(crate) fn apply_job(&self, job: JobGeneration) {
+        let _ = self
+            .word
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                job.is_newer_than(Self::job_in(word))
+                    .then(|| Self::with_job(word, job))
+            });
+    }
+
+    /// Advance the thread's own generation toward `stopped`, returning the
+    /// generation that decides it and whether this call moved it: the job
+    /// control of a process no thread-group table keeps, which is its one
+    /// thread.
+    fn advance_job(&self, stopped: bool) -> (JobGeneration, bool) {
+        let mut word = self.word.load(Ordering::Acquire);
+        loop {
+            let current = Self::job_in(word);
+            let next = current.toward(stopped);
+            if next == current {
+                return (current, false);
+            }
+            match self.word.compare_exchange_weak(
+                word,
+                Self::with_job(word, next),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return (next, true),
+                Err(seen) => word = seen,
+            }
+        }
     }
 
     /// The death a word just replaced recorded, keeping the owed count in
@@ -321,7 +462,7 @@ static OWED_KILLS: AtomicUsize = AtomicUsize::new(0);
 /// admission is then refused. [`Errno::AlreadyExists`] when `task` already has
 /// a gate.
 pub fn install_gate(task: u64, process: ProcessId) -> Result<(), Errno> {
-    let gate = Arc::try_new(ThreadGate::new(process)).map_err(|_| Errno::OutOfMemory)?;
+    let gate = Arc::try_new(ThreadGate::new(task, process)).map_err(|_| Errno::OutOfMemory)?;
     let mut gates = GATES.write();
     let gates = gates.get_or_insert_with(|| {
         HashMap::with_hasher(BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED))
@@ -487,23 +628,146 @@ pub fn take_owed_kill(task: u64) -> Option<DeferredTeardown> {
     gate_of(task).and_then(|gate| gate.take_owed())
 }
 
-/// Whether a death is owed by `task`, for a party not holding its gate: the
-/// in-kernel park loops ask after every wake, and unwind with
-/// `Errno::Interrupted` rather than park again.
+/// Whether a death is owed by `task`: the in-kernel park loops ask after
+/// every wake, and unwind with `Errno::Interrupted` rather than park again.
+///
+/// A thread asking about itself — every park loop does — reads the gate its
+/// CPU publishes for it; only a question about another thread reaches the
+/// registry.
 #[must_use]
 pub fn kill_pending(task: u64) -> bool {
-    gate_of(task).is_some_and(|gate| gate.kill_pending())
+    crate::waitq::wait_arch()
+        .and_then(crate::waitq::WaitQueueArch::current_cpu)
+        .and_then(|cpu| {
+            crate::kthread::with_current_gate(cpu, |gate| {
+                (gate.task == task).then(|| gate.kill_pending())
+            })
+        })
+        .flatten()
+        .unwrap_or_else(|| gate_of(task).is_some_and(|gate| gate.kill_pending()))
 }
 
-/// Drop every trace of `task` from the gates on teardown — its in-kernel
-/// window, any death it owes, and its registration. Idempotent; driven by the
-/// one shared thread teardown once the thread has left its group, so a death
-/// claimed while it was still a member is cleared here and none can be claimed
-/// after.
+/// Drop every trace of `task` from the gates on teardown — any death it owes,
+/// and its registration. Idempotent; driven by the one shared thread teardown
+/// once the thread has left its group, so a death claimed while it was still
+/// a member is cleared here and none can be claimed after.
 pub fn clear_kill_gate(task: u64) {
     let removed = GATES.write().as_mut().and_then(|gates| gates.remove(&task));
     if let Some(gate) = removed {
-        let _ = gate.exit_take();
+        let _ = gate.take_owed();
+    }
+}
+
+/// A job-control decision for one process and the threads it governs.
+struct JobTransition {
+    /// The generation that decides the process.
+    job: JobGeneration,
+    /// Whether this decision moved the process, rather than restating it.
+    moved: bool,
+    /// Every live thread of the process, with its gate.
+    members: Vec<(u64, Arc<ThreadGate>)>,
+}
+
+/// What a fan-out leaves a thread's scheduler state as, for the gate word it
+/// now reads.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum JobHold {
+    /// Stopped by the scheduler: the thread is outside any kernel body.
+    Hold,
+    /// Released: no stop is owed.
+    Release,
+    /// Left alone: the thread stops itself at its kernel edge, or owes a
+    /// death that its killer brings it to.
+    Leave,
+}
+
+fn job_hold(word: u64) -> JobHold {
+    if word & OWED != 0 {
+        JobHold::Leave
+    } else if !ThreadGate::job_in(word).is_stopped() {
+        JobHold::Release
+    } else if word & IN_KERNEL != 0 {
+        JobHold::Leave
+    } else {
+        JobHold::Hold
+    }
+}
+
+/// Take the stop the calling thread owes at an edge of a kernel body, where
+/// it holds no kernel state, returning once no stop is owed — `false` when no
+/// stop can be taken here (no scheduler hook yet, a thread already retired),
+/// and the edge goes on without one.
+///
+/// The thread stops itself through the scheduler, then reads its gate as a
+/// read-modify-write: a continue moves the generation on that word before it
+/// resumes the thread, so either the read sees the continue and the stop is
+/// withdrawn here, or the continue's resume follows the stop and ends it.
+pub(crate) fn stop_at_edge(gate: &ThreadGate) -> bool {
+    crate::waitq::wait_arch().is_some_and(|hook| {
+        stop_through(gate, hook, |cpu| {
+            crate::kthread::reschedule_current(cpu, RescheduleAction::Yield)
+        })
+    })
+}
+
+/// [`stop_at_edge`] through `hook`, suspending the stopped thread with
+/// `suspend`, which reports whether it could.
+fn stop_through(
+    gate: &ThreadGate,
+    hook: &dyn crate::waitq::WaitQueueArch,
+    mut suspend: impl FnMut(tairix_kernel_sched_api::CpuId) -> bool,
+) -> bool {
+    loop {
+        if gate.owed() != Owed::Stop {
+            return true;
+        }
+        let Some(cpu) = hook.current_cpu() else {
+            return false;
+        };
+        if !hook.stop(gate.task) {
+            return false;
+        }
+        if gate.owed() != Owed::Stop {
+            let _ = hook.resume(gate.task);
+            return true;
+        }
+        if !suspend(cpu) {
+            let _ = hook.resume(gate.task);
+            return false;
+        }
+    }
+}
+
+/// Enter a kernel body on `gate`, taking first any stop it owes at this edge;
+/// reports whether the body may run, which it may not while a death is owed.
+pub(crate) fn enter_body(gate: &ThreadGate) -> bool {
+    enter_body_through(gate, stop_at_edge)
+}
+
+/// [`enter_body`], taking an owed stop through `stop`, which reports whether
+/// it could.
+fn enter_body_through(gate: &ThreadGate, mut stop: impl FnMut(&ThreadGate) -> bool) -> bool {
+    let mut owed = gate.enter();
+    while owed == Owed::Stop {
+        if !stop(gate) {
+            // No stop can be taken here, but a death still skips the body.
+            return gate.owed() != Owed::Death;
+        }
+        owed = gate.owed();
+    }
+    owed == Owed::Nothing
+}
+
+/// Leave a kernel body on `gate`, taking first any stop it owes when the
+/// thread is `returning` to user mode, and return the death it owes.
+pub(crate) fn leave_body(gate: &ThreadGate, returning: bool) -> Option<DeferredTeardown> {
+    let mut returning = returning;
+    loop {
+        match gate.leave(returning) {
+            Leave::Left => return None,
+            Leave::Death(teardown) => return Some(teardown),
+            Leave::Stop => returning = stop_at_edge(gate),
+        }
     }
 }
 
@@ -1126,87 +1390,131 @@ where
     ///
     /// A continue delivered to a child that is not actually stopped is a
     /// harmless no-op — matching the long-standing Unix behaviour where
-    /// continuing a running process succeeds without effect. A thread that has
-    /// exited but is not yet reaped answers [`SchedError::InvalidState`], folded
-    /// to `Ok` as a continue to a zombie is. A child with no thread to reach,
-    /// or one the scheduler no longer knows, fails closed with
-    /// [`Errno::NotFound`].
+    /// continuing a running process succeeds without effect. A child with no
+    /// live thread fails closed with [`Errno::NotFound`].
     fn resume(&self, child: ProcessId) -> Result<(), Errno> {
         // The resume also clears any stop the parent never observed: a
         // stale "stopped" report after the child is running again would
         // mislead the job table.
-        self.wait.record_continue(child);
-        let resumed = self.with_group(child, |threads| {
-            let mut resumed = false;
-            for &thread in threads {
-                match self.scheduler.resume(thread) {
-                    Ok(()) | Err(SchedError::InvalidState) => resumed = true,
-                    Err(_) => {}
-                }
-            }
-            resumed
-        });
-        if resumed {
-            Ok(())
-        } else {
-            Err(Errno::NotFound)
-        }
+        let (job, _) = self.drive_job(child, false)?;
+        self.wait.record_continue(child, job);
+        Ok(())
     }
 
     /// Stop a child without terminating it ([`Signal::Stop`]).
     ///
     /// Every thread of the group is stopped — stopping only the leader would
     /// leave the rest of the process running, which is not what "stopped"
-    /// means to a job-control shell — and the stop recorded for a
-    /// `WaitFlags::STOPPED` wait. A child the scheduler no longer knows fails
-    /// closed with [`Errno::NotFound`].
+    /// means to a job-control shell — and the stop recorded once for a
+    /// `WaitFlags::STOPPED` wait, unless every thread is already dying. A
+    /// child with no live thread fails closed with [`Errno::NotFound`].
     fn stop(&self, child: ProcessId) -> Result<(), Errno> {
-        let (reached, held) = self.with_group(child, |threads| {
-            let (mut reached, mut held) = (false, false);
-            for &thread in threads {
-                if self.scheduler.stop(thread).is_err() {
-                    continue;
-                }
-                reached = true;
-                // A thread owing a death must reach its boundary or retire, so
-                // a stop landing after a kill's resume is withdrawn.
-                if gate_of(thread).is_some_and(|gate| gate.kill_pending_ordered()) {
-                    let _ = self.scheduler.resume(thread);
-                } else {
-                    held = true;
-                }
-            }
-            (reached, held)
-        });
+        let (job, held) = self.drive_job(child, true)?;
         if held {
-            self.wait.record_stop(child, Signal::Stop);
+            self.wait.record_stop(child, Signal::Stop, job);
         }
-        if reached {
-            Ok(())
-        } else {
-            Err(Errno::NotFound)
-        }
+        Ok(())
     }
 
-    /// Run `apply` over every live thread of `process`, in ascending id order,
-    /// holding the thread-group table's read lock across it.
+    /// Move `process` to the job-control state `stopped` and bring each of
+    /// its threads to it, returning the generation that decides it and
+    /// whether this call moved the process and any thread of it will hold.
     ///
-    /// The lock is what makes a stop or resume exact against a thread being
-    /// born into the group: admission registers the thread under the write
-    /// lock and stops it there when its creator is stopped, so a thread joins
-    /// either before `apply` sees the group or after it has run. A process the
-    /// table lists no thread for has none a signal may reach — its record is
-    /// not yet published, or already withdrawn, and the task its number names
-    /// belongs to the admission or teardown that owns it. A producer wired with
-    /// no table treats the target as the single thread its process id names.
-    fn with_group<R>(&self, process: ProcessId, apply: impl FnOnce(&[u64]) -> R) -> R {
-        match self.caps {
-            Some(caps) => {
-                let table = caps.read();
-                let threads: Vec<u64> = table.threads_of(process).map(|thread| thread.0).collect();
-                apply(&threads)
+    /// The generation is advanced, and the threads it governs collected,
+    /// under the thread-group table's read lock alone: a registration holds
+    /// the write lock and gives the thread the generation it finds, so a
+    /// thread joins either before the collection or already holding the
+    /// decision. The threads are then driven with no lock held, so a fan-out
+    /// over a large group blocks no other CPU's syscall.
+    fn drive_job(&self, process: ProcessId, stopped: bool) -> Result<(JobGeneration, bool), Errno> {
+        let transition = self
+            .job_transition(process, stopped)
+            .ok_or(Errno::NotFound)?;
+        let mut holds = false;
+        for (thread, gate) in &transition.members {
+            gate.apply_job(transition.job);
+            holds |= self.reconcile(*thread, gate);
+        }
+        Ok((transition.job, transition.moved && holds))
+    }
+
+    /// Advance `process`'s generation toward `stopped` and collect every live
+    /// thread of it with its gate. A producer wired with no table treats the
+    /// target as the single thread its process id names, whose own gate then
+    /// carries the generation.
+    fn job_transition(&self, process: ProcessId, stopped: bool) -> Option<JobTransition> {
+        let Some(caps) = self.caps else {
+            let gate = gate_of(process.0)?;
+            let (job, moved) = gate.advance_job(stopped);
+            return Some(JobTransition {
+                job,
+                moved,
+                members: alloc::vec![(process.0, gate)],
+            });
+        };
+        let table = caps.read();
+        let (job, moved) = table.advance_job(process, stopped)?;
+        let gates = GATES.read();
+        let members = table
+            .threads_of(process)
+            .filter_map(|thread| {
+                let gate = gates.as_ref()?.get(&thread.0)?;
+                Some((thread.0, Arc::clone(gate)))
+            })
+            .collect();
+        Some(JobTransition {
+            job,
+            moved,
+            members,
+        })
+    }
+
+    /// Bring `thread`'s scheduler state to what its gate now decides,
+    /// re-reading the gate after acting until a read agrees with the one
+    /// acted on, and report whether the thread will hold stopped.
+    ///
+    /// Every party that changes the decision on the gate word acts after it:
+    /// a stop or continue reconciles, a death's killer brings the thread to
+    /// it, and a thread entering a kernel body takes its own stop at the
+    /// edge. Only a stop made here on an older read can outlive every one of
+    /// them, so a decision to leave the thread alone takes it back.
+    fn reconcile(&self, thread: u64, gate: &ThreadGate) -> bool {
+        self.reconcile_deciding(thread, gate, |_| {})
+    }
+
+    /// [`Self::reconcile`], running `decided` between each read of the gate
+    /// and the scheduler action that read decides.
+    fn reconcile_deciding(
+        &self,
+        thread: u64,
+        gate: &ThreadGate,
+        mut decided: impl FnMut(JobHold),
+    ) -> bool {
+        let mut word = gate.ordered();
+        let mut holding = false;
+        loop {
+            let hold = job_hold(word);
+            decided(hold);
+            match hold {
+                JobHold::Hold => {
+                    let _ = self.scheduler.stop(thread);
+                    holding = true;
+                }
+                JobHold::Release => {
+                    let _ = self.scheduler.resume(thread);
+                    holding = false;
+                }
+                JobHold::Leave if holding => {
+                    let _ = self.scheduler.resume(thread);
+                    holding = false;
+                }
+                JobHold::Leave => {}
             }
-            None => apply(&[process.0]),
+            let now = gate.ordered();
+            if job_hold(now) == hold {
+                return now & OWED == 0 && ThreadGate::job_in(now).is_stopped();
+            }
+            word = now;
         }
     }
 
@@ -1593,6 +1901,15 @@ mod tests {
         gate_of(task).expect("the thread has its gate")
     }
 
+    /// Leave `gate`'s kernel body for good, as an exit does: the death taken
+    /// there, which no stop defers.
+    fn left(gate: &ThreadGate) -> Option<DeferredTeardown> {
+        match gate.leave(false) {
+            Leave::Death(teardown) => Some(teardown),
+            Leave::Left | Leave::Stop => None,
+        }
+    }
+
     /// Drive the two halves of the producer in the order the syscall
     /// handler drives them for a signal aimed at the sender's own child:
     /// resolve the pid against the sender's children, then deliver.
@@ -1698,16 +2015,16 @@ mod tests {
     fn the_kill_gate_round_trips_enter_take_and_clear() {
         // Pure gate bookkeeping, on raw ids no scheduler-backed test uses.
         let open = gate(0x00de_ad01);
-        assert!(!open.enter());
+        assert_eq!(open.enter(), Owed::Nothing);
         assert!(!kill_pending(0x00de_ad01));
-        assert_eq!(open.exit_take(), None);
+        assert_eq!(left(&open), None);
         // Clearing an open window leaves nothing behind, registration included,
         // while the thread's own handle still answers.
         let cleared = gate(0x00de_ad02);
-        assert!(!cleared.enter());
+        assert_eq!(cleared.enter(), Owed::Nothing);
         clear_kill_gate(0x00de_ad02);
         assert!(gate_of(0x00de_ad02).is_none());
-        assert_eq!(cleared.exit_take(), None);
+        assert_eq!(left(&cleared), None);
         assert_eq!(
             install_gate(0x00de_ad01, ProcessId(0x00de_ad01)),
             Err(Errno::AlreadyExists),
@@ -1735,7 +2052,7 @@ mod tests {
                 let mut taken = 0usize;
                 for _ in 0..ROUNDS {
                     let _ = held.enter();
-                    taken += usize::from(held.exit_take().is_some());
+                    taken += usize::from(left(&held).is_some());
                 }
                 taken
             })
@@ -1746,10 +2063,10 @@ mod tests {
             killer_took += usize::from(held.take_owed().is_some());
         }
         let boundary_took = victim.join().expect("the victim thread completes");
-        let left = usize::from(held.exit_take().is_some());
+        let leaver_took = usize::from(left(&held).is_some());
 
         assert_eq!(
-            boundary_took + killer_took + left,
+            boundary_took + killer_took + leaver_took,
             recorded,
             "every recorded death is taken exactly once"
         );
@@ -1770,7 +2087,7 @@ mod tests {
                 process: ProcessId(task),
             };
             assert!(held.claim(plain).0);
-            assert_eq!(held.exit_take(), Some(plain));
+            assert_eq!(left(&held), Some(plain));
             clear_kill_gate(task);
         }
     }
@@ -1792,7 +2109,7 @@ mod tests {
         // block-I/O descriptor), so the kill must not land here — the
         // regression this pins down is a killed writer leaving its volume's
         // lock held forever, deadlocking every later filesystem call.
-        assert!(!gate_in_hand(child).enter());
+        assert_eq!(gate_in_hand(child).enter(), Owed::Nothing);
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
@@ -1808,12 +2125,10 @@ mod tests {
         );
         // The syscall boundary takes the deferred kill exactly once.
         assert_eq!(
-            gate_in_hand(child)
-                .exit_take()
-                .and_then(DeferredTeardown::reaped_status),
+            left(&gate_in_hand(child)).and_then(DeferredTeardown::reaped_status),
             Signal::Kill.termination_status()
         );
-        assert_eq!(gate_in_hand(child).exit_take(), None);
+        assert_eq!(left(&gate_in_hand(child)), None);
     }
 
     #[test]
@@ -1828,7 +2143,7 @@ mod tests {
         .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
-        assert!(!gate_in_hand(child).enter());
+        assert_eq!(gate_in_hand(child).enter(), Owed::Nothing);
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),
             Ok(())
@@ -1842,9 +2157,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            gate_in_hand(child)
-                .exit_take()
-                .and_then(DeferredTeardown::reaped_status),
+            left(&gate_in_hand(child)).and_then(DeferredTeardown::reaped_status),
             Signal::Terminate.termination_status()
         );
         assert_eq!(scheduler.live_task_count(), 1);
@@ -1934,11 +2247,11 @@ mod tests {
         let task = 0x00c0_ffe8;
         let held = gate(task);
 
-        assert!(!held.enter());
+        assert_eq!(held.enter(), Owed::Nothing);
         assert_eq!(claim_one(exit_of(task, 137)).site, KillSite::Boundary);
         assert!(kill_pending(task), "the body's park loops must unwind");
         assert_eq!(
-            held.exit_take().and_then(DeferredTeardown::reaped_status),
+            left(&held).and_then(DeferredTeardown::reaped_status),
             Some(137)
         );
         assert!(!kill_pending(task));
@@ -1959,8 +2272,8 @@ mod tests {
         };
 
         assert_eq!(claim_one(plain).site, KillSite::Retire);
-        assert!(held.enter(), "the body must not run");
-        assert_eq!(held.exit_take(), Some(plain));
+        assert_eq!(held.enter(), Owed::Death, "the body must not run");
+        assert_eq!(left(&held), Some(plain));
         clear_kill_gate(driver);
     }
 
@@ -2564,7 +2877,7 @@ mod tests {
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert!(
-            !gate_in_hand(child).enter(),
+            gate_in_hand(child).enter() == Owed::Nothing,
             "inside a kernel body, owing nothing yet"
         );
         assert_eq!(claim_one(exit_of(child, 137)).site, KillSite::Boundary);
@@ -2585,12 +2898,364 @@ mod tests {
         );
 
         assert_eq!(
-            gate_in_hand(child)
-                .exit_take()
-                .and_then(DeferredTeardown::reaped_status),
+            left(&gate_in_hand(child)).and_then(DeferredTeardown::reaped_status),
             Some(137)
         );
         clear_kill_gate(child);
+    }
+
+    fn stopped_flags() -> WaitFlags {
+        WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
+            .expect("defined bits")
+    }
+
+    /// A stop never stops a thread inside a kernel body. Such a thread may hold
+    /// kernel state another thread waits on — a lock handed to it while it
+    /// slept — and stopped there it would hold that state until the continue,
+    /// closing a shared disk to every user. The scheduler leaves it parked, a
+    /// wake runs it on, and it owes the stop at its edge, while the job reads
+    /// stopped at once.
+    #[test]
+    fn a_stop_leaves_a_thread_inside_a_kernel_body_to_its_edge() {
+        let (wait, scheduler) = scaffold();
+        let id = scheduler
+            .spawn_parked(0, Priority::Normal, |_ctx| TaskAction::Exit)
+            .expect("admitted");
+        let held = gate(id);
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(id),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
+
+        assert_eq!(held.enter(), Owed::Nothing, "parked inside a kernel body");
+        let pid = id.cast_signed();
+        assert_eq!(
+            signal_child(&signaller, ProcessId(7), pid, Signal::Stop),
+            Ok(())
+        );
+        assert_eq!(scheduler.state_of(id), TaskState::Parked, "left parked");
+        assert_eq!(scheduler.unpark(id), Ok(()), "the lock's handoff wakes it");
+        assert_eq!(
+            scheduler.state_of(id),
+            TaskState::Ready,
+            "to run on and release it"
+        );
+        assert_eq!(held.leave(true), Leave::Stop, "its edge owes the stop");
+        assert_eq!(
+            wait.poll(ProcessId(7), tairix_abi::WAIT_PID_ANY, stopped_flags()),
+            Ok(WaitedChild {
+                pid: id,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
+        );
+
+        assert_eq!(
+            signal_child(&signaller, ProcessId(7), pid, Signal::Continue),
+            Ok(())
+        );
+        assert_eq!(
+            held.leave(true),
+            Leave::Left,
+            "the continue ended what it owed"
+        );
+        clear_kill_gate(id);
+    }
+
+    /// A stop's fan-out that falls behind a continue's carries an older
+    /// generation, and changes nothing the continue decided.
+    #[test]
+    fn a_stop_fan_out_overtaken_by_a_continue_cannot_undo_it() {
+        let (wait, scheduler) = scaffold();
+        let (child, child_pid) = spawn_child(scheduler);
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
+        let held = gate_in_hand(child);
+
+        let (stop, moved) = held.advance_job(true);
+        assert!(moved && stop.is_stopped(), "the stop is decided");
+        assert_eq!(
+            signal_child(&signaller, ProcessId(7), child_pid, Signal::Continue),
+            Ok(())
+        );
+        held.apply_job(stop);
+        assert_eq!(held.owed(), Owed::Nothing, "the late fan-out is refused");
+        assert!(
+            !signaller.reconcile(child, &held),
+            "so the thread does not hold"
+        );
+        assert!(!scheduler.state_of(child).is_stopped());
+        clear_kill_gate(child);
+    }
+
+    /// A stop decided on a read that a kill then overtakes — the thread
+    /// entering its body, the kill claiming its death there and resuming it,
+    /// all before the stop lands — is taken back. Left standing, it held a
+    /// thread owing a death nobody would bring it to, and the process was
+    /// never reclaimed.
+    #[test]
+    fn a_stale_stop_a_kill_overtakes_is_taken_back() {
+        let _gate = running_kill_test_lock();
+        let (wait, scheduler) = scaffold();
+        let (child, _) = spawn_child(scheduler);
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
+        let held = gate_in_hand(child);
+        let (stop, _) = held.advance_job(true);
+        assert!(stop.is_stopped());
+
+        let mut raced = false;
+        let holds = signaller.reconcile_deciding(child, &held, |hold| {
+            if hold == JobHold::Hold && !raced {
+                raced = true;
+                assert_eq!(held.enter(), Owed::Stop, "the thread enters its body");
+                let claim = claim_one(exit_of(child, 137));
+                assert_eq!(claim.site, KillSite::Boundary);
+                assert!(signaller.stop_claimed(claim), "the kill resumes it");
+            }
+        });
+        assert!(raced);
+        assert!(!holds, "a thread owing a death does not hold");
+        assert!(
+            !scheduler.state_of(child).is_stopped(),
+            "the stale stop was taken back"
+        );
+        assert_eq!(
+            left(&held).and_then(DeferredTeardown::reaped_status),
+            Some(137),
+            "its boundary lands the death"
+        );
+        clear_kill_gate(child);
+    }
+
+    /// A stop decided on a read that the thread's entry into a kernel body
+    /// then overtakes — a continue lets it in, it parks there on a lock, and a
+    /// newer stop finds it inside — is taken back. Left standing, it held the
+    /// thread parked inside the body, so the lock handed to it stayed held
+    /// until the continue.
+    #[test]
+    fn a_stale_stop_a_kernel_entry_overtakes_is_taken_back() {
+        let (wait, scheduler) = scaffold();
+        let id = scheduler
+            .spawn_parked(0, Priority::Normal, |_ctx| TaskAction::Exit)
+            .expect("admitted");
+        let held = gate(id);
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(id),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
+        let (stop, _) = held.advance_job(true);
+
+        let mut raced = false;
+        let holds = signaller.reconcile_deciding(id, &held, |hold| {
+            if hold == JobHold::Hold && !raced {
+                raced = true;
+                let continued = stop.toward(false);
+                held.apply_job(continued);
+                assert_eq!(held.enter(), Owed::Nothing, "the thread enters its body");
+                held.apply_job(continued.toward(true));
+            }
+        });
+        assert!(raced);
+        assert!(holds, "the job is stopped, at the thread's edge");
+        assert_eq!(
+            scheduler.state_of(id),
+            TaskState::Parked,
+            "the stale stop was taken back"
+        );
+        assert_eq!(scheduler.unpark(id), Ok(()), "the lock's handoff wakes it");
+        assert_eq!(scheduler.state_of(id), TaskState::Ready, "to release it");
+        assert_eq!(
+            held.leave(true),
+            Leave::Stop,
+            "its edge owes the newer stop"
+        );
+        clear_kill_gate(id);
+    }
+
+    /// A body whose owed stop cannot be taken at its edge still never runs
+    /// for a thread a death has been recorded against meanwhile.
+    #[test]
+    fn a_body_whose_edge_stop_fails_still_skips_for_a_death() {
+        let _gate = running_kill_test_lock();
+        let racing = ThreadGate::new(4, ProcessId(4));
+        let _ = racing.advance_job(true);
+        let ran = enter_body_through(&racing, |gate| {
+            let (recorded, site) = gate.claim(exit_of(4, 137));
+            assert!(recorded);
+            assert_eq!(site, KillSite::Boundary);
+            false
+        });
+        assert!(!ran, "the death skips the body");
+        assert_eq!(
+            left(&racing).and_then(DeferredTeardown::reaped_status),
+            Some(137)
+        );
+    }
+
+    /// A thread joining its group takes the group's generation however far
+    /// the group has come: compared rather than adopted, a group past half the
+    /// generation space reads older than a fresh gate's, and the thread runs
+    /// through every stop.
+    #[test]
+    fn a_joining_thread_adopts_its_groups_generation_however_far_it_has_come() {
+        let joining = ThreadGate::new(5, ProcessId(5));
+        let far = JobGeneration::from_bits((1 << (JobGeneration::BITS - 1)) | 1);
+        joining.adopt_job(far);
+        assert_eq!(joining.owed(), Owed::Stop, "it joins stopped");
+        joining.apply_job(far.toward(false));
+        assert_eq!(
+            joining.owed(),
+            Owed::Nothing,
+            "and follows the next continue"
+        );
+    }
+
+    /// A hook that stops and resumes a real scheduler, for driving an edge
+    /// stop without a kthread; `on_stop` lands a racing call just after the
+    /// thread has stopped itself.
+    struct EdgeHook {
+        scheduler: &'static Scheduler<TestArch>,
+        on_stop: SpinLock<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl crate::waitq::WaitQueueArch for EdgeHook {
+        fn unpark(&self, id: SchedTaskId) -> bool {
+            self.scheduler.unpark(id).is_ok()
+        }
+
+        fn now_ns(&self) -> u64 {
+            0
+        }
+
+        fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+
+        fn current_cpu(&self) -> Option<CpuId> {
+            Some(0)
+        }
+
+        fn stop(&self, id: SchedTaskId) -> bool {
+            let stopped = self.scheduler.stop(id).is_ok();
+            if let Some(racing) = self.on_stop.lock().take() {
+                racing();
+            }
+            stopped
+        }
+
+        fn resume(&self, id: SchedTaskId) -> bool {
+            self.scheduler.resume(id).is_ok()
+        }
+    }
+
+    /// Run `edge` as the body of a task stopping itself at a kernel edge, so
+    /// the task is on its CPU, as a thread taking an edge stop always is.
+    fn at_an_edge(
+        edge: impl FnOnce(&'static Scheduler<TestArch>, Arc<ThreadGate>) + Send + 'static,
+    ) {
+        let (_wait, scheduler) = scaffold();
+        let ran = Arc::new(AtomicBool::new(false));
+        let body_ran = Arc::clone(&ran);
+        let mut edge = Some(edge);
+        let id_cell = Arc::new(AtomicU64::new(0));
+        let body_id = Arc::clone(&id_cell);
+        let id = scheduler
+            .spawn(0, Priority::Normal, move |_ctx| {
+                if let Some(edge) = edge.take() {
+                    edge(scheduler, gate_in_hand(body_id.load(Ordering::Acquire)));
+                    body_ran.store(true, Ordering::Release);
+                }
+                TaskAction::Exit
+            })
+            .expect("admitted");
+        let _ = gate(id);
+        id_cell.store(id, Ordering::Release);
+        assert_eq!(scheduler.step(0), Ok(StepOutcome::Ran(id)));
+        assert!(
+            ran.load(Ordering::Acquire),
+            "the edge ran on the task's CPU"
+        );
+        clear_kill_gate(id);
+    }
+
+    /// A continue that lands between the thread stopping itself and its
+    /// read of the gate withdraws the stop there: the thread never suspends.
+    #[test]
+    fn an_edge_stop_a_continue_overtakes_is_withdrawn() {
+        at_an_edge(|scheduler, held| {
+            let (stop, _) = held.advance_job(true);
+            let racing = Arc::clone(&held);
+            let hook = EdgeHook {
+                scheduler,
+                on_stop: SpinLock::new(Some(Box::new(move || {
+                    racing.apply_job(stop.toward(false));
+                }))),
+            };
+            assert!(stop_through(&held, &hook, |_cpu| panic!(
+                "withdrawn, never suspended"
+            )));
+            assert_eq!(scheduler.state_of(held.task), TaskState::Running);
+        });
+    }
+
+    /// A stop the gate still owes once the thread has stopped itself suspends
+    /// it until the continue, which resumes it.
+    #[test]
+    fn an_edge_stop_holds_until_the_continue() {
+        at_an_edge(|scheduler, held| {
+            let (stop, _) = held.advance_job(true);
+            let hook = EdgeHook {
+                scheduler,
+                on_stop: SpinLock::new(None),
+            };
+            let mut suspended = 0;
+            assert!(stop_through(&held, &hook, |_cpu| {
+                suspended += 1;
+                assert_eq!(scheduler.state_of(held.task), TaskState::StoppedOnCpu);
+                held.apply_job(stop.toward(false));
+                assert_eq!(scheduler.resume(held.task), Ok(()), "the continue's resume");
+                true
+            }));
+            assert_eq!(suspended, 1);
+            assert_eq!(held.owed(), Owed::Nothing);
+        });
+    }
+
+    /// A death is counted before it is on the gate, where a taker can reach
+    /// it. Counted after, a take landing in between drove the count below the
+    /// deaths owed, and a dispatch reading it zero left another thread's death
+    /// unlanded for good.
+    #[test]
+    fn a_death_is_counted_before_anyone_can_take_it() {
+        let _gate = running_kill_test_lock();
+        let racing = ThreadGate::new(2, ProcessId(2));
+        let (recorded, _) = racing.claim_then(
+            DeferredTeardown::Plain {
+                process: ProcessId(2),
+            },
+            || {
+                assert!(
+                    OWED_KILLS.load(Ordering::Relaxed) >= 1,
+                    "takeable before it was counted"
+                );
+            },
+        );
+        assert!(recorded);
+        assert!(racing.take_owed().is_some());
     }
 
     #[test]

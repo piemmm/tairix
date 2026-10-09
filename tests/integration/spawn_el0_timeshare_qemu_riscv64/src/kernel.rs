@@ -11,17 +11,18 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
+use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
-use tairix_arch_riscv64::userentry::UserMode;
+use tairix_arch_riscv64::userentry::USER_MODE;
 use tairix_arch_riscv64::{
     handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
     SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
     Yielder,
@@ -338,20 +339,25 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // repointing (unlike x86_64's per-CPU `set_kernel_rsp0`).
     let cs = ContextSwitchHal::new();
     for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b)] {
-        let user_mode = UserMode::new();
         let pre_resume = move |_top: u64| {
             // SAFETY: paging is enabled and `root_phys` is the Sv39 root of a
             // space that maps the low identity window the running dispatcher
             // executes from — exactly `activate_user_root`'s contract.
             unsafe { activate_user_root(root_phys) };
         };
-        let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+        let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
             // SAFETY: by the time this body runs the task has been dispatched,
             // so its `pre_resume` hook reactivated `satp`, and the trap vector +
             // dispatch callback are installed; the program's first `ecall` is
             // handled. `build_process_image` mapped the entry/stack as user
             // pages.
-            unsafe { user_mode.enter_user(entry) }
+            unsafe {
+                UserThreadEntry {
+                    port: &USER_MODE,
+                    regs: entry,
+                }
+                .enter(yielder)
+            }
         };
         if spawn_user_kthread(&sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work).is_err() {
             qemu_exit::exit_failure(FAIL_SPAWN);

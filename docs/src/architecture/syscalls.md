@@ -1596,7 +1596,10 @@ analogue the shell's job control uses): it returns the child's PID and
 writes a *stopped* record — **without reaping the child**, which stays
 tracked and resumable through `Signal::Continue`. Each stop is reported
 exactly once (edge-triggered; a `Continue` clears an unobserved stop so a
-stale report never follows a resume, and an exit supersedes one). With the
+stale report never follows a resume, and an exit supersedes one). Both
+reports carry the job-control generation they were decided at, and one no
+newer than the last is dropped, so a stop's report arriving after the
+continue that overtook it never reads a running child stopped. With the
 bit clear a stopped child is invisible to `wait`, exactly as before. The
 simple wrapper for a parent with no job control is `tairix_rt::wait_exit`.
 
@@ -1655,9 +1658,25 @@ termination status (`Signal::termination_status`: `Interrupt` → 130,
 `Kill` → 137, `Terminate` → 143 — the `128 + n` codes a shell user already
 scripts against, deliberately not our wire discriminants) so the parent's
 `wait` reaps it — distinguishable from a self-`exit` — and `Stop` stops every
-thread of the child (`SchedulerPolicy::stop`, a scheduler state no wake leaves,
-so only `Continue` or a kill ends it) and records the stop for a
-`WaitFlags::STOPPED` wait. The
+thread of the child and records the stop for a `WaitFlags::STOPPED` wait.
+
+A stop or continue advances the process's job-control generation (odd while
+stopped) and collects its threads under the thread-group table's read lock
+alone, then gives each thread that generation on its kill gate and drives its
+scheduler state to match with no lock held, so a fan-out over a large group
+holds up no other CPU's syscall. A thread keeps only the newest generation it
+is given, so a slow stop cannot undo a continue that overtook it, and every
+party re-reads the gate after acting until the scheduler agrees with the newest
+decision — taking back a stop of its own that a newer read says to leave
+alone, since the thread's entry into a body, or a kill, can overtake the read
+it was decided on. A thread outside any kernel body is stopped by the scheduler
+(`SchedulerPolicy::stop`, a state no wake leaves, so only `Continue` or a kill
+ends it); one inside a body is never — it may hold kernel state another thread
+waits on, such as a lock handed to it while it slept — and instead stops itself
+at the edge of the body, where it holds none. A thread created while its
+process is stopped takes the generation at registration as its own, under the
+table's write lock, and joins stopped; it stays parked until its creator starts
+it, which a continue arriving first does not change. The
 first-party Rust wrapper is
 `tairix_rt::signal`; the C stub is `tairix_sys_signal` and the header defines
 `TAIRIX_SIGNAL_CONTINUE` / `TAIRIX_SIGNAL_TERMINATE` / `TAIRIX_SIGNAL_KILL` /
@@ -1709,10 +1728,12 @@ Four rules make each death land exactly once:
   syscall, the deferred-load body, the user-fault resolver — with a death
   already owed never runs that body: it goes straight to its boundary. The
   scheduler retires a thread told to die at its next stopping point, and inside
-  a body that would free a stack whose frames still own kernel state. No wake
-  ends a stop, so a stopped thread owing its death at a boundary is resumed
-  before it is woken, and a stop that lands on a thread already owing one is
-  withdrawn.
+  a body that would free a stack whose frames still own kernel state. A thread
+  stopped at a kernel edge owing its death is resumed before it is woken, and a
+  thread owing a death is never held by a stop. The count of owed deaths the
+  dispatch loop consults is raised before a death is on a gate and lowered
+  only after it is taken, so it reads high at worst, never below the deaths
+  owed.
 * **Landed only once retired.** A dispatch returns on a yield and a park as
   well as on a retire, so the dispatch loop lands a death only for a thread the
   scheduler reports `Exited`.
@@ -2614,6 +2635,18 @@ This reuses the in-kernel dispatch loop's machinery rather than inventing
 a second discipline, so a task that sits in syscalls is still preempted
 and a task woken by an interrupt during another task's syscall runs
 promptly, with no busy-poll.
+
+The shared port-side return path then takes one last look before the user
+frame is restored (`kernel/core::settle_before_user`, called by the shared
+syscall and resolved-fault returns): it masks interrupts and honours any
+reschedule latch still set — a tick, or a reschedule IPI's un-gated yield
+(a wake placed on this CPU, a stop or kill of this task) — suspending the
+task if one is owed, masking again after each switch back in, and returning
+with interrupts masked for the port to restore. A latch set during the call
+or after the completion decision is therefore honoured now rather than at
+the next interrupt, which a lone task on a tickless core may not take for a
+long time. The user-mode preempt point applies the same masked re-check after
+it switches a task back in.
 
 ## Out of scope (Stage 2.7)
 

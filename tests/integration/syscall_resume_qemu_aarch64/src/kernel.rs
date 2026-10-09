@@ -13,20 +13,21 @@ use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::paging::{
     self, activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
-use tairix_arch_aarch64::userentry::UserMode;
+use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
-use tairix_arch_api::{EnterUser, BOOT_CPU};
+use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
     RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
-use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
 
@@ -257,7 +258,6 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     };
 
     let context_switch = ContextSwitchHal::new();
-    let parent_user_mode = UserMode::new();
     let parent_pre_resume = move |_stack_top: u64| {
         // SAFETY: `parent_root` is the retained L1 root built above and the MMU
         // is enabled; the mapping includes the running kernel window.
@@ -269,18 +269,23 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         BOOT_CPU,
         Priority::Normal,
         parent_pre_resume,
-        move |_yielder: &mut Yielder<ContextSwitchHal>| {
+        move |yielder: &mut Yielder<ContextSwitchHal>| {
             // SAFETY: the parent space is active and vectors plus the syscall
             // callback are installed, so both its clock and exit traps return
             // through this kernel.
-            unsafe { parent_user_mode.enter_user(parent_entry) }
+            unsafe {
+                UserThreadEntry {
+                    port: &USER_MODE,
+                    regs: parent_entry,
+                }
+                .enter(yielder)
+            }
         },
     );
     if parent.is_err() {
         qemu_exit::exit_failure(FAIL_PARENT);
     }
 
-    let child_user_mode = UserMode::new();
     let child_pre_resume = move |_stack_top: u64| {
         // SAFETY: `child_root` is the retained L1 root built above and the MMU
         // is enabled; the mapping includes the running kernel window.
@@ -292,10 +297,16 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         BOOT_CPU,
         Priority::Normal,
         child_pre_resume,
-        move |_yielder: &mut Yielder<ContextSwitchHal>| {
+        move |yielder: &mut Yielder<ContextSwitchHal>| {
             // SAFETY: the child space is active and its ordinary syscall is
             // deliberately parked by `dispatch` before returning.
-            unsafe { child_user_mode.enter_user(child_entry) }
+            unsafe {
+                UserThreadEntry {
+                    port: &USER_MODE,
+                    regs: child_entry,
+                }
+                .enter(yielder)
+            }
         },
     ) {
         Ok(id) => id,

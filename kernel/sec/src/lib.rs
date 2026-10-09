@@ -56,7 +56,7 @@ pub mod session;
 
 pub use audit::AuditEvent;
 pub use captable::{
-    CapTable, NoRecord, ProcName, ProcessId, Removed, TaskCapabilities, TaskId,
+    CapTable, JobGeneration, NoRecord, ProcName, ProcessId, Removed, TaskCapabilities, TaskId,
     ThreadRegisterError, PROC_NAME_MAX,
 };
 pub use dma::{alloc_dma, free_dma, DmaGateError};

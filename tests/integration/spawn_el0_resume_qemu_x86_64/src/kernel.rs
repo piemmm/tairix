@@ -10,16 +10,17 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::{EnterUser, BOOT_CPU};
+use tairix_arch_api::BOOT_CPU;
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
-use tairix_arch_x86_64::userentry::UserMode;
+use tairix_arch_x86_64::userentry::USER_MODE;
 use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
     Yielder,
@@ -323,7 +324,6 @@ fn run_resume() -> ! {
     // `enter_user`s into ring 3. `ContextSwitchHal` is the x86_64
     // context-switch primitive.
     let cs = ContextSwitchHal::new();
-    let user_mode = UserMode::new();
     let pre_resume = move |kernel_stack_top: u64| {
         // Repoint the per-CPU syscall entry stack at this task's own kernel
         // stack before the switch-in (`plans/PI.md` §X). A rejected value
@@ -340,13 +340,19 @@ fn run_resume() -> ! {
         // contract.
         unsafe { activate_user_root(root_phys) };
     };
-    let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+    let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so
         // its `pre_resume` hook reloaded CR3 + repointed the entry stack, and
         // the GDT user selectors / TSS / `syscall` entry + dispatch callback
         // are installed; the program's first `syscall` is handled.
         // `build_process_image` mapped the entry/stack as user pages.
-        unsafe { user_mode.enter_user(entry) }
+        unsafe {
+            UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            }
+            .enter(yielder)
+        }
     };
     if spawn_user_kthread(&sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work).is_err() {
         note(TEST_FAIL, "X1 test: spawn_user_kthread failed");

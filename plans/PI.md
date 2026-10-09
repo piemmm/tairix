@@ -1291,14 +1291,14 @@ copy is added on the syscall hot path (§2.16).
     matching exit `swapgs`. Fix: a HAL cooperative-park hook pair on
     `tairix_arch_api::ContextSwitch` — `enter_cooperative_park` /
     `leave_cooperative_park`, default no-op (aarch64/riscv64 need nothing) —
-    that `kernel/core`'s kthread runtime calls in `suspend_thunk_syscall`
-    around the suspend switch (the user-kthread mid-handler park path; a
-    kernel kthread's `suspend_thunk_body` skips the bracket). x86_64 implements
+    that `kernel/core`'s kthread `suspend_thunk` calls around the suspend
+    switch of a thread that has entered user mode (a mid-handler park; body
+    code skips the bracket). x86_64 implements
     them as a `swapgs` back to the between-handler convention immediately before
     the park and back into the stub-window convention immediately after resume;
     both are on the *task's* control flow and pair exactly, and the first
-    trampoline→`enter_user` entry never goes through the syscall thunk, so it
-    correctly does no swapgs. Structural, fail-closed, no limit bump (§2.17),
+    trampoline→`enter_user` entry, with any suspension its body makes before
+    it, runs no bracket, so it correctly does no swapgs. Structural, fail-closed, no limit bump (§2.17),
     capability checks unchanged (§5.4), per-PML4 isolation intact (§4). No ABI
     change. Stub rustdoc + the `SyscallTls` (transient-`gs:8`) docs updated;
     the host stub-layout test still pins the 16-byte two-word layout. Docs in

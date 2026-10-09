@@ -258,11 +258,12 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   publishes a resume handle for *every* kthread it is about to switch
   into — user and kernel alike — and clears it the instant the task
   switches back, so a handle is valid exactly while that CPU runs the task
-  (in EL0, in one of its syscall traps, or in a kernel kthread's body). A
-  user task's handle carries the *syscall* suspend thunk (which brackets
-  the suspend with the port's cooperative-park convention hook); a kernel
-  kthread's carries the *body* thunk (no bracket — a kthread never entered
-  the port's privilege-entry convention). It carries the control block as a
+  (in EL0, in one of its syscall traps, or in a kernel kthread's body). Its
+  suspend brackets the switch with the port's cooperative-park convention
+  hook only once the thread has entered user mode, after which it runs
+  kernel code only inside a trap handler; before that — a kernel kthread
+  always, a user thread until its first entry — it runs body code, with no
+  convention to balance. It carries the control block as a
   **pointer**, not an address: routed through a `usize` it would arrive
   stripped of provenance, leaving the thunk to work through a pointer the
   compiler believes aliases nothing and may reorder or elide accesses
@@ -349,9 +350,9 @@ task's next `syscall` would observe an unbalanced GS-swap and fault. The
 arch-neutral fix is a cooperative-park hook pair on
 `tairix_arch_api::ContextSwitch` — `enter_cooperative_park` /
 `leave_cooperative_park`, both **default no-op** — that the kthread runtime
-calls in the *syscall* suspend thunk around the suspend switch (the
-user-kthread mid-handler park path; a kernel kthread's *body* suspend
-skips the bracket — it never entered the convention). They are the exact
+calls around the suspend switch of a thread that has entered user mode (a
+mid-handler park; body code never entered the convention and skips it).
+They are the exact
 analogue of the `pre_resume`
 stack-top argument: a seam ports that need nothing (aarch64 saves its return
 state in the trap frame; riscv64 has no cooperative mid-handler park yet)

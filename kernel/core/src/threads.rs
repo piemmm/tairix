@@ -241,13 +241,13 @@ where
 
     // Born parked: the caller installs the thread's per-thread state under the
     // returned id and only then unparks it.
-    let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
+    let work = move |yielder: &mut crate::kthread::Yielder<A::Cs>| {
         // SAFETY: the thread is dispatched only after `unpark` below, by which
         // point its switch-in hook has run on the dispatcher's context and
         // activated the process's own root; the trap path was installed at
         // boot. `entry` names the caller-validated entry address and the top of
         // the stack reserved above.
-        unsafe { entry.enter() }
+        unsafe { entry.enter(yielder) }
     };
     let admitted = crate::kthread::spawn_user_kthread_with_stack_live(
         handlers.sched,
@@ -341,14 +341,16 @@ where
 }
 
 /// Register the parked `thread` as a member of `process`, refused while its
-/// `creator` owes a death, and stopped if its creator is.
+/// `creator` owes a death, and stopped if the process is.
 ///
-/// A group death is claimed, and a group stopped or resumed, under the table's
-/// read lock over the members it holds, and this runs under the write lock. So
-/// a thread either joins before the claim and is claimed with the rest, or
-/// finds its creator dying and is never born: it cannot outlive the group it
-/// would have belonged to. Likewise it joins a stopped group stopped, and
-/// never runs while the rest of the group is held.
+/// A group death is claimed, and a group's job-control generation advanced
+/// and its members collected, under the table's read lock, and this runs
+/// under the write lock. So a thread either joins before the claim and is
+/// claimed with the rest, or finds its creator dying and is never born: it
+/// cannot outlive the group it would have belonged to. Likewise it joins
+/// before a stop or continue collects the group and is driven with it, or
+/// joins after holding the generation that decided it, so it never runs while
+/// the rest of the group is held.
 ///
 /// # Errors
 ///
@@ -377,9 +379,14 @@ where
             // vanished under us.
             _ => Errno::NotFound,
         })?;
-    // Refused only for a thread already retired, which can never run anyway.
-    if sched.state_of(creator.0).is_stopped() {
-        let _ = sched.stop(thread.0);
+    if let Some(job) = caps.job_generation(process) {
+        if let Some(gate) = crate::procsignal::gate_of(thread.0) {
+            gate.adopt_job(job);
+        }
+        // Refused only for a thread already retired, which can never run.
+        if job.is_stopped() {
+            let _ = sched.stop(thread.0);
+        }
     }
     Ok(())
 }
@@ -669,10 +676,11 @@ mod tests {
         .expect("the scheduler builds")
     }
 
-    /// A thread born to a creator its group's stop already holds joins the
-    /// group stopped, and starting it does not run it; one born to a running
-    /// creator starts as usual. Admitted runnable, it would run on while the
-    /// job-control shell believes the whole process stopped.
+    /// A thread born into a process job control has stopped joins it holding
+    /// the stop, and starting it does not run it; one born into a running
+    /// process starts as usual. Admitted runnable, it would run on while the
+    /// job-control shell believes the whole process stopped — even if its
+    /// creator, still inside the kernel creating it, has yet to stop itself.
     #[test]
     fn a_thread_born_into_a_stopped_group_is_born_stopped() {
         for stopped in [true, false] {
@@ -690,8 +698,14 @@ mod tests {
             };
             let (leader, newborn) = (spawn(false), spawn(true));
             let (caps, _aspaces) = group_with_a_sibling(leader, newborn + 1);
+            crate::procsignal::clear_kill_gate(newborn);
+            crate::procsignal::install_gate(newborn, ProcessId(leader)).expect("a gate installs");
             if stopped {
-                assert_eq!(sched.stop(leader), Ok(()));
+                let (job, moved) = caps
+                    .read()
+                    .advance_job(ProcessId(leader), true)
+                    .expect("a live group");
+                assert!(moved && job.is_stopped());
             }
 
             assert_eq!(
@@ -713,13 +727,84 @@ mod tests {
             assert_eq!(
                 sched.state_of(newborn),
                 expected,
-                "creator stopped: {stopped}"
+                "process stopped: {stopped}"
+            );
+            let owed = crate::procsignal::gate_of(newborn)
+                .expect("installed")
+                .owed();
+            assert_eq!(
+                owed == crate::procsignal::Owed::Stop,
+                stopped,
+                "its gate holds the decision for its first kernel edge"
             );
 
+            crate::procsignal::clear_kill_gate(newborn);
             for id in [leader, newborn + 1] {
                 crate::procsignal::clear_kill_gate(id);
                 tairix_kernel_sched_api::release_task_id(id);
             }
+        }
+    }
+
+    /// A continue that reaches a thread born into a stopped group before its
+    /// creator has started it leaves it parked: its creator has yet to record
+    /// the stack it owns, and only the start may run it. Resumed runnable, it
+    /// ran with that state missing.
+    #[test]
+    fn a_continue_before_its_start_leaves_a_newborn_parked() {
+        let sched = scheduler();
+        let body = |_: &mut tairix_kernel_sched_api::TaskContext| {
+            tairix_kernel_sched_api::TaskAction::Yield
+        };
+        let leader = sched.spawn(0, Priority::Normal, body).expect("admitted");
+        let newborn = sched
+            .spawn_parked(0, Priority::Normal, body)
+            .expect("admitted");
+        let (caps, _aspaces) = group_with_a_sibling(leader, newborn + 1);
+        crate::procsignal::clear_kill_gate(newborn);
+        crate::procsignal::install_gate(newborn, ProcessId(leader)).expect("a gate installs");
+        let _ = caps
+            .read()
+            .advance_job(ProcessId(leader), true)
+            .expect("a live group");
+        assert_eq!(
+            register_unless_dying(
+                &caps,
+                &sched,
+                SecTaskId(leader),
+                SecTaskId(newborn),
+                ProcessId(leader)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            sched.state_of(newborn),
+            tairix_kernel_sched_api::TaskState::StoppedParked
+        );
+
+        let (continued, moved) = caps
+            .read()
+            .advance_job(ProcessId(leader), false)
+            .expect("a live group");
+        assert!(moved);
+        crate::procsignal::gate_of(newborn)
+            .expect("installed")
+            .apply_job(continued);
+        assert_eq!(sched.resume(newborn), Ok(()), "the continue's release");
+        assert_eq!(
+            sched.state_of(newborn),
+            tairix_kernel_sched_api::TaskState::Parked,
+            "not run before its start"
+        );
+        assert!(start_parked(&sched, newborn, || {}));
+        assert_eq!(
+            sched.state_of(newborn),
+            tairix_kernel_sched_api::TaskState::Ready
+        );
+
+        for id in [leader, newborn, newborn + 1] {
+            crate::procsignal::clear_kill_gate(id);
+            tairix_kernel_sched_api::release_task_id(id);
         }
     }
 

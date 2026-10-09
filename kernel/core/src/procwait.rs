@@ -36,7 +36,7 @@ use tairix_abi::{Errno, Signal, WaitFlags, WaitStatus, WAIT_PID_ANY};
 use tairix_collections::{HashMap, HashSet};
 use tairix_hash::BuildSipHash13;
 use tairix_kernel_sched_api::SchedulerArch;
-use tairix_kernel_sec::{ProcessId, TaskId};
+use tairix_kernel_sec::{JobGeneration, ProcessId, TaskId};
 use tairix_sync::SpinLock;
 
 use crate::dispatch_slot::RescheduleAction;
@@ -166,20 +166,25 @@ pub trait ProcessWait: Sync {
         false
     }
 
-    /// Record that `process` was stopped by `signal` ([`Signal::Stop`]), so a
-    /// parent waiting with [`WaitFlags::STOPPED`] can observe it.
+    /// Record that `process` was stopped by `signal` ([`Signal::Stop`]) at
+    /// job-control generation `job`, so a parent waiting with
+    /// [`WaitFlags::STOPPED`] can observe it.
     ///
-    /// Called from the signal producer after the child is parked. The
-    /// default is a no-op, exactly like the other bookkeeping hooks.
-    fn record_stop(&self, _process: ProcessId, _signal: Signal) {}
+    /// Called from the signal producer once the stop is decided. A report no
+    /// newer than the last one recorded is dropped, so the order in which a
+    /// stop and a continue racing it report cannot leave a running child
+    /// reading stopped. The default is a no-op, exactly like the other
+    /// bookkeeping hooks.
+    fn record_stop(&self, _process: ProcessId, _signal: Signal, _job: JobGeneration) {}
 
-    /// Record that `process` was resumed ([`Signal::Continue`]), clearing any
-    /// not-yet-reported stop so a stale stop is never reported after the
-    /// child is already running again.
+    /// Record that `process` was resumed ([`Signal::Continue`]) at
+    /// job-control generation `job`, clearing any not-yet-reported older
+    /// stop so a stale stop is never reported after the child is running
+    /// again.
     ///
-    /// Called from the signal producer after the child is unparked. The
+    /// Called from the signal producer once the continue is decided. The
     /// default is a no-op.
-    fn record_continue(&self, _process: ProcessId) {}
+    fn record_continue(&self, _process: ProcessId, _job: JobGeneration) {}
 
     /// Authorise `sender` over the **live** child selected by `pid`,
     /// returning the child's process id.
@@ -310,6 +315,8 @@ struct Row {
     /// child is stopped, cleared when reported, resumed, or superseded by its
     /// exit, so each stop is observed at most once and never after a resume.
     stop: Option<Signal>,
+    /// The newest job-control generation a stop or continue reported.
+    job: JobGeneration,
 }
 
 /// One parent's tracked children.
@@ -475,6 +482,7 @@ impl Tables {
                 listing,
                 exit: None,
                 stop: None,
+                job: JobGeneration::default(),
             };
             rows.try_insert(child, row)
                 .map_err(|_| Errno::OutOfMemory)?;
@@ -600,15 +608,22 @@ impl ProcessTable {
         Some(ProcessId(parent))
     }
 
-    /// Mark a not-yet-reported stop by `signal` on `process`, answering the
-    /// parent to tell. A process the table does not track, an orphan, and a
-    /// zombie awaiting reap are ignored: none has a parent to observe it stop.
-    pub fn record_stop(&mut self, process: ProcessId, signal: Signal) -> Option<ProcessId> {
+    /// Mark a not-yet-reported stop by `signal` on `process` at generation
+    /// `job`, answering the parent to tell. A process the table does not
+    /// track, an orphan, and a zombie awaiting reap are ignored: none has a
+    /// parent to observe it stop. So is a report no newer than the last.
+    pub fn record_stop(
+        &mut self,
+        process: ProcessId,
+        signal: Signal,
+        job: JobGeneration,
+    ) -> Option<ProcessId> {
         let Tables { rows, families } = self.tables.as_mut()?;
         let row = rows.get_mut(&process.0)?;
-        if row.exit.is_some() {
+        if row.exit.is_some() || !job.is_newer_than(row.job) {
             return None;
         }
+        row.job = job;
         let parent = row.parent?;
         if row.stop.replace(signal).is_none() && row.listing == ChildListing::Listed {
             if let Some(family) = families.get_mut(&parent) {
@@ -618,15 +633,20 @@ impl ProcessTable {
         Some(ProcessId(parent))
     }
 
-    /// Clear any not-yet-reported stop on `process` (the child was resumed), so
-    /// a stale stop is never reported after the child is running again.
-    pub fn record_continue(&mut self, process: ProcessId) {
+    /// Clear any not-yet-reported stop on `process`, resumed at generation
+    /// `job`, so a stale stop is never reported after the child is running
+    /// again. A continue no newer than the last report is ignored.
+    pub fn record_continue(&mut self, process: ProcessId, job: JobGeneration) {
         let Some(Tables { rows, families }) = self.tables.as_mut() else {
             return;
         };
         let Some(row) = rows.get_mut(&process.0) else {
             return;
         };
+        if !job.is_newer_than(row.job) {
+            return;
+        }
+        row.job = job;
         if row.stop.take().is_none() || row.listing == ChildListing::Private {
             return;
         }
@@ -872,17 +892,17 @@ where
         owed.is_some()
     }
 
-    fn record_stop(&self, process: ProcessId, signal: Signal) {
-        let observer = self.table.lock().record_stop(process, signal);
+    fn record_stop(&self, process: ProcessId, signal: Signal, job: JobGeneration) {
+        let observer = self.table.lock().record_stop(process, signal, job);
         if let Some(parent) = observer {
             crate::waitq::procwait_wake(parent);
         }
     }
 
-    fn record_continue(&self, process: ProcessId) {
+    fn record_continue(&self, process: ProcessId, job: JobGeneration) {
         // Clearing a pending stop creates nothing to report, so no wake: a
         // parent parked in `wait` stays parked until a real event.
-        self.table.lock().record_continue(process);
+        self.table.lock().record_continue(process, job);
     }
 
     fn authorise_child(&self, sender: ProcessId, pid: i64) -> Result<ProcessId, Errno> {
@@ -973,6 +993,43 @@ mod tests {
     /// leader, so a park keyed by the process rather than by the caller
     /// shows up here rather than as a hang on a running machine.
     const REAPER: TaskId = TaskId(41);
+
+    fn job(bits: u32) -> JobGeneration {
+        JobGeneration::from_bits(bits)
+    }
+
+    /// A stop's report that arrives after the continue that overtook it — the
+    /// stop decided first, the continue decided and reported, then the stop's
+    /// report — leaves nothing to report: the child is running. And a
+    /// continue's late report cannot clear the newer stop that overtook it.
+    #[test]
+    fn a_job_control_report_older_than_the_last_changes_nothing() {
+        let mut table = ProcessTable::new();
+        table
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
+            .expect("registered");
+        table.record_continue(ProcessId(2), job(2));
+        assert_eq!(table.record_stop(ProcessId(2), Signal::Stop, job(1)), None);
+        assert_eq!(
+            table.reap(ProcessId(1), WAIT_PID_ANY, true),
+            Reap::Blocked,
+            "the late stop is not reported"
+        );
+
+        assert_eq!(
+            table.record_stop(ProcessId(2), Signal::Stop, job(3)),
+            Some(ProcessId(1))
+        );
+        table.record_continue(ProcessId(2), job(2));
+        assert_eq!(
+            table.reap(ProcessId(1), WAIT_PID_ANY, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            }),
+            "the late continue does not clear the newer stop"
+        );
+    }
 
     #[test]
     fn null_process_wait_fails_closed() {
@@ -1101,7 +1158,7 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, true), Reap::Blocked);
         assert_eq!(
             table.reap(ProcessId(1), 2, true),
@@ -1112,8 +1169,8 @@ mod tests {
         );
         // Resumed and stopped again, then reaped by name after its exit: no
         // stale wildcard report is ever left behind.
-        table.record_continue(ProcessId(2));
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_continue(ProcessId(2), job(2));
+        table.record_stop(ProcessId(2), Signal::Stop, job(3));
         table.record_exit(ProcessId(2), 0);
         assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, true), Reap::Blocked);
         assert_eq!(
@@ -1314,7 +1371,7 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         table.parent_exited(ProcessId(1), |_| {});
         assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, true), Reap::NoChild);
         assert!(table.is_live(ProcessId(2)));
@@ -1354,8 +1411,8 @@ mod tests {
         table.record_exit(ProcessId(42), 3);
         assert_eq!(table.reap(ProcessId(0), WAIT_PID_ANY, false), Reap::NoChild);
         // The stop/continue hooks are equally inert for untracked tasks.
-        table.record_stop(ProcessId(42), Signal::Stop);
-        table.record_continue(ProcessId(42));
+        table.record_stop(ProcessId(42), Signal::Stop, job(1));
+        table.record_continue(ProcessId(42), job(2));
         assert_eq!(table.reap(ProcessId(0), WAIT_PID_ANY, true), Reap::NoChild);
     }
 
@@ -1369,7 +1426,7 @@ mod tests {
                 .register(ProcessId(1), ProcessId(child), ChildListing::Listed)
                 .expect("registered");
         }
-        table.record_stop(ProcessId(3), Signal::Stop);
+        table.record_stop(ProcessId(3), Signal::Stop, job(1));
         table.record_exit(ProcessId(5), 50);
         table.record_exit(ProcessId(7), 70);
         let reaps: alloc::vec::Vec<Reap> = (0..3)
@@ -1411,14 +1468,14 @@ mod tests {
             (family.zombies.capacity(), family.stopped.capacity())
         };
         let reserved = room(&table);
-        for _ in 0..100 {
+        for round in 0..100 {
             for child in children.clone() {
-                table.record_stop(ProcessId(child), Signal::Stop);
-                table.record_continue(ProcessId(child));
+                table.record_stop(ProcessId(child), Signal::Stop, job(2 * round + 1));
+                table.record_continue(ProcessId(child), job(2 * round + 2));
             }
         }
         for child in children {
-            table.record_stop(ProcessId(child), Signal::Stop);
+            table.record_stop(ProcessId(child), Signal::Stop, job(201));
             table.record_exit(ProcessId(child), 0);
         }
         assert_eq!(room(&table), reserved);
@@ -1588,7 +1645,7 @@ mod tests {
         }
         let _ = take_unparked();
 
-        p.record_stop(ProcessId(child), Signal::Stop);
+        p.record_stop(ProcessId(child), Signal::Stop, job(1));
         assert_eq!(take_unparked(), [waiter, sibling_waiter], "the stop");
         assert!(p.record_exit(ProcessId(child), 0));
         assert_eq!(take_unparked(), [waiter, sibling_waiter], "the exit");
@@ -1775,7 +1832,7 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         // Without the stop-report request the stopped child is invisible:
         // the wait stays blocked exactly as for a running child.
         assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, false), Reap::Blocked);
@@ -1806,10 +1863,10 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         // The child is resumed before the parent ever looked: the stale
         // stop must not be reported afterwards.
-        table.record_continue(ProcessId(2));
+        table.record_continue(ProcessId(2), job(2));
         assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, true), Reap::Blocked);
     }
 
@@ -1819,7 +1876,7 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(3));
         // The child died while stopped (e.g. a kill): the terminal exit is
         // the report; the stale stop is gone.
         table.record_exit(ProcessId(2), 137);
@@ -1841,7 +1898,7 @@ mod tests {
             .expect("registered");
         table.record_exit(ProcessId(2), 3);
         // A dead child cannot stop; the exit report stands untouched.
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         assert_eq!(
             table.reap(ProcessId(1), WAIT_PID_ANY, true),
             Reap::Ready(WaitedChild {
@@ -1860,7 +1917,7 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         table.record_exit(ProcessId(3), 0);
         // Termination is the stronger, terminal report; the stop stays
         // pending for the next wait.
@@ -1886,7 +1943,7 @@ mod tests {
         table
             .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_stop(ProcessId(2), Signal::Stop, job(1));
         // The wait-set readiness peek is about reapability; a stopped child
         // is still merely "running" to it, and the pending stop survives.
         assert_eq!(table.peek(ProcessId(1), 2), ChildPeek::Running);
@@ -1904,7 +1961,7 @@ mod tests {
         let p = producer();
         p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        p.record_stop(ProcessId(2), Signal::Stop);
+        p.record_stop(ProcessId(2), Signal::Stop, job(1));
         let flags = WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
             .expect("defined bits");
         assert_eq!(
@@ -1929,7 +1986,7 @@ mod tests {
         let p = producer();
         p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
-        p.record_stop(ProcessId(2), Signal::Stop);
+        p.record_stop(ProcessId(2), Signal::Stop, job(1));
         // The stop is already pending when the parent waits, so the report
         // is immediate — the blocking park path is never reached.
         assert_eq!(

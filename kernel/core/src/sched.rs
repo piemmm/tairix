@@ -46,14 +46,14 @@ pub(crate) const fn level_of_priority(priority: Priority) -> SchedPriority {
 
 /// The concrete scheduler policy selected for this image.
 ///
-/// CFQ (`kernel/sched/cfq`) is the default: a non-tickless, Linux-CFS-like
-/// Completely-Fair-Queuing policy, the one scheduler the charter permits
-/// to keep a fixed-frequency periodic tick armed for a running task (the
-/// tickless carve-out). The tickless EEVDF (`kernel/sched/eevdf`) and MLFQ
-/// (`kernel/sched/mlfq`) siblings are selectable with `--no-default-features
-/// --features scheduler-eevdf` (or `scheduler-mlfq`). All implement the
-/// same [`tairix_kernel_sched_api::SchedulerPolicy`] contract, so the rest
-/// of `kernel/core` is agnostic to which one this alias resolves to.
+/// EEVDF (`kernel/sched/eevdf`) is the default: tickless, eligible virtual
+/// deadline first. The non-tickless CFQ (`kernel/sched/cfq`) — the one
+/// scheduler the charter permits to keep a fixed-frequency tick armed for a
+/// running task — and the tickless MLFQ (`kernel/sched/mlfq`) are selectable
+/// with `--no-default-features --features scheduler-cfq` (or
+/// `scheduler-mlfq`). All implement the same
+/// [`tairix_kernel_sched_api::SchedulerPolicy`] contract, so the rest of
+/// `kernel/core` is agnostic to which one this alias resolves to.
 #[cfg(feature = "scheduler-cfq")]
 pub(crate) use tairix_kernel_sched_cfq::Scheduler;
 #[cfg(all(feature = "scheduler-eevdf", not(feature = "scheduler-cfq")))]

@@ -513,6 +513,14 @@ impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch
         // current CPU here to then look up and park the current task.
         Some(SchedulerArch::current_cpu(self.arch))
     }
+
+    fn stop(&self, id: tairix_kernel_sched_api::TaskId) -> bool {
+        self.scheduler.stop(id).is_ok()
+    }
+
+    fn resume(&self, id: tairix_kernel_sched_api::TaskId) -> bool {
+        self.scheduler.resume(id).is_ok()
+    }
 }
 
 impl<A: KernelArch + 'static> MonotonicClock for SchedWaitQueueArch<A> {
@@ -556,6 +564,10 @@ impl<A: KernelArch + 'static> crate::preempt::PreemptCompetitor for SchedWaitQue
         // ticks. The re-arm targets the calling CPU — the one whose tick
         // just fired, which is where the preempt path runs this.
         self.scheduler.rearm_periodic_tick();
+    }
+
+    fn mask_interrupts(&self) {
+        self.arch.set_device_irqs(false);
     }
 }
 
@@ -1668,11 +1680,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the trampoline's terminal `Exit` — PID 1 leaves EL0 only through a
         // rescheduling syscall (`yield`/`exit`), whose trap path suspends
         // it back to the scheduler.
-        let work = move |_yielder: &mut crate::kthread::Yielder<A::Cs>| {
+        let work = move |yielder: &mut crate::kthread::Yielder<A::Cs>| {
             // SAFETY: this runs on PID 1's own first dispatch, so its
             // switch-in hook has already activated its address space, and
             // this method's contract has the trap path installed.
-            unsafe { entry.enter() }
+            unsafe { entry.enter(yielder) }
         };
         // PID 1's first thread carries the process hook bound to its own
         // thread pointer (`0` — thread-local storage is the layer above this

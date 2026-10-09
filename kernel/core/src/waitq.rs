@@ -116,6 +116,22 @@ pub trait WaitQueueArch: Sync {
     fn current_cpu(&self) -> Option<CpuId> {
         None
     }
+
+    /// Stop the task `id` for job control — the scheduler's `stop` — reporting
+    /// whether it could. A thread owing a stop at the edge of a kernel body
+    /// stops itself through this. The default stops nothing, so an
+    /// uninstalled hook fails closed.
+    fn stop(&self, id: TaskId) -> bool {
+        let _ = id;
+        false
+    }
+
+    /// End a job-control stop of `id` — the scheduler's `resume` — reporting
+    /// whether it could; the default resumes nothing.
+    fn resume(&self, id: TaskId) -> bool {
+        let _ = id;
+        false
+    }
 }
 
 /// Which condition on a queue a waiter is registered against.

@@ -37,7 +37,7 @@ use tairix_abi::{
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
-use tairix_kernel_sec::ProcessId;
+use tairix_kernel_sec::{JobGeneration, ProcessId};
 use tairix_reclaim::PressureBand;
 
 use crate::aspace::AddressSpaceRegistry;
@@ -111,12 +111,14 @@ fn counts_toward_load(state: TaskState, task: TaskId, observer: Option<TaskId>) 
 }
 
 /// How active a scheduler state is, for reading a thread group as one process:
-/// a group is as active as its most active thread, so it reads as stopped only
-/// once every live thread is.
+/// a group is as active as its most active thread.
 const fn activity(state: TaskState) -> u8 {
     match state {
         TaskState::Exited => 0,
-        TaskState::Stopped | TaskState::StoppedOnQueue | TaskState::StoppedOnCpu => 1,
+        TaskState::Stopped
+        | TaskState::StoppedOnQueue
+        | TaskState::StoppedOnCpu
+        | TaskState::StoppedParked => 1,
         TaskState::Parked => 2,
         TaskState::Ready => 3,
         TaskState::Running => 4,
@@ -266,14 +268,26 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
     /// `Running`; `Parked` (blocked on a wait) reports `Blocked`; a job-control
     /// stop reports `Stopped` from the moment it is requested; `Exited`
     /// reports `Zombie` (terminated, record not yet reaped).
+    /// How a process whose threads read together as `group` reads under job
+    /// control's `job`: stopped once job control decides it, though a thread
+    /// still inside a kernel body stops only on leaving it.
+    fn process_state_of(group: TaskState, job: Option<JobGeneration>) -> ProcessState {
+        if group != TaskState::Exited && job.is_some_and(JobGeneration::is_stopped) {
+            ProcessState::Stopped
+        } else {
+            Self::process_state(group)
+        }
+    }
+
     fn process_state(state: TaskState) -> ProcessState {
         match state {
             TaskState::Ready => ProcessState::Runnable,
             TaskState::Running => ProcessState::Running,
             TaskState::Parked => ProcessState::Blocked,
-            TaskState::Stopped | TaskState::StoppedOnQueue | TaskState::StoppedOnCpu => {
-                ProcessState::Stopped
-            }
+            TaskState::Stopped
+            | TaskState::StoppedOnQueue
+            | TaskState::StoppedOnCpu
+            | TaskState::StoppedParked => ProcessState::Stopped,
             TaskState::Exited => ProcessState::Zombie,
         }
     }
@@ -328,7 +342,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         {
             let task_id = record.process().0;
             let group = self.group(caps.threads_of(record.process()));
-            let state = Self::process_state(group.state);
+            let state = Self::process_state_of(group.state, caps.job_generation(record.process()));
             let cpu = group.cpu.map_or(PROCESS_CPU_NONE, |cpu| {
                 u8::try_from(cpu).unwrap_or(PROCESS_CPU_NONE)
             });
@@ -1036,7 +1050,7 @@ fn record_page<R, const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{counts_toward_load, record_page, GroupReading};
+    use super::{counts_toward_load, record_page, GroupReading, JobGeneration};
     use tairix_abi::sysinfo::{
         CacheLedgerRecord, CacheOwnerKind, PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT,
     };
@@ -1260,6 +1274,7 @@ mod tests {
             TaskState::Stopped,
             TaskState::StoppedOnQueue,
             TaskState::StoppedOnCpu,
+            TaskState::StoppedParked,
             TaskState::Exited,
         ] {
             assert!(!counts_toward_load(state, 7, None), "{state:?}");
@@ -1272,11 +1287,35 @@ mod tests {
     /// Switchboard never offered to continue it. A group reads as stopped once
     /// every live thread is, and a thread the stop has not reached outranks it.
     #[test]
+    fn a_process_job_control_stopped_reads_stopped_before_its_threads_do() {
+        type Source = super::KernelIntrospectSource<crate::test_arch::TestArch>;
+        let stopped = JobGeneration::default().toward(true);
+        assert_eq!(
+            Source::process_state_of(TaskState::Parked, Some(stopped)),
+            tairix_abi::sysinfo::ProcessState::Stopped,
+            "a thread still in a kernel body does not hide the stop"
+        );
+        assert_eq!(
+            Source::process_state_of(TaskState::Exited, Some(stopped)),
+            tairix_abi::sysinfo::ProcessState::Zombie
+        );
+        assert_eq!(
+            Source::process_state_of(TaskState::Running, Some(stopped.toward(false))),
+            tairix_abi::sysinfo::ProcessState::Running
+        );
+        assert_eq!(
+            Source::process_state_of(TaskState::Ready, None),
+            tairix_abi::sysinfo::ProcessState::Runnable
+        );
+    }
+
+    #[test]
     fn a_stopped_group_reports_stopped() {
         for state in [
             TaskState::Stopped,
             TaskState::StoppedOnQueue,
             TaskState::StoppedOnCpu,
+            TaskState::StoppedParked,
         ] {
             assert_eq!(
                 super::KernelIntrospectSource::<crate::test_arch::TestArch>::process_state(state),

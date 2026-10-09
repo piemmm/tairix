@@ -12,13 +12,11 @@ publish.workspace = true
 workspace = true
 
 [features]
-# CFQ is the default scheduler policy: a non-tickless, Linux-CFS-like
-# Completely-Fair-Queuing policy. It is the one scheduler the charter
-# permits to keep a fixed-frequency periodic tick armed for a running
-# task (the tickless carve-out). The tickless EEVDF
-# and MLFQ siblings stay available behind their own features (and are
-# still tested).
-default = ["scheduler-cfq"]
+# EEVDF is the default scheduler policy: tickless, eligible virtual deadline
+# first. The non-tickless CFQ — the one policy the charter lets keep a
+# fixed-frequency tick armed for a running task — and the tickless MLFQ stay
+# available behind their own features (and are still tested).
+default = ["scheduler-eevdf"]
 
 # Scheduler selection. `kernel/core` is the single
 # selection point: exactly one `scheduler-*` feature must be active per
@@ -232,11 +230,11 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0", features = ["test-uti
 # Mirrors `kernel/sched`'s self-link pattern: integration tests get the
 # host-only `test-arch` feature for free without ever leaking it into a
 # production build. `default-features = false` keeps this self-link from
-# force-enabling the default `scheduler-cfq` policy, so a build that
+# force-enabling the default `scheduler-eevdf` policy, so a build that
 # selects a sibling with `--no-default-features --features
-# scheduler-mlfq,test-arch` (or `scheduler-eevdf`) is not silently turned
+# scheduler-mlfq,test-arch` (or `scheduler-cfq`) is not silently turned
 # into a forbidden two-policy image by the test scaffolding. The normal `cargo
-# test` run still gets `scheduler-cfq` from the
+# test` run still gets `scheduler-eevdf` from the
 # package's own default feature set.
 tairix-kernel-core = { path = ".", version = "=0.0.0", default-features = false, features = ["test-arch"] }
 # The per-task address-space registry's host tests (`src/aspace.rs`)

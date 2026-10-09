@@ -31,9 +31,9 @@ pub enum SchedError {
     NoSuchTask,
     /// The task is not in a state that allows the requested transition.
     ///
-    /// Example: calling `unpark` on a task that is already running, or
-    /// `park` on a task that has exited. The state machine is documented
-    /// in `docs/src/architecture/scheduler.md`.
+    /// Example: calling `unpark`, `stop` or `resume` on a task that has
+    /// exited but whose record a queue entry still holds. The state machine
+    /// is documented in `docs/src/architecture/scheduler.md`.
     InvalidState,
     /// The requested CPU identifier is outside the configured range.
     NoSuchCpu,

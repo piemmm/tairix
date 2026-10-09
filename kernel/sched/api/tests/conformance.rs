@@ -15,3 +15,8 @@ use tairix_kernel_sched_mlfq::Scheduler;
 fn mlfq_passes_scheduler_policy_conformance() {
     conformance::run_all::<Scheduler<TestArch>>();
 }
+
+#[test]
+fn mlfq_survives_scheduler_policy_races() {
+    conformance::run_races::<Scheduler<TestArch>>();
+}

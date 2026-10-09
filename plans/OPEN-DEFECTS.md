@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 337 open, 472 closed, 809 total.
+**closed**, and a partial fix stays **open**. 353 open, 485 closed, 838 total.
 
-### Open (337)
+### Open (353)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -365,56 +365,25 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D813 | every syscall still takes the one capability-table `RwLock` to snapshot its caller's record: a read lock is two atomic read-modify-writes on one word every CPU's syscalls share, so a many-core machine taking syscalls at full rate bounces that line between every core | **medium**, unmeasured: scalability on the syscall path, not correctness; noticed fixing D297 and D812, not absorbed, because the cure is a credential model rather than a local change. Closed by a per-thread published credential, as Linux's `current_cred()`: each thread holds the shared record its process is under, a mutation installs a new record and republishes it to every thread of the process under the table's write lock, and the syscall entry reads its own thread's copy with no shared lock — with a test that a revocation reaches every sibling's next syscall. `kernel/core/src/syscalls.rs` `KernelDispatchHook::dispatch`, `kernel/sec/src/captable.rs` |
 | D814 | every scheduler dispatch looks its task up in the policy's one task registry: `dispatch` takes the registry's `RwLock` and walks its B-tree to turn a run-queue entry's id into the task, on every CPU for every dispatch | **medium**, unmeasured: scalability on the dispatch path, not correctness; noticed fixing D721, not absorbed, because it changes what a run-queue entry holds in all three policies. Closed by entries that carry the task itself (an `Arc` of the policy's record) so a pick needs no lookup, the registry kept for the id-addressed calls (`unpark`, `exit`, the observations) — with a conformance case that a dispatch reaches its task with the registry write-locked elsewhere. `kernel/sched/cfq`, `kernel/sched/eevdf`, `kernel/sched/mlfq` `scheduler.rs` `dispatch` |
 | D815 | the file manager still writes on its event loop: New ▸'s create, the Properties window's mode, owner and attribute commits, the Trash folder's creation, the `stat`s that plan a paste or a move to Trash, and every step of a delete, paste or move to Trash each make their filesystem call on the loop that owes its windows a frame, so a slow or failing volume stalls every window the process serves for the length of that call | **medium**: responsiveness under slow or failing storage, not correctness; noticed moving the rename off the loop, the same class; not absorbed, because the operations need a worker of their own. Each call is bounded — an operation step is one directory read, unlink, `fs_mkdir`, rename or copy chunk, and a turn starts none after half a frame — so a stall is one device round trip, but on a failing disk that is the request deadline. The fix: the one-shot writes become one write-job type on the reader thread, answered by ticket to the window that asked as the rename is (`Reads::rename`, `collect_renames`), the window keeping its live state until the answer lands; an operation runs whole on a worker that posts progress for the panel and takes a cancel between steps, the loop presenting the panel once a frame from the latest progress. The reads' counterpart is D454. Tests: an answer reaches only the window that asked and a closed window's is dropped; a full queue refuses with its reason; a cancel stops a worker-run operation between steps. `userland/apps/files/src/run.rs` `begin_new_entry`, `toggle_permission`, `commit_owner`, `set_attribute`, `remove_attribute`, `ensure_dir`, `plan_trash_moves`, `start_paste`, `advance_operation` |
+| D827 | the compositor allocates twice per composited rectangle per frame: `compose_span` builds a fresh covering-source list (`covering_sources`) and `tairix_parallel::fold_drawn` collects its bands, so a frame repainting under a window allocates on the frame path however much the rest of the pass reuses | **medium**; noticed closing D826, not absorbed, because the source list borrows from the compositor and the band split lives in `lib/parallel`. Closed by a source list held in inline storage sized to the windows a rectangle can reach (spilling only past it) and a band collector the runner reuses, with a test that a frame repainting kept window content and presenting it allocates nothing. `userland/gui/wm/src/compositor.rs` `compose_span`, `lib/parallel` |
+| D828 | the capability table allocates infallibly on admission and mutation: `insert` boxes a record in an `Arc` and grows `BTreeMap` nodes, `register_thread` grows two maps, and a mutation of a record a snapshot shares copies it — each an abort, not a `Result`, when the kernel heap is exhausted | **medium**; noticed closing D825; the class predates the shared record (the map nodes always aborted). Closed by fallible growth — reserved map capacity or a fallible ordered map, `Arc::try_new`, and a fallible record copy — so an admission or a revocation the heap cannot serve fails with `OutOfMemory` and changes nothing. `kernel/sec/src/captable.rs` |
+| D831 | an ARXFS mount can overwrite live data while repairing an old transaction root: the ring scan reads every slot's root before choosing the newest, and `read_txn_root` writes a verified companion over its primary for superseded generations too, whose freed root blocks the live tree may have reused — a one-block write over an old root's primary with its companion still intact is silently replaced by that root on the next read-write mount; the repair's write error is now discarded unlogged | **high**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. Closed by repairing only the root the scan chose, after choosing it, and recording a refused repair through the device-health path. `drivers/filesystem/arxfs/src/lib.rs` `read_txn_root`, the ring scan |
+| D832 | a rename differing from a sibling only in letter case destroys that sibling on FAT32 and ADFS: the file manager's clash check (`lib/browse/src/rename.rs` `validate_new_name`) compares bytes exactly, while both drivers match names ignoring ASCII case and `fs_rename` replaces the entry it finds — renaming `a.txt` to `B.TXT` beside `b.txt` frees `b.txt`'s data, and `Foo.txt` to `foo.txt` reports success while changing nothing | **high**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. Closed by a clash rule the volume states (its case folding, through the filesystem capability API) and by the no-replace rename D833 needs. `lib/browse/src/rename.rs`, `drivers/filesystem/fat32/src/lib.rs` rename, `drivers/filesystem/adfs/src/lib.rs` rename |
+| D833 | the file manager's rename clash check runs against a listing the window has frozen while the editor is open, and the kernel's rename silently replaces an existing file or empty folder, so a name another window or program creates while the user types is overwritten on Enter; the ABI offers no rename that refuses to replace | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. Closed by a no-replace `fs_rename` flag the kernel checks under the volume lock, used by every interactive rename. `userland/apps/files/src/run.rs`, `lib/browse/src/browser.rs`, `kernel/core/src/fs/delegate.rs` rename |
+| D834 | ARXFS's freed-block embargo does not cover the window right after a mount: the newest root's freed blocks are rebuilt free and reusable before any device flush, so after a kernel crash that left slot N only in the drive's write cache, the first transaction can overwrite blocks slot N−1 still names before a power loss | **medium**, plausible; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. Closed by a flush on a read-write open before the first allocation. `drivers/filesystem/arxfs/src/lib.rs` mount, the embargo |
+| D835 | ARXFS's claim that a delete always makes room for the very next write is false under the kernel's write-back batching: a delete's frees stay in the open transaction, `mutation()` only lifts the embargo, the commit's own root allocation and `reclaim_step` get no retry, and the embargo holds the previous root out of the fixed metadata reserve — on a full volume a commit can abort acknowledged work and freeze the handle, and `remove`/`rename` can return `NoSpace` after the name changed, so the fs cache skips its change-log event | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `docs/src/filesystem/arxfs-spec.md` (delete makes room), `drivers/filesystem/arxfs/src/lib.rs` `mutation`, `commit_prepare`, `reclaim_step` |
+| D836 | the file manager ignores every key, click and scroll while a rename is with the volume, and the rename waits behind the one reader thread's queue — a program-store rescan each right-click queues, a large listing, a picture decode — so on slow storage the window is dead for that whole time, against `rename.rs`'s own "nothing typed is thrown away" | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `userland/apps/files/src/rename.rs`, `run.rs` (the rename wait, the reader queue) |
+| D837 | a refused rename's reason is never drawn: the editor is one control tall and the text control draws a message only with room beneath it, which neither a list row nor a grid label leaves, so validation, clash and volume refusals are invisible and Enter or a click outside just does nothing; context-menu refusals reach only stderr, and every volume refusal reads "The rename was refused." with its error dropped, the app's own full queue included | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/browse/src/render.rs` (editor height), `lib/controls/src/text.rs` (message room), `userland/apps/files/src/run.rs` |
+| D838 | an icon's shadow can push its own picture out of the artwork cache: `ArtworkCache::shadowed` admits the shadow — larger than its picture — through `ReclaimCache` eviction to the watermark, which may evict the picture just served, so the tile falls to its glyph and the next paint decodes again (a read and a sandbox round trip per icon per frame under pressure); a refused retain re-casts the shadow every paint, its key and clone allocate infallibly on the paint path, and the rustdoc claims only the reverse case | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/icon/src/artwork.rs` `shadowed` |
+| D839 | the persistent thumbnail store is fragile and over-trusting: a failed header read (an I/O error) is taken for another layout and truncates the store; its layout is keyed by the first icon side to ask, so a scale change or a second instance at another DPI truncates the shared blob and lookups then thrash; keys trust the medium's volume id, so a cloned or crafted volume can plant a stored picture for a file; `THUMBNAIL_REVISION` is hand-maintained with nothing tying it to decoder output; and pictures of deleted files or of another volume outlive them in a blob the user cannot list or purge | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/icon/src/store.rs` `open`, keys; `lib/sandbox/src/imagerender.rs` `THUMBNAIL_REVISION` |
+| D840 | ARXFS and fs-cache loose ends: the embargo's runs are not counted toward the write-back memory bound (`txn_pinned`), `committed_free_count` can briefly count embargoed runs twice so `statfs` over-reports, spec §12 still says freed runs are queued for discard as reclaimed, the fs cache keeps a moved node's stale change time after a rename (`fscache.rs` rename, which says its stat stays valid), and the volume-wide `content_gen` lets a user count everyone else's writes between two of their own | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `drivers/filesystem/arxfs/src/allocator.rs`, `lib.rs`; `kernel/core/src/fs/fscache.rs` |
+| D841 | the generated C headers do not publish the `fs_stat` record (now 120 bytes, refused shorter) or the readdir record layout with `content_gen`, so a C program cannot read either; `c_field_offsets`'s doc comment is attached to the new test and says nested structs are not allowed | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `include/tairix/tairix_syscall.h` (generated), `tools/xtask/src/commands/c_header.rs` |
+| D842 | the file manager's rename flow: F2 and the menu's Rename do not wait for a navigation in progress, whose target the rename's re-list then replaces; a rename that landed but whose re-list failed leaves the editor open as refused, and Enter resubmits; every rename re-reads the whole directory even when change reports cover it; opening the editor by F2, the menu or New repaints the whole window; and the menu's quick-entry field opens with nothing selected, though FI17 and `apps.md` say every way selects the stem | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `userland/apps/files/src/run.rs`, `lib/browse/src/browser.rs` `finish_rename`, `chrome.rs` |
+| D843 | per-sample and per-paint work in the file grid: the selection band rebuilds its edge cells with a text layout of each name on every pointer sample, a whole column over the band's auto-scrolled height when an edge sits in a margin (plausible, unmeasured), and a tile with no artwork rasterises the built-in picture and blurs a fresh shadow on every paint | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `userland/apps/files/src/marquee.rs`, `layout.rs`; `lib/controls/src/collection.rs` |
+| D844 | `lib/raster`'s `blit_transformed` clamps its walk to the buffer rather than the surface's origin-relative extent (no current caller is affected); `lib/icon/src/folder.rs`'s `fit_within` duplicates `imagerender.rs`'s fit and already rounds differently; and docs drift: `docs/src/lib/icon.md` says a folder card shares the member's tile thumbnail, which only files.app's store does, `display_ipc.rs`'s test helper's first doc line is stale, and the `autoload_input` fixture numbers two steps "5." | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/raster/src/transformed.rs`, `lib/icon/src/folder.rs`, `docs/src/lib/icon.md` |
 
-### D453 — a process's scheduling level reaches only its leader thread
 
-`SchedPriority` is documented as a process's time-shared service level, but
-the kernel applies it to one task: `sched_set_priority` calls `set_priority`
-on the target's leader `TaskId` alone, and `threads::create` admits every
-thread at `Priority::Normal`. So the Switchboard's *Lower* barely touches a
-program whose work runs on a pool; a demotion meant to contain a tenant fails
-open the moment it creates a thread; and the level reported for a process (its
-leader's) need not be the one most of its threads run at.
-
-The fix makes the level the thread group's: the change re-weights every thread
-of `CapTable::threads_of(process)` and records the level for the group, and a
-new thread is admitted at the recorded level. The two race: a thread created
-while the level changes must not keep the old one, so the level is read and
-the thread registered under the lock the change takes, and the thread's weight
-is set before it is unparked. The ordering wants a loom model beside the host
-tests.
-
-Regression tests the fix carries: every existing thread of a lowered group
-reports the lowered level; a thread created afterwards is admitted at it; a
-thread created concurrently with a change ends at the changed level; a raise
-still needs `CAP_PROC_CONTROL`; the process record reports the group's level.
-
-### D140 — the loaded notification-icon set is never installed
-
-`lib/icon`'s `IconSet` is the desktop's *tintable chrome glyph* tier: the
-taskbar's notification area resolves each `StatusKind` through
-`TaskbarRenderer::icons()`, and `set_icons` swaps a loaded set in, bumping the
-generation that is part of the glyph cache's epoch. `DesktopSession::load_icons`
-assembles that set from `/System/Graphics/Icons/<asset-id>.svg`. Both halves are
-complete and unit-tested — and **neither is called from the session's bring-up**,
-so the desktop always draws its built-in chrome glyphs. (This is the icon
-counterpart of the cursor-load gap DS3b closed; noticed while closing that one.)
-
-It is **latent**, not visible: the only kinds `draw_icon` resolves are
-`Network`, `Volume` and `Battery`, and none of the three ships an SVG today, so
-installing the set would change no pixel. It becomes a real defect the moment
-any chrome kind ships artwork.
-
-**Why it is not a two-line wiring fix.** `load_icon_set` reads one path per
-`IconKind` — 80 of them — of which 78 would miss. Calling it at bring-up
-would add 80 speculative VFS lookups to every boot to enable nothing. The
-honest shape is the one the cursor and wallpaper stores already use: list
-`/System/Graphics/Icons` **once**, keep the names `artwork_kind_for_file`
-resolves to a kind with a `.svg` extension, and read only those. That is a
-signature change to `load_icon_set` (it needs the present kinds, since the
-`SessionFileReader` seam only reads a path) plus the bring-up call.
-
-### Closed (472)
+### Closed (485)
 
 | ID | Subject |
 |---|---|
@@ -887,9 +856,22 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D721 | every thread dispatch took one global lock to ask whether the thread was stopped: the kthread shim looked the task up in `procsignal`'s `STOPPED_TASKS` B-tree under its spin lock, because a stopped thread was parked like any blocked one and an unrelated broadcast wake made it runnable; a stop is now the scheduler's own state — `TaskState::Stopped`, with `StoppedOnQueue` and `StoppedOnCpu` for a stop the scheduler completes when it next reaches the task — which no `unpark` leaves, so dispatch checks nothing and the overlay is gone; `SchedulerPolicy::stop`/`resume` replace the remote `park`; `a_wake_leaves_a_stopped_task_stopped` (every policy), `stop_holds_and_reports_and_continue_releases_it` |
 | D808 | a task parked while queued kept its stale run-queue entry and the wake that readmitted it queued a second, so a job stopped and continued while runnable — a CPU-bound job after `^Z` and `bg` — was dispatched from both entries until it next blocked, two turns a round under MLFQ's FIFO bands; a stop of a queued task keeps its one entry and whoever takes the entry completes the stop (`park::take_entry`), so a task holds one entry while `Ready`; `a_task_stopped_while_queued_keeps_one_entry` (every policy) |
 | D809 | a task retired while it held neither a run-queue entry nor a CPU — a thread whose admission failed before it started, a thread killed while stopped — kept its scheduler record for good, since only the dispatch that took its last entry or settled it dropped one, lengthening every later dispatch's registry lookup and MLFQ's boost walk; `exit` drops such a record at once, never one an id drawn again has since claimed; `a_task_retired_off_every_queue_leaves_no_record` (every policy) |
-| D810 | a stopped process read as `Blocked` to `sysinfo`, so `ps` never showed its `T`, `top` and `sysmon` never counted it stopped, and the Switchboard never offered to continue it; the stop states report `ProcessState::Stopped`, a group reading stopped once every live thread is; `a_stopped_group_reports_stopped` |
-| D811 | a thread created while its group was being stopped could start and run while the rest of the job was held, and a stop landing after a kill had lifted its thread's stop held a thread that had to reach its boundary to die; the stop and continue fan-outs run under the thread-group table's read lock, `thread_create` stops a thread born to a stopped creator under the write lock, and a stop withdraws itself from a thread owing a death; `a_thread_born_into_a_stopped_group_is_born_stopped`, `a_stop_never_holds_a_thread_that_owes_a_death` |
+| D810 | a stopped process read as `Blocked` to `sysinfo`, so `ps` never showed its `T`, `top` and `sysmon` never counted it stopped, and the Switchboard never offered to continue it; the stop states report `ProcessState::Stopped`, and a process reads stopped from its job-control generation the moment job control decides it; `a_stopped_group_reports_stopped`, `a_process_job_control_stopped_reads_stopped_before_its_threads_do` |
+| D811 | a thread created while its group was being stopped could start and run while the rest of the job was held, and a stop landing after a kill had lifted its thread's stop held a thread that had to reach its boundary to die; a thread registered under the thread-group table's write lock takes its process's job-control generation there and joins a stopped process stopped (D822), and a thread owing a death is never held by a stop, a fan-out taking back a stop of its own that a kill overtook; `a_thread_born_into_a_stopped_group_is_born_stopped`, `a_stop_never_holds_a_thread_that_owes_a_death`, `a_stale_stop_a_kill_overtakes_is_taken_back` |
 | D812 | every syscall copied its caller's whole capability record to snapshot it — its supplementary groups and spawn path each a heap allocation, made and freed through the kernel heap's one interrupt-masking lock on every syscall of every CPU; the table holds each record shared (`Arc`), a snapshot is a reference count, and a mutation copies the record only while a snapshot of it is held; `a_snapshot_shares_the_record_and_keeps_its_point_in_time` |
+| D816 | a stop of a task a dispatch had just claimed cleared that CPU's current-task slot and sent no IPI: the body then ran with no caller identity, so its next syscall was unattributable and the kernel killed it, and a lone task on a tickless core was never stopped at all; a stop now never touches the slot or the body lock, nudges the CPU running a `StoppedOnCpu` task (every CPU when no slot names it yet), and a stop that lands after the claim is completed without running the body; `a_stop_landing_before_the_body_completes_without_running_it` (every policy), `stop_of_an_executing_task_leaves_its_current_slot_intact` |
+| D817 | an exit racing a stop, or a repeat exit's probe, could report a kill of a parked or stopped task deferred to a dispatch that would never run it: both held the body lock just long enough for the exit to read it as a dispatch's, and the task stayed alive and stopped for good; only a dispatch now takes the body lock, and a repeat exit decides its nudge from the task's state; `an_exit_racing_job_control_retires_the_task` (`run_races`, every policy) |
+| D818 | CFQ and EEVDF kept a task's record for good when an exit retired it between its being made ready and its entry being pushed: the admission saw it exited and pushed nothing, while the exit had left the record to that entry; whoever makes a task ready now always pushes its entry and the entry's taker drops the record; `an_exit_between_a_wake_and_its_entry_leaves_no_record` (every policy) |
+| D819 | an exit could own a teardown the task's own dispatch had already completed: retired by its dispatch between the exit's check and its swap, the task was reported `Quiesced` to a second owner; the exit now decides on the state its swap replaced, and one finding the task already exited reports `AlreadyExited`; `an_exit_finding_the_task_already_retired_owns_no_teardown` (every policy), `a_retirement_reports_the_state_it_ended` |
+| D820 | the count of owed deaths was raised only after a death was on its gate, so a take of another thread's death in between drove it below the deaths owed, and a dispatch reading it zero never landed a retired thread's death — its process never reclaimed, its parent's `wait` hung; a claim now counts before the death is takeable and uncounts only an unrecorded claim; `a_death_is_counted_before_anyone_can_take_it` |
+| D821 | **security**: a job-control stop froze a thread inside a kernel body, so a sleeping lock handed to it as it waited — the one serialising a shared disk — stayed held until the continue, and `^Z` on one process could stall every user's I/O on that disk; a stop now only ever stops a thread outside a kernel body, and one inside stops itself at the body's edge, where it holds nothing, through its gate's job-control generation, and a fan-out takes back a stop of its own that the thread's entry into a body overtook; `a_stop_leaves_a_thread_inside_a_kernel_body_to_its_edge`, `an_edge_stop_holds_until_the_continue`, `an_edge_stop_a_continue_overtakes_is_withdrawn`, `a_stale_stop_a_kernel_entry_overtakes_is_taken_back` |
+| D822 | the stop and continue fan-outs held the capability table's read lock across every thread's scheduler call, so behind a queued writer every CPU's per-syscall snapshot waited out a fan-out over a large group; a process's job-control generation is now advanced and its members collected under the read lock alone and the fan-out runs unlocked, a thread keeping only the newest generation it is given, while a thread created meanwhile adopts the group's generation as its own under the write lock; `a_stop_fan_out_overtaken_by_a_continue_cannot_undo_it`, `a_process_job_generation_advances_once_per_transition`, `a_thread_born_into_a_stopped_group_is_born_stopped`, `a_joining_thread_adopts_its_groups_generation_however_far_it_has_come` |
+| D823 | a reschedule IPI latched while a syscall ran — a wake placed on that CPU, a stop or kill of the task — was ignored at the syscall's return, which consulted only the tick latch, and the last look ran with interrupts on, so under a tickless policy the wake, stop or kill waited for the next interrupt, up to the watchdog's one-second guard; the shared syscall, resolved-fault and first-entry returns now look once more with interrupts masked and honour either latch, and the user preempt point looks again after switching a task back in; `the_settle_before_user_masks_then_honours_both_latches` |
+| D824 | every in-kernel wait loop's kill check after a wake took the gate registry's lock and a keyed hash, though the asking thread is the one running; a thread asking about itself now reads the gate its CPU publishes, in place; `the_published_gate_is_read_without_taking_a_share` |
+| D825 | removing a process deep-copied its capability record whenever a syscall's snapshot still shared it — every exit through its own syscall — and `insert` did the same for a record it then discarded; both now hand back the shared record; `a_removed_record_is_the_one_a_snapshot_shares` |
+| D826 | D450's fix was incomplete: `repaint_desktop` still cloned its damage on every call, each composite dropped its damage buffer, plan and hit list, and each present allocated the region it sent, so every icon hover and crossfade step allocated; all are now kept and reused; `a_frame_repainting_the_desktop_allocates_nothing_of_its_own`, `a_repaint_of_kept_content_allocates_nothing_of_its_own` |
+| D829 | a continue reaching a thread born into a stopped group before its creator started it ran the thread early: `stop` turned the parked newborn `Stopped`, which `resume` made `Ready`, so it ran before its creator had recorded the stack it owns; a parked task is now stopped into `TaskState::StoppedParked`, which `resume` leaves parked and a wake makes `Stopped`, owed its run — and a park a stop overtakes keeps a racing wake; `a_continue_before_its_start_leaves_a_newborn_parked`, `a_continue_leaves_a_task_parked_under_a_stop_parked` and `a_body_parking_as_a_stop_lands_stays_parked_beneath_it` (every policy) |
+| D830 | a stop's report could outlive the continue that overtook it: a continue recorded before a racing stop's fan-out recorded, so `wait` read a running child stopped; the reports now carry the job-control generation and one no newer than the last is dropped; `a_job_control_report_older_than_the_last_changes_nothing` |
 
 ## Scope
 
@@ -6326,7 +6308,7 @@ both. Before the fix the spawned-after case failed with `Ran(1)` where
 `Ran(11)` was required; the spawn order was the control that isolated the id
 as the cause.
 
-**Scope.** CFQ only, which is the default and what production runs. The
+**Scope.** CFQ only. The
 EEVDF sibling admits at zero lag and orders by deadline, so a woken task's
 deadline is genuinely earlier and no tie-break decides; MLFQ re-enters a
 waker at high priority. Two *separate* EEVDF defects noticed while
@@ -10767,3 +10749,51 @@ seam on `GrantSyscalls`, as `lib/rt`'s heap has. Regression tests: a slab carved
 before its host moves frees through the moved host's seam, never a host placed
 where the first one was; a slab outliving its host still frees; and the miri
 run of `tairix-drvrt` passes the test above.
+
+## D453 — a process's scheduling level reaches only its leader thread (OPEN)
+
+`SchedPriority` is documented as a process's time-shared service level, but
+the kernel applies it to one task: `sched_set_priority` calls `set_priority`
+on the target's leader `TaskId` alone, and `threads::create` admits every
+thread at `Priority::Normal`. So the Switchboard's *Lower* barely touches a
+program whose work runs on a pool; a demotion meant to contain a tenant fails
+open the moment it creates a thread; and the level reported for a process (its
+leader's) need not be the one most of its threads run at.
+
+The fix makes the level the thread group's: the change re-weights every thread
+of `CapTable::threads_of(process)` and records the level for the group, and a
+new thread is admitted at the recorded level. The two race: a thread created
+while the level changes must not keep the old one, so the level is read and
+the thread registered under the lock the change takes, and the thread's weight
+is set before it is unparked. The ordering wants a loom model beside the host
+tests.
+
+Regression tests the fix carries: every existing thread of a lowered group
+reports the lowered level; a thread created afterwards is admitted at it; a
+thread created concurrently with a change ends at the changed level; a raise
+still needs `CAP_PROC_CONTROL`; the process record reports the group's level.
+
+## D140 — the loaded notification-icon set is never installed (OPEN)
+
+`lib/icon`'s `IconSet` is the desktop's *tintable chrome glyph* tier: the
+taskbar's notification area resolves each `StatusKind` through
+`TaskbarRenderer::icons()`, and `set_icons` swaps a loaded set in, bumping the
+generation that is part of the glyph cache's epoch. `DesktopSession::load_icons`
+assembles that set from `/System/Graphics/Icons/<asset-id>.svg`. Both halves are
+complete and unit-tested — and **neither is called from the session's bring-up**,
+so the desktop always draws its built-in chrome glyphs. (This is the icon
+counterpart of the cursor-load gap DS3b closed; noticed while closing that one.)
+
+It is **latent**, not visible: the only kinds `draw_icon` resolves are
+`Network`, `Volume` and `Battery`, and none of the three ships an SVG today, so
+installing the set would change no pixel. It becomes a real defect the moment
+any chrome kind ships artwork.
+
+**Why it is not a two-line wiring fix.** `load_icon_set` reads one path per
+`IconKind` — 80 of them — of which 78 would miss. Calling it at bring-up
+would add 80 speculative VFS lookups to every boot to enable nothing. The
+honest shape is the one the cursor and wallpaper stores already use: list
+`/System/Graphics/Icons` **once**, keep the names `artwork_kind_for_file`
+resolves to a kind with a `.svg` extension, and read only those. That is a
+signature change to `load_icon_set` (it needs the present kinds, since the
+`SessionFileReader` seam only reads a path) plus the bring-up call.

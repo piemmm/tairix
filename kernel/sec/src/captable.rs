@@ -23,7 +23,7 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::{
     AppIdentity, CapabilitySummary, Errno, Origin, ProcId, SpawnSession, TrustDomain,
@@ -214,14 +214,12 @@ impl Default for ProcName {
 ///
 /// Carries no [`Eq`]/[`PartialEq`]: nothing in the kernel compares a whole
 /// record, and the per-process I/O counters are live accounting state, not
-/// a value with a meaningful equality. [`Clone`] is still needed — the
-/// syscall dispatcher clones a snapshot of the caller's record under a
-/// briefly held read lock so the rest of the call runs lock-free — so the
-/// counters are [`Arc`]-shared [`AtomicU64`]s: cloning the record shares the
-/// same underlying counters rather than resetting a fresh pair, so an
-/// increment made through a per-syscall snapshot still lands on the one
-/// total the registry's live entry (and every other outstanding snapshot)
-/// reads back.
+/// a value with a meaningful equality. [`Clone`] is still needed — a
+/// mutation of a record some syscall's snapshot still shares copies it
+/// ([`CapTable::caps_for_mut`]) — so the counters are [`Arc`]-shared
+/// [`AtomicU64`]s: the copy shares the same underlying counters rather than
+/// resetting a fresh pair, so an increment made through a snapshot still
+/// lands on the one total the registry's live entry reads back.
 #[derive(Clone, Debug)]
 pub struct TaskCapabilities {
     /// The **process** (thread group) this record authorises.
@@ -358,13 +356,13 @@ pub struct TaskCapabilities {
     /// moved, never the length the caller asked for. Monotonic for the
     /// process's lifetime and saturating rather than wrapping.
     ///
-    /// `Arc<AtomicU64>` rather than a plain `u64` or a bare `AtomicU64`: the
-    /// syscall dispatcher works off a per-call `Clone` of this record (see
-    /// the struct docs), so the counter must be a shared cell every clone
-    /// of one task's record points at, not a value each clone would carry
-    /// its own independent copy of. [`Self::record_bytes_read`] then updates
-    /// it through the shared `&TaskCapabilities` every syscall handler
-    /// already holds, with no additional lock on the file I/O hot path.
+    /// `Arc<AtomicU64>` rather than a plain `u64` or a bare `AtomicU64`: a
+    /// syscall may be working off a snapshot of this record while a mutation
+    /// copies it (see the struct docs), so the counter must be a shared cell
+    /// every copy of one task's record points at. [`Self::record_bytes_read`]
+    /// then updates it through the shared `&TaskCapabilities` every syscall
+    /// handler already holds, with no additional lock on the file I/O hot
+    /// path.
     io_bytes_read: Arc<AtomicU64>,
     /// Bytes actually transferred by this process's own `fs_write` system
     /// calls, mirroring [`Self::io_bytes_read`] in every respect but
@@ -1132,7 +1130,7 @@ pub struct CapTable {
     /// `O(log n + threads)` instead of a scan across every thread on the
     /// machine, which is what a system under load would actually pay. The two
     /// indices are only ever updated together, by the four mutators below.
-    members: BTreeMap<ProcessId, BTreeSet<TaskId>>,
+    members: BTreeMap<ProcessId, ThreadGroup>,
     /// Each live process instance, by the [`ProcId`] its record carries.
     ///
     /// The one authority for whether an instance still exists, because it
@@ -1149,12 +1147,79 @@ pub struct CapTable {
     sessions: SessionTree,
 }
 
+/// A process's job-control generation: advanced by each stop and each
+/// continue, odd while the process is stopped.
+///
+/// A fan-out applies the generation it decided to each thread, and a thread
+/// keeps only the newest it has been given, so a slow stop's fan-out cannot
+/// undo a continue that overtook it. Its width is what a thread's kill gate
+/// packs it into, and ordering is serial-number arithmetic within it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct JobGeneration(u32);
+
+impl JobGeneration {
+    /// The generation's width in bits.
+    pub const BITS: u32 = 29;
+    const MASK: u32 = (1 << Self::BITS) - 1;
+
+    /// The generation `bits` hold, ignoring any bit past [`Self::BITS`].
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits & Self::MASK)
+    }
+
+    /// The generation as its [`Self::BITS`]-bit value.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Whether this generation decides the process stopped.
+    #[must_use]
+    pub const fn is_stopped(self) -> bool {
+        self.0 & 1 == 1
+    }
+
+    /// The generation a transition to `stopped` advances this one to — this
+    /// one, when it already says so.
+    #[must_use]
+    pub const fn toward(self, stopped: bool) -> Self {
+        if self.is_stopped() == stopped {
+            self
+        } else {
+            Self::from_bits(self.0.wrapping_add(1))
+        }
+    }
+
+    /// Whether this generation was decided after `other`: ahead of it by less
+    /// than half the generation space.
+    #[must_use]
+    pub const fn is_newer_than(self, other: Self) -> bool {
+        let ahead = self.0.wrapping_sub(other.0) & Self::MASK;
+        ahead != 0 && ahead < 1 << (Self::BITS - 1)
+    }
+}
+
+/// One process's live threads and the job-control generation they run under.
+#[derive(Debug, Default)]
+struct ThreadGroup {
+    threads: BTreeSet<TaskId>,
+    job: AtomicU32,
+}
+
+impl ThreadGroup {
+    fn job(&self) -> JobGeneration {
+        JobGeneration::from_bits(self.job.load(Ordering::Acquire))
+    }
+}
+
 /// A process's record, removed with the process, and the exits its departure
 /// released.
 #[derive(Debug)]
 pub struct Removed {
-    /// The record the process held.
-    pub record: TaskCapabilities,
+    /// The record the process held, shared with any syscall snapshot of it
+    /// still in flight rather than copied out from under one.
+    pub record: Arc<TaskCapabilities>,
     /// The exits of the anchors whose sessions the departure emptied, which
     /// the caller retires.
     pub released: Released,
@@ -1215,7 +1280,7 @@ impl CapTable {
     /// untouched: both belong to the process, not to the record that
     /// describes it. A new process inserted here is in the root session;
     /// placing one anywhere else is [`Self::admit`]'s.
-    pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<TaskCapabilities> {
+    pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<Arc<TaskCapabilities>> {
         let process = caps.process();
         if let Some(previous) = self.entries.get(&process) {
             caps.adopt_io_counters(previous);
@@ -1224,13 +1289,15 @@ impl CapTable {
         }
         let leader = process.leader_task();
         self.threads.insert(leader, process);
-        self.members.entry(process).or_default().insert(leader);
+        self.members
+            .entry(process)
+            .or_default()
+            .threads
+            .insert(leader);
         if !caps.proc_id().is_kernel() {
             self.instances.insert(caps.proc_id(), process);
         }
-        self.entries
-            .insert(process, Arc::new(caps))
-            .map(Arc::unwrap_or_clone)
+        self.entries.insert(process, Arc::new(caps))
     }
 
     /// Attach `thread` to the already-registered process `process`, so the
@@ -1255,7 +1322,11 @@ impl CapTable {
             return Err(ThreadRegisterError::AlreadyPresent);
         }
         self.threads.insert(thread, process);
-        self.members.entry(process).or_default().insert(thread);
+        self.members
+            .entry(process)
+            .or_default()
+            .threads
+            .insert(thread);
         Ok(())
     }
 
@@ -1275,13 +1346,54 @@ impl CapTable {
         self.members
             .get(&process)
             .into_iter()
-            .flat_map(|set| set.iter().copied())
+            .flat_map(|group| group.threads.iter().copied())
     }
 
     /// How many live threads `process` has. `0` for an unknown process.
     #[must_use]
     pub fn thread_count(&self, process: ProcessId) -> usize {
-        self.members.get(&process).map_or(0, BTreeSet::len)
+        self.members
+            .get(&process)
+            .map_or(0, |group| group.threads.len())
+    }
+
+    /// The job-control generation `process`'s threads run under, or [`None`]
+    /// for a process with no live thread.
+    ///
+    /// Read under the table's write lock by a thread's registration, so a
+    /// thread joining a stopped process joins it stopped.
+    #[must_use]
+    pub fn job_generation(&self, process: ProcessId) -> Option<JobGeneration> {
+        self.members.get(&process).map(ThreadGroup::job)
+    }
+
+    /// Advance `process`'s job-control generation to one saying `stopped`,
+    /// unless it already does, returning the generation that decides it and
+    /// whether this call moved it; [`None`] for a process with no live thread.
+    ///
+    /// Taken under the table's *read* lock: a registration, which holds the
+    /// write lock, therefore sees the process wholly before or wholly after
+    /// it, while concurrent stops and continues are ordered by the
+    /// generation's own compare-exchange.
+    #[must_use]
+    pub fn advance_job(&self, process: ProcessId, stopped: bool) -> Option<(JobGeneration, bool)> {
+        let group = self.members.get(&process)?;
+        let mut current = group.job();
+        loop {
+            let next = current.toward(stopped);
+            if next == current {
+                return Some((current, false));
+            }
+            match group.job.compare_exchange_weak(
+                current.bits(),
+                next.bits(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some((next, true)),
+                Err(seen) => current = JobGeneration::from_bits(seen),
+            }
+        }
     }
 
     /// Borrow the capability record authorising `thread` immutably.
@@ -1433,9 +1545,9 @@ impl CapTable {
     pub fn remove_thread(&mut self, thread: TaskId) -> Option<(ProcessId, usize)> {
         let process = self.threads.remove(&thread)?;
         let remaining = match self.members.get_mut(&process) {
-            Some(set) => {
-                set.remove(&thread);
-                let remaining = set.len();
+            Some(group) => {
+                group.threads.remove(&thread);
+                let remaining = group.threads.len();
                 if remaining == 0 {
                     self.members.remove(&process);
                 }
@@ -1464,8 +1576,8 @@ impl CapTable {
     /// ([`crate::SessionTree::is_ending`] on the removed record's instance),
     /// and so is retiring every exit the departure released.
     pub fn remove(&mut self, process: ProcessId) -> Option<Removed> {
-        if let Some(threads) = self.members.remove(&process) {
-            for thread in threads {
+        if let Some(group) = self.members.remove(&process) {
+            for thread in group.threads {
                 self.threads.remove(&thread);
             }
         }
@@ -1474,10 +1586,7 @@ impl CapTable {
         let released = self
             .sessions
             .depart(process, record.proc_id(), record.session());
-        Some(Removed {
-            record: Arc::unwrap_or_clone(record),
-            released,
-        })
+        Some(Removed { record, released })
     }
 
     /// Hold `exit` until the session anchored at `anchor` has no member left —
@@ -2255,6 +2364,83 @@ mod tests {
             table.snapshot_of(TaskId(0x52)).is_none(),
             "no record, no snapshot"
         );
+    }
+
+    /// Removing a process hands back the record a syscall's snapshot still
+    /// shares rather than copying it out from under that syscall.
+    #[test]
+    fn a_removed_record_is_the_one_a_snapshot_shares() {
+        let sink = RecordingSink::new();
+        let process = ProcessId(0x61);
+        let mut table = CapTable::new();
+        let none = caps_of(&[]);
+        table.insert(TaskCapabilities::derive(
+            process,
+            UserId(1000),
+            none,
+            none,
+            &sink,
+        ));
+        let snapshot = table
+            .snapshot_of(process.leader_task())
+            .expect("registered");
+        let removed = table.remove(process).expect("removed");
+        assert!(Arc::ptr_eq(&removed.record, &snapshot));
+    }
+
+    /// A generation says stopped by its parity, advances only toward the state
+    /// it does not already say, and keeps its order across its wrap.
+    #[test]
+    fn a_job_generation_advances_toward_a_state_and_orders_across_its_wrap() {
+        let running = JobGeneration::default();
+        assert!(!running.is_stopped());
+        let stopped = running.toward(true);
+        assert!(stopped.is_stopped());
+        assert!(stopped.is_newer_than(running) && !running.is_newer_than(stopped));
+        assert_eq!(
+            stopped.toward(true),
+            stopped,
+            "a stop of a stopped process moves nothing"
+        );
+        assert!(!running.is_newer_than(running));
+
+        let last = JobGeneration::from_bits(u32::MAX);
+        assert_eq!(last.bits(), (1 << JobGeneration::BITS) - 1);
+        let wrapped = last.toward(!last.is_stopped());
+        assert_eq!(wrapped.bits(), 0);
+        assert!(wrapped.is_newer_than(last), "the wrap still orders forward");
+        assert!(!last.is_newer_than(wrapped));
+    }
+
+    /// A process's stop and continue each advance its generation once, a
+    /// repeat moves nothing, and a process with no live thread has none.
+    #[test]
+    fn a_process_job_generation_advances_once_per_transition() {
+        let sink = RecordingSink::new();
+        let process = ProcessId(0x71);
+        let mut table = CapTable::new();
+        let none = caps_of(&[]);
+        table.insert(TaskCapabilities::derive(
+            process,
+            UserId(1000),
+            none,
+            none,
+            &sink,
+        ));
+        assert_eq!(
+            table.job_generation(process),
+            Some(JobGeneration::default())
+        );
+
+        let (stopped, moved) = table.advance_job(process, true).expect("live");
+        assert!(moved && stopped.is_stopped());
+        assert_eq!(table.advance_job(process, true), Some((stopped, false)));
+        let (running, moved) = table.advance_job(process, false).expect("live");
+        assert!(moved && !running.is_stopped() && running.is_newer_than(stopped));
+        assert_eq!(table.job_generation(process), Some(running));
+
+        assert!(table.advance_job(ProcessId(0x72), true).is_none());
+        assert!(table.job_generation(ProcessId(0x72)).is_none());
     }
 
     #[test]

@@ -16,17 +16,18 @@ use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, SyscallNumber, WaitFlags, WaitStatus, WaitStatusRecord,
     SYSCALL_MAX_ARGS,
 };
-use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
+use tairix_arch_api::{UserEntry, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
-use tairix_arch_riscv64::userentry::UserMode;
+use tairix_arch_riscv64::userentry::USER_MODE;
 use tairix_arch_riscv64::{
     handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
     SERIAL_SINK,
 };
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     reschedule_current, spawn_image, spawn_user_kthread, KernelProcessWait, ProcessWait,
     RescheduleAction, SpawnMode, SpawnRequest, Yielder,
@@ -35,7 +36,7 @@ use tairix_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
     VirtAddr,
 };
-use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
@@ -387,18 +388,23 @@ fn build_user_space(pool: &'static paging::PageTablePool, rxe: &'static [u8]) ->
 /// stack with no dispatcher-side repointing.
 fn admit(sched: &Scheduler<RiscvArch>, root_phys: u64, entry: UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
-    let user_mode = UserMode::new();
     let pre_resume = move |_top: u64| {
         // SAFETY: paging is enabled and `root_phys` is the Sv39 root of a space
         // that maps the low identity window the running dispatcher executes
         // from — exactly `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys) };
     };
-    let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+    let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: by the time this body runs the task has been dispatched, so
         // its `pre_resume` hook reactivated `satp`, and the trap vector +
         // dispatch callback are installed; the program's `ecall`s are handled.
-        unsafe { user_mode.enter_user(entry) }
+        unsafe {
+            UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            }
+            .enter(yielder)
+        }
     };
     match spawn_user_kthread(sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work) {
         Ok(id) => id,

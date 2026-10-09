@@ -216,10 +216,11 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   publication gives interrupt paths O(1) lock-free lookup with no
   compile-time CPU ceiling; each resume/live-space slot remains independently
   locked and never cross-CPU contended. `kthread` supplies the
-  `C,S`-monomorphised suspend thunks over one shared `suspend_with` body
-  (reuses `Yielder::suspend`, §2.2) — `suspend_thunk_syscall` (brackets
-  the port's cooperative-park convention, the user mid-handler path) and
-  `suspend_thunk_body` (no bracket, a kernel kthread's own body) — and
+  `C,S`-monomorphised `suspend_thunk` (reuses `Yielder::suspend`, §2.2),
+  which brackets the port's cooperative-park convention only once the
+  thread has entered user mode (`ThreadControl::entered_user`, set by
+  `UserThreadEntry::enter` with interrupts masked just before the entry) —
+  before that the thread runs body code with no convention to balance — and
   the public **`reschedule_current(cpu, action) -> bool`** the arch trap
   path and in-kernel blocking primitives call — it lifts the handle out
   from under the lock *before* the suspending switch (no lock across the
@@ -231,8 +232,7 @@ next dispatch — **no separate EL0-frame save area and no new HAL trait**
   whose `Some`-ness marks a **user** kthread; `dispatch_step` now takes
   `cpu`, runs `pre_resume` (the per-task address-space reactivation seam)
   and publishes the resume handle immediately before the switch-in — for
-  **every** kthread: user tasks with the syscall thunk, kernel kthreads
-  with the body thunk — and clears it the instant the task switches back.
+  **every** kthread — and clears it the instant the task switches back.
   Kernel kthreads being suspendable is load-bearing: a kthread contending
   on a `SleepLock` whose holder parked across a block-device completion
   wait parks too instead of spinning in-kernel and starving the dispatch
@@ -946,15 +946,20 @@ clears the foreground job. Binding design decisions:
   is gone may be drawn again, so a stale slot must never reach whoever
   inherited the number. A delivery whose target has exited is dropped
   fail-closed.
-- **Stop state.** A stop is the scheduler's own `Stopped` state, which no
-  wake leaves — a broadcast wake (a console byte waking all parked readers)
-  leaves a stopped reader stopped, and the dispatch path checks nothing for
-  it. Only `Continue` (`resume`) or a kill ends it; a kill resumes a stopped
-  thread owing its death at a kernel boundary so it can unwind there, and a
-  stop landing on a thread already owing a death is withdrawn. The fan-out
-  runs under the thread-group table's read lock and `thread_create` stops a
-  thread born to a stopped creator, so no thread of a stopped job runs
-  (`docs/src/architecture/scheduler.md`, "Job-control stop").
+- **Stop state.** A stop advances the process's job-control generation and
+  drives each thread to it. A thread outside any kernel body enters the
+  scheduler's own `Stopped` state, which no wake leaves — a broadcast wake (a
+  console byte waking all parked readers) leaves a stopped reader stopped, and
+  the dispatch path checks nothing for it; a parked one is held
+  `StoppedParked`, which `resume` leaves parked. A thread inside a kernel body,
+  which may hold state another thread waits on, stops itself at the body's
+  edge instead, and a fan-out takes back a stop of its own that the thread's
+  entry overtook. Only `Continue` (`resume`) or a kill ends a stop; a thread
+  owing a death is never held. The generation is advanced under the
+  thread-group table's read lock and `thread_create` gives a newborn the
+  generation it finds as its own under the write lock, so no thread of a
+  stopped job runs (`docs/src/architecture/scheduler.md`, "Job-control
+  stop").
 - **Foreground marking.** New unprivileged-beyond-console syscall
   `SyscallNumber::CONSOLE_FOREGROUND` (**70**): `(fd: u32, pid: i64)`; `fd`
   must be a `StreamMode::Read` descriptor of the caller's own table (the

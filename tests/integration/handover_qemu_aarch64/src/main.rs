@@ -75,10 +75,11 @@
 //!
 //! Each relay is caused by one activation in the manager's window, and both of
 //! that activation's gestures are gated on the session's own announcement that
-//! the surface they aim at is on screen — the window for the press that opens
-//! the item's menu, the drawn plate for the press on its *Open* row. So the
-//! records that complete the PASS cannot happen before the gestures that cause
-//! them.
+//! the surface they aim at is ready for them — the window on screen (raised
+//! back to the front, for every activation after the first) for the press that
+//! opens the item's menu, the drawn plate for the press on its *Open* row. So
+//! the records that complete the PASS cannot happen before the gestures that
+//! cause them.
 //!
 //! A panic before the gate parks the CPU, the guest falls silent, and the
 //! runner reports a timeout — loud failure, never a false pass.

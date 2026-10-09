@@ -26,16 +26,17 @@ use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::paging::{
     self, activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
-use tairix_arch_aarch64::userentry::UserMode;
+use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
     Aarch64ArchStorage, SERIAL_SINK,
 };
-use tairix_arch_api::{EnterUser, BOOT_CPU};
+use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::foreground::ForegroundOwner;
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     drain_pending_foreground, install_foreground_signal, install_gate, intake_enable, intake_take,
     reschedule_current, spawn_image, spawn_user_kthread, ConsoleDevice, ConsoleInput,
@@ -46,7 +47,7 @@ use tairix_kernel_mem::{
     copy_out, AddressSpace, DirectPhysMap, Frame, PhysAddr, PhysMap, UserAddressSpace, UserStack,
     VirtAddr,
 };
-use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig};
+use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_log::{log, Event, EventId, Level};
@@ -495,18 +496,23 @@ fn build_el0_space(
 /// `root_phys` before every switch-in (isolation). Returns its task id.
 fn admit(sched: &Scheduler<Aarch64Arch>, root_phys: u64, entry: tairix_arch_api::UserEntry) -> u64 {
     let cs = ContextSwitchHal::new();
-    let user_mode = UserMode::new();
     let pre_resume = move |_stack_top: u64| {
         // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
         // that identity-maps the low kernel window — `activate_user_root`'s
         // contract.
         unsafe { activate_user_root(root_phys) };
     };
-    let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+    let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // SAFETY: the entered space is active (the `pre_resume` hook just
         // reactivated it) and the EL1 trap vector + dispatch callback are
         // installed, so the program's `svc`s are handled.
-        unsafe { user_mode.enter_user(entry) }
+        unsafe {
+            UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            }
+            .enter(yielder)
+        }
     };
     let Ok(id) = spawn_user_kthread(sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work) else {
         qemu_exit::exit_failure(FAIL_SPAWN)

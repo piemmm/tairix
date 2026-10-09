@@ -72,6 +72,21 @@ pub struct TestArch {
     last_wakeup_ns: AtomicU64,
     last_wakeup_some: AtomicBool,
     wakeup_call_count: AtomicU64,
+    /// Run inside the next [`SchedulerArch::set_preemption`]: every policy
+    /// arms between claiming a task and running its body, so a test lands a
+    /// racing call in exactly that window.
+    preemption_hook: tairix_sync::SpinLock<Option<PreemptionHook>>,
+}
+
+/// A test's one-shot [`TestArch::on_next_set_preemption`] action.
+#[cfg(any(test, feature = "test-arch"))]
+struct PreemptionHook(alloc::boxed::Box<dyn FnOnce() + Send>);
+
+#[cfg(any(test, feature = "test-arch"))]
+impl core::fmt::Debug for PreemptionHook {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PreemptionHook")
+    }
 }
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -107,7 +122,13 @@ impl TestArch {
             last_wakeup_ns: AtomicU64::new(0),
             last_wakeup_some: AtomicBool::new(false),
             wakeup_call_count: AtomicU64::new(0),
+            preemption_hook: tairix_sync::SpinLock::new(None),
         })
+    }
+
+    /// Run `hook` once, inside the next [`SchedulerArch::set_preemption`] call.
+    pub fn on_next_set_preemption(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.preemption_hook.lock() = Some(PreemptionHook(alloc::boxed::Box::new(hook)));
     }
 
     /// Sets the simulated [`CoreClass`] of `cpu`.
@@ -254,6 +275,10 @@ impl SchedulerArch for TestArch {
             self.arm_count.fetch_add(1, Ordering::Relaxed);
         } else {
             self.disarm_count.fetch_add(1, Ordering::Relaxed);
+        }
+        let hook = self.preemption_hook.lock().take();
+        if let Some(PreemptionHook(run)) = hook {
+            run();
         }
     }
 

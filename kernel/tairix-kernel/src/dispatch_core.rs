@@ -100,7 +100,7 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
     // 64 caller-supplied bits against the identifier space and refuses an
     // out-of-space number with `Errno::OutOfRange`. Narrowing here instead
     // would map a reserved-bit probe onto a real syscall.
-    match hook.dispatch(number, args) {
+    let returned = match hook.dispatch(number, args) {
         DispatchOutcome::Returned(result) => Some(encode_result(result)),
         DispatchOutcome::NoCallerContext { cpu } => {
             // The hook could not attribute this trap, so the EL0 context on
@@ -130,7 +130,11 @@ pub fn dispatch_via_slot(slot: &DispatchCallbackSlot, number: u64, args: RawArgs
             let _ = reschedule_current(cpu, action);
             Some(encode_result(result))
         }
-    }
+    };
+    // Back to user mode only once no reschedule latched during the call is
+    // owed; this returns with interrupts masked, for the port to restore.
+    tairix_kernel_core::settle_before_user();
+    returned
 }
 
 /// Forward one user-mode data abort through a slot's resident hook.
@@ -177,7 +181,12 @@ pub unsafe fn resolve_user_fault_via_slot(
     // this call; `as_ref` yields `None` for null and never dereferences it.
     let regs = unsafe { regs.as_ref() };
     match hook.resolve_user_fault(fault_va, write, regs) {
-        UserFaultOutcome::Resolved => true,
+        UserFaultOutcome::Resolved => {
+            // A resolution may have parked: back to user mode only once no
+            // reschedule latched meanwhile is owed.
+            tairix_kernel_core::settle_before_user();
+            true
+        }
         UserFaultOutcome::Terminated { cpu } => {
             // The task is dead (exit recorded, resources reclaimed):
             // suspend it with an `Exit` action — control never returns

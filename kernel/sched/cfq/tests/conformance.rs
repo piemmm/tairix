@@ -16,3 +16,8 @@ use tairix_kernel_sched_cfq::Scheduler;
 fn cfq_passes_scheduler_policy_conformance() {
     conformance::run_all::<Scheduler<TestArch>>();
 }
+
+#[test]
+fn cfq_survives_scheduler_policy_races() {
+    conformance::run_races::<Scheduler<TestArch>>();
+}

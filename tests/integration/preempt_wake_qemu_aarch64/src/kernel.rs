@@ -19,14 +19,15 @@ use tairix_arch_aarch64::paging::{
     self, activate_user_root, AddressSpace as ArchAddressSpace, PageTablePool,
 };
 use tairix_arch_aarch64::preempt::{self, PreemptStorage};
-use tairix_arch_aarch64::userentry::UserMode;
+use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
-use tairix_arch_api::{CpuId, EnterUser, BOOT_CPU};
+use tairix_arch_api::{CpuId, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     on_reschedule_ipi, preempt_current, preemption_count, reschedule_current, spawn_image,
     spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest, Yielder,
@@ -337,14 +338,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // a non-timer interrupt taken on the first EL0 instruction — is the only
     // thing that can drive the return-to-EL0 preempt point.
     let cs = ContextSwitchHal::new();
-    let user_mode = UserMode::new();
     let pre_resume = move |_stack_top: u64| {
         // SAFETY: the MMU is enabled and `root_phys` is the L1 root of a space
         // that identity-maps the low kernel window the running kernel executes
         // from — exactly `activate_user_root`'s contract.
         unsafe { activate_user_root(root_phys) };
     };
-    let work = move |_yielder: &mut Yielder<ContextSwitchHal>| {
+    let work = move |yielder: &mut Yielder<ContextSwitchHal>| {
         // Post a self-directed reschedule SGI while IRQs are masked at EL1: it
         // stays pending until `enter_user`'s `eret` unmasks IRQ in EL0, where
         // it is taken on the first EL0 instruction. This closure runs only on
@@ -357,7 +357,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         // reactivated it) and the EL1 trap vector + dispatch callback are
         // installed, so the program's `exit` `svc` is handled and the pending
         // SGI traps to `LOWER_IRQ`.
-        unsafe { user_mode.enter_user(entry) }
+        unsafe {
+            UserThreadEntry {
+                port: &USER_MODE,
+                regs: entry,
+            }
+            .enter(yielder)
+        }
     };
     if spawn_user_kthread(&sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work).is_err() {
         qemu_exit::exit_failure(FAIL_SPAWN);

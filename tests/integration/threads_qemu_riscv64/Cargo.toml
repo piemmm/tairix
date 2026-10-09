@@ -41,7 +41,7 @@ tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
 tairix-kernel-sched-api = { path = "../../../kernel/sched/api", version = "=0.0.0" }
-tairix-kernel-sched-cfq = { path = "../../../kernel/sched/cfq", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }

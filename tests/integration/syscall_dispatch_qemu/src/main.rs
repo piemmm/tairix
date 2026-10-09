@@ -109,7 +109,7 @@ mod kernel {
     };
     use tairix_kernel_ipc::PortRegistry;
     use tairix_kernel_irq::{IrqTable, UnsupportedController};
-    use tairix_kernel_sched_cfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
+    use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId};
     use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs};
     use tairix_log::{Event, EventId, Sink};

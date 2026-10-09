@@ -413,6 +413,9 @@ pub struct Yielder<C: ContextSwitch + Copy> {
     /// written by [`Self::become_user`] so the dispatcher can install the
     /// task's freshly built user address space before the next switch-in.
     pending_upgrade: *mut Option<UserUpgrade>,
+    /// Raw pointer to this task's [`ThreadControl::entered_user`] flag,
+    /// written by [`Self::note_user_entry`].
+    entered_user: *mut bool,
 }
 
 impl<C: ContextSwitch + Copy> Yielder<C> {
@@ -453,6 +456,20 @@ impl<C: ContextSwitch + Copy> Yielder<C> {
             *self.pending_upgrade = Some(UserUpgrade { pre_resume, live });
         }
         self.suspend(TaskAction::Yield);
+    }
+
+    /// Record that this thread is about to enter user mode, after which it
+    /// runs kernel code only inside a trap handler.
+    ///
+    /// Called with interrupts masked immediately before the entry, so
+    /// nothing suspends the thread in between.
+    pub(crate) fn note_user_entry(&mut self) {
+        // SAFETY: `entered_user` points at the live field of this task's
+        // `ThreadControl`, read and written only on the task's own control
+        // flow.
+        unsafe {
+            *self.entered_user = true;
+        }
     }
 
     /// Record `action` and switch back to the dispatcher's saved context.
@@ -560,108 +577,75 @@ const fn to_task_action(action: RescheduleAction) -> TaskAction {
     }
 }
 
-/// Suspend the `ThreadControl` at `block` with `action` and switch back to
-/// its dispatcher, returning when the task is next resumed.
+/// The [`UserResumeHandle`] thunk: suspend the `ThreadControl<C, S>` at
+/// `block` with `action` and switch back to its dispatcher, returning when
+/// the task is next resumed.
 ///
-/// The shared body of the two `C, S`-monomorphised thunks a
-/// [`UserResumeHandle`] can carry: it reconstructs the task's [`Yielder`]
-/// from the control block and reuses [`Yielder::suspend`] so the
-/// switch-back invoke has exactly one definition. `bracket` selects the
-/// port's cooperative-park convention hook (see the thunks below).
+/// A thread that has entered user mode runs kernel code only inside a trap
+/// handler, so its suspension is bracketed with the port's cooperative-park
+/// hook: x86_64's entry `swapgs` is balanced across the park and reinstated
+/// on resume (`plans/PI.md` X2). Before that — a kernel kthread always, a user
+/// one until its first entry — it suspends from plain body code, which holds
+/// no flipped convention to balance, so an unpaired flip would corrupt it.
 ///
 /// # Safety
 ///
 /// `block` must address the live, boxed `ThreadControl<C, S>` the publishing
 /// [`dispatch_step`] passed. The caller must run between that
-/// `dispatch_step`'s switch-into-task and the task's switch-back — from the
-/// task's own syscall trap or its own kthread body — so the CPU exclusively
-/// owns the control block (the kthread raw-pointer protocol, see the module
-/// docs). `bracket` must be `true` exactly when the caller runs inside the
-/// port's privilege-entry convention (a syscall handler), `false` for a
-/// kthread body.
-unsafe fn suspend_with<C, S>(block: NonNull<ThreadControl<C, S>>, action: TaskAction, bracket: bool)
+/// `dispatch_step`'s switch-into-task and the task's switch-back, on the
+/// task's own control flow, so the CPU exclusively owns the control block
+/// (the kthread raw-pointer protocol, see the module docs).
+unsafe fn suspend_thunk<C, S>(block: NonNull<()>, action: TaskAction)
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    let ctl = block.as_ptr();
-    // SAFETY: `ctl` is the live control block per this function's contract;
-    // `cs` is `Copy`, and the three fields are distinct and live.
-    let (cs, mut yielder) = unsafe {
-        let cs = (*ctl).cs;
-        let yielder = Yielder {
-            cs,
-            task_ctx: addr_of_mut!((*ctl).task_ctx),
-            dispatch_ctx: addr_of_mut!((*ctl).dispatch_ctx),
-            action: addr_of_mut!((*ctl).action),
-            pending_upgrade: addr_of_mut!((*ctl).pending_upgrade),
-        };
-        (cs, yielder)
-    };
+    // The publisher paired this pointer with this thunk's `C, S`, so the cast
+    // restores the type it was erased from.
+    let ctl = block.cast::<ThreadControl<C, S>>().as_ptr();
+    // SAFETY: `ctl` is the live control block per this function's contract.
+    let (mut yielder, bracket) = unsafe { (yielder_of(ctl), (*ctl).entered_user) };
     if bracket {
-        // Bracket the suspend with the port's cooperative-park hook so a port
-        // that flips a per-CPU privilege-entry convention inside its syscall
-        // handler (x86_64's entry `swapgs`) balances it across the park: this
-        // is the user-kthread mid-handler park path (the syscall trap reaches
-        // it via `reschedule_current`), the one place the imbalance arises
-        // (`plans/PI.md` X2). The pair is a no-op on ports that need nothing
-        // (aarch64/riscv64).
-        // SAFETY: we run on the parking user task's own syscall-handler
-        // control flow (the kthread raw-pointer protocol, this function's
-        // contract); the two calls bracket exactly one `Yielder::suspend`, so
-        // `enter`/`leave` pair on this task. `Exit` never returns from
-        // `suspend`, leaving the CPU in the balanced between-handler
-        // convention `enter` restored — correct, since the task never
-        // resumes.
+        let cs = yielder.cs;
+        // SAFETY: the thread runs inside a trap handler, on its own control
+        // flow; the two calls bracket exactly one `Yielder::suspend`, so they
+        // pair on this task. `Exit` never returns from `suspend`, leaving the
+        // CPU in the balanced between-handler convention `enter` restored —
+        // correct, since the task never resumes.
         unsafe {
             cs.enter_cooperative_park();
             yielder.suspend(action);
             cs.leave_cooperative_park();
         }
     } else {
-        // A kthread body never entered through the port's privilege-entry
-        // convention (no entry `swapgs` to balance), so the hook must not
-        // run — an unpaired flip would corrupt the per-CPU convention. The
-        // suspend itself is the safe `Yielder` switch-back.
         yielder.suspend(action);
     }
 }
 
-/// [`suspend_with`] for a task suspending from its own **syscall
-/// handler** (a user kthread's trap path): applies the port's
-/// cooperative-park convention bracket.
+/// The [`Yielder`] over the control block at `ctl`: the one construction the
+/// trampoline and [`suspend_thunk`] share.
 ///
 /// # Safety
 ///
-/// As [`suspend_with`], with the caller on the task's syscall-handler
-/// control flow.
-unsafe fn suspend_thunk_syscall<C, S>(block: NonNull<()>, action: TaskAction)
+/// `ctl` must address a live, boxed `ThreadControl<C, S>` the caller's
+/// control flow exclusively owns.
+unsafe fn yielder_of<C, S>(ctl: *mut ThreadControl<C, S>) -> Yielder<C>
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    // SAFETY: forwarded contract (syscall-handler control flow ⇒ bracket).
-    // The publisher paired this pointer with this thunk's `C, S`, so the cast
-    // restores the type it was erased from.
-    unsafe { suspend_with::<C, S>(block.cast(), action, true) }
-}
-
-/// [`suspend_with`] for a task suspending from its own **kthread body**
-/// (in-kernel code with no privilege-entry convention active): no bracket.
-///
-/// # Safety
-///
-/// As [`suspend_with`], with the caller on the kthread's own body control
-/// flow.
-unsafe fn suspend_thunk_body<C, S>(block: NonNull<()>, action: TaskAction)
-where
-    C: ContextSwitch + Copy,
-    S: KernelStack,
-{
-    // SAFETY: forwarded contract (kthread body ⇒ no bracket). The publisher
-    // paired this pointer with this thunk's `C, S`, so the cast restores the
-    // type it was erased from.
-    unsafe { suspend_with::<C, S>(block.cast(), action, false) }
+    // SAFETY: `ctl` is live per the contract; `cs` is `Copy`, and the fields
+    // addressed are distinct.
+    unsafe {
+        Yielder {
+            cs: (*ctl).cs,
+            task_ctx: addr_of_mut!((*ctl).task_ctx),
+            dispatch_ctx: addr_of_mut!((*ctl).dispatch_ctx),
+            action: addr_of_mut!((*ctl).action),
+            pending_upgrade: addr_of_mut!((*ctl).pending_upgrade),
+            entered_user: addr_of_mut!((*ctl).entered_user),
+        }
+    }
 }
 
 /// Suspend the kthread currently switched in on `cpu` with `action`,
@@ -674,8 +658,7 @@ where
 /// back to the scheduler rather than returned to immediately), and an
 /// in-kernel blocking primitive suspending its own caller — a `SleepLock`
 /// contention park, a block-device completion wait — which works equally
-/// from a user task's syscall trap and a kernel kthread's body (each
-/// published handle carries the thunk matching its context). The suspend
+/// from a user task's syscall trap and a kthread's body. The suspend
 /// switches to the dispatcher's saved context; control returns here — and
 /// then to the caller — only when this task is dispatched again.
 ///
@@ -699,8 +682,8 @@ pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
         return false;
     };
     // SAFETY: `dispatch_step` published this handle for the task currently
-    // switched in on this CPU; the call runs from that task's syscall trap,
-    // so the control block is live and exclusively owned (the kthread
+    // switched in on this CPU; the call runs from that task's own control
+    // flow, so the control block is live and exclusively owned (the kthread
     // raw-pointer protocol).
     unsafe {
         handle.suspend(to_task_action(action));
@@ -738,12 +721,10 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     ///
     /// `Some` marks this as a **user** kthread: the hook reactivates the
     /// task's user address space (its arch page-table root) so the trap
-    /// path `eret`s back into EL0 with the correct translation regime, and
-    /// its presence is also what makes [`dispatch_step`] publish a
-    /// [`UserResumeHandle`] for the trap path. A plain kernel kthread
-    /// leaves this `None` and is never published. It runs on the
-    /// dispatcher's context, where the kernel mapping is identical across
-    /// every user space, so switching the user root mid-step is sound.
+    /// path `eret`s back into EL0 with the correct translation regime. A
+    /// plain kernel kthread leaves this `None`. It runs on the dispatcher's
+    /// context, where the kernel mapping is identical across every user
+    /// space, so switching the user root mid-step is sound.
     pre_resume: Option<PreResume>,
     /// The owning process's live, mutable user address space, or `None` for a
     /// task that has none (a kernel kthread, or a user task whose producer
@@ -765,6 +746,9 @@ struct ThreadControl<C: ContextSwitch + Copy, S: KernelStack> {
     /// dispatch and published on its CPU for every run ([`publish_gate`]).
     /// `None` for a kernel service, which no admission gives one.
     gate: Option<Arc<ThreadGate>>,
+    /// Set by the thread as it first enters user mode, after which it runs
+    /// kernel code only inside a trap handler ([`suspend_thunk`]).
+    entered_user: bool,
 }
 
 /// A user kthread's pre-resume hook: see [`ThreadControl::pre_resume`].
@@ -826,16 +810,8 @@ where
     // SAFETY: `ctl` is the live control block per this function's contract.
     let work = unsafe { (*ctl).work.take() };
     if let Some(mut work) = work {
-        // SAFETY: `ctl` is live; `cs` is `Copy`.
-        let cs = unsafe { (*ctl).cs };
-        let mut yielder = Yielder {
-            cs,
-            // SAFETY: these address distinct, live fields of `*ctl`.
-            task_ctx: unsafe { addr_of_mut!((*ctl).task_ctx) },
-            dispatch_ctx: unsafe { addr_of_mut!((*ctl).dispatch_ctx) },
-            action: unsafe { addr_of_mut!((*ctl).action) },
-            pending_upgrade: unsafe { addr_of_mut!((*ctl).pending_upgrade) },
-        };
+        // SAFETY: `ctl` is live, and the task's own control flow owns it.
+        let mut yielder = unsafe { yielder_of(ctl) };
         work(&mut yielder);
     }
 
@@ -990,13 +966,13 @@ where
 /// (`plans/SPAWN.md` SP2). The hook reactivates the task's user address
 /// space — its arch page-table root — so the task `eret`s back into EL0
 /// under the correct translation regime and stays isolated from its
-/// siblings. Its presence also enrols the task in the
-/// per-CPU resume table ([`reschedule_current`]), so its syscall trap path
-/// can suspend it back to the scheduler.
+/// siblings.
 ///
-/// `work` typically diverges into EL0 via the arch `EnterUser` HAL; the
-/// reschedule machinery brings control back to the dispatcher on each
-/// rescheduling syscall.
+/// `work` diverges into EL0 through
+/// [`UserThreadEntry::enter`](crate::UserThreadEntry::enter), the one entry
+/// that records it, so the task's trap-path suspensions balance the port's
+/// entry convention; the reschedule machinery brings control back to the
+/// dispatcher on each rescheduling syscall.
 ///
 /// # Errors
 ///
@@ -1173,6 +1149,7 @@ where
         live,
         pending_upgrade: None,
         gate: None,
+        entered_user: false,
     });
 
     // The `move` closure owns the boxed control block, so its heap address
@@ -1339,10 +1316,10 @@ where
     let cs = unsafe { (*ctl).cs };
 
     // A user kthread (one with a `pre_resume` hook) reactivates its user
-    // address space and publishes a resume handle so its syscall trap path
-    // can suspend it back to us. Both run on the dispatcher's context,
-    // where the kernel mapping is identical across every user space, so
-    // switching the user root here is sound (`plans/SPAWN.md` SP2).
+    // address space and publishes it for its syscalls. Both run on the
+    // dispatcher's context, where the kernel mapping is identical across
+    // every user space, so switching the user root here is sound
+    // (`plans/SPAWN.md` SP2).
     // SAFETY: exclusive dispatcher-side access to `*ctl` (see above).
     let is_user = unsafe { (*ctl).pre_resume.is_some() };
     if is_user {
@@ -1363,19 +1340,12 @@ where
         if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
             pre(stack_top);
         }
-        publish_resume::<C, S>(cpu, block, suspend_thunk_syscall::<C, S>);
         publish_live_space::<C, S>(cpu, block);
-    } else {
-        // A kernel kthread is equally suspendable from its own body
-        // (`reschedule_current` from a blocking primitive it calls — a
-        // `SleepLock` contention park, a block-device completion wait), so
-        // it publishes a resume handle too — with the body thunk, which
-        // skips the syscall-entry convention bracket a kthread never
-        // established. Without this a kthread contending on a lock whose
-        // holder is parked could only spin, monopolising the CPU and
-        // starving the dispatch loop — the whole system then hangs.
-        publish_resume::<C, S>(cpu, block, suspend_thunk_body::<C, S>);
     }
+    // Every kthread can suspend itself — a user one from its trap path, any
+    // one from a blocking primitive its body calls — and without a handle a
+    // kthread contending on a lock whose holder is parked could only spin.
+    publish_resume::<C, S>(cpu, block);
     let gated = gate.is_some();
     publish_gate(cpu, gate);
 
@@ -1496,24 +1466,21 @@ pub fn install_park_translation(park: fn() -> bool) {
     let _ = PARK_TRANSLATION.set(park);
 }
 
-/// Publish the per-CPU resume handle for the user kthread `ctl`, about to
-/// be switched in on `cpu` (the dispatcher side of [`reschedule_current`]).
+/// Publish the per-CPU resume handle for the kthread `block`, about to be
+/// switched in on `cpu` (the dispatcher side of [`reschedule_current`]).
 ///
 /// Out-of-range or unconfigured `cpu` is a silent no-op: the task simply
 /// cannot be rescheduled from its trap and falls closed there, which is the
 /// same outcome [`reschedule_current`] gives.
-fn publish_resume<C, S>(
-    cpu: CpuId,
-    block: NonNull<ThreadControl<C, S>>,
-    thunk: unsafe fn(NonNull<()>, TaskAction),
-) where
+fn publish_resume<C, S>(cpu: CpuId, block: NonNull<ThreadControl<C, S>>)
+where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
     if let Some(state) = cpu_state::get(cpu) {
-        // SAFETY: both thunks are monomorphised over this call's `C, S`,
-        // which is the type `block` addresses.
-        *state.resume.lock() = Some(unsafe { UserResumeHandle::new(block, thunk) });
+        // SAFETY: the thunk is monomorphised over this call's `C, S`, which
+        // is the type `block` addresses.
+        *state.resume.lock() = Some(unsafe { UserResumeHandle::new(block, suspend_thunk::<C, S>) });
     }
 }
 
@@ -1645,6 +1612,13 @@ fn clear_gate(cpu: CpuId) {
 #[must_use]
 pub(crate) fn current_gate(cpu: CpuId) -> Option<Arc<ThreadGate>> {
     cpu_state::get(cpu)?.gate.lock().clone()
+}
+
+/// Run `read` against the kill gate published on `cpu` without taking a share
+/// of it: a check of a word, made under the slot's lock. [`None`] for a CPU
+/// running no thread that has one.
+pub(crate) fn with_current_gate<R>(cpu: CpuId, read: impl FnOnce(&ThreadGate) -> R) -> Option<R> {
+    cpu_state::get(cpu)?.gate.lock().as_deref().map(read)
 }
 
 /// Test-only: publish `gate` as the kill gate of the thread running on `cpu`,
@@ -1854,6 +1828,9 @@ mod tests {
         published_during_switch: AtomicBool,
         /// The observed CPU's kill-gate slot was published at switch time.
         gate_during_switch: AtomicBool,
+        /// Once set, the next switch into a task parks it through the
+        /// observed CPU's published handle, as its own control flow would.
+        park_on_switch: AtomicBool,
         /// The observed CPU's kernel-activity crumb at switch time.
         #[cfg(feature = "watchdog-diagnostics")]
         crumb_during_switch: core::sync::atomic::AtomicU8,
@@ -1874,6 +1851,7 @@ mod tests {
                 observed_cpu: AtomicU32::new(u32::MAX),
                 published_during_switch: AtomicBool::new(false),
                 gate_during_switch: AtomicBool::new(false),
+                park_on_switch: AtomicBool::new(false),
                 #[cfg(feature = "watchdog-diagnostics")]
                 crumb_during_switch: core::sync::atomic::AtomicU8::new(u8::MAX),
             }
@@ -1928,6 +1906,10 @@ mod tests {
                 self.0
                     .crumb_during_switch
                     .store(state.kbc_site.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            if self.0.park_on_switch.swap(false, Ordering::SeqCst) {
+                let cpu = self.0.observed_cpu.load(Ordering::SeqCst);
+                assert!(reschedule_current(cpu, RescheduleAction::Park));
             }
             // No control transfer on the host (see the module docs); the
             // real switch is proven by the per-arch QEMU verticals.
@@ -2006,6 +1988,7 @@ mod tests {
             live: None,
             pending_upgrade: None,
             gate: None,
+            entered_user: false,
         })
     }
 
@@ -2032,6 +2015,7 @@ mod tests {
             live: None,
             pending_upgrade: None,
             gate: None,
+            entered_user: false,
         })
     }
 
@@ -2170,13 +2154,7 @@ mod tests {
         let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
 
-        let mut yielder = Yielder {
-            cs,
-            task_ctx: unsafe { addr_of_mut!((*ctl).task_ctx) },
-            dispatch_ctx: unsafe { addr_of_mut!((*ctl).dispatch_ctx) },
-            action: unsafe { addr_of_mut!((*ctl).action) },
-            pending_upgrade: unsafe { addr_of_mut!((*ctl).pending_upgrade) },
-        };
+        let mut yielder = unsafe { yielder_of(ctl) };
 
         yielder.yield_now();
         assert_eq!(control.action, TaskAction::Yield);
@@ -2334,11 +2312,7 @@ mod tests {
         // point directly. The handle's thunk reconstructs the task's
         // Yielder and suspends it: one switch, task_ctx -> dispatch_ctx,
         // with the requested action recorded.
-        publish_resume::<RecordingCs, BoxStack>(
-            cpu,
-            block,
-            suspend_thunk_syscall::<RecordingCs, BoxStack>,
-        );
+        publish_resume::<RecordingCs, BoxStack>(cpu, block);
         assert!(reschedule_current(cpu, RescheduleAction::Exit));
 
         assert_eq!(rec.switches.load(Ordering::SeqCst), 1);
@@ -2655,45 +2629,70 @@ mod tests {
         crate::procsignal::clear_kill_gate(id);
     }
 
+    /// A thread's in-kernel wait loops check their own gate through its CPU's
+    /// publication after every wake, so the read takes no share of it — no
+    /// reference count every wake would bounce — and finds nothing on a CPU
+    /// running no gated thread.
     #[test]
-    fn kernel_body_suspend_skips_the_cooperative_park_bracket() {
-        // A kernel kthread's body suspend must not run the port's
-        // syscall-entry convention bracket (x86_64's `swapgs`): an unpaired
-        // flip would corrupt the per-CPU convention. The syscall thunk runs
-        // the bracket; the body thunk does not.
-        let rec = recorder!();
-        let cs = RecordingCs(rec);
-        let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
-        let block = NonNull::from(&mut *control);
+    fn the_published_gate_is_read_without_taking_a_share() {
         let cpu = crate::test_boot::claim_cpu();
+        let task = crate::test_boot::claim_task();
+        crate::procsignal::clear_kill_gate(task);
+        crate::procsignal::install_gate(task, tairix_kernel_sec::ProcessId(task))
+            .expect("a gate installs");
+        let gate = crate::procsignal::gate_of(task).expect("installed");
+        assert_eq!(with_current_gate(cpu, |_| ()), None, "nothing published");
 
-        publish_resume::<RecordingCs, BoxStack>(
-            cpu,
-            block,
-            suspend_thunk_body::<RecordingCs, BoxStack>,
+        let _published = publish_gate_for_test(cpu, Arc::clone(&gate));
+        let shares = Arc::strong_count(&gate);
+        let read = with_current_gate(cpu, |published| {
+            (
+                core::ptr::eq(published, Arc::as_ptr(&gate)),
+                Arc::strong_count(&gate),
+            )
+        });
+        assert_eq!(read, Some((true, shares)), "read in place, no share taken");
+        crate::procsignal::clear_kill_gate(task);
+    }
+
+    /// A suspension brackets the port's privilege-entry convention (x86_64's
+    /// `swapgs`) only once the thread has entered user mode. Before that — a
+    /// kernel kthread always, a user one until its first entry — it suspends
+    /// from body code, where an unpaired flip corrupts the convention.
+    #[test]
+    fn only_a_thread_that_entered_user_mode_suspends_through_the_entry_bracket() {
+        let rec = recorder!();
+        let cpu = crate::test_boot::claim_cpu();
+        install_park_translation(count_park);
+        rec.observed_cpu.store(cpu, Ordering::SeqCst);
+
+        let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
+        rec.park_on_switch.store(true, Ordering::SeqCst);
+        assert_eq!(dispatch_step(&mut kernel, cpu), TaskAction::Park);
+        assert_eq!(rec.brackets.load(Ordering::SeqCst), 0, "a kernel body");
+
+        let mut user = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            pre_resume_counter!(),
         );
-        assert!(reschedule_current(cpu, RescheduleAction::Park));
-        assert_eq!(control.action, TaskAction::Park);
+        rec.park_on_switch.store(true, Ordering::SeqCst);
+        assert_eq!(dispatch_step(&mut user, cpu), TaskAction::Park);
         assert_eq!(
             rec.brackets.load(Ordering::SeqCst),
             0,
-            "a body suspend must not run the cooperative-park bracket"
+            "a user thread before its first entry"
         );
-        clear_resume(cpu);
 
-        // The syscall thunk brackets the same suspend (enter + leave).
-        publish_resume::<RecordingCs, BoxStack>(
-            cpu,
-            block,
-            suspend_thunk_syscall::<RecordingCs, BoxStack>,
-        );
-        assert!(reschedule_current(cpu, RescheduleAction::Park));
+        // SAFETY: the control block is live and nothing else reaches it.
+        unsafe { yielder_of(addr_of_mut!(*user)) }.note_user_entry();
+        rec.park_on_switch.store(true, Ordering::SeqCst);
+        assert_eq!(dispatch_step(&mut user, cpu), TaskAction::Park);
         assert_eq!(
             rec.brackets.load(Ordering::SeqCst),
             2,
-            "a syscall suspend must enter and leave the bracket"
+            "a trap-path suspension enters and leaves the bracket"
         );
-        clear_resume(cpu);
     }
 
     std::thread_local! {

@@ -82,7 +82,7 @@ use tairix_kernel_mem::{
 use tairix_kernel_sched_api::Priority;
 #[cfg(migration_smp)]
 use tairix_kernel_sched_api::{SchedulerArch, StepOutcome};
-use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
+use tairix_kernel_sched_eevdf::{Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, UserId};
 use tairix_log::{log, Event, EventId, Level};
 use tairix_sync::RwLock;

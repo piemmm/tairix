@@ -13685,7 +13685,7 @@ where
             // without one fails closed rather than run outside it.
             let gate = crate::procsignal::gate_of(task);
             let built = match &gate {
-                Some(gate) if !gate.enter() => build_child_image(
+                Some(gate) if crate::procsignal::enter_body(gate) => build_child_image(
                     services, sec_id, task, &plan, &body_seed, &arg_refs, &env_refs,
                 )
                 .map(|ready| upgrade_built_child(yielder, ready)),
@@ -13694,13 +13694,15 @@ where
             // The gate closes only once the upgrade's own yield is behind us,
             // so nothing between here and user mode can be reclaimed
             // mid-flight.
-            let pending_kill = gate.as_ref().and_then(|gate| gate.exit_take());
+            let pending_kill = gate
+                .as_ref()
+                .and_then(|gate| crate::procsignal::leave_body(gate, built.is_ok()));
             if let Some(entry) = dispose_finished_load(services, sec_id, pending_kill, built) {
                 // SAFETY: the upgrade installed this thread's switch-in hook
                 // and process address space, and the dispatch step that
                 // resumed us ran the hook, so the child's own root is active
                 // and the trap path installed.
-                unsafe { entry.enter() }
+                unsafe { entry.enter(yielder) }
             }
         };
 
@@ -14784,7 +14786,7 @@ where
         // hold kernel state only its own unwind can release). Both early
         // returns above sit before this point, so the window never leaks.
         // A thread that already owes a death runs no handler at all.
-        let killed_at_entry = gate.enter();
+        let killed_at_entry = !crate::procsignal::enter_body(&gate);
 
         // Frame-budget boundary (entry): record which call this watched
         // thread is entering, together with the user frame the port
@@ -14808,49 +14810,42 @@ where
             Dispatcher::new(&self.handlers, self.audit).dispatch(&caller, raw_number, args)
         };
 
-        // Re-read the live CPU for everything below. A *blocking* handler
-        // (`ipc_call`, `call_recv`, `irq_wait`, `hw_tree_wait`, …) parks
-        // the task, and a parked task can be woken and re-dispatched
-        // (work-stolen) onto a **different** core; when the handler
-        // returns we are physically running on whatever core resumed the
-        // task, which is the core its resume handle is now published on.
-        // The completion path below hands a `CpuId` to the arch port's
-        // `reschedule_current`, which is invoked on this same physical
-        // core — so it must name the core the task is on *now*, never the
-        // `cpu` captured at entry (before any migration). Passing the
-        // stale entry `cpu` would drive `reschedule_current` against a
-        // different core's resume handle, context-switching this core
-        // through another task's saved state and corrupting both — a wild
-        // fault. The task cannot migrate again between here and the
-        // `reschedule_current` call: the kernel is non-preemptible, and
-        // nothing below parks.
-        let completion_cpu = SchedulerArch::current_cpu(self.arch);
-
         // Frame-budget boundary (exit): the call has returned, so its cost
         // is known. A span that crosses its budget *here* was carried over
         // by this very call, and the frame taken at its entry names the
-        // blocking call site.
+        // blocking call site. A stop taken at the boundary below is not the
+        // call's cost.
         #[cfg(feature = "watchdog-diagnostics")]
-        if let Some(over) = crate::latency::on_syscall_exit(completion_cpu, sched_task_id, || {
-            self.arch.monotonic_ns(completion_cpu)
-        }) {
-            self.handlers
-                .report_latency_overrun(caller_process, task_id, &over);
+        {
+            let exit_cpu = SchedulerArch::current_cpu(self.arch);
+            if let Some(over) = crate::latency::on_syscall_exit(exit_cpu, sched_task_id, || {
+                self.arch.monotonic_ns(exit_cpu)
+            }) {
+                self.handlers
+                    .report_latency_overrun(caller_process, task_id, &over);
+            }
         }
 
         // The kill boundary: a death owed by this task lands now, after the
         // unwind released everything the handler held, and the task never
         // returns to user space. A signalled death carries the status the
-        // parent's `wait` reaps; a driver unload's carries none.
-        if let Some(teardown) = gate.exit_take() {
+        // parent's `wait` reaps; a driver unload's carries none. A stop owed
+        // by a task returning to user space is taken here first.
+        let returning = !matches!(
+            number,
+            Some(SyscallNumber::EXIT | SyscallNumber::THREAD_EXIT)
+        );
+        let owed = crate::procsignal::leave_body(&gate, returning);
+
+        // A handler that parked, or a stop taken at either edge, may have
+        // resumed the task on another core, and the port suspends the task on
+        // the core this names; nothing below parks.
+        let completion_cpu = SchedulerArch::current_cpu(self.arch);
+
+        if let Some(teardown) = owed {
             // An `exit` or `thread_exit` that ran already retired this thread
             // through the shared landing rule, which supersedes the death.
-            if killed_at_entry
-                || !matches!(
-                    number,
-                    Some(SyscallNumber::EXIT | SyscallNumber::THREAD_EXIT)
-                )
-            {
+            if killed_at_entry || returning {
                 return self.handlers.land_pending_kill(
                     caller_process,
                     SecTaskId(sched_task_id),
@@ -14905,11 +14900,15 @@ where
         // The resolvers read through the filesystem and park there, so a fault
         // is a kernel body like a syscall: a death is taken at its boundary,
         // never inside it, and one already owed skips the resolution.
-        let outcome = (!gate.enter())
-            .then(|| self.resolve_attributed_fault(cpu, process, thread, fault_va, write, regs));
-        let owed = gate.exit_take();
-        // A resolver that parked may have resumed on another core, and the
-        // port suspends the task on the core this names.
+        let outcome = crate::procsignal::enter_body(&gate).then(|| {
+            let cpu = SchedulerArch::current_cpu(self.arch);
+            self.resolve_attributed_fault(cpu, process, thread, fault_va, write, regs)
+        });
+        let returning = matches!(outcome, Some(UserFaultOutcome::Resolved));
+        let owed = crate::procsignal::leave_body(&gate, returning);
+        // A resolver that parked, or a stop taken at either edge, may have
+        // resumed on another core, and the port suspends the task on the core
+        // this names.
         let cpu = SchedulerArch::current_cpu(self.arch);
         match (outcome, owed) {
             // A fault fatal to the thread landed its own death, which

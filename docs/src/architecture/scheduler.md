@@ -23,12 +23,12 @@ policies ship today, each in its own `kernel/sched/<impl>` crate, all
 implementing the same [`SchedulerPolicy`] contract so the rest of the
 kernel is agnostic to which one an image links:
 
-* **CFQ** (`kernel/sched/cfq`, feature `scheduler-cfq`) — the
-  **default**. A *non-tickless*, Linux-CFS-like Completely-Fair-Queuing
-  policy (see [CFQ policy](#cfq-policy-scheduler-cfq-default)).
-* **EEVDF** (`kernel/sched/eevdf`, feature `scheduler-eevdf`) — a fully
-  *tickless* Earliest-Eligible-Virtual-Deadline-First policy (see
-  [EEVDF policy](#eevdf-policy-scheduler-eevdf)).
+* **CFQ** (`kernel/sched/cfq`, feature `scheduler-cfq`) — a
+  *non-tickless*, Linux-CFS-like Completely-Fair-Queuing policy (see
+  [CFQ policy](#cfq-policy-scheduler-cfq)).
+* **EEVDF** (`kernel/sched/eevdf`, feature `scheduler-eevdf`) — the
+  **default**. A fully *tickless* Earliest-Eligible-Virtual-Deadline-First
+  policy (see [EEVDF policy](#eevdf-policy-scheduler-eevdf-default)).
 * **MLFQ** (`kernel/sched/mlfq`, feature `scheduler-mlfq`) — a
   Multi-Level Feedback Queue with periodic priority boosting (see
   [MLFQ policy](#mlfq-policy-scheduler-mlfq)).
@@ -39,9 +39,9 @@ below the policy sections — the IPI hook, the timer entry point, the
 current-task slot, and the invariants — is shared by every policy
 because it lives in the contract, not the policy.
 
-## CFQ policy (`scheduler-cfq`, default)
+## CFQ policy (`scheduler-cfq`)
 
-The default policy is **CFQ — Completely Fair Queuing**, modelled on
+**CFQ — Completely Fair Queuing** is modelled on
 Linux's Completely Fair Scheduler (Molnar, 2007). Each task carries a
 virtual runtime `vruntime`; on each CPU the ready task with the
 *smallest* `vruntime` is dispatched next — the leftmost node of Linux
@@ -178,7 +178,7 @@ entry point — the queue is a single-end FIFO consumer, so MLFQ
 fairness within a band is preserved. Push is wait-free; consume
 is lock-free with a bounded retry loop on `Steal::Retry`.
 
-## EEVDF policy (`scheduler-eevdf`)
+## EEVDF policy (`scheduler-eevdf`, default)
 
 EEVDF — **Earliest Eligible Virtual Deadline First** (Stoica &
 Abdel-Wahab, 1995; the same family Linux adopted for its fair scheduler
@@ -412,8 +412,10 @@ same shape as `set_sched_class`:
   so the observable behaviour is identical across policies (the Chase–Lev
   deques support no arbitrary removal, and no policy needs one);
 * re-stating the level a task already holds is an **idempotent success**;
-* an unknown id fails closed with `NoSuchTask` and a terminal task with
-  `InvalidState` — never a fabricated change;
+* an id the scheduler holds no record of — never admitted, or a retired
+  task whose record is gone — fails closed with `NoSuchTask`, and a
+  terminal task whose record a queue entry still holds with `InvalidState`
+  — never a fabricated change;
 * the recorded value is the task's *time-shared* service level: a
   `Realtime`-class task keeps it for when it returns to the fair band, and
   the strict-priority band is unaffected by it.
@@ -493,17 +495,17 @@ level interrupt source (EOI on the LAPIC, etc.). The scheduler
 itself never reaches for a timer register; the arch port owns that.
 
 TAIRiX is a **tickless (NO_HZ)** kernel (`AGENTS.md` §17.1) under every
-policy but the one sanctioned exception, **CFQ** (the default). Under a
+policy but the one sanctioned exception, **CFQ**. Under a
 tickless policy no CPU is driven by a fixed-frequency periodic timer
 interrupt: the timer is armed **one-shot**, to the next event the
 scheduler actually needs (the running task's preemption deadline or the
 nearest timed wakeup), and is left unarmed when a CPU is idle or runs a
 single runnable task. Under the tickless EEVDF policy a periodic tick is
 **not** required for correctness at all (see
-[EEVDF policy](#eevdf-policy-scheduler-eevdf)).
+[EEVDF policy](#eevdf-policy-scheduler-eevdf-default)).
 
-**The default CFQ policy is deliberately non-tickless** — the charter's
-one sanctioned exception (see [CFQ policy](#cfq-policy-scheduler-cfq-default)):
+**The CFQ policy is deliberately non-tickless** — the charter's
+one sanctioned exception (see [CFQ policy](#cfq-policy-scheduler-cfq)):
 it passes `armed = true` to `set_preemption` for *any* running task,
 including a lone CPU-bound one, so the port keeps re-arming the quantum
 one-shot and the effect is a fixed-frequency `HZ`-style periodic tick.
@@ -534,7 +536,7 @@ The one-shot is armed through the Arch HAL timer surface
 ([`Timer::arm_oneshot`] / [`Timer::disarm`], `kernel/arch/api`): the
 scheduler decides *whether* to arm on each dispatch — via the provided
 [`SchedulerArch::set_preemption(armed)`] hook. Under a tickless policy
-`armed` is "this CPU still has a ready competitor"; under the default CFQ
+`armed` is "this CPU still has a ready competitor"; under the CFQ
 policy `armed` is `true` for *any* running task (the non-tickless
 carve-out). The port programs (or stops) its per-CPU timer (the LAPIC
 one-shot count, `CNTP_TVAL_EL0`, an SBI `set_timer`). The per-CPU quantum
@@ -934,29 +936,60 @@ policy.
 `stop` takes a task into `Stopped`, which no `unpark` leaves — only `resume`
 or `exit` — so the dispatch path checks nothing for it, and a broadcast wake
 (a console byte waking every parked reader) leaves a stopped reader stopped.
+A parked task is stopped where it is, into `StoppedParked`: the `resume`
+leaves it parked for the wake it waits on, and a wake reaching it first makes
+it `Stopped`, owed its run once resumed. Resumed as runnable, a thread born
+parked would run before its creator had made it whole, and a waiter would run
+with nothing woken. A body that parks as a stop lands ends `StoppedParked`
+too, and its park commit keeps a wake that raced it (`park::commit_park`).
 A queued task keeps its entry (`StoppedOnQueue`) and a running one its CPU
 (`StoppedOnCpu`) until the scheduler next reaches it: whoever takes the entry,
 or the dispatch whose body returns, completes the stop, and a `resume` before
-then simply withdraws it. A task therefore holds exactly one run-queue entry
-while `Ready` or `StoppedOnQueue` and none in any other state, so a stop never
-leaves a stale entry for a later wake to queue a second one beside, and no
-transition can queue a task whose body is still running on another CPU. Every
-party that takes an entry — a pick, a steal, the overflow drain — decides it
-through `park::take_entry`, which completes a stop requested while the task
-was queued; dropping that entry instead would strand the task, since `resume`
-re-queues only a task whose stop has completed. The shared conformance suite
-pins each property (`a_wake_leaves_a_stopped_task_stopped`,
+then simply withdraws it. A stop touches neither the task's current-task slot
+nor its body lock — both belong to the dispatch running it — and nudges the
+CPU running a `StoppedOnCpu` task, every CPU when no slot names it yet. A stop
+landing after a dispatch claimed the task but before its body runs is
+completed without running the body, since a task alone on a tickless core
+would otherwise run on with nothing to preempt it.
+
+Whoever moves a task into `Ready` from a state holding no entry pushes exactly
+one, even if an exit retires the task first, and only taking it ends it. So a
+task holds at most one entry, a stop never leaves a stale one for a later wake
+to queue a second beside, no transition can queue a task whose body is still
+running, and an exited task's last entry is what drops its record. Every
+party that consumes an entry — a pick, and in CFQ and EEVDF a steal or
+overflow drain that claims the task — decides it through `park::take_entry`,
+which completes a stop requested while the task was queued; MLFQ's steal and
+drain move an entry unread, so its pick decides it. Dropping an entry instead
+would strand the task, since `resume` re-queues only a task whose stop has
+completed. The shared conformance suite pins each property
+(`a_wake_leaves_a_stopped_task_stopped`,
+`a_continue_leaves_a_task_parked_under_a_stop_parked`,
+`a_body_parking_as_a_stop_lands_stays_parked_beneath_it`,
 `a_task_stopped_while_queued_keeps_one_entry`,
 `a_stop_withdrawn_while_the_body_ran_leaves_its_request_standing`,
-`an_exit_over_a_stop_retires_the_task`).
+`a_stop_landing_before_the_body_completes_without_running_it`,
+`an_exit_over_a_stop_retires_the_task`), and `run_races` holds the one only
+real threads reach: an exit racing a stop and continue of a task no CPU
+holds always retires it, because only a dispatch ever takes the body lock.
 
-`kernel/core`'s `Signal::Stop` and `Signal::Continue` fan out over a process's
-threads under the thread-group table's read lock, and `thread_create`
-registers a thread under its write lock, stopping it there when its creator
-is stopped, so no thread is born running into a stopped group. A stop that
-lands on a thread already owing a death is withdrawn, so a killed thread
-always reaches its boundary. Introspection reports a stopped process as
-`ProcessState::Stopped` once every live thread is stopped.
+`kernel/core`'s `Signal::Stop` and `Signal::Continue` advance the process's
+job-control generation and collect its threads under the thread-group table's
+read lock alone, then drive each thread with no lock held, so a fan-out over a
+large group holds up no other CPU's syscall; `thread_create` registers a thread
+under the write lock and gives it the generation it finds as its own, so no
+thread is born running into a stopped group. A thread outside any kernel body is
+stopped through `stop`; one inside a body is never — it may hold kernel state
+another thread waits on, such as a sleeping lock handed to it — and stops itself
+at the edge of the body instead, where it holds none. A thread owing a death is
+never held by a stop, so a killed thread always reaches its boundary. A fan-out
+re-reads the thread's gate after each scheduler call until a read agrees, and
+takes back a stop of its own the newer read says to leave alone: a thread
+entering its body, or a kill, can overtake the read the stop was decided on.
+The parent's stop and continue reports carry the generation, so a stop's report
+arriving after the continue that overtook it changes nothing. Introspection
+reports a process `ProcessState::Stopped` from its generation, the moment job
+control decides it (`docs/src/architecture/syscalls.md`, the signal section).
 
 `SleepLock` builds fair mutex contention on the same wait queue. Contenders
 retain FIFO registration order and release wakes only the oldest waiter,
@@ -1011,8 +1044,8 @@ not caller-supplied).
 | -------------------------------- | ---------------------------------------- |
 | `Scheduler::dispatch` (entry)    | publishes the about-to-run task's id     |
 | `Scheduler::dispatch` (exit)     | clears the slot, every branch            |
-| `Scheduler::stop(id)`            | clears the slot **only** once the body lock proves no CPU is running `id`; otherwise IPIs the running CPU, which clears its own slot on dispatch exit |
-| `Scheduler::exit(id)`            | same proof, same fallback: clears the slot only when it holds the body lock, else defers and IPIs |
+| `Scheduler::stop(id)`            | never touches the slot; IPIs the CPU running `id` (every CPU if no slot names it), which clears its own slot on dispatch exit |
+| `Scheduler::exit(id)`            | clears the slot only when it holds the body lock, which proves no CPU is running `id`; else defers and IPIs |
 
 The slot is exposed read-only through
 `Scheduler::current_task(cpu) -> Option<TaskId>`. The setter and
@@ -1205,7 +1238,8 @@ These hold at every API boundary:
    | -------------- | -------------------------- | -------------------------------- |
    | `Exited`       | *anything*                 | retire                           |
    | *any other*    | `Exit`, or `doomed` (§5) and not `Park` | → `Exited`, retire  |
-   | `StoppedOnCpu` | `Park` / `Yield`           | → `Stopped`, nothing more owed   |
+   | `StoppedOnCpu` | `Yield`                    | → `Stopped`, nothing more owed   |
+   | `StoppedOnCpu` | `Park`                     | → `StoppedParked`, commit the park |
    | `Running`      | `Park`                     | → `Parked`, commit the park      |
    | `Running`      | `Yield`                    | → `Ready`, re-enqueue            |
 
@@ -1213,7 +1247,7 @@ These hold at every API boundary:
    entry, so no wake or resume can queue it, and an `unpark` of a running
    task only leaves the token its coming park consumes. A stop wins over
    the body's own `Park` or `Yield`, either of which would leave the task
-   where a wake or its own entry could run it.
+   where a wake or its own entry could run it; a park is kept beneath it.
 
 5. **SMP quiescence and reclamation ownership.** `exit(id)` returns an
    `ExitDisposition` so its caller can reclaim a task's resources
@@ -1322,7 +1356,7 @@ one policy crate per implementation:
   Arch HAL surface (`CpuId`, `SchedulerArch`), the host `TestArch`
   double, and the shared `conformance` suite.
 * `kernel/sched/cfq` (`tairix-kernel-sched-cfq`) — the CFQ policy
-  described above, implementing `SchedulerPolicy`. This is the default.
+  described above, implementing `SchedulerPolicy`.
 * `kernel/sched/eevdf` (`tairix-kernel-sched-eevdf`) — the EEVDF policy
   described above, implementing `SchedulerPolicy`.
 * `kernel/sched/mlfq` (`tairix-kernel-sched-mlfq`) — the MLFQ policy
@@ -1331,8 +1365,8 @@ one policy crate per implementation:
   duplication); adding another policy means adding a sibling crate,
   never editing an existing one.
 * `kernel/core` is the single build-time selection point: exactly one
-  `scheduler-*` feature is active per image (`scheduler-cfq` by
-  default, `scheduler-eevdf` or `scheduler-mlfq` with
+  `scheduler-*` feature is active per image (`scheduler-eevdf` by
+  default, `scheduler-cfq` or `scheduler-mlfq` with
   `--no-default-features --features scheduler-<impl>`). It re-exports the
   chosen policy as
   `crate::sched::Scheduler`; `compile_error!` guards reject the

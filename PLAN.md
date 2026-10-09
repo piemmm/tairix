@@ -285,8 +285,8 @@ The sub-stage numbers are cited by the crates they delivered.
   boot RAM sanity test (`ramtest.rs`: an address-line and stuck-bit check that
   fails closed with the failing location, not a march test).
 - **2.3 `kernel/sched`**: the `SchedulerPolicy` contract in `kernel/sched/api`
-  with its conformance suite, and the sibling policies `cfq` (the default),
-  `eevdf` and `mlfq`.
+  with its conformance suite, and the sibling policies `eevdf` (the default),
+  `cfq` and `mlfq`.
 - **2.4 `kernel/sec`**: the identity table, per-task capabilities (user grant ∩
   manifest request), fail-closed Ed25519 manifest verification, and the audit
   writer. `uid 0` holds no power.
@@ -897,6 +897,9 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-08 — §3, §17.1: EEVDF is the default scheduler.** At the user's
+  direction the default image runs tickless; CFQ keeps its periodic-tick
+  exception as a selectable policy.
 - **2026-10-07 — §16.3: `UserFiles` replaces `Documents` in the home.** At the
   user's direction the user's own files live in one folder holding
   `Documents`, `Music`, `Pictures` and `Videos`, where a bare file-manager

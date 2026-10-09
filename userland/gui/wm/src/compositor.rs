@@ -281,9 +281,16 @@ pub struct Compositor {
     /// to write over. Held here, and cleared per use, so a frame's segments
     /// reuse its buffers instead of allocating a region each.
     uncovered: Region,
-    /// The client damage [`repaint_window`](Self::repaint_window) clips and
-    /// paints, kept so a repaint copies into storage it already has.
+    /// The damage [`repaint_window`](Self::repaint_window) and
+    /// [`repaint_desktop`](Self::repaint_desktop) clip and paint, kept so a
+    /// repaint copies into storage it already has.
     repaint_scratch: Region,
+    /// The rectangles a composite recomposes, and the windows each reaches,
+    /// held for reuse like the regions above.
+    plan: Vec<Rect>,
+    hits: Vec<usize>,
+    /// What a present recomposed and sends, handed back emptied for the next.
+    composed: Region,
     /// What the frame in flight has cost so far, reset by each
     /// [`composite`](Compositor::composite) and read back through
     /// [`frame_stats`](Compositor::frame_stats).
@@ -445,6 +452,9 @@ impl Compositor {
             scanout: Region::new(),
             uncovered: Region::new(),
             repaint_scratch: Region::new(),
+            plan: Vec::new(),
+            hits: Vec::new(),
+            composed: Region::new(),
             stats: FrameCounters::new(),
             presented: None,
             undelivered: Region::new(),
@@ -1388,13 +1398,26 @@ impl Compositor {
         let Some(layer) = self.desktop_bounds() else {
             return false;
         };
-        let painted = if fits {
-            let mut region = area.clone();
-            region.clip(layer);
-            region
+        let mut painted = core::mem::take(&mut self.repaint_scratch);
+        if fits {
+            painted.clone_from(area);
+            painted.clip(layer);
         } else {
-            Region::from(layer)
-        };
+            painted.clear();
+            painted.add(layer);
+        }
+        let repainted = self.paint_desktop(&painted, paint);
+        self.repaint_scratch = painted;
+        repainted
+    }
+
+    /// Paint `painted`, already clipped to the desktop layer, into it and mark
+    /// it on screen.
+    fn paint_desktop(
+        &mut self,
+        painted: &Region,
+        paint: impl FnOnce(&mut Surface, &[Rect]),
+    ) -> bool {
         if painted.is_empty() {
             return true;
         }
@@ -2953,13 +2976,16 @@ impl Compositor {
     /// rectangles, not one per sample.
     pub fn composite(&mut self) -> Region {
         self.stats.begin_frame(self.screen_px());
-        self.recompose_damage()
+        let mut composited = Region::new();
+        self.recompose_damage(&mut composited);
+        composited
     }
 
-    /// [`composite`](Self::composite) without opening a new frame's counters,
-    /// so a present path that already opened one attributes the composite it
-    /// drives to that frame rather than starting a second.
-    fn recompose_damage(&mut self) -> Region {
+    /// [`composite`](Self::composite) into `composited`, without opening a new
+    /// frame's counters, so a present path that already opened one attributes
+    /// the composite it drives to that frame rather than starting a second.
+    fn recompose_damage(&mut self, composited: &mut Region) {
+        composited.clear();
         let screen = self.screen_rect();
         let mut owed: ArrayVec<Rect, MAX_OWED> = ArrayVec::new();
         self.pointer.settle(|rect| {
@@ -2979,10 +3005,14 @@ impl Compositor {
         // rectangle it is handed: damage marked wholly off screen composites
         // nothing, which is what `has_damage` promises.
         damage.clip(screen);
-        let plan = self.compose_plan(&mut damage, screen);
+        let mut plan = core::mem::take(&mut self.plan);
+        self.compose_plan(&mut damage, screen, &mut plan);
+        // Handed back emptied, so the next frame's marks reuse its storage;
+        // planning marks nothing, so nothing is lost.
+        damage.clear();
+        self.damage = damage;
         self.ensure_shadow_tiles();
         let reach = self.shadow.reach();
-        let mut composited = Region::new();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
         let base = self.background.premultiply();
@@ -3001,9 +3031,7 @@ impl Compositor {
             plan.iter()
                 .any(|&dirty| covers(window, reach_around(dirty, frost_reach)))
         });
-        // Reused across rectangles so a multi-rectangle composite makes
-        // no per-rectangle allocation on this hot path.
-        let mut hits: Vec<usize> = Vec::new();
+        let mut hits = core::mem::take(&mut self.hits);
         for &area in &plan {
             composited.add(area);
             self.stats.add_damaged(area_px(area.width, area.height));
@@ -3020,12 +3048,13 @@ impl Compositor {
             }
             self.recompose_rect(area, base, &hits, &fallback);
         }
+        self.plan = plan;
+        self.hits = hits;
         self.retain_pending_frost();
         for window in &mut self.windows {
             window.set_backdrop_changed(false);
         }
-        self.rescan_scanout(&mut composited, screen);
-        composited
+        self.rescan_scanout(composited, screen);
     }
 
     /// Re-encode the scan-out bytes of everything
@@ -3102,9 +3131,9 @@ impl Compositor {
     /// dropped for the next pass to promote; one retaken only because it was not
     /// retained comes out as it was and drops nothing. Each pass that grows
     /// claims one more window for good, so `windows.len()` passes reach the
-    /// fixed point. Every rectangle returned lies on screen.
-    fn compose_plan(&mut self, damage: &mut Region, screen: Rect) -> Vec<Rect> {
-        let mut plan: Vec<Rect> = Vec::new();
+    /// fixed point. Every rectangle written to `plan` lies on screen.
+    fn compose_plan(&mut self, damage: &mut Region, screen: Rect, plan: &mut Vec<Rect>) {
+        plan.clear();
         for _ in 0..self.windows.len() {
             let mut grown = false;
             for index in 0..self.windows.len() {
@@ -3130,7 +3159,7 @@ impl Compositor {
                 // one that must be blurred outright: its border is blurred, and a
                 // border blurred over a strip of damage would spread a
                 // neighbourhood clipped to that strip.
-                if !self.recomposed_and_seen(index, bounds, damage, &plan) {
+                if !self.recomposed_and_seen(index, bounds, damage, plan) {
                     continue;
                 }
                 let spreads = match self.frost_plan(index) {
@@ -3148,7 +3177,7 @@ impl Compositor {
                         .get(index)
                         .is_some_and(Window::backdrop_changed),
                 };
-                let claimed = claim(&mut plan, bounds);
+                let claimed = claim(plan, bounds);
                 damage.subtract(claimed);
                 if spreads {
                     self.invalidate_frosts_from(claimed, index.saturating_add(1));
@@ -3160,7 +3189,6 @@ impl Compositor {
             }
         }
         plan.extend_from_slice(damage.rects());
-        plan
     }
 
     /// Whether the frame recomposes any of the window at `index`'s on-screen
@@ -3418,25 +3446,34 @@ impl Compositor {
             return Ok(());
         }
         self.stats.begin_frame(self.screen_px());
-        let mut region = self.recompose_damage();
+        let mut region = core::mem::take(&mut self.composed);
+        self.recompose_damage(&mut region);
         let mut owed = core::mem::take(&mut self.undelivered);
         owed.clip(self.screen_rect());
         for &rect in owed.rects() {
             region.add(rect);
         }
+        let sent = self.send(display, &region);
+        if sent.is_err() {
+            self.undelivered = region;
+        } else {
+            self.composed = region;
+        }
+        sent
+    }
+
+    /// Present the frame's `region` to `display`, recording how the frame got
+    /// there; an empty region sends nothing.
+    fn send(&mut self, display: &mut dyn Display, region: &Region) -> Result<(), DriverError> {
         if region.is_empty() {
             return Ok(());
         }
         self.stats.bump_present();
         let mut list = [DamageRect::full(&self.mode); MAX_DAMAGE_RECTS];
-        let sent = match damage_list(&region, &self.mode, &mut list) {
+        match damage_list(region, &self.mode, &mut list) {
             Some(rects) => display.present_rects(&self.frame, rects),
             None => display.present(&self.frame),
-        };
-        if let Err(err) = sent {
-            self.undelivered = region;
-            return Err(err);
-        }
+        }?;
         self.presented = Some(Presentation::Composited);
         Ok(())
     }
@@ -3511,7 +3548,9 @@ impl Compositor {
             display.present_layers(&layers)?;
             presentation
         } else {
-            self.recompose_damage();
+            let mut composed = core::mem::take(&mut self.composed);
+            self.recompose_damage(&mut composed);
+            self.composed = composed;
             self.stats.bump_present();
             if let Err(err) = display.present(&self.frame) {
                 self.undelivered.add(self.screen_rect());

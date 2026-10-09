@@ -133,7 +133,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// shared [`crate::park::unpark_task`] handshake is the one definition.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.
     fn unpark(&self, id: TaskId) -> SchedResult<()>;
 
@@ -143,11 +143,12 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// No [`unpark`](Self::unpark) ends a stop, so nothing need re-check it
     /// when the task is next dispatched. A task executing on another CPU is
     /// signalled so its stop takes effect at its next stopping point rather
-    /// than its next quantum. The shared [`crate::park::stop_task`] is the
-    /// one definition of the transition.
+    /// than its next quantum, and its current-task slot and body lock are
+    /// left to the dispatch running it. The shared [`crate::park::stop_task`]
+    /// is the one definition of the transition.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.
     fn stop(&self, id: TaskId) -> SchedResult<()>;
 
@@ -157,7 +158,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// The shared [`crate::park::resume_task`] is the one definition.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.
     fn resume(&self, id: TaskId) -> SchedResult<()>;
 
@@ -171,10 +172,11 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// ([`ExitDisposition::Quiesced`], caller reclaims now), still executing
     /// ([`ExitDisposition::Deferred`], the owning dispatch retires it and
     /// the caller must not reclaim), or already terminal
-    /// ([`ExitDisposition::AlreadyExited`], no teardown owed). A task
-    /// reported `Deferred` never reaches [`TaskState::Exited`] until its
-    /// dispatch returns to the scheduler, so no policy exposes an `Exited`
-    /// task that is still running.
+    /// ([`ExitDisposition::AlreadyExited`], no teardown owed — including an
+    /// exit whose retirement finds the task's own dispatch retired it first).
+    /// A task reported `Deferred` never reaches [`TaskState::Exited`] until
+    /// its dispatch returns to the scheduler, so no policy exposes an
+    /// `Exited` task that is still running.
     ///
     /// A retired task's record is dropped as soon as nothing will reach it
     /// again — at once for a task holding neither a run-queue entry nor a
@@ -182,7 +184,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// [`crate::SchedError::NoSuchTask`]; that too owes no teardown.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task holds that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     fn exit(&self, id: TaskId) -> SchedResult<ExitDisposition>;
 
     /// Observation point the arch port's timer ISR calls after
@@ -345,14 +347,14 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// caller and does not itself perform the capability check.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.
     fn set_sched_class(&self, id: TaskId, class: SchedClass) -> SchedResult<()>;
 
     /// The current [`SchedClass`] of `id`.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     fn sched_class(&self, id: TaskId) -> SchedResult<SchedClass>;
 
     /// Move `id` to the [`Priority`] `priority`.
@@ -382,7 +384,7 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// [`set_sched_class`]: Self::set_sched_class
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     /// * [`crate::SchedError::InvalidState`] if the task is terminal.
     fn set_priority(&self, id: TaskId, priority: Priority) -> SchedResult<()>;
 
@@ -394,6 +396,6 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     /// now, which is the truthful reading.
     ///
     /// # Errors
-    /// * [`crate::SchedError::NoSuchTask`] if no task ever held that id.
+    /// * [`crate::SchedError::NoSuchTask`] if the scheduler holds no record of the id.
     fn priority(&self, id: TaskId) -> SchedResult<Priority>;
 }

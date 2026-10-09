@@ -540,8 +540,8 @@ tairix/
 │   ├── mem/             # Allocator, paging, process isolation.
 │   ├── sched/           # SMP scheduler — pluggable:
 │   │   ├── api/         #   SchedulerPolicy contract + conformance suite.
-│   │   ├── cfq/         #   Default policy (non-tickless fair queuing).
-│   │   ├── eevdf/       #   Concrete policy (sibling crate).
+│   │   ├── cfq/         #   Concrete policy (non-tickless fair queuing).
+│   │   ├── eevdf/       #   Default policy (tickless, eligible virtual deadline).
 │   │   └── mlfq/        #   Concrete policy (sibling crate).
 │   ├── ipc/             # Capabilities, message ports.
 │   ├── irq/             # IRQ table + per-handle wait queue (irq_bind/irq_wait).
@@ -2242,8 +2242,8 @@ as non-negotiable as §2.
   type.** The rest of the kernel depends on `SchedulerPolicy` (or a
   generic `Scheduler<P: SchedulerPolicy>`), never on a concrete impl.
 - There is exactly **one selection point**, in `kernel/core`, chosen at
-  build time via a workspace feature (`scheduler-cfq` — the default,
-  `scheduler-eevdf`, `scheduler-mlfq`, …). Exactly one such feature must
+  build time via a workspace feature (`scheduler-eevdf` — the default,
+  `scheduler-cfq`, `scheduler-mlfq`, …). Exactly one such feature must
   be active per image; the build fails otherwise.
 - Every concrete scheduler must pass the shared conformance test
   suite in `kernel/sched/api/tests/` (fairness bounds, no starvation
@@ -2316,7 +2316,7 @@ as non-negotiable as §2.
   deadline that arms the next one-shot are the one shared definition every
   port reuses (§2.2, §17.2); only the genuinely target-divergent
   register/MMIO arming is arch-specific.
-  - **The default policy (CFQ) is deliberately non-tickless — the sole
+  - **The CFQ policy is deliberately non-tickless — the sole
     exception, and the only scheduler permitted to be.** CFQ
     (`kernel/sched/cfq`) is a Linux-CFS-like Completely-Fair-Queuing policy
     that keeps a fixed-frequency periodic quantum tick armed for *any*

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-handover-qemu-aarch64"
-description = "plans/VIEW.md QEMU integration test: boot the graphical desktop on the aarch64 virt board, open a file-manager window from its icon-bar slot, activate a planted picture twice, and hold the run to two complete three-principal document hand-overs — the manager mints, the session relays, and the one already-running viewer redeems"
+description = "plans/VIEW.md QEMU integration test: boot the graphical desktop on the aarch64 virt board, open a file-manager window from its icon-bar slot, activate a planted picture three times — the first starts the viewer — and hold the run to two complete three-principal document hand-overs — the manager mints, the session relays, and the one already-running viewer redeems"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

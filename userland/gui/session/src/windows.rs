@@ -126,8 +126,8 @@ pub const HAND_OVER_WITHHELD: EventId = EventId(20_021);
 pub const HAND_OVER_WITHHELD_MESSAGE: &str = "hand-over raise withheld";
 
 /// Event id of an application's own window brought forward with the keyboard
-/// on its request: the compositor has restacked it, so what is pressed next
-/// lands on it.
+/// on its request: it is at the front of the stack, moved there or already
+/// there, so what is pressed next lands on it.
 pub const WINDOW_RAISED: EventId = EventId(20_022);
 
 /// The exact message [`WINDOW_RAISED`] is emitted with.
@@ -3028,9 +3028,12 @@ mod tests {
         assert_eq!(count(&AUDIT.raised), 1);
         bench.host().raise_refused(caller(), 9);
         assert_eq!(count(&AUDIT.refused), 1);
+        assert_eq!(bench.host().raise_requested(404), Err(Errno::NotFound));
+        assert_eq!(count(&AUDIT.raised), 1, "an unknown window raises nothing");
         bench.seat_held = true;
         assert_eq!(bench.host().raise_requested(9), Err(Errno::SeatBusy));
         assert_eq!(count(&AUDIT.refused), 2);
+        assert_eq!(count(&AUDIT.raised), 1, "a refusal is not a raise");
     }
 
     /// While the seat is held a window's first frame puts it on screen

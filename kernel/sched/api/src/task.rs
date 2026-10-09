@@ -18,8 +18,9 @@
 //! ```
 //!
 //! A job-control `stop` takes a task out beside that cycle, into
-//! [`TaskState::Stopped`], which only `resume` or `exit` ends: a wake does
-//! not. `unpark`, `stop`, `resume`, and `exit` are *cancellation-safe*: an
+//! [`TaskState::Stopped`] — or [`TaskState::StoppedParked`] for a parked one,
+//! which `resume` leaves parked — and only `resume` or `exit` ends it: a wake
+//! does not. `unpark`, `stop`, `resume`, and `exit` are *cancellation-safe*: an
 //! implementation may be issued one while the task is running on another CPU
 //! and must apply it at the next safe point. See
 //! `docs/src/architecture/scheduler.md` for the full invariants.
@@ -516,9 +517,11 @@ impl SchedClass {
 /// Task lifecycle state.
 ///
 /// An implementation stores this (typically in an `AtomicU8`) inside each
-/// task. A task in [`Self::Ready`] or [`Self::StoppedOnQueue`] holds exactly
-/// one run-queue entry and a task in any other state holds none, so a task
-/// can never be queued while its body runs. Allowed transitions:
+/// task. Whoever moves a task into [`Self::Ready`] from a state holding no
+/// run-queue entry pushes exactly one, even if an exit retires it first, and
+/// only taking that entry ends it. So a task holds at most one entry, never
+/// while its body runs, and an exited task's last entry is what drops its
+/// record. Allowed transitions:
 ///
 /// | from             | to               | trigger                                  |
 /// | ---------------- | ---------------- | ---------------------------------------- |
@@ -528,12 +531,15 @@ impl SchedClass {
 /// | `Parked`         | `Ready`          | `unpark`                                 |
 /// | `Ready`          | `StoppedOnQueue` | `stop`                                   |
 /// | `Running`        | `StoppedOnCpu`   | `stop`                                   |
-/// | `Parked`         | `Stopped`        | `stop`                                   |
+/// | `Parked`         | `StoppedParked`  | `stop`                                   |
 /// | `StoppedOnQueue` | `Stopped`        | the scheduler takes the queue entry      |
-/// | `StoppedOnCpu`   | `Stopped`        | the body returns                         |
+/// | `StoppedOnCpu`   | `Stopped`        | the body returns [`TaskAction::Yield`]   |
+/// | `StoppedOnCpu`   | `StoppedParked`  | the body returns [`TaskAction::Park`]    |
+/// | `StoppedParked`  | `Stopped`        | `unpark`                                 |
 /// | `StoppedOnQueue` | `Ready`          | `resume`                                 |
 /// | `StoppedOnCpu`   | `Running`        | `resume`                                 |
 /// | `Stopped`        | `Ready`          | `resume`                                 |
+/// | `StoppedParked`  | `Parked`         | `resume`                                 |
 /// | any              | `Exited`         | body returns [`TaskAction::Exit`], or `exit` |
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -546,8 +552,8 @@ pub enum TaskState {
     Parked = 2,
     /// Terminal state. The task body has been dropped.
     Exited = 3,
-    /// Stopped by job control and off every CPU and queue. Only `resume`
-    /// (or `exit`) ends it: a wake does not.
+    /// Stopped by job control, off every CPU and queue, and runnable once
+    /// resumed. Only `resume` (or `exit`) ends it: a wake does not.
     Stopped = 4,
     /// Stopped while queued. Its entry still stands, so the scheduler
     /// completes the stop when it takes the entry, and a `resume` first
@@ -556,6 +562,9 @@ pub enum TaskState {
     /// Stopped while its body runs. The dispatch completes the stop when the
     /// body returns, and a `resume` first leaves the task `Running`.
     StoppedOnCpu = 6,
+    /// Parked, and stopped by job control. A `resume` leaves it parked, so a
+    /// stop never runs a task nothing woke; a wake makes it [`Self::Stopped`].
+    StoppedParked = 7,
 }
 
 impl TaskState {
@@ -576,6 +585,7 @@ impl TaskState {
             4 => Some(Self::Stopped),
             5 => Some(Self::StoppedOnQueue),
             6 => Some(Self::StoppedOnCpu),
+            7 => Some(Self::StoppedParked),
             _ => None,
         }
     }
@@ -585,7 +595,7 @@ impl TaskState {
     pub const fn is_stopped(self) -> bool {
         matches!(
             self,
-            Self::Stopped | Self::StoppedOnQueue | Self::StoppedOnCpu
+            Self::Stopped | Self::StoppedOnQueue | Self::StoppedOnCpu | Self::StoppedParked
         )
     }
 }
@@ -593,7 +603,7 @@ impl TaskState {
 /// What the scheduler should do with a task whose body has just returned.
 ///
 /// Returned from the closure passed to [`crate::SchedulerPolicy::spawn`].
-/// Combined with externally-issued `park`/`unpark`/`exit`, this gives the
+/// Combined with externally-issued `unpark`/`stop`/`resume`/`exit`, this gives the
 /// scheduler a full picture of the task's intent.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TaskAction {
@@ -660,19 +670,21 @@ mod tests {
             TaskState::Stopped,
             TaskState::StoppedOnQueue,
             TaskState::StoppedOnCpu,
+            TaskState::StoppedParked,
         ] {
             assert_eq!(TaskState::from_u8(s.as_u8()), Some(s));
         }
-        assert_eq!(TaskState::from_u8(7), None);
+        assert_eq!(TaskState::from_u8(8), None);
         assert_eq!(TaskState::from_u8(99), None);
     }
 
     #[test]
-    fn only_the_three_stop_states_are_stopped() {
+    fn only_the_stop_states_are_stopped() {
         for s in [
             TaskState::Stopped,
             TaskState::StoppedOnQueue,
             TaskState::StoppedOnCpu,
+            TaskState::StoppedParked,
         ] {
             assert!(s.is_stopped(), "{s:?}");
         }

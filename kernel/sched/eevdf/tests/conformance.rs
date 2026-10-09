@@ -16,3 +16,8 @@ use tairix_kernel_sched_eevdf::Scheduler;
 fn eevdf_passes_scheduler_policy_conformance() {
     conformance::run_all::<Scheduler<TestArch>>();
 }
+
+#[test]
+fn eevdf_survives_scheduler_policy_races() {
+    conformance::run_races::<Scheduler<TestArch>>();
+}

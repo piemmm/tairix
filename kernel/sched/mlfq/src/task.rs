@@ -145,13 +145,6 @@ impl TaskInner {
     pub(crate) fn store_state(&self, new: TaskState) {
         self.state.store(new.as_u8(), Ordering::Release);
     }
-
-    /// Unconditionally store the state, returning the one it replaced.
-    pub(crate) fn swap_state(&self, new: TaskState) -> TaskState {
-        let raw = self.state.swap(new.as_u8(), Ordering::AcqRel);
-        // A corrupt byte reads as terminal, as `load_state` reads it.
-        TaskState::from_u8(raw).unwrap_or(TaskState::Exited)
-    }
 }
 
 impl ParkableTask for TaskInner {
@@ -172,6 +165,11 @@ impl ParkableTask for TaskInner {
             Ok(_) => Ok(()),
             Err(cur) => Err(TaskState::from_u8(cur).unwrap_or(TaskState::Exited)),
         }
+    }
+
+    fn swap_state(&self, new: TaskState) -> TaskState {
+        let raw = self.state.swap(new.as_u8(), Ordering::AcqRel);
+        TaskState::from_u8(raw).unwrap_or(TaskState::Exited)
     }
 
     fn set_wake_pending(&self) {
