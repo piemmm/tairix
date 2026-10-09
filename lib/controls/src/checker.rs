@@ -46,6 +46,15 @@ impl Checker {
         self
     }
 
+    /// This checkerboard in `dark` and `light`, for a surface that lets its
+    /// user choose them.
+    #[must_use]
+    pub const fn with_shades(mut self, dark: Color, light: Color) -> Self {
+        self.dark = dark;
+        self.light = light;
+        self
+    }
+
     /// A square's side, in pixels.
     #[must_use]
     pub const fn side(&self) -> u32 {

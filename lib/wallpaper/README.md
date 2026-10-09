@@ -75,8 +75,9 @@ disagree about whether they mean the same backdrop. The colour is
 
 ## Two readings, deliberately different
 
-`DesktopSettings::load` is the **tolerant** one, for a document held in a
-store: a value the registry refuses leaves that one field at its documented
+The registry load — `DesktopSettings` is a `tairix_appconf::Registry`, read
+by the shared engine's `Registry::load` — is the **tolerant** one, for a
+document held in a store: a value the registry refuses leaves that one field at its documented
 default and is *named* to the caller, so one stale setting costs only
 itself and never blanks a user's desktop. It reads through
 `tairix_appconf::Lookup`, so the same loader serves the session's own

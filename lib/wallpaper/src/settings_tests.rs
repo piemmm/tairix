@@ -1,7 +1,7 @@
 //! Unit tests for the desktop settings registry.
 
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
-use tairix_appconf::Document;
+use tairix_appconf::{Document, Registry};
 
 use super::*;
 use crate::catalog;
@@ -112,6 +112,10 @@ fn the_render_is_canonical_and_round_trips() {
         density: Density::Comfortable,
         motion: Motion::Reduced,
         scale: Scale::from_percent(150).expect("150% is a scale"),
+        text_family: TextFamily::Named(
+            tairix_theme::FamilyKey::new("noto-serif").expect("a family key"),
+        ),
+        text_size: TextSize::Points(12),
         cursor_set: CursorSetId::new("High Visibility").expect("a legal set name"),
         cursor_size: CursorSize::Larger,
         cursor_shake: false,
@@ -148,6 +152,8 @@ fn the_render_is_canonical_and_round_trips() {
          density = comfortable\n\
          motion = reduced\n\
          scale = 150\n\
+         font.family = noto-serif\n\
+         font.size = 12\n\
          cursor.set = High Visibility\n\
          cursor.size = larger\n\
          cursor.shake = false\n\

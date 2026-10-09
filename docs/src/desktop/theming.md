@@ -194,7 +194,7 @@ bundles, under a stable `ThemeId`:
     `10` logical pixels in both themes: the label's horizontal budget is the
     plate less the frame border and this inset either side, so text stays clear
     of the rounded corners. It is *not* a vertical budget — it exceeds what the
-    theme's own `control_height` can spare around an 18px glyph — and charging
+    theme's own `control_height` can spare around a line of body type — and charging
     it vertically withheld a plate's whole content rather than clipping it, so
     every button laid out on a text row pitch drew as an empty plate (the
     Properties and "Open With…" windows). The vertical budget is the plate less
@@ -424,9 +424,9 @@ type scales together (`AGENTS.md` §2.2):
 | `Display` | 250% | Regular | 480 |
 | `Heading` | 133% | Medium | 580 |
 | `ItemTitle` | 113% | Medium | 580 |
-| `WindowTitle` | 89% | Medium | 580 |
+| `WindowTitle` | 100% | Medium | 580 |
 | `Body` | 100% | Regular | 480 |
-| `ItemLabel` | 89% | Regular | 480 |
+| `ItemLabel` | 100% | Regular | 480 |
 | `Metric` | 100% | Bold | 780 |
 | `Caption` | 87% | Regular | 480 |
 | `SectionHeader` | 100% | Bold | 780 |
@@ -437,13 +437,12 @@ rising weight — a detail line sits within a point of the title above it, and a
 column header is the size of the rows it heads but bold — so weight, not size,
 does most of the work.
 
-Window titles and item names sit a point below body. Ladder sizes are line-box
-heights, and the shipped face's line box is about six fifths of its em, so a
-point of em is about 1.6 px of line box: at the shipped base those two rungs
-are 16 px against body's 18. `ItemLabel` is the name under every icon tile —
-the file manager's, the picker's, the desktop's, the greeter's accounts — and
-in every row of a file listing; a listing row keeps body's row pitch, so it
-stays on the places rail's grid beside it.
+Window titles and item names are set at body's size: they were brought a point
+below an 18 px body first, and kept their 16 px when the shipped base came down
+to it. `ItemLabel` is the name under every icon tile — the file manager's, the
+picker's, the desktop's, the greeter's accounts — and in every row of a file
+listing; a listing row keeps body's row pitch, so it stays on the places rail's
+grid beside it.
 
 Every role is set `TEXT_WEIGHT_LIFT` (80) heavier than its named weight along
 the face's own `wght` axis (`lifted`). The UI face's named weights are drawn
@@ -458,10 +457,26 @@ no place in a window's chrome. Its 250% is the largest multiple that still
 rasterises at the maximum authored base under a doubled density; a taller rung
 would silently clamp.
 
-The built-ins author the base at 18 logical pixels; `Fonts::ladder` clamps an
-authored base into `MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`, so a theme can
-neither author text below the rasteriser's legibility floor nor above its
-cell-height ceiling (`AGENTS.md` §5.4).
+The built-ins author the base at 16 logical pixels — ten points of Inter;
+`Fonts::ladder` clamps an authored base into
+`MIN_BASE_SIZE_PX..=MAX_BASE_SIZE_PX`, so a theme can neither author text below
+the rasteriser's legibility floor nor above its cell-height ceiling (`AGENTS.md`
+§5.4).
+
+### The user's text
+
+A user chooses the desktop's family and size on Settings ▸ Appearance ▸ Text
+(`font.family`, `font.size`). A size is points of em: ladder sizes are line-box
+heights, and families differ in how tall a line is for one em — Inter's is 1.21
+of its em, Noto's 1.362 — so `tairix_theme::line_box_px` converts points ×
+96/72 × the family's line box (`FamilyEntry::line_box`, read by `fontd`) to the
+base, and a change of family keeps the glyphs the size they were. The session
+resolves the choice against the font store (`tairix_wallpaper::resolve`; a
+family the store no longer holds falls back to the theme's own and is said on
+`stderr`) and publishes it as `DesktopText`; `ThemeRegistry::set_text` lays it
+over every theme and `Theme::with_text` is the one place it reaches the ladder,
+which `Fonts::with_text` rebuilds on the chosen family and base. The monospace
+family is never replaced.
 
 Sizes are *logical* pixels at `tairix_geometry::REFERENCE_DPI`;
 `tairix_font::BitmapFont::for_role(fonts, role, scale)` is the one place a role
@@ -559,8 +574,8 @@ repaints every pixel in the new look). See
 An application's window is the application's own pixels: the session composes
 them but cannot re-colour them, so re-theming the desktop alone would leave
 every open window sitting in the appearance the user just left. The session
-therefore *publishes* the new state. `Appearance`, `Contrast`, `Density` and
-`Motion` are all part of the seat's desktop record
+therefore *publishes* the new state. `Appearance`, `Contrast`, `Density`,
+`Motion` and the user's `DesktopText` are all part of the seat's desktop record
 (`tairix_abi::desktop::DesktopInfo`), which an app reads before it paints its
 first frame and then converges on through the `Desktop` system notice, which
 the session publishes whenever any of them changes. They travel together
@@ -568,7 +583,7 @@ because they are one decision to a reader and one repaint to an application:
 an application that learned only half of what changed would draw the other
 half the way the user just stopped asking for. `lib/window`'s
 `adopt_desktop` applies all of them in the one call an app already makes, so
-each app re-applies the appearance *and* the axes to its own `ThemeRegistry`,
+each app re-applies the appearance, the axes *and* the text to its own `ThemeRegistry`,
 re-resolves whatever it derived from the theme, and presents — so the switch reaches the whole screen
 at once, including the apps that have no window open at the time. The enum crossing
 that wire *is* `tairix_theme::Appearance`: the theme crate re-exports the ABI's

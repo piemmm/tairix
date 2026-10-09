@@ -13,26 +13,16 @@
 //! colour is spelled as bare `rrggbb` digits ([`Rgb::from_hex`]) rather than
 //! `#rrggbb`.
 //!
-//! # What a save writes, and what it does not
-//!
-//! [`Profile::save`] writes only the keys whose value differs from what the
-//! store's layers already imply, so a user's own document holds what the user
-//! actually changed and nothing else — not a copy of every default. A key no
-//! layer sets reads as its documented default, and [`Profile::clear`] removes
-//! the user's opinions so the layers beneath (the machine's policy, the
-//! bundle's shipped defaults) apply again.
-//!
-//! A value the registry refuses — a size outside its bounds, a malformed
-//! colour — leaves that one field at its default and is *named* to the caller,
-//! which reports it. One broken setting therefore costs only itself, and never
-//! silently becomes something else.
+//! It is kept by the shared closed-registry engine ([`Registry`], [`Live`]):
+//! a save writes only what the store's layers do not already imply, a restore
+//! removes the user's opinions so the layers beneath apply again, and a value
+//! the registry refuses — a size outside its bounds, a malformed colour —
+//! leaves that one field at its default and is named.
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use core::fmt::Write as _;
+use alloc::string::String;
+use core::fmt::{self, Write as _};
 
-use tairix_abi::Errno;
-use tairix_appdata::Settings;
+use tairix_appconf::{overwrite, Live, Registry};
 use tairix_colour::Rgb;
 
 use crate::effects::{Effects, FULL, MIN_OPACITY};
@@ -66,11 +56,8 @@ pub const FONT_SIZE_STEP_PX: u16 = 1;
 /// One key of the closed profile registry.
 ///
 /// Adding a key means adding a variant here, its row in [`ProfileKey::ALL`],
-/// and its arms in this module's private `set_field`, `field_value` and
-/// `copy_field` bridges — the compiler then forces every consumer to state
-/// what the new key means. The store's key namespace is open, but this
-/// application's is closed: a key outside the registry is one this profile
-/// does not read.
+/// and its arms in the profile's [`Registry`] and [`Live`] bridges — the
+/// compiler then forces every consumer to state what the new key means.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProfileKey {
     /// `scheme` — which colour scheme is in force.
@@ -144,57 +131,6 @@ impl ProfileKey {
             Self::CustomAnsi => "custom.ansi",
         }
     }
-
-    /// This key's member of a [`ProfileKeys`] set.
-    const fn bit(self) -> u16 {
-        1 << self as u16
-    }
-}
-
-const _: () = assert!(ProfileKey::ALL.len() <= u16::BITS as usize);
-
-/// A set of registry keys: the settings one change touched.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct ProfileKeys(u16);
-
-impl ProfileKeys {
-    /// No setting.
-    pub const EMPTY: Self = Self(0);
-
-    /// Every setting in the registry.
-    pub const ALL: Self = {
-        let mut bits = 0;
-        let mut index = 0;
-        while index < ProfileKey::ALL.len() {
-            bits |= ProfileKey::ALL[index].bit();
-            index += 1;
-        }
-        Self(bits)
-    };
-
-    /// Whether the set names no setting.
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Whether the set names `key`.
-    #[must_use]
-    pub const fn contains(self, key: ProfileKey) -> bool {
-        self.0 & key.bit() != 0
-    }
-
-    /// Every setting either set names.
-    #[must_use]
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// This set with `key` added.
-    #[must_use]
-    pub const fn with(self, key: ProfileKey) -> Self {
-        Self(self.0 | key.bit())
-    }
 }
 
 /// The user's terminal profile.
@@ -257,102 +193,6 @@ impl Profile {
             .font_size_px
             .saturating_sub(FONT_SIZE_STEP_PX)
             .max(MIN_FONT_SIZE_PX);
-    }
-
-    /// Take the settings `keys` names from `from`, leaving every other one as
-    /// it is, and answer which of them changed.
-    ///
-    /// Each field valid in `from` stays valid here: the registry's bounds are
-    /// per setting, so no combination of two valid profiles can break one.
-    pub fn set_from(&mut self, from: &Self, keys: ProfileKeys) -> ProfileKeys {
-        let mut changed = ProfileKeys::EMPTY;
-        for key in ProfileKey::ALL {
-            if keys.contains(key) && copy_field(self, from, key) {
-                changed = changed.with(key);
-            }
-        }
-        changed
-    }
-
-    /// The settings whose value differs between `self` and `other`.
-    #[must_use]
-    pub fn differing(&self, other: &Self) -> ProfileKeys {
-        let mut probe = *self;
-        probe.set_from(other, ProfileKeys::ALL)
-    }
-
-    /// The profile the store's layers imply, and the keys whose stored value
-    /// the registry refused.
-    ///
-    /// Every key the layers do not set reads as its documented default, so a
-    /// fresh account and a hand-cleared store both yield
-    /// [`Profile::default`]. A refused value leaves that one field at its
-    /// default and is named in the returned list, so a caller reports the
-    /// broken setting instead of running on a value the user cannot account
-    /// for.
-    #[must_use]
-    pub fn load(settings: &Settings<'_>) -> (Self, Vec<ProfileKey>) {
-        let mut profile = Self::default();
-        let mut refused = Vec::new();
-        for key in ProfileKey::ALL {
-            let Some(value) = settings.get(key.name()) else {
-                continue;
-            };
-            if !set_field(&mut profile, key, value) {
-                refused.push(key);
-            }
-        }
-        profile.clamp();
-        (profile, refused)
-    }
-
-    /// Publish this profile, writing only what the store's layers do not
-    /// already imply.
-    ///
-    /// A key whose effective value already matches is left alone, so saving a
-    /// profile the user did not change rewrites nothing, and a value that
-    /// comes from the machine's policy or the bundle's defaults is never
-    /// copied up into the user's own document. The whole profile lands as one
-    /// atomic commit.
-    ///
-    /// # Errors
-    ///
-    /// The app-data service's own typed refusal — no service bound, no store
-    /// for a caller running no signed bundle, or an unreachable volume. The
-    /// edits stay staged, so a caller may retry.
-    pub fn save(&self, settings: &mut Settings<'_>) -> Result<(), Errno> {
-        let (stored, _) = Self::load(settings);
-        for key in ProfileKey::ALL {
-            let value = field_value(self, key);
-            if field_value(&stored, key) == value {
-                continue;
-            }
-            // The registry's own spellings are inside the format's grammar, so
-            // a refusal here would be a defect in this module rather than a
-            // user's mistake; it is reported as a refused write either way.
-            settings
-                .set(key.name(), &value)
-                .map_err(|_| Errno::OutOfRange)?;
-        }
-        settings.commit()
-    }
-
-    /// Remove every profile key from the store, so the layers beneath the
-    /// user's own document apply again.
-    ///
-    /// This is what *Restore defaults* means: not "write the shipped values
-    /// into my document" but "stop having an opinion". The profile that then
-    /// applies is [`Profile::load`]'s answer, which may be the machine's
-    /// policy rather than this application's own default.
-    ///
-    /// # Errors
-    ///
-    /// As [`Profile::save`].
-    pub fn clear(settings: &mut Settings<'_>) -> Result<(), Errno> {
-        for key in ProfileKey::ALL {
-            settings.unset(key.name());
-        }
-        settings.commit()
     }
 }
 
@@ -439,62 +279,68 @@ fn set_field(profile: &mut Profile, key: ProfileKey, value: &str) -> bool {
     true
 }
 
-/// Copy `key`'s setting from `from` onto `to`, answering whether `to` changed.
-fn copy_field(to: &mut Profile, from: &Profile, key: ProfileKey) -> bool {
-    match key {
-        ProfileKey::Scheme => overwrite(&mut to.scheme, from.scheme),
-        ProfileKey::FontSize => overwrite(&mut to.font_size_px, from.font_size_px),
-        ProfileKey::Opacity => overwrite(&mut to.effects.opacity, from.effects.opacity),
-        ProfileKey::Blur => overwrite(&mut to.effects.blur, from.effects.blur),
-        ProfileKey::ScanLines => overwrite(&mut to.effects.scanlines, from.effects.scanlines),
-        ProfileKey::Glow => overwrite(&mut to.effects.glow, from.effects.glow),
-        ProfileKey::Fuzz => overwrite(&mut to.effects.fuzz, from.effects.fuzz),
-        ProfileKey::Phosphor => overwrite(&mut to.effects.phosphor, from.effects.phosphor),
-        ProfileKey::Wobble => overwrite(&mut to.effects.wobble, from.effects.wobble),
-        ProfileKey::CustomBackground => {
-            overwrite(&mut to.custom.background, from.custom.background)
-        }
-        ProfileKey::CustomForeground => {
-            overwrite(&mut to.custom.foreground, from.custom.foreground)
-        }
-        ProfileKey::CustomCursor => overwrite(&mut to.custom.cursor, from.custom.cursor),
-        ProfileKey::CustomCursorText => {
-            overwrite(&mut to.custom.cursor_text, from.custom.cursor_text)
-        }
-        ProfileKey::CustomAnsi => overwrite(&mut to.custom.ansi, from.custom.ansi),
+impl Registry for Profile {
+    type Key = ProfileKey;
+    const KEYS: &'static [ProfileKey] = &ProfileKey::ALL;
+
+    fn name(key: ProfileKey) -> &'static str {
+        key.name()
+    }
+
+    fn read(&mut self, key: ProfileKey, text: &str) -> bool {
+        set_field(self, key, text)
+    }
+
+    fn spell(&self, key: ProfileKey, out: &mut String) -> bool {
+        let written = match key {
+            ProfileKey::Scheme => out.write_str(self.scheme.name()),
+            ProfileKey::FontSize => write!(out, "{}", self.font_size_px),
+            ProfileKey::Opacity => write!(out, "{}", self.effects.opacity),
+            ProfileKey::Blur => write!(out, "{}", self.effects.blur),
+            ProfileKey::ScanLines => write!(out, "{}", self.effects.scanlines),
+            ProfileKey::Glow => write!(out, "{}", self.effects.glow),
+            ProfileKey::Fuzz => write!(out, "{}", self.effects.fuzz),
+            ProfileKey::Phosphor => write!(out, "{}", self.effects.phosphor),
+            ProfileKey::Wobble => write!(out, "{}", self.effects.wobble),
+            ProfileKey::CustomBackground => write!(out, "{}", self.custom.background.hex()),
+            ProfileKey::CustomForeground => write!(out, "{}", self.custom.foreground.hex()),
+            ProfileKey::CustomCursor => write!(out, "{}", self.custom.cursor.hex()),
+            ProfileKey::CustomCursorText => write!(out, "{}", self.custom.cursor_text.hex()),
+            ProfileKey::CustomAnsi => spell_ansi(&self.custom.ansi, out),
+        };
+        written.is_ok()
+    }
+
+    fn normalise(&mut self) {
+        self.clamp();
     }
 }
 
-/// Store `value` in `slot`, answering whether that changed it.
-fn overwrite<T: Copy + PartialEq>(slot: &mut T, value: T) -> bool {
-    let changed = *slot != value;
-    *slot = value;
-    changed
-}
-
-/// The current value of `key` on `profile`, in its canonical spelling.
-fn field_value(profile: &Profile, key: ProfileKey) -> String {
-    match key {
-        ProfileKey::Scheme => profile.scheme.name().to_string(),
-        ProfileKey::FontSize => profile.font_size_px.to_string(),
-        ProfileKey::Opacity => profile.effects.opacity.to_string(),
-        ProfileKey::Blur => profile.effects.blur.to_string(),
-        ProfileKey::ScanLines => profile.effects.scanlines.to_string(),
-        ProfileKey::Glow => profile.effects.glow.to_string(),
-        ProfileKey::Fuzz => profile.effects.fuzz.to_string(),
-        ProfileKey::Phosphor => profile.effects.phosphor.to_string(),
-        ProfileKey::Wobble => profile.effects.wobble.to_string(),
-        ProfileKey::CustomBackground => hex(profile.custom.background),
-        ProfileKey::CustomForeground => hex(profile.custom.foreground),
-        ProfileKey::CustomCursor => hex(profile.custom.cursor),
-        ProfileKey::CustomCursorText => hex(profile.custom.cursor_text),
-        ProfileKey::CustomAnsi => render_ansi(&profile.custom.ansi),
+impl Live for Profile {
+    fn take(&mut self, from: &Self, key: ProfileKey) -> bool {
+        match key {
+            ProfileKey::Scheme => overwrite(&mut self.scheme, from.scheme),
+            ProfileKey::FontSize => overwrite(&mut self.font_size_px, from.font_size_px),
+            ProfileKey::Opacity => overwrite(&mut self.effects.opacity, from.effects.opacity),
+            ProfileKey::Blur => overwrite(&mut self.effects.blur, from.effects.blur),
+            ProfileKey::ScanLines => overwrite(&mut self.effects.scanlines, from.effects.scanlines),
+            ProfileKey::Glow => overwrite(&mut self.effects.glow, from.effects.glow),
+            ProfileKey::Fuzz => overwrite(&mut self.effects.fuzz, from.effects.fuzz),
+            ProfileKey::Phosphor => overwrite(&mut self.effects.phosphor, from.effects.phosphor),
+            ProfileKey::Wobble => overwrite(&mut self.effects.wobble, from.effects.wobble),
+            ProfileKey::CustomBackground => {
+                overwrite(&mut self.custom.background, from.custom.background)
+            }
+            ProfileKey::CustomForeground => {
+                overwrite(&mut self.custom.foreground, from.custom.foreground)
+            }
+            ProfileKey::CustomCursor => overwrite(&mut self.custom.cursor, from.custom.cursor),
+            ProfileKey::CustomCursorText => {
+                overwrite(&mut self.custom.cursor_text, from.custom.cursor_text)
+            }
+            ProfileKey::CustomAnsi => overwrite(&mut self.custom.ansi, from.custom.ansi),
+        }
     }
-}
-
-/// One colour in the canonical bare `rrggbb` spelling.
-fn hex(color: Rgb) -> String {
-    color.hex().to_string()
 }
 
 /// Decode a decimal `value` bounded to `min..=max`; `None` for a
@@ -521,17 +367,16 @@ fn parse_ansi(value: &str) -> Option<[Rgb; ANSI_COLORS]> {
     (seen == ANSI_COLORS).then_some(colors)
 }
 
-/// Render sixteen ANSI colours as the space-separated bare `rrggbb` list
-/// [`parse_ansi`] reads back.
-fn render_ansi(ansi: &[Rgb; ANSI_COLORS]) -> String {
-    let mut text = String::new();
+/// Spell sixteen ANSI colours into `out` as the space-separated bare `rrggbb`
+/// list [`parse_ansi`] reads back.
+fn spell_ansi(ansi: &[Rgb; ANSI_COLORS], out: &mut String) -> fmt::Result {
     for (index, color) in ansi.iter().enumerate() {
         if index > 0 {
-            text.push(' ');
+            out.push(' ');
         }
-        let _ = write!(text, "{}", color.hex());
+        write!(out, "{}", color.hex())?;
     }
-    text
+    Ok(())
 }
 
 /// What replacing one [`Profile`] with another makes stale — the whole of it,

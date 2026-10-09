@@ -875,6 +875,72 @@ fn the_minimum_outer_size_leaves_a_usable_band_and_a_real_client() {
     }
 }
 
+#[test]
+fn a_tool_frame_is_a_window_frame_on_the_mini_band() {
+    let double = Scale::from_percent(200).expect("scale");
+    for theme in [Theme::dark(), Theme::light()] {
+        for scale in [Scale::ONE, double] {
+            let tool = WindowFrame::tool();
+            let window = WindowFrame::new(furniture());
+            let mini = TitleBar::height_of(TitleBarCommands::Tool, scale, &theme);
+            assert!(mini < TitleBar::band_height(scale, &theme));
+            let (tool_in, window_in) = (tool.insets(scale, &theme), window.insets(scale, &theme));
+            assert_eq!(
+                window_in.top - tool_in.top,
+                TitleBar::band_height(scale, &theme) - mini,
+                "only the band is shallower"
+            );
+            assert_eq!(
+                (tool_in.left, tool_in.right, tool_in.bottom),
+                (window_in.left, window_in.right, window_in.bottom)
+            );
+            let client = Rect::new(40, 60, 180, 120);
+            let outer = tool.outer_for_client(client, scale, &theme);
+            let layout = tool.layout(outer, scale, &theme);
+            assert_eq!(layout.client, client, "the inverse round-trips");
+            assert_eq!(layout.title_bar.height, mini);
+            let (w, h) = tool.min_outer_size(scale, &theme);
+            assert!(w >= TitleBar::min_band_width(TitleBarCommands::Tool, scale, &theme));
+            assert!(h > tool_in.top + tool_in.bottom);
+            // The band moves the window, Close closes it, and nothing resizes it.
+            let band = layout.title_bar;
+            let on = |x: i32| Point::new(x, band.top() + half(band.height));
+            assert_eq!(
+                tool.hit(
+                    outer,
+                    scale,
+                    &theme,
+                    on(band.right() - half(band.height) * 4)
+                ),
+                FurniturePart::TitleBar
+            );
+            let close = tool.title_bar().layout(band, scale, &theme).controls()[0];
+            assert_eq!(close.0, WindowControlKind::Close);
+            assert_eq!(
+                tool.hit(outer, scale, &theme, close.1.center()),
+                FurniturePart::WindowControl(WindowControlKind::Close)
+            );
+            assert_eq!(
+                tool.title_bar()
+                    .layout(band, scale, &theme)
+                    .controls()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                tool.hit(
+                    outer,
+                    scale,
+                    &theme,
+                    Point::new(client.left(), client.bottom() - 1)
+                ),
+                FurniturePart::Client
+            );
+            assert!(tool.grab_region(outer, scale, &theme).is_none());
+        }
+    }
+}
+
 /// A bar carrying `hue`, rendered into a `width`-wide band over the theme's
 /// plain band colour, plus the laid-out icon slot the wash runs out from.
 fn washed_bar(theme: &Theme, width: u32, hue: Option<Color>, active: bool) -> (Surface, Rect) {
@@ -3037,6 +3103,8 @@ fn band_over_plate(commands: TitleBarCommands, theme: &Theme) -> Surface {
     let mut bar = match commands {
         TitleBarCommands::Empty => TitleBar::plate(),
         TitleBarCommands::Window => TitleBar::new(WindowFurnitureState::default()),
+        TitleBarCommands::Tool => TitleBar::tool(),
+        TitleBarCommands::Pane => TitleBar::pane(),
     };
     bar.set_title("Appearance");
     let mut surface = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");
@@ -3433,4 +3501,212 @@ fn a_longer_title_asks_for_a_wider_band() {
         long.preferred_band_width(Scale::ONE, &theme)
             > short.preferred_band_width(Scale::ONE, &theme)
     );
+}
+
+// --- The mini bands: a tool window's and a docked pane's -----------------
+
+/// A mini band `height_of` its set, as wide as the title band the window
+/// tests use.
+fn mini_bounds(commands: TitleBarCommands, theme: &Theme) -> Rect {
+    Rect::new(
+        0,
+        0,
+        TITLE_BOUNDS.width,
+        TitleBar::height_of(commands, Scale::ONE, theme),
+    )
+}
+
+#[test]
+fn the_mini_bands_are_shallower_and_seat_their_own_commands() {
+    let theme = Theme::dark();
+    let window = TitleBar::height_of(TitleBarCommands::Window, Scale::ONE, &theme);
+    assert_eq!(window, TitleBar::band_height(Scale::ONE, &theme));
+    for commands in [TitleBarCommands::Tool, TitleBarCommands::Pane] {
+        assert!(
+            TitleBar::height_of(commands, Scale::ONE, &theme) < window,
+            "{commands:?}"
+        );
+    }
+
+    let tool = TitleBar::tool();
+    let bounds = mini_bounds(TitleBarCommands::Tool, &theme);
+    let layout = tool.layout(bounds, Scale::ONE, &theme);
+    let kinds: alloc::vec::Vec<WindowControlKind> =
+        layout.controls().iter().map(|(k, _)| *k).collect();
+    assert_eq!(kinds, [WindowControlKind::Close]);
+    let close = layout.controls()[0].1;
+    assert_eq!(
+        (close.left(), close.width),
+        (0, bounds.height),
+        "a square cell in the leading corner"
+    );
+    assert!(tool.control(WindowControlKind::Minimize).is_none());
+    assert!(tool.control(WindowControlKind::Close).is_some());
+
+    let pane = TitleBar::pane();
+    let bounds = mini_bounds(TitleBarCommands::Pane, &theme);
+    let layout = pane.layout(bounds, Scale::ONE, &theme);
+    let seated: alloc::vec::Vec<(WindowControlKind, Rect)> = layout.controls().to_vec();
+    assert_eq!(seated.len(), 2);
+    assert_eq!(seated[0].0, WindowControlKind::Close);
+    assert_eq!(seated[0].1.left(), 0);
+    assert_eq!(seated[1].0, WindowControlKind::Minimize);
+    assert_eq!(
+        seated[1].1.right(),
+        bounds.right(),
+        "Minimize is hard against the trailing end"
+    );
+    // The title is left-justified after the leading cluster, not centred.
+    assert!(layout.drag.left() > seated[0].1.right());
+    assert!(layout.drag.right() < seated[1].1.left());
+}
+
+#[test]
+fn a_mini_band_sets_its_title_in_the_caption_face_and_still_drags() {
+    let theme = Theme::dark();
+    let mut pane = TitleBar::pane();
+    pane.set_title("Colour");
+    let bounds = mini_bounds(TitleBarCommands::Pane, &theme);
+    let layout = pane.layout(bounds, Scale::ONE, &theme);
+    let caption = crate::paint::role_font(&theme, Scale::ONE, tairix_theme::TextRole::Caption);
+    assert_eq!(layout.title.width, caption.text_width("Colour"));
+    let mut damage = crate::damage::sink();
+    let grab = Point::new(layout.drag.left() + 4, bounds.top() + 4);
+    assert_eq!(
+        pane.on_pointer(
+            &InputEvent::PointerMoved { to: grab },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        None
+    );
+    assert_eq!(
+        pane.on_pointer(
+            &InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        Some(TitleBarEvent::Activate)
+    );
+    let away = Point::new(grab.x + 40, grab.y + 30);
+    assert_eq!(
+        pane.on_pointer(
+            &InputEvent::PointerMoved { to: away },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        Some(TitleBarEvent::DragBegin)
+    );
+    assert_eq!(
+        pane.on_pointer(
+            &InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        Some(TitleBarEvent::DragEnd)
+    );
+}
+
+#[test]
+fn a_panes_two_commands_fire_and_its_keys_walk_only_them() {
+    let theme = Theme::dark();
+    let mut pane = TitleBar::pane();
+    let bounds = mini_bounds(TitleBarCommands::Pane, &theme);
+    let layout = pane.layout(bounds, Scale::ONE, &theme);
+    let mut damage = crate::damage::sink();
+    for (kind, rect) in layout.controls().to_vec() {
+        let centre = Point::new(
+            rect.left() + tairix_geometry::to_i32(rect.width) / 2,
+            rect.top() + tairix_geometry::to_i32(rect.height) / 2,
+        );
+        let _ = pane.on_pointer(
+            &InputEvent::PointerMoved { to: centre },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage,
+        );
+        let _ = pane.on_pointer(
+            &InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage,
+        );
+        assert_eq!(
+            pane.on_pointer(
+                &InputEvent::PointerReleased {
+                    button: PointerButton::Primary
+                },
+                bounds,
+                Scale::ONE,
+                &theme,
+                &mut damage
+            ),
+            Some(TitleBarEvent::Control(kind))
+        );
+    }
+    let focused = |pane: &TitleBar| {
+        [WindowControlKind::Close, WindowControlKind::Minimize]
+            .into_iter()
+            .find(|&kind| pane.control(kind).is_some_and(|c| c.state().focus.focused))
+    };
+    let _ = pane.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(focused(&pane), Some(WindowControlKind::Close));
+    let _ = pane.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(focused(&pane), Some(WindowControlKind::Minimize));
+    let _ = pane.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(
+        focused(&pane),
+        Some(WindowControlKind::Close),
+        "wrapping over the two alone"
+    );
+}
+
+#[test]
+fn a_mini_band_never_paints_outside_its_bounds_in_either_theme() {
+    for theme in [Theme::dark(), Theme::light()] {
+        for commands in [TitleBarCommands::Tool, TitleBarCommands::Pane] {
+            let surface = band_over_plate(commands, &theme);
+            assert_eq!(surface.width(), TITLE_BOUNDS.width);
+            // The band draws its title and commands over the plate's ground.
+            let ground = premul(theme.palette().surface_raised);
+            assert!(
+                surface.pixels().iter().any(|&pixel| pixel != ground),
+                "{commands:?}"
+            );
+        }
+    }
 }

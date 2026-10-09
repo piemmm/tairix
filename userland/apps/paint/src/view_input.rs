@@ -17,8 +17,10 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButt
 use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_util::fallible;
+use tairix_window::docapp::Relayout;
 use tairix_window::menu::{MenuBuilder, Plate};
 
+use super::adjust::Applying;
 use super::{
     Action, Aim, Clip, Compute, Computed, Draft, Gesture, Lands, MenuKind, Modal, NewPicture,
     Outcome, Own, PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY,
@@ -37,7 +39,7 @@ use crate::save::{natural, restated, writable_as, SaveFormat};
 use crate::selection::Floating;
 use crate::shape::{line_pixels, Bounds, Point as Fx, Shape, FX};
 use crate::stroke::{Coat, Stroke};
-use crate::tool::{mark_grid, tool_index, Marquee, Tool, VIEW_COMMANDS};
+use crate::tool::{mark_pixel_grid, tool_index, Marquee, Tool, VIEW_COMMANDS};
 use crate::tool_controls::{BarOutcome, ToolControls};
 use crate::transform::{Depth, Transform, TransformError, Turn};
 use crate::viewport::{Zoom, ACTUAL, ZOOMS};
@@ -63,8 +65,22 @@ const NO_ROOM_TO_SELECT: &str = "There is not enough memory to select that";
 const KEPT_UNCHANGED: &str = "This sprite cannot be edited; it is kept, and saved back unchanged";
 
 impl View {
-    /// Feed one pointer event.
+    /// Feed one pointer event; where it moves the picture under an open
+    /// adjustment, what that shows is asked again.
     pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        let before = self.basis();
+        let outcome = self.pointer_event(event, layout, scale, theme, damage);
+        self.follow_picture(before, outcome, layout, damage)
+    }
+
+    fn pointer_event(
         &mut self,
         event: &InputEvent,
         layout: &Layout,
@@ -100,6 +116,17 @@ impl View {
         if self.picker.is_dragging() {
             return self
                 .dock_pointer(event, layout, scale, theme, damage)
+                .unwrap_or_else(Outcome::none);
+        }
+        // A list a pane opened, or a press held on it, owns the pointer.
+        if self.adjustment_pane().listing() || self.adjustment_pane().holding() {
+            return self
+                .adjustment_pointer(event, layout, scale, theme, damage)
+                .unwrap_or_else(Outcome::none);
+        }
+        if self.colour_controls().listing() || self.colour_controls().holding() {
+            return self
+                .colour_controls_pointer(event, layout, scale, theme, damage)
                 .unwrap_or_else(Outcome::none);
         }
         // An open list owns the pointer wherever it reaches: a press on its
@@ -177,7 +204,7 @@ impl View {
         };
         Some(match answer {
             Some(answer) => self.answer_modal(answer, layout, damage),
-            None => self.filter_moved(layout, damage),
+            None => Outcome::none(),
         })
     }
 
@@ -194,6 +221,18 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
+        if let Some(outcome) = self.panes_pointer(event, layout, scale, theme, damage) {
+            return Some(outcome);
+        }
+        if let Some(outcome) = self.adjustment_pointer(event, layout, scale, theme, damage) {
+            return Some(outcome);
+        }
+        if let Some(outcome) = self.colour_controls_pointer(event, layout, scale, theme, damage) {
+            return Some(outcome);
+        }
+        if let Some(outcome) = self.recents_pointer(event, layout, damage) {
+            return Some(outcome);
+        }
         let chosen = self
             .tool_box
             .on_pointer(event, layout.tools(), scale, theme, damage);
@@ -332,7 +371,7 @@ impl View {
 
     /// The inks changed from outside the dock: show them in the wells, the
     /// palette's marks and the picker.
-    fn inks_changed(&mut self, layout: &Layout, damage: &mut Region) {
+    pub(super) fn inks_changed(&mut self, layout: &Layout, damage: &mut Region) {
         self.mark_wells();
         self.sync_picker();
         damage.add(layout.wells());
@@ -460,6 +499,9 @@ impl View {
         self.release_dock(layout, scale, theme, damage);
         self.release_bar(layout, damage);
         self.release_palette(layout, damage);
+        self.release_adjustment(layout, scale, theme, damage);
+        self.release_colour_controls(layout, scale, theme, damage);
+        self.release_recents(layout, damage);
     }
 
     /// A press settles and takes the keyboard from every part it did not land
@@ -478,7 +520,14 @@ impl View {
         if !layout.controls().contains(self.pointer) {
             self.release_bar(layout, damage);
         }
+        if !layout.adjustment().contains(self.pointer) {
+            self.release_adjustment(layout, scale, theme, damage);
+        }
+        if !layout.colour_controls().contains(self.pointer) {
+            self.release_colour_controls(layout, scale, theme, damage);
+        }
         self.release_palette(layout, damage);
+        self.release_recents(layout, damage);
     }
 
     /// Which part of the window has the keyboard.
@@ -489,6 +538,12 @@ impl View {
             Keyboard::Bar
         } else if self.swatches.state().focus.focused {
             Keyboard::Palette
+        } else if self.adjustment_pane().has_focus() {
+            Keyboard::Adjustment
+        } else if self.colour_controls().focus().is_some() {
+            Keyboard::Colours
+        } else if self.recent_colours().state().focus.focused {
+            Keyboard::Recents
         } else {
             Keyboard::Picture
         }
@@ -497,7 +552,7 @@ impl View {
     /// Carry the keyboard on from `from` to the next part that takes it, in
     /// the order Tab walks — the picture, the bar, the palette, the dock —
     /// or back the other way; the picture always takes it.
-    fn walk_keyboard(
+    pub(super) fn walk_keyboard(
         &mut self,
         from: Keyboard,
         forward: bool,
@@ -552,6 +607,12 @@ impl View {
                 damage.add(layout.picker());
                 true
             }
+            Keyboard::Adjustment => {
+                let bounds = layout.adjustment_settings();
+                !bounds.is_empty() && self.enter_adjustment(forward, bounds, damage)
+            }
+            Keyboard::Colours => self.enter_colour_controls(forward, layout, damage),
+            Keyboard::Recents => self.enter_recents(layout, damage),
         }
     }
 
@@ -571,6 +632,9 @@ impl View {
                 match self.editing {
                     SwatchMark::Primary => self.primary = ink,
                     SwatchMark::Secondary => self.secondary = ink,
+                }
+                if settled {
+                    self.remember_colour(colour, layout, damage);
                 }
                 self.mark_wells();
                 damage.add(layout.wells());
@@ -886,6 +950,41 @@ impl View {
             return Outcome::none();
         }
         let at = self.at(layout);
+        if self.adjustment_pane().picking().is_some() {
+            return self.pick_for_adjustment(at, layout, damage);
+        }
+        // Marking a selection or a crop box leaves the picture as it is; any
+        // other tool applies an open adjustment first, and a press that finds
+        // it still being worked out paints nothing.
+        let applying = self.adjustment_pane().filter().is_some()
+            && !matches!(self.tool, Tool::Select | Tool::Crop);
+        if !applying {
+            return self.use_tool(at, secondary, layout, scale, damage);
+        }
+        match self.apply_adjustment(Then::Rest, layout, damage) {
+            Applying::Now(_) => {
+                let mut outcome = self.use_tool(at, secondary, layout, scale, damage);
+                // The pane went back to its list, and stands at its height.
+                outcome.relayout = Relayout::Whole;
+                outcome
+            }
+            Applying::Waiting(outcome) => outcome,
+        }
+    }
+
+    /// Begin what the tool does at `at`.
+    fn use_tool(
+        &mut self,
+        at: Fx,
+        secondary: bool,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        if self.picking_colour {
+            self.colour_picked_at(at, layout, damage);
+            return Outcome::none();
+        }
         let own_alt = matches!(self.tool, Tool::Select | Tool::Clone);
         if self.tool == Tool::Eyedropper || self.modifiers.alt && !own_alt {
             self.pick(at, secondary, layout, damage);
@@ -906,7 +1005,7 @@ impl View {
                 self.text_press(at, layout, damage);
                 Outcome::none()
             }
-            Tool::Polygon => self.polygon_press(at, secondary, layout, scale, damage),
+            Tool::Polygon => self.polygon_press(self.on_grid(at), secondary, layout, scale, damage),
             Tool::Crop => {
                 self.crop_press(at, layout, scale, damage);
                 Outcome::none()
@@ -944,7 +1043,7 @@ impl View {
     }
 
     /// Take the colour at `at` as the primary or secondary colour.
-    fn pick(&mut self, at: Fx, secondary: bool, layout: &Layout, damage: &mut Region) {
+    pub(super) fn pick(&mut self, at: Fx, secondary: bool, layout: &Layout, damage: &mut Region) {
         let (x, y) = at.pixel();
         let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
             return;
@@ -966,6 +1065,9 @@ impl View {
             self.secondary = ink;
         } else {
             self.primary = ink;
+        }
+        if let Ink::Colour(colour) = ink {
+            self.remember_colour(Rgba::from_array(colour), layout, damage);
         }
         self.inks_changed(layout, damage);
     }
@@ -1123,10 +1225,13 @@ impl View {
                 }
             }
             Some(Gesture::Lasso { .. }) => self.lasso_to(at, layout, damage),
-            Some(Gesture::Move { from, last }) => {
+            Some(Gesture::Move { from, corner, .. }) => {
                 let now = at.pixel();
-                self.gesture = Some(Gesture::Move { from, last: now });
-                self.shift_floating((now.0 - last.0, now.1 - last.1), layout, damage);
+                let mut target = (corner.0 + now.0 - from.0, corner.1 + now.1 - from.1);
+                if self.snapping() {
+                    target = crate::grid::snap_corner(&self.canvas_style().grid, target);
+                }
+                self.move_floating_to(target, layout, damage);
             }
             Some(Gesture::Gradient {
                 from, secondary, ..
@@ -1143,7 +1248,14 @@ impl View {
             Some(Gesture::CropNew { .. } | Gesture::CropAdjust { .. }) => {
                 self.crop_to(at.pixel(), layout, scale, damage);
             }
-            None => self.follow_draft(at, layout, damage),
+            None => {
+                let at = if self.tool == Tool::Polygon {
+                    self.on_grid(at)
+                } else {
+                    at
+                };
+                self.follow_draft(at, layout, damage);
+            }
         }
     }
 
@@ -1180,15 +1292,24 @@ impl View {
         }
     }
 
-    /// Shift the floating selection by `(dx, dy)` pixels.
-    fn shift_floating(&mut self, (dx, dy): (i64, i64), layout: &Layout, damage: &mut Region) {
-        if (dx, dy) == (0, 0) {
-            return;
-        }
+    /// The floating selection's top left, or the picture's where none floats.
+    fn floating_corner(&self) -> (i64, i64) {
+        self.held.as_ref().map_or((0, 0), |held| {
+            let bounds = held.bounds();
+            (bounds.x0, bounds.y0)
+        })
+    }
+
+    /// Move the floating selection so its top left stands at `to`.
+    fn move_floating_to(&mut self, to: (i64, i64), layout: &Layout, damage: &mut Region) {
         let Some(held) = &mut self.held else {
             return;
         };
         let before = held.bounds();
+        let (dx, dy) = (to.0 - before.x0, to.1 - before.y0);
+        if (dx, dy) == (0, 0) {
+            return;
+        }
         held.shift(dx, dy);
         let after = held.bounds();
         self.damage_picture(Some(before), layout, damage);
@@ -1371,7 +1492,9 @@ impl View {
             what,
         });
         self.sync_picker();
+        self.sync_adjustment();
         damage.add(layout.picker());
+        damage.add(layout.adjustment());
         self.state("Working\u{2026}", layout, damage);
         Outcome::asking(Request::Own(Own::Compute { job, work }))
     }
@@ -1384,14 +1507,30 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
-        if self.previewing(job) {
-            return self.previewed(answer, layout, damage);
+        if self.looking(job) {
+            return self.looked(answer, layout, damage);
         }
         let Some(pending) = self.pending.take_if(|pending| pending.job == job) else {
             return Outcome::none();
         };
+        let before = self.basis();
+        let outcome = self.landed(pending, answer, layout, damage);
+        self.follow_picture(before, outcome, layout, damage)
+    }
+
+    /// The window's own job `pending` answered: land it where the picture is
+    /// as it was asked of.
+    fn landed(
+        &mut self,
+        pending: Pending,
+        answer: Computed,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
         self.sync_picker();
+        self.sync_adjustment();
         damage.add(layout.picker());
+        damage.add(layout.adjustment());
         self.end_gesture(layout, damage);
         self.message = None;
         damage.add(layout.message());
@@ -1563,12 +1702,19 @@ impl View {
                 }
                 Outcome::none()
             }
+            Settles::Adjusted(then) => {
+                self.close_adjustment(layout, damage);
+                let mut outcome = self.carry_on(then, layout, damage);
+                outcome.relayout = Relayout::Whole;
+                outcome
+            }
             Settles::PutDown(then) => {
                 if let Some(held) = self.held.take() {
                     let (width, height) = self.picture_size();
-                    self.selection = held
-                        .selection()
-                        .and_then(|chosen| chosen.within(Bounds::picture(width, height)));
+                    self.set_selection(
+                        held.selection()
+                            .and_then(|chosen| chosen.within(Bounds::picture(width, height))),
+                    );
                     self.damage_picture(Some(held.bounds()), layout, damage);
                 }
                 self.carry_on(then, layout, damage)
@@ -1579,11 +1725,11 @@ impl View {
     /// The picture showing was replaced, or another shown: carry the inks,
     /// the palette, the bar and the view over to it.
     fn after_picture_change(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        self.selection = None;
+        self.set_selection(None);
         self.draft = None;
         self.crop = None;
         self.adopt_kind();
-        damage.add(layout.window());
+        layout.damage_all(damage);
         self.settle(layout, damage);
         Outcome::relaid()
     }
@@ -1609,7 +1755,7 @@ impl View {
         {
             self.gesture = Some(Gesture::Move {
                 from: pixel,
-                last: pixel,
+                corner: self.floating_corner(),
             });
             return Outcome::none();
         }
@@ -1627,7 +1773,7 @@ impl View {
                 if self.lift(layout, damage) {
                     self.gesture = Some(Gesture::Move {
                         from: pixel,
-                        last: pixel,
+                        corner: self.floating_corner(),
                     });
                 }
                 return Outcome::none();
@@ -1747,7 +1893,7 @@ impl View {
 
     /// Hold `marked` as the selection.
     fn adopt_selection(&mut self, marked: Option<Mask>, layout: &Layout, damage: &mut Region) {
-        let before = core::mem::replace(&mut self.selection, marked);
+        let before = self.set_selection(marked);
         self.damage_picture(before.as_ref().map(Mask::bounds), layout, damage);
         self.damage_picture(self.selection.as_ref().map(Mask::bounds), layout, damage);
     }
@@ -1855,7 +2001,7 @@ impl View {
             return false;
         };
         self.held = Some(floating);
-        self.selection = None;
+        self.set_selection(None);
         self.damage_picture(Some(chosen.bounds()), layout, damage);
         true
     }
@@ -1914,7 +2060,7 @@ impl View {
 
     /// Forget the selection held.
     fn drop_selection(&mut self, layout: &Layout, damage: &mut Region) {
-        if let Some(selection) = self.selection.take() {
+        if let Some(selection) = self.set_selection(None) {
             self.damage_picture(Some(selection.bounds()), layout, damage);
         }
     }
@@ -1994,9 +2140,7 @@ impl View {
             Some(Gesture::Lasso { points, .. }) => {
                 self.damage_picture(path_bounds(&points, None), layout, damage);
             }
-            Some(Gesture::Move { from, last }) => {
-                self.shift_floating((from.0 - last.0, from.1 - last.1), layout, damage);
-            }
+            Some(Gesture::Move { corner, .. }) => self.move_floating_to(corner, layout, damage),
             Some(Gesture::Gradient { .. }) => damage.add(layout.canvas()),
             Some(Gesture::Pan { scroll, .. }) => {
                 self.scroll_to(Some(scroll.0), Some(scroll.1), layout, damage);
@@ -2090,7 +2234,7 @@ impl View {
             return Outcome::asking(Request::Close);
         }
         self.modal = Some(Modal::Close(Dialog::save_changes(&self.name)));
-        damage.add(layout.window());
+        layout.damage_all(damage);
         Outcome::none()
     }
 
@@ -2100,7 +2244,7 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
-        damage.add(layout.window());
+        layout.damage_all(damage);
         match (self.modal.take(), answer) {
             (Some(Modal::Close(_)), ModalAnswer::Close(SaveChanges::Discard)) => {
                 Outcome::asking(Request::Close)
@@ -2111,11 +2255,7 @@ impl View {
             (Some(Modal::Form(form)), ModalAnswer::Form(Answer::Confirmed)) => {
                 self.form_answered(form, layout, damage)
             }
-            _ => {
-                // A form turned down takes its preview with it.
-                self.preview = None;
-                Outcome::none()
-            }
+            _ => Outcome::none(),
         }
     }
 
@@ -2144,10 +2284,6 @@ impl View {
                 self.save_as = Some(format);
                 Outcome::asking(Request::SaveWhere { then_close })
             }
-            Purpose::Filter => match form.filter_answer() {
-                Some(filter) => self.apply_filter(filter, layout, damage),
-                None => Outcome::none(),
-            },
             Purpose::Layer => match form.layer_answer() {
                 Ok(shown) => self.reshow_layer(shown, layout, damage),
                 Err(reason) => refused(self, form, &reason),
@@ -2290,7 +2426,7 @@ impl View {
         match self.document.set_details(Some(palette), sprite) {
             Ok(true) => {
                 self.adopt_kind();
-                damage.add(layout.window());
+                layout.damage_all(damage);
             }
             Ok(false) => {}
             Err(OutOfMemory) => self.state(
@@ -2310,7 +2446,7 @@ impl View {
         }
         self.end_gesture(layout, damage);
         self.modal = Some(Modal::Form(Box::new(form)));
-        damage.add(layout.window());
+        layout.damage_all(damage);
     }
 
     /// Ask a worker for `transform` of the picture showing.
@@ -2458,8 +2594,22 @@ impl View {
         self.after_picture_change(layout, damage)
     }
 
-    /// Feed one key press.
+    /// Feed one key press; where it moves the picture under an open
+    /// adjustment, what that shows is asked again.
     pub fn on_key(
+        &mut self,
+        stroke: Keystroke,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        let before = self.basis();
+        let outcome = self.key_event(stroke, layout, scale, theme, damage);
+        self.follow_picture(before, outcome, layout, damage)
+    }
+
+    fn key_event(
         &mut self,
         stroke: Keystroke,
         layout: &Layout,
@@ -2488,13 +2638,21 @@ impl View {
             };
             return match answer {
                 Some(answer) => self.answer_modal(answer, layout, damage),
-                None => self.filter_moved(layout, damage),
+                None => Outcome::none(),
             };
+        }
+        if stroke.key == Key::Named(NamedKey::Escape)
+            && self.turn_down_pane_drag(layout, scale, theme, damage)
+        {
+            return Outcome::none();
         }
         let claimed = match self.keyboard() {
             Keyboard::Dock => self.dock_key(stroke, layout, scale, theme, damage),
             Keyboard::Bar => self.bar_key(stroke, layout, scale, theme, damage),
             Keyboard::Palette => self.palette_key(stroke, layout, scale, theme, damage),
+            Keyboard::Adjustment => self.adjustment_key(stroke, layout, scale, theme, damage),
+            Keyboard::Colours => self.colour_controls_key(stroke, layout, scale, theme, damage),
+            Keyboard::Recents => self.recents_walk_key(stroke, layout, scale, theme, damage),
             Keyboard::Picture if stroke.key == Key::Named(NamedKey::Tab) => {
                 let forward = !stroke.modifiers.shift;
                 self.walk_keyboard(Keyboard::Picture, forward, layout, scale, theme, damage);
@@ -2774,15 +2932,34 @@ impl View {
         self.commit_text(layout, damage);
     }
 
-    /// Carry out `action`.
+    /// Carry out `action`; where it moves the picture under an open
+    /// adjustment, what that shows is asked again.
+    pub fn act(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
+        let before = self.basis();
+        let outcome = self.carry_out(action, layout, damage);
+        self.follow_picture(before, outcome, layout, damage)
+    }
+
+    /// Carry out `action`, an open adjustment applied first where the action
+    /// changes or reads the picture.
     #[allow(
         clippy::too_many_lines,
         reason = "one arm an action; splitting it would part each action from its siblings"
     )]
-    pub fn act(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn carry_out(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
         // Whatever the action, a drag under way is finished first: none acts
         // on a picture a stroke is still being laid on.
         self.end_gesture(layout, damage);
+        if self.adjustment.filter().is_some() && !self.leaves_adjustment(action) {
+            return match self.apply_adjustment(Then::Act(action), layout, damage) {
+                Applying::Now(then) => {
+                    let mut outcome = self.carry_on(then, layout, damage);
+                    outcome.relayout = Relayout::Whole;
+                    outcome
+                }
+                Applying::Waiting(outcome) => outcome,
+            };
+        }
         if self.draft.is_some() {
             match action {
                 Action::PutDown => return self.close_draft(layout, damage),
@@ -2805,7 +2982,8 @@ impl View {
         let area = layout.canvas();
         match action {
             Action::NewPicture => {
-                self.ask(Form::new_picture(self.picture_size()), layout, damage);
+                let (picture, format) = self.new_picture;
+                self.ask(Form::new_picture(picture, format), layout, damage);
             }
             Action::Open => return Outcome::asking(Request::Open),
             Action::Save => return Outcome::asking(Request::Save),
@@ -2931,11 +3109,15 @@ impl View {
             Action::Zoom(rung) => self.zoom_to(rung, area.center(), layout, damage),
             Action::Fit => self.fit(layout, damage),
             Action::Actual => self.zoom_to(ACTUAL, self.pointer, layout, damage),
-            Action::Grid => {
-                self.grid = !self.grid;
-                mark_grid(&mut self.commands, self.grid);
+            Action::PixelGrid => {
+                self.grids.pixels = !self.grids.pixels;
+                mark_pixel_grid(&mut self.commands, self.grids.pixels);
                 damage.add(area);
                 damage.add(layout.view_strip());
+            }
+            Action::Grid => {
+                self.grids.spaced = !self.grids.spaced;
+                damage.add(area);
             }
             Action::NewLayer => return self.new_layer(layout, damage),
             Action::DuplicateLayer => return self.duplicate_layer(layout, damage),
@@ -2958,6 +3140,10 @@ impl View {
                     return self.adjust(filter, layout, damage);
                 }
             }
+            Action::Pane(kind) => return self.toggle_pane(kind, layout, damage),
+            Action::ResetPanes => return self.reset_panes(layout, damage),
+            Action::ResetColours => self.reset_colours(layout, damage),
+            Action::PickColour => self.toggle_colour_pick(layout, damage),
         }
         Outcome::none()
     }
@@ -3162,6 +3348,13 @@ impl View {
     /// Escape: turn a drag under way down, else a floating selection, else
     /// forget the selection.
     fn escape(&mut self, layout: &Layout, damage: &mut Region) {
+        if self.put_down_pick(layout, damage) {
+            return;
+        }
+        if self.picking_colour {
+            self.toggle_colour_pick(layout, damage);
+            return;
+        }
         if self.gesture.is_some() {
             self.cancel_gesture(layout, damage);
             return;
@@ -3254,29 +3447,24 @@ impl View {
                 colours,
             );
             menu.item(Action::SwapColours, "Swap colours", "X", true, colours);
+            menu.item(Action::ResetColours, "Reset colours", "", true, colours);
+            menu.mark(
+                Action::PickColour,
+                "Pick a colour from the picture",
+                "",
+                self.picking_colour,
+                colours,
+            );
         }
         if let Some(adjust) = menu.submenu("Adjust", Plate::Root) {
-            let palette = self.kind().palette().is_some();
-            for (index, filter) in crate::filter::Filter::ALL.iter().enumerate() {
-                let label = if filter.parameters().is_empty() {
-                    String::from(filter.label())
-                } else {
-                    alloc::format!("{}\u{2026}", filter.label())
-                };
-                let can = picture && !(palette && filter.neighbourly());
-                menu.item(Action::Adjust(index), &label, "", can, adjust);
-            }
+            self.adjust_rows(menu, adjust, picture);
         }
         let pages = self.document.is_pages();
         if let Some(entries) = menu.submenu(if pages { "Pages" } else { "Sprites" }, Plate::Root) {
             self.entry_rows(menu, entries, pages);
         }
         if let Some(view) = menu.submenu("View", Plate::Root) {
-            menu.item(Action::ZoomIn, "Zoom in", "+", true, view);
-            menu.item(Action::ZoomOut, "Zoom out", "-", true, view);
-            menu.item(Action::Fit, "Fit in window", "Ctrl+0", true, view);
-            menu.item(Action::Actual, "Actual size", "1", true, view);
-            menu.mark(Action::Grid, "Pixel grid", "G", self.grid, view);
+            self.view_rows(menu, view);
         }
         if let Some(tools) = menu.submenu("Tools", Plate::Root) {
             for tool in Tool::ALL {
@@ -3288,6 +3476,50 @@ impl View {
                     tools,
                 );
             }
+        }
+    }
+
+    /// Every adjustment and filter, one with settings marked as opening
+    /// them; a palette picture offers no filter.
+    fn adjust_rows(&self, menu: &mut MenuBuilder, plate: Plate, picture: bool) {
+        let palette = self.kind().palette().is_some();
+        for (index, filter) in crate::filter::Filter::ALL.iter().enumerate() {
+            let label = if filter.has_settings() {
+                alloc::format!("{}\u{2026}", filter.label())
+            } else {
+                String::from(filter.label())
+            };
+            let can = picture && !(palette && filter.neighbourly());
+            menu.item(Action::Adjust(index), &label, "", can, plate);
+        }
+    }
+
+    /// The view's own commands, and the panes shown.
+    fn view_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
+        menu.item(Action::ZoomIn, "Zoom in", "+", true, plate);
+        menu.item(Action::ZoomOut, "Zoom out", "-", true, plate);
+        menu.item(Action::Fit, "Fit in window", "Ctrl+0", true, plate);
+        menu.item(Action::Actual, "Actual size", "1", true, plate);
+        menu.mark(Action::Grid, "Grid", "Ctrl+'", self.grids.spaced, plate);
+        menu.mark(
+            Action::PixelGrid,
+            "Pixel grid",
+            "G",
+            self.grids.pixels,
+            plate,
+        );
+        if let Some(panes) = menu.submenu("Panes", plate) {
+            for kind in crate::pane::PaneKind::ALL {
+                menu.mark(
+                    Action::Pane(kind),
+                    kind.title(),
+                    "",
+                    self.shows(kind),
+                    panes,
+                );
+            }
+            menu.separator(panes);
+            menu.item(Action::ResetPanes, "Reset panes", "", true, panes);
         }
     }
 
@@ -3535,20 +3767,34 @@ fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
 
 /// A part of the window the keyboard can be in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Keyboard {
+pub(super) enum Keyboard {
     /// The picture: tools' and commands' keys, nudges.
     Picture,
     /// The tool-controls bar's settings.
     Bar,
     /// The palette strip's wells.
     Palette,
-    /// The colour dock's picker.
+    /// The colour pane's buttons and choices.
+    Colours,
+    /// The colour pane's picker.
     Dock,
+    /// The colour pane's recent colours.
+    Recents,
+    /// The Adjustment pane's settings.
+    Adjustment,
 }
 
 impl Keyboard {
     /// The order Tab walks.
-    const ORDER: [Self; 4] = [Self::Picture, Self::Bar, Self::Palette, Self::Dock];
+    const ORDER: [Self; 7] = [
+        Self::Picture,
+        Self::Bar,
+        Self::Palette,
+        Self::Colours,
+        Self::Dock,
+        Self::Recents,
+        Self::Adjustment,
+    ];
 }
 
 /// The tool a strip's primary activation chose.
@@ -3639,6 +3885,7 @@ pub(super) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Action> {
             ('[', _) => Some(Action::RotateLeft),
             (']', _) => Some(Action::RotateRight),
             ('0', _) => Some(Action::Fit),
+            ('\'', _) => Some(Action::Grid),
             ('=' | '+', _) => Some(Action::ZoomIn),
             ('-', _) => Some(Action::ZoomOut),
             _ => None,
@@ -3647,7 +3894,7 @@ pub(super) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Action> {
             '+' | '=' => Some(Action::ZoomIn),
             '-' => Some(Action::ZoomOut),
             '1' => Some(Action::Actual),
-            'g' | 'G' => Some(Action::Grid),
+            'g' | 'G' => Some(Action::PixelGrid),
             'x' | 'X' => Some(Action::SwapColours),
             other => Tool::for_key(other).map(Action::Tool),
         },

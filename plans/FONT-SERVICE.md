@@ -321,7 +321,10 @@ Load-bearing facts a future reader needs:
   records, the whole frame bounded by `FONT_MAX_GLYPH_REPLY`; `width == 0` is
   an ink-less glyph), the `FontMetrics { pixel_height, baseline, line_height,
   monospace_advance }` (where `monospace_advance == 0` *means* proportional),
-  or up to `FONT_MAX_FAMILIES` `FamilyEntry` (key, label, kind) rows. One
+  or up to `FONT_MAX_FAMILIES` `FamilyEntry` (key, label, kind, and the primary
+  face's line box in thousandths of its em — what a size in points becomes on
+  the theme's line-box ladder) rows; a family whose face cannot be read is not
+  listed. One
   shared `glyph_coverage_len` bound governs encode and decode. Pixel height is
   bounded by `FONT_MIN/MAX_PIXEL_HEIGHT` (8..=512) and the run by
   `FONT_MAX_GLYPH_RUN` (32) — validation bounds. `GlyphBatchWriter` is the one

@@ -297,6 +297,21 @@ impl SessionInputRouter {
         self.wm.begin_move(compositor)
     }
 
+    /// Carry the press held in `parent`'s content on as a move of `window`,
+    /// held at `offset` from its top-left. Returns `false`, changing nothing,
+    /// unless a button is still down and the press it began is `parent`'s:
+    /// the seat keeps the gesture, which now ends with the window manager's
+    /// move ([`InputRouter::carry`]).
+    pub fn carry(
+        &mut self,
+        parent: WindowId,
+        window: WindowId,
+        offset: Point,
+        compositor: &mut Compositor,
+    ) -> bool {
+        self.pressed_in() == Some(parent) && self.wm.carry(parent, window, offset, compositor)
+    }
+
     /// Hold an in-flight resize to the range its window declares now, from
     /// where the pointer rests. Delegates to the window manager's router,
     /// which owns the drag ([`InputRouter::restate_resize`]).

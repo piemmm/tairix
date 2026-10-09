@@ -4,18 +4,25 @@
 //! the mood you left him in; everything else is this run's business and is not
 //! written anywhere.
 
-use tairix_appconf::{ConfError, Document, PERMILLE_FULL};
+use alloc::string::String;
+use core::fmt::Write as _;
+
+use tairix_appconf::{as_bool, as_permille, bool_text, Registry, PERMILLE_FULL};
 
 use crate::mind::Needs;
 
-/// The document key the energy level is written under.
-const KEY_ENERGY: &str = "energy";
-/// The document key the play level is written under.
-const KEY_PLAY: &str = "play";
-/// The document key the affection level is written under.
-const KEY_AFFECTION: &str = "affection";
-/// The document key the whereabouts is written under.
-const KEY_LOOSE: &str = "loose";
+/// One thing kept: a need's level, in parts per thousand, or whereabouts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Kept {
+    /// `energy`.
+    Energy,
+    /// `play`.
+    Play,
+    /// `affection`.
+    Affection,
+    /// `loose`: whether he was out on the desktop.
+    Loose,
+}
 
 /// What survives a restart.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
@@ -27,47 +34,57 @@ pub struct Saved {
 }
 
 impl Saved {
-    /// Render the state as a settings document.
-    ///
-    /// Levels are written in parts per thousand, the shared settings grammar's
-    /// own fixed-point form: exact in the text, legible to anyone reading the
-    /// file, and needing no float parser to read back.
-    ///
-    /// # Errors
-    ///
-    /// Whatever the document refuses a key or value with; a level is bounded
-    /// into range before it is offered, so only a malformed key can fail.
-    pub fn to_document(self) -> Result<Document, ConfError> {
-        let mut document = Document::new();
-        document.set_permille(KEY_ENERGY, permille_of(self.needs.energy))?;
-        document.set_permille(KEY_PLAY, permille_of(self.needs.play))?;
-        document.set_permille(KEY_AFFECTION, permille_of(self.needs.affection))?;
-        document.set_bool(KEY_LOOSE, self.was_loose)?;
-        Ok(document)
+    const fn level(&mut self, kept: Kept) -> Option<&mut f64> {
+        match kept {
+            Kept::Energy => Some(&mut self.needs.energy),
+            Kept::Play => Some(&mut self.needs.play),
+            Kept::Affection => Some(&mut self.needs.affection),
+            Kept::Loose => None,
+        }
+    }
+}
+
+/// Levels are kept in parts per thousand, the shared settings grammar's own
+/// fixed-point form: exact in the text, legible to anyone reading the file,
+/// and needing no float parser to read back. A value this never wrote is not
+/// one to believe, so it is refused, never repaired.
+impl Registry for Saved {
+    type Key = Kept;
+    const KEYS: &'static [Kept] = &[Kept::Energy, Kept::Play, Kept::Affection, Kept::Loose];
+
+    fn name(kept: Kept) -> &'static str {
+        match kept {
+            Kept::Energy => "energy",
+            Kept::Play => "play",
+            Kept::Affection => "affection",
+            Kept::Loose => "loose",
+        }
     }
 
-    /// Read the state from a settings document.
-    ///
-    /// Every field falls back to its default independently, so a document that
-    /// has lost a line — or that carries a value this never wrote — still
-    /// yields a usable companion rather than nothing. A malformed value is
-    /// treated as absent rather than repaired: a level this did not write is
-    /// not one to believe.
-    #[must_use]
-    pub fn from_document(document: &Document) -> Self {
-        let fallback = Self::default();
-        Self {
-            needs: Needs {
-                energy: level(document, KEY_ENERGY, fallback.needs.energy),
-                play: level(document, KEY_PLAY, fallback.needs.play),
-                affection: level(document, KEY_AFFECTION, fallback.needs.affection),
-            },
-            was_loose: document
-                .bool(KEY_LOOSE)
-                .ok()
-                .flatten()
-                .unwrap_or(fallback.was_loose),
+    fn read(&mut self, kept: Kept, text: &str) -> bool {
+        match self.level(kept) {
+            Some(level) => as_permille(text).is_ok_and(|parts| {
+                *level = f64::from(parts) / f64::from(PERMILLE_FULL);
+                true
+            }),
+            None => as_bool(text).is_ok_and(|loose| {
+                self.was_loose = loose;
+                true
+            }),
         }
+    }
+
+    fn spell(&self, kept: Kept, out: &mut String) -> bool {
+        let level = match kept {
+            Kept::Energy => self.needs.energy,
+            Kept::Play => self.needs.play,
+            Kept::Affection => self.needs.affection,
+            Kept::Loose => {
+                out.push_str(bool_text(self.was_loose));
+                return true;
+            }
+        };
+        write!(out, "{}", permille_of(level)).is_ok()
     }
 }
 
@@ -78,14 +95,6 @@ fn permille_of(level: f64) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         scaled as u32
-    }
-}
-
-/// A need level read from `key`, or `fallback`.
-fn level(document: &Document, key: &str, fallback: f64) -> f64 {
-    match document.permille(key) {
-        Ok(Some(parts)) => f64::from(parts) / f64::from(PERMILLE_FULL),
-        Ok(None) | Err(_) => fallback,
     }
 }
 

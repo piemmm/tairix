@@ -1556,14 +1556,16 @@ fn test_metrics_reply(
 /// Encode a [`FontRequest::Families`] reply for [`SolidTestTransport`]: the
 /// built-in monospace family plus one synthetic proportional family, so a
 /// consumer's family-picker tests have more than one entry to choose from.
+/// Each carries the line box of the shipped face it stands in for, so a size
+/// in points converts as it does on a running desktop.
 #[cfg(any(test, feature = "test-util"))]
 fn test_families_reply(reply: &mut [u8]) -> Result<usize, Errno> {
     use tairix_abi::font_ipc::{encode_families_reply, FamilyKind};
 
     let proportional = FamilyKey::new(TEST_PROPORTIONAL_FAMILY).unwrap_or(FamilyKey::MONO);
     let entries = [
-        FamilyEntry::new(FamilyKey::MONO, "Mono", FamilyKind::Monospace)?,
-        FamilyEntry::new(proportional, "Test Sans", FamilyKind::Proportional)?,
+        FamilyEntry::new(FamilyKey::MONO, "Mono", FamilyKind::Monospace, 1110)?,
+        FamilyEntry::new(proportional, "Test Sans", FamilyKind::Proportional, 1210)?,
     ];
     encode_families_reply(reply, Ok(&entries))
 }

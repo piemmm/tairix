@@ -2,7 +2,8 @@
 //!
 //! A toolbar is a strip of tool controls — [`IconButton`]s and
 //! [`SplitButton`]s — arranged in groups along one axis: across a window, or,
-//! laid out [`ScrollOrientation::Vertical`], down its side as a tool box. It
+//! laid out [`ScrollOrientation::Vertical`], down its side as a tool box, one
+//! tool to a line or, with [`Toolbar::with_lanes`], several side by side. It
 //! draws the strip's background and the quiet divider between groups,
 //! positions each tool, marks the *active* tool with a persistent accent seam —
 //! beneath it across a window, along its leading edge down one — and routes
@@ -14,8 +15,8 @@
 //! [`Theme`] and [`Scale`].
 //!
 //! A strip too short for its tools **scrolls** rather than running off its
-//! own edge: it seats whole tools only, reserves one slot at each end for the
-//! overflow affordances, and offsets in whole tools through the shared
+//! own edge: it seats whole lines only, reserves one slot at each end for the
+//! overflow affordances, and offsets in whole lines through the shared
 //! [`crate::scroll`] engine. Nothing is ever painted or hit-tested outside the
 //! bounds the owner gave.
 
@@ -133,9 +134,12 @@ struct Entry {
 pub struct Toolbar {
     entries: Vec<Entry>,
     orientation: ScrollOrientation,
+    /// How many tools a line across the strip seats: one, a strip of single
+    /// tools, or more, a grid of them.
+    lanes: u16,
     focus: Option<usize>,
-    /// The first tool the strip shows — drawn, so it compares. Clamped on
-    /// every layout against the tools the current bounds can seat, so a
+    /// The first line the strip shows — drawn, so it compares. Clamped on
+    /// every layout against the lines the current bounds can seat, so a
     /// shortened strip never holds an offset past its own end.
     offset: u64,
     /// The last pointer position, forwarded to the tool it falls on —
@@ -170,6 +174,7 @@ impl Toolbar {
         Self {
             entries: Vec::new(),
             orientation: ScrollOrientation::Horizontal,
+            lanes: 1,
             focus: None,
             offset: 0,
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -185,6 +190,18 @@ impl Toolbar {
     #[must_use]
     pub fn with_orientation(mut self, orientation: ScrollOrientation) -> Self {
         self.orientation = orientation;
+        self
+    }
+
+    /// This toolbar seating `lanes` tools to a line across it — a tool box two
+    /// tools wide, say — rather than one; zero is taken as one.
+    ///
+    /// Tools fill each line in order and a new group starts a line of its own;
+    /// a tool too broad for one lane takes as many as it spans. The strip
+    /// scrolls a line at a time.
+    #[must_use]
+    pub fn with_lanes(mut self, lanes: u16) -> Self {
+        self.lanes = lanes.max(1);
         self
     }
 
@@ -271,10 +288,10 @@ impl Toolbar {
 
     /// Scroll tool `target` into view, if the strip had no room to seat it.
     ///
-    /// The nearest offset that shows it: its own index when it sits before
+    /// The nearest offset that shows it: its own line when that sits before
     /// the band, and the first offset forward whose band reaches it
     /// otherwise. The seating depends on the lengths in between, so the walk
-    /// asks the seating rather than subtracting a tool count that is not
+    /// asks the seating rather than subtracting a line count that is not
     /// constant. A tool the strip already shows moves nothing.
     fn reveal(
         &mut self,
@@ -289,11 +306,14 @@ impl Toolbar {
         if measured.shows(offset, target) {
             return;
         }
-        let wanted = if target < offset {
-            target
+        let Some(line) = Self::line_of(&measured.lines, target) else {
+            return;
+        };
+        let wanted = if line < offset {
+            line
         } else {
             let last = usize::try_from(measured.model.range().max_offset()).unwrap_or(0);
-            (offset..=target.min(last))
+            (offset..=line.min(last))
                 .find(|&candidate| measured.shows(candidate, target))
                 .unwrap_or(last)
         };
@@ -317,40 +337,81 @@ impl Toolbar {
         }
     }
 
-    /// Each tool's own extent along and across the strip and the gutter
-    /// charged before it when it follows a tool of another group.
+    /// Each tool's own extent along and across the strip and the lanes it
+    /// takes, and the lines they are packed into.
     ///
     /// Every length the strip reasons about — what it needs, what one band
-    /// can seat, where each seated tool sits — is summed from this one list,
-    /// so the natural length and the seating can never measure a strip
-    /// differently. A split keeps its two regions side by side, so it is two
-    /// slots along a strip across a window and two slots across a column.
-    fn spans(&self, slot: u32, gap: u32) -> Vec<Span> {
+    /// can seat, where each seated tool sits — is summed from this one
+    /// layout, so the natural length and the seating can never measure a
+    /// strip differently. A split keeps its two regions side by side, so it
+    /// is two slots along a strip across a window and two slots across a
+    /// column.
+    fn layout(&self, slot: u32, gap: u32) -> Lanes {
         let double = slot.saturating_mul(2);
+        let across = self.lanes.max(1);
         let mut spans = Vec::with_capacity(self.entries.len());
+        let mut lines: Vec<Line> = Vec::new();
+        let mut used = 0u16;
         let mut prev: Option<u16> = None;
-        for entry in &self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
             let (length, breadth) = match (&entry.tool, self.orientation) {
                 (Tool::Icon(_), _) => (slot, slot),
                 (Tool::Split(_), ScrollOrientation::Horizontal) => (double, slot),
                 (Tool::Split(_), ScrollOrientation::Vertical) => (slot, double),
             };
+            let taken = if across == 1 {
+                1
+            } else {
+                let pitch = slot.saturating_add(gap).max(1);
+                u16::try_from(breadth.saturating_add(gap).div_ceil(pitch))
+                    .unwrap_or(across)
+                    .clamp(1, across)
+            };
             spans.push(Span {
                 length,
                 breadth,
-                gutter: if prev.is_some_and(|group| group != entry.group) {
-                    gap
-                } else {
-                    0
-                },
+                lanes: taken,
             });
+            let new_group = prev.is_some_and(|group| group != entry.group);
+            match lines.last_mut() {
+                Some(line) if !new_group && used.saturating_add(taken) <= across => {
+                    line.end = index + 1;
+                    line.length = line.length.max(length);
+                    used = used.saturating_add(taken);
+                }
+                _ => {
+                    lines.push(Line {
+                        first: index,
+                        end: index + 1,
+                        length,
+                        gutter: if new_group { gap } else { 0 },
+                    });
+                    used = taken;
+                }
+            }
             prev = Some(entry.group);
         }
-        spans
+        let grid = if across == 1 {
+            spans.iter().map(|span| span.breadth).max().unwrap_or(slot)
+        } else {
+            let across = u32::from(across);
+            let cells = slot
+                .saturating_mul(across)
+                .saturating_add(gap.saturating_mul(across - 1));
+            spans.iter().map(|span| span.breadth).fold(cells, u32::max)
+        };
+        Lanes { spans, lines, grid }
+    }
+
+    /// The line tool `index` sits in, if there is one.
+    fn line_of(lines: &[Line], index: usize) -> Option<usize> {
+        lines
+            .iter()
+            .position(|line| (line.first..line.end).contains(&index))
     }
 
     /// The length along its axis the strip needs to seat **every** tool: the
-    /// leading gap, each tool with the gap that follows it, and a gutter at
+    /// leading gap, each line with the gap that follows it, and a gutter at
     /// each group boundary.
     ///
     /// What an owner floors a window on when its strip must never scroll, so
@@ -358,12 +419,12 @@ impl Toolbar {
     #[must_use]
     pub fn natural_length(&self, scale: Scale, theme: &Theme) -> u32 {
         let (slot, gap) = slot_metrics(scale, theme);
-        let spans = self.spans(slot, gap);
-        span_of(&spans, 0, spans.len(), gap)
+        let lanes = self.layout(slot, gap);
+        span_of(&lanes.lines, 0, lanes.lines.len(), gap)
     }
 
     /// The shortest strip that can still show something: the two reserved
-    /// overflow slots plus the longest single tool in its own band.
+    /// overflow slots plus the longest single line in its own band.
     ///
     /// What an owner floors a window on when its strip is allowed to scroll —
     /// below this the affordances leave no room for a tool and the strip shows
@@ -372,9 +433,10 @@ impl Toolbar {
     pub fn min_length(&self, scale: Scale, theme: &Theme) -> u32 {
         let (slot, gap) = slot_metrics(scale, theme);
         let longest = self
-            .spans(slot, gap)
+            .layout(slot, gap)
+            .lines
             .iter()
-            .map(|span| span.length)
+            .map(|line| line.length)
             .max()
             .unwrap_or(slot);
         slot.saturating_mul(2)
@@ -382,28 +444,25 @@ impl Toolbar {
             .saturating_add(longest)
     }
 
-    /// The breadth across its axis the strip needs: its broadest tool, or one
-    /// slot for a strip of none.
+    /// The breadth across its axis the strip needs: its lanes side by side,
+    /// or its broadest tool where that is broader, or one slot for a strip of
+    /// none.
     ///
-    /// What an owner sizes the band the strip sits in from; a tool broader
+    /// What an owner sizes the band the strip sits in from; a line broader
     /// than the bounds it is given is not seated, rather than drawn past the
     /// strip's edge.
     #[must_use]
     pub fn breadth(&self, scale: Scale, theme: &Theme) -> u32 {
         let (slot, gap) = slot_metrics(scale, theme);
-        self.spans(slot, gap)
-            .iter()
-            .map(|span| span.breadth)
-            .max()
-            .unwrap_or(slot)
+        self.layout(slot, gap).grid
     }
 
-    /// The scroll model over the tools for a strip drawn at `bounds`: how many
-    /// tools there are, how many that band seats, and which is first.
+    /// The scroll model over the lines for a strip drawn at `bounds`: how many
+    /// lines there are, how many that band seats, and which is first.
     ///
-    /// The unit is a tool, because that is what the strip scrolls in. Exposed
-    /// so an owner (or a test) can reason about the offset without
-    /// re-deriving the seating.
+    /// The unit is a line — a tool, for a strip of one lane — because that is
+    /// what the strip scrolls in. Exposed so an owner (or a test) can reason
+    /// about the offset without re-deriving the seating.
     #[must_use]
     pub fn scroll_model(&self, bounds: Rect, scale: Scale, theme: &Theme) -> ScrollModel {
         self.strip(bounds, scale, theme).model
@@ -417,8 +476,8 @@ impl Toolbar {
     /// tools without also moving the band they sit in.
     fn measure(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Measure {
         let (slot, gap) = slot_metrics(scale, theme);
-        let spans = self.spans(slot, gap);
-        let count = spans.len();
+        let Lanes { spans, lines, grid } = self.layout(slot, gap);
+        let count = lines.len();
         let ((start, length), (across, breadth)) = axes(self.orientation, bounds);
         let whole = Band {
             orientation: self.orientation,
@@ -428,10 +487,13 @@ impl Toolbar {
             breadth,
             slot,
             gap,
+            lanes: self.lanes.max(1),
+            grid,
         };
-        if span_of(&spans, 0, count, gap) <= length {
+        if span_of(&lines, 0, count, gap) <= length {
             return Measure {
                 spans,
+                lines,
                 band: whole,
                 model: fixed_model(count),
                 reserved: false,
@@ -442,16 +504,16 @@ impl Toolbar {
             length: length.saturating_sub(slot.saturating_mul(2)),
             ..whole
         };
-        // The least offset whose window still reaches the last tool. Each
-        // tool added at the front costs its own length and leading gap plus
-        // the gutter the tool it now precedes no longer starts a run with.
+        // The least offset whose window still reaches the last line. Each
+        // line added at the front costs its own length and leading gap plus
+        // the gutter the line it now precedes no longer starts a run with.
         let mut first = count;
         let mut span = 0u32;
         while let Some(added) = first.checked_sub(1).and_then(|i| {
             let grown = span
                 .saturating_add(gap)
-                .saturating_add(spans.get(i)?.length)
-                .saturating_add(spans.get(first).map_or(0, |next| next.gutter));
+                .saturating_add(lines.get(i)?.length)
+                .saturating_add(lines.get(first).map_or(0, |next| next.gutter));
             (grown <= band.length).then_some((i, grown))
         }) {
             (first, span) = added;
@@ -459,6 +521,7 @@ impl Toolbar {
         let shown = (count - first) as u64;
         Measure {
             spans,
+            lines,
             band,
             model: ScrollModel::new(ScrollRange::new(count as u64, shown, self.offset), 1, shown),
             reserved: true,
@@ -851,7 +914,9 @@ impl Toolbar {
     /// Feed a key event: the arrow keys along the strip's axis move focus
     /// between tools (wrapping) — Left and Right across a window, Up and Down
     /// down one — Home/End jump to the ends, and Enter/Space activate the
-    /// focused tool.
+    /// focused tool. In a strip of several lanes the keys along the axis move
+    /// a line, to the tool in the same lane or the nearest before it, and the
+    /// keys across it move to the tool before or after in order.
     ///
     /// A focus move scrolls the tool it lands on into view, so the keyboard
     /// reaches every tool however short the strip is.
@@ -867,19 +932,34 @@ impl Toolbar {
             return ToolbarOutcome::Idle;
         }
         let last = self.entries.len() - 1;
-        let (backward, forward) = match self.orientation {
-            ScrollOrientation::Horizontal => (NamedKey::Left, NamedKey::Right),
-            ScrollOrientation::Vertical => (NamedKey::Up, NamedKey::Down),
+        let ((backward, forward), (before, after)) = match self.orientation {
+            ScrollOrientation::Horizontal => (
+                (NamedKey::Left, NamedKey::Right),
+                (NamedKey::Up, NamedKey::Down),
+            ),
+            ScrollOrientation::Vertical => (
+                (NamedKey::Up, NamedKey::Down),
+                (NamedKey::Left, NamedKey::Right),
+            ),
+        };
+        let next = |focus: Option<usize>| match focus {
+            Some(i) if i < last => i + 1,
+            _ => 0,
+        };
+        let previous = |focus: Option<usize>| match focus {
+            Some(0) | None => last,
+            Some(i) => i - 1,
         };
         let moved_to = match key {
-            Key::Named(named) if named == forward => Some(match self.focus {
-                Some(i) if i < last => i + 1,
-                _ => 0,
-            }),
-            Key::Named(named) if named == backward => Some(match self.focus {
-                Some(0) | None => last,
-                Some(i) => i - 1,
-            }),
+            Key::Named(named) if self.lanes > 1 && (named == forward || named == backward) => {
+                Some(self.line_step(named == forward, scale, theme))
+            }
+            Key::Named(named) if named == forward || (self.lanes > 1 && named == after) => {
+                Some(next(self.focus))
+            }
+            Key::Named(named) if named == backward || (self.lanes > 1 && named == before) => {
+                Some(previous(self.focus))
+            }
             Key::Named(NamedKey::Home) => Some(0),
             Key::Named(NamedKey::End) => Some(last),
             _ => None,
@@ -910,6 +990,39 @@ impl Toolbar {
     }
 }
 
+impl Toolbar {
+    /// The tool a step of a line forward (or back) lands on from the focused
+    /// one, in the same lane or the nearest before it, wrapping at the ends.
+    fn line_step(&self, forward: bool, scale: Scale, theme: &Theme) -> usize {
+        let (slot, gap) = slot_metrics(scale, theme);
+        let Lanes { spans, lines, .. } = self.layout(slot, gap);
+        let lane_of = |index: usize, row: &Line| -> u16 {
+            (row.first..index)
+                .filter_map(|i| spans.get(i))
+                .map(|span| span.lanes)
+                .fold(0u16, u16::saturating_add)
+        };
+        let focus = self.focus.unwrap_or(0);
+        let Some(from) = Self::line_of(&lines, focus) else {
+            return 0;
+        };
+        let column = lines.get(from).map_or(0, |row| lane_of(focus, row));
+        let count = lines.len();
+        let to = if forward {
+            (from + 1) % count
+        } else {
+            (from + count - 1) % count
+        };
+        let Some(row) = lines.get(to) else {
+            return focus;
+        };
+        (row.first..row.end)
+            .take_while(|&index| lane_of(index, row) <= column)
+            .last()
+            .unwrap_or(row.first)
+    }
+}
+
 /// One tool's contribution to the strip.
 #[derive(Copy, Clone)]
 struct Span {
@@ -917,9 +1030,30 @@ struct Span {
     length: u32,
     /// Its extent across the strip.
     breadth: u32,
-    /// The extra gap charged before it when it follows a tool of another
-    /// group, and where a divider is drawn.
+    /// How many lanes of its line it takes.
+    lanes: u16,
+}
+
+/// One line of tools seated across the strip side by side: a single tool, for
+/// a strip of one lane.
+#[derive(Copy, Clone)]
+struct Line {
+    /// The tools it seats, as the indices `first..end`.
+    first: usize,
+    end: usize,
+    /// Its extent along the strip: its longest tool's.
+    length: u32,
+    /// The extra gap charged before it when it begins another group, and
+    /// where a divider is drawn.
     gutter: u32,
+}
+
+/// The tools' spans, the lines they are packed into, and how broad the
+/// lanes stand side by side.
+struct Lanes {
+    spans: Vec<Span>,
+    lines: Vec<Line>,
+    grid: u32,
 }
 
 /// The run of the strip tools are seated into, and the placement they share.
@@ -934,9 +1068,41 @@ struct Band {
     breadth: u32,
     slot: u32,
     gap: u32,
+    /// How many tools a line seats, and how broad the lanes stand together.
+    lanes: u16,
+    grid: u32,
 }
 
 impl Band {
+    /// Where the tool of `span`, starting in lane `lane`, sits in a line
+    /// `length` long from `along`, or `None` where the strip is too narrow
+    /// for it.
+    ///
+    /// A strip of one lane centres each tool across it, so a tool too broad
+    /// for the band alone goes unseated. Several lanes are centred across the
+    /// strip as one grid and each tool centred in the lanes it takes, so a
+    /// short last line keeps to the grid's columns.
+    fn seat(&self, along: i32, length: u32, lane: u16, span: Span) -> Option<Rect> {
+        let along = along.saturating_add(to_i32(length.saturating_sub(span.length) / 2));
+        if self.lanes == 1 {
+            return self.rect(along, span.length, span.breadth);
+        }
+        let room = self.breadth.checked_sub(self.grid)?;
+        let pitch = self.slot.saturating_add(self.gap);
+        let start = self
+            .across
+            .saturating_add(to_i32(room / 2))
+            .saturating_add(to_i32(pitch.saturating_mul(u32::from(lane))));
+        let width = pitch
+            .saturating_mul(u32::from(span.lanes))
+            .saturating_sub(self.gap);
+        let across = start.saturating_add(to_i32(width.saturating_sub(span.breadth) / 2));
+        Some(match self.orientation {
+            ScrollOrientation::Horizontal => Rect::new(along, across, span.length, span.breadth),
+            ScrollOrientation::Vertical => Rect::new(across, along, span.breadth, span.length),
+        })
+    }
+
     /// The rectangle `length` along and `breadth` across from `along`,
     /// centred across the strip, or `None` where the strip is too narrow
     /// for it.
@@ -979,22 +1145,24 @@ fn axes(orientation: ScrollOrientation, bounds: Rect) -> ((i32, u32), (i32, u32)
     }
 }
 
-/// The seating inputs for one strip at one bounds: each tool's span, the band
-/// the tools are seated into, the offset clamped against what that band can
-/// show, and whether the overflow slots are reserved.
+/// The seating inputs for one strip at one bounds: each tool's span, the
+/// lines they pack into, the band the lines are seated into, the offset
+/// clamped against what that band can show, and whether the overflow slots
+/// are reserved.
 struct Measure {
     spans: Vec<Span>,
+    lines: Vec<Line>,
     band: Band,
     model: ScrollModel,
     reserved: bool,
 }
 
 impl Measure {
-    /// Seat the tools from `start`, answering where each drawn one sits and
-    /// the dividers between them.
+    /// Seat the lines from line `start`, answering where each drawn tool sits
+    /// and the dividers between them.
     fn seats(&self, start: usize) -> (Vec<Option<Rect>>, Vec<i32>) {
         let mut seats = alloc::vec![None; self.spans.len()];
-        let dividers = seat(&self.spans, &self.band, start, &mut seats);
+        let dividers = seat(&self.lines, &self.spans, &self.band, start, &mut seats);
         (seats, dividers)
     }
 
@@ -1044,51 +1212,64 @@ fn slot_metrics(scale: Scale, theme: &Theme) -> (u32, u32) {
     )
 }
 
-/// The length the tools `start..end` claim from a band's leading edge: the
-/// leading gap, each tool with the gap before the next, and a gutter wherever
+/// The length the lines `start..end` claim from a band's leading edge: the
+/// leading gap, each line with the gap before the next, and a gutter wherever
 /// the group changes inside the run. Zero for an empty run.
-fn span_of(spans: &[Span], start: usize, end: usize, gap: u32) -> u32 {
-    let Some(run) = spans.get(start..end) else {
+fn span_of(lines: &[Line], start: usize, end: usize, gap: u32) -> u32 {
+    let Some(run) = lines.get(start..end) else {
         return 0;
     };
     let mut total = 0u32;
-    for (offset, span) in run.iter().enumerate() {
+    for (offset, line) in run.iter().enumerate() {
         total = total.saturating_add(gap);
         if offset > 0 {
-            total = total.saturating_add(span.gutter);
+            total = total.saturating_add(line.gutter);
         }
-        total = total.saturating_add(span.length);
+        total = total.saturating_add(line.length);
     }
     total
 }
 
-/// Seat the tools from `start` into `band`, in order, stopping at the first
-/// one that would not fit whole along it; one too broad for the band keeps
-/// its place and is not seated. Answers where along the strip each divider
-/// between two seated tools of different groups falls.
-fn seat(spans: &[Span], band: &Band, start: usize, seats: &mut [Option<Rect>]) -> Vec<i32> {
+/// Seat the lines from line `start` into `band`, in order, stopping at the
+/// first one that would not fit whole along it; a line too broad for the band
+/// keeps its place and seats nothing. Answers where along the strip each
+/// divider between two seated lines of different groups falls.
+fn seat(
+    lines: &[Line],
+    spans: &[Span],
+    band: &Band,
+    start: usize,
+    seats: &mut [Option<Rect>],
+) -> Vec<i32> {
     let mut dividers = Vec::new();
-    let Some(run) = spans.get(start..) else {
+    let Some(run) = lines.get(start..) else {
         return dividers;
     };
     let end = band.start.saturating_add(to_i32(band.length));
     let mut along = band.start.saturating_add(to_i32(band.gap));
-    for (offset, span) in run.iter().enumerate() {
-        // The first seated tool starts its own run, so it is charged no
-        // gutter however its group compares with the tool scrolled past.
-        let gutter = if offset == 0 { 0 } else { span.gutter };
+    for (offset, line) in run.iter().enumerate() {
+        // The first seated line starts its own run, so it is charged no
+        // gutter however its group compares with the line scrolled past.
+        let gutter = if offset == 0 { 0 } else { line.gutter };
         let at = along.saturating_add(to_i32(gutter));
-        if at.saturating_add(to_i32(span.length)) > end {
+        if at.saturating_add(to_i32(line.length)) > end {
             break;
         }
         if gutter > 0 {
             dividers.push(along.saturating_add(to_i32(band.gap) / 2));
         }
-        if let Some(seat) = seats.get_mut(start.saturating_add(offset)) {
-            *seat = band.rect(at, span.length, span.breadth);
+        let mut lane = 0u16;
+        for index in line.first..line.end {
+            let Some(&span) = spans.get(index) else {
+                continue;
+            };
+            if let Some(seat) = seats.get_mut(index) {
+                *seat = band.seat(at, line.length, lane, span);
+            }
+            lane = lane.saturating_add(span.lanes);
         }
         along = at
-            .saturating_add(to_i32(span.length))
+            .saturating_add(to_i32(line.length))
             .saturating_add(to_i32(band.gap));
     }
     dividers

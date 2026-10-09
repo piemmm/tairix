@@ -49,6 +49,7 @@ mod program {
     use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
+    use tairix_appdata::{Publication, PublishJob, Published, Settings};
     use tairix_controls::damage::{self, Repaint};
     use tairix_controls::Keystroke;
     use tairix_geometry::Region;
@@ -72,7 +73,7 @@ mod program {
     use tairix_wintersun_app::error::ClientError;
     use tairix_wintersun_app::figures::{submerged, Cast};
     use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
-    use tairix_wintersun_app::graphics::{self, Adopted, Choice, Graphics, Stored};
+    use tairix_wintersun_app::graphics::Graphics;
     use tairix_wintersun_app::input::{Command, Controls, Zoom as ZoomWay};
     use tairix_wintersun_app::landfall::{landfall, Landfall};
     use tairix_wintersun_app::light::{Sky, Sun};
@@ -437,16 +438,15 @@ mod program {
         dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
     }
 
-    /// What the store worker was asked to write, and what the store held
-    /// afterwards.
-    type Published = (Graphics, Result<Stored, Errno>);
+    /// What the store held after a write, or why it said nothing.
+    type Answer = Result<Published<Graphics>, Errno>;
 
     /// The worker the graphics choice is written through, off the frame loop.
-    type Publisher = Worker<(), Graphics, Published>;
+    type Publisher = Worker<(), PublishJob<Graphics>, Answer>;
 
-    /// Write one choice to the application's own store.
-    fn publish(_: &mut (), wrote: &mut Graphics) -> Published {
-        (*wrote, graphics::publish(&mut RtHost, *wrote))
+    /// Carry out one write to the application's own store.
+    fn publish(_: &mut (), job: &mut PublishJob<Graphics>) -> Answer {
+        tairix_appdata::publish(&mut Settings::open_without_defaults(&mut RtHost), job)
     }
 
     /// The desktop the windows are drawn for: its scale, and the theme its
@@ -597,7 +597,7 @@ mod program {
         /// once.
         refusing: bool,
         /// The player's graphics choice.
-        choice: Choice,
+        choice: Publication<Graphics>,
         /// The worker that choice is written through, or `None` for a scene
         /// that keeps none.
         publisher: Option<&'a Publisher>,
@@ -715,7 +715,7 @@ mod program {
         let Some(mode) = session.window.mode().copied() else {
             return Ok(false);
         };
-        if session.choice.live() == Graphics::Auto {
+        if *session.choice.live() == Graphics::Auto {
             let floor = readable_floor(session, &mode);
             session.governor.hold(floor);
         }
@@ -933,8 +933,10 @@ mod program {
             Request::Preview(graphics) => choose(session, graphics),
             Request::Settle(graphics) => {
                 choose(session, graphics);
-                if let Some(publisher) = session.publisher {
-                    publisher.submit(graphics);
+                if let (Some(publisher), Some(job)) = (session.publisher, session.choice.settle()) {
+                    if publisher.submit(job) {
+                        collect_published(session);
+                    }
                 }
             }
             Request::Close => close_settings(session),
@@ -944,15 +946,14 @@ mod program {
     /// Draw with `graphics` from the next frame on, starting `auto` afresh
     /// from full detail when that is what the player has just chosen.
     fn choose(session: &mut Session<'_>, graphics: Graphics) {
-        let was = session.choice.live();
-        if session.choice.preview(graphics) {
-            entered(session, was);
-        }
+        let was = *session.choice.live();
+        session.choice.edit(&was, &graphics);
+        entered(session, was);
     }
 
-    /// The live choice has just moved from `was`.
+    /// The live choice may have moved from `was`.
     fn entered(session: &mut Session<'_>, was: Graphics) {
-        if session.choice.live() == Graphics::Auto && was != Graphics::Auto {
+        if *session.choice.live() == Graphics::Auto && was != Graphics::Auto {
             session.governor.restart();
         }
     }
@@ -962,45 +963,43 @@ mod program {
         let Some(publisher) = session.publisher else {
             return;
         };
-        while let Some((wrote, answer)) = publisher.collect() {
-            let answer = match answer {
-                Ok(stored) => {
-                    report_refused(&stored);
-                    Ok(stored.graphics)
-                }
-                Err(err) => {
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "the graphics choice could not be kept ({err}); the kept one stands"
-                        ),
-                    );
-                    Err(err)
-                }
-            };
-            let was = session.choice.live();
-            if session.choice.answered(wrote, answer) == Adopted::Moved {
-                entered(session, was);
+        let mut refusals = Vec::new();
+        // With no worker a write runs here and its answer is already waiting,
+        // so the owed chain is followed until one is really in flight.
+        while let Some(answer) = publisher.collect() {
+            let was = *session.choice.live();
+            let owed = session.choice.adopt(answer, &mut refusals);
+            entered(session, was);
+            if !owed.is_some_and(|job| publisher.submit(job)) {
+                break;
             }
+        }
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
         }
     }
 
-    /// State every stored graphics value that meant nothing here.
-    fn report_refused(stored: &Stored) {
-        for key in &stored.refused {
-            app::report(
-                APP_NAME,
-                format_args!(
-                    "the stored {key} is not one this build understands; it is read as unset"
-                ),
-            );
+    /// See the choice's writes out before the program ends, so the last one
+    /// is never dropped with the worker.
+    fn see_out(publisher: &Publisher, choice: &mut Publication<Graphics>) {
+        let mut refusals = Vec::new();
+        if let Some(job) = choice.settle() {
+            let _ = publisher.submit(job);
+        }
+        while let Some(answer) = publisher.wait() {
+            if let Some(job) = choice.adopt(answer, &mut refusals) {
+                let _ = publisher.submit(job);
+            }
+        }
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
         }
     }
 
     /// What the settings window shows now.
     fn shown(session: &Session<'_>) -> Shown {
         Shown {
-            graphics: session.choice.live(),
+            graphics: *session.choice.live(),
             detail: in_force(session),
             readable: readable(session),
         }
@@ -1315,7 +1314,7 @@ mod program {
             signals: &signals,
         });
         let _guard = QuarryGuard(Arc::clone(&quarry));
-        run_loop(
+        let code = run_loop(
             &mut session,
             &mut world,
             &mut zone,
@@ -1325,7 +1324,9 @@ mod program {
             &pool,
             events,
             &signals,
-        )
+        );
+        see_out(&publisher, &mut session.choice);
+        code
     }
 
     /// The player's stored graphics choice and the worker every later write
@@ -1333,24 +1334,19 @@ mod program {
     ///
     /// Read here, before any window: nothing is on screen yet, so there is no
     /// frame to owe anyone.
-    fn bring_up_graphics(set: u64) -> (Choice, Arc<Publisher>) {
-        let (stored, refusal) = graphics::load(&mut RtHost);
-        if let Some(err) = refusal {
-            app::report(
-                APP_NAME,
-                format_args!(
-                    "graphics settings unavailable ({err}); drawing every detail at its finest"
-                ),
-            );
+    fn bring_up_graphics(set: u64) -> (Publication<Graphics>, Arc<Publisher>) {
+        let (graphics, refusals) =
+            tairix_appdata::loaded(&Settings::open_without_defaults(&mut RtHost));
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
         }
-        report_refused(&stored);
         let publisher = Arc::new(Publisher::new(
             publish,
             (),
             tairix_rt::sync::WorkerWake::create(),
         ));
         start_publisher(&publisher, set);
-        (Choice::new(stored.graphics), publisher)
+        (Publication::new(graphics), publisher)
     }
 
     /// Start the graphics store worker and put its answer wake on `set`.
@@ -1599,7 +1595,7 @@ mod program {
     /// On `auto`, hand the governor the frame just drawn, saying once when
     /// frames overrun at the least detail that keeps figures readable.
     fn governed(session: &mut Session<'_>, now: u64) {
-        if session.choice.live() != Graphics::Auto {
+        if *session.choice.live() != Graphics::Auto {
             return;
         }
         let Some(mode) = session.window.mode().copied() else {
@@ -1665,7 +1661,7 @@ mod program {
             refusing: false,
             // The scene is always drawn in its finest detail, keeps no choice,
             // and declares no slot, so no settings window is ever asked for.
-            choice: Choice::new(Graphics::Ultra),
+            choice: Publication::new(Graphics::Ultra),
             publisher: None,
             settings: None,
             look,

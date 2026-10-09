@@ -55,18 +55,30 @@ ajoute, en copie, les supprime et les réordonne.
 
 Le bouton principal (gauche) peint avec la couleur principale et le bouton
 du milieu avec la couleur secondaire ; en tenant Alt, on prélève plutôt une
-couleur, telle que les calques la montrent. Les outils de la boîte à outils
-à gauche sont sélection, crayon, pinceau, aérographe, gomme, clonage,
-remplissage, dégradé, pipette, texte, ligne, rectangle, ellipse, polygone,
-recadrage, main et loupe. La barre du haut nomme l'outil utilisé et contient
-ses réglages — la taille, la dureté, l'opacité, le flux et l'espacement d'un
-pinceau, la tolérance d'un remplissage, la forme d'un dégradé, la taille du
-texte, les coins d'un rectangle — saisis ou réglés avec les flèches, et les
-boutons qui agrandissent et montrent la grille des pixels ; la bande de
-palette sous l'image contient la palette de l'image, ou les couleurs du
-bureau. L'aérographe continue de pulvériser tant qu'il est tenu immobile. En
-tenant Maj, on trace un carré, un cercle ou une ligne à un multiple de 45
-degrés.
+couleur, telle que les calques la montrent. La boîte à outils, dans le volet
+Outils, range les outils sur deux colonnes : sélection, crayon, pinceau,
+aérographe, gomme, clonage, remplissage, dégradé, pipette, texte, ligne,
+rectangle, ellipse, polygone, recadrage, main et loupe. La barre du haut nomme
+l'outil utilisé et contient ses réglages — la taille, la dureté, l'opacité, le
+flux et l'espacement d'un pinceau, la tolérance d'un remplissage, la forme
+d'un dégradé, la taille du texte, les coins d'un rectangle — saisis ou réglés
+avec les flèches, et les boutons qui agrandissent et montrent la grille des
+pixels ; la bande de palette sous l'image contient la palette de l'image, ou
+les couleurs du bureau. L'aérographe continue de pulvériser tant qu'il est
+tenu immobile. En tenant Maj, on trace un carré, un cercle ou une ligne à un
+multiple de 45 degrés.
+
+Des volets longent les deux côtés de la fenêtre : par défaut le volet Outils
+à gauche et le volet Couleur à droite, avec le volet Réglage en dessous dès
+qu'un réglage est ouvert. Chacun est coiffé d'une fine bande qui le nomme,
+avec une commande qui l'enroule sur sa bande et une marque qui le ferme ;
+Affichage ▸ Volets montre de nouveau un volet fermé, et Réinitialiser les
+volets remet chaque volet comme une nouvelle fenêtre les a. Faire glisser une
+bande déplace son volet sur son côté ou vers l'autre, l'endroit où il se
+posera étant marqué en chemin ; lâché loin des deux côtés, ou tiré hors de la
+fenêtre, le volet flotte dans une petite fenêtre à lui, déplacée par sa
+bande, gardée au-dessus de l'image et fermée par sa marque ; ramené au-dessus
+d'un côté, il s'y ancre de nouveau.
 
 L'outil de sélection délimite un rectangle, une ellipse, un lasso à main
 levée, un polygone cliqué coin par coin, ou avec la baguette magique les
@@ -91,21 +103,56 @@ l'image dans la fenêtre, comme Espace avec n'importe quel outil ; la loupe
 agrandit à un clic, ou avec Alt réduit, et un cadre tracé remplit la
 fenêtre.
 
-Le menu Réglages change la luminosité et le contraste, la teinte et la
-saturation et les niveaux, postérise, applique un seuil, désature, rend
-flou, accentue, pixelise, ajoute du bruit et trouve les contours ; chacun se
-montre sur l'image à mesure que ses réglages bougent et n'est gardé que s'il
-est appliqué. Sur une image à palette, un réglage change sa palette, et ceux
-qui ont besoin des couleurs voisines ne sont pas proposés.
+Le menu Réglages ouvre un réglage dans le volet Réglage, où chaque autre
+outil, volet et menu reste à portée de main : luminosité et contraste, teinte
+et saturation, balance des couleurs, niveaux, courbes, balance des blancs,
+postérisation, seuil, flou, netteté, pixelisation et ajout de bruit ;
+désaturer et trouver les contours, qui n'ont pas de réglages, s'appliquent
+aussitôt. L'image montre le réglage à mesure que ses réglages bougent, Aperçu
+l'éteint et le rallume pour comparer, Réinitialiser remet ses réglages et
+Appliquer le garde comme une seule modification à annuler ; peindre, remplir
+ou choisir un autre réglage l'applique d'abord. Les niveaux placent les points
+noir, gris et blanc sur un histogramme du calque, pour tous les canaux ensemble
+ou chacun seul, avec des pipettes qui les prennent dans l'image et Auto ; les
+courbes plient les tons d'un canal par des points tirés sur son histogramme ;
+la balance des blancs règle la température et la teinte de la lumière, d'après
+un pixel neutre choisi ou par Auto ; teinte et saturation tournent, renforcent
+et éclaircissent toutes les couleurs ou une gamme d'entre elles ; la balance
+des couleurs pousse les ombres, les tons moyens et les hautes lumières vers le
+rouge, le vert ou le bleu, en gardant leur luminosité si on le demande. Tout
+reste limité à la sélection. Sur une image à palette, un réglage change sa
+palette, et ceux qui ont besoin des couleurs voisines ne sont pas proposés.
 
-Le volet des couleurs à droite contient les couleurs principale et
-secondaire et un sélecteur de couleur pour celle des deux qui est choisie :
-un clic sur une couleur la choisit, puis on la règle par teinte, saturation
-et valeur, par rouge, vert et bleu, par son écriture hexadécimale et, là où
-l'image contient de la transparence, par son opacité. La couleur qu'elle
-avait se tient à côté, et un clic la rétablit. Sur une image à palette, les
-couleurs sont ses entrées, le sélecteur modifie donc la palette, et chaque
-modification est une seule modification à annuler.
+Le volet Couleur contient les couleurs principale et secondaire et un
+sélecteur de couleur pour celle des deux qui est choisie : un clic sur une
+couleur la choisit, puis on la prend sur un carré de saturation et de valeur à
+côté d'une bande de teintes, sur une roue de teintes autour d'un triangle, ou
+sur un curseur par canal, et on la saisit en RVB, TSV, TSL, CMJN, Lab, LCh ou
+comme un gris, ou par son écriture hexadécimale et, là où l'image contient de
+la transparence, son opacité. Une couleur Lab ou LCh que l'écran ne peut pas
+montrer est montrée au plus près, et signalée. Échanger permute les deux
+couleurs, Réinitialiser les rend noire et blanche, et Prélever prend la
+prochaine couleur cliquée dans l'image. La couleur qu'elle avait se tient à
+côté, un clic la rétablit, et les dernières couleurs choisies attendent
+dessous d'être choisies de nouveau. Sur une image à palette, les couleurs sont
+ses entrées, le sélecteur modifie donc la palette, et chaque modification est
+une seule modification à annuler.
+
+Réglages, dans le menu de la barre d'icônes, ouvre la fenêtre des réglages de
+Paint : l'outil avec lequel une nouvelle fenêtre commence, et si une image
+s'ouvre ajustée à la fenêtre ou en taille réelle ; la taille, le format, les
+couleurs et le fond que propose Nouvelle image ; l'espacement, le décalage, la
+couleur, l'opacité et le style de la grille — lignes, tirets, points ou
+croisements —, si une nouvelle fenêtre la montre, le magnétisme sur elle, et
+le zoom à partir duquel la grille entre les pixels apparaît ; la taille et les
+tons du damier et ce qui entoure l'image ; et les volets avec lesquels s'ouvre
+une nouvelle fenêtre. Un changement s'applique aussitôt à chaque fenêtre et
+reste pour la fois suivante ; Rétablir les valeurs par défaut les remet tous.
+Affichage ▸ Grille montre la grille d'une fenêtre. Tant qu'elle est visible et
+que le magnétisme est actif, les formes, les sélections et les cadres de
+recadrage couvrent des cellules entières, les extrémités d'une ligne et d'un
+dégradé et les coins d'un polygone se posent sur ses croisements, et une
+sélection déplacée s'y pose par son coin.
 
 Le programme ne détient aucune autorisation sur le système de fichiers. Il
 ne modifie que le fichier qui lui a été remis. Un fichier que l'utilisateur
@@ -146,6 +193,7 @@ modifications non enregistrées demande d'abord.
 * `Ctrl` + molette — agrandir ou réduire autour du pointeur
 * Pincer à deux doigts — agrandir ou réduire en continu ; sur un écran tactile, l'image suit les doigts
 * `G` — afficher ou masquer la grille entre les pixels
+* `Ctrl+'` — afficher ou masquer la grille
 * `Page Up` / `Page Down` — le sprite précédent ou suivant, la page précédente ou suivante
 * touches fléchées — déplacer une sélection flottante d'un pixel ; avec `Shift`, de dix ; dans la bande de palette, parcourir ses couleurs
 

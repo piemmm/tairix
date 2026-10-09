@@ -41,7 +41,7 @@ use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 
-use crate::server::{LayerSpec, PopupSpec, WindowSizeState, WindowSizing};
+use crate::server::{LayerSpec, ToolSpec, TransientSpec, WindowSizeState, WindowSizing};
 
 /// An open target an application pulled, owned rather than borrowed from the
 /// reply buffer so the pull can be drained in a loop.
@@ -719,7 +719,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * The session's typed refusal (a foreign or unknown parent, the
     ///   per-client window budget reached), a transport failure, or a
     ///   corrupt reply (fail closed, never a guessed id).
-    pub fn create_popup(&mut self, spec: &PopupSpec) -> Result<(u64, ProcId), Errno> {
+    pub fn create_popup(&mut self, spec: &TransientSpec) -> Result<(u64, ProcId), Errno> {
         let request = WindowRequest::CreatePopup {
             parent_window_id: spec.parent_window_id,
             shm_handle: spec.shm_handle,
@@ -736,6 +736,51 @@ impl<T: WindowTransport> WindowClient<T> {
         let len = self.call(&request, &mut reply)?;
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
+        Ok((window_id, server))
+    }
+
+    /// Open a tool window: a floating palette hung from this app's own
+    /// top-level window `spec.transient.parent_window_id`, framed by the
+    /// window manager with a mini title band reading `spec.title`, moved by
+    /// the user, and reported to this app as it moves
+    /// ([`WindowEvent::ToolMoved`]).
+    ///
+    /// It is placed and lives as [`Self::create_popup`]'s popup does —
+    /// relative to the parent's client origin, above the parent, closed and
+    /// hidden with it, off the taskbar — except that `spec.carry` asks for
+    /// the press the parent still holds to carry it, and it takes the
+    /// keyboard only when the user presses it. The reply is the same shape
+    /// as [`Self::create`]'s.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry, a
+    ///   carry off the band, or a reserved event endpoint the protocol
+    ///   refuses, caught before any call.
+    /// * The session's typed refusal (a foreign or unknown parent,
+    ///   [`Errno::NotSupported`] for a parent that is itself a transient, the
+    ///   window budget reached), a transport failure, or a corrupt reply.
+    pub fn create_tool(&mut self, spec: &ToolSpec) -> Result<(u64, ProcId), Errno> {
+        let transient = &spec.transient;
+        let request = WindowRequest::CreateTool {
+            parent_window_id: transient.parent_window_id,
+            shm_handle: transient.shm_handle,
+            event_endpoint: transient.event_endpoint,
+            frame_count: transient.frame_count,
+            width_px: transient.surface.width_px,
+            height_px: transient.surface.height_px,
+            stride_bytes: transient.surface.stride_bytes,
+            format: transient.surface.format,
+            offset_x: transient.offset_x,
+            offset_y: transient.offset_y,
+            carry: spec.carry,
+            title: spec.title,
+        };
+        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+        let len = self.call(&request, &mut reply)?;
+        let (window_id, server) = decode_create_reply(&reply[..len])?;
+        let surface = &transient.surface;
+        self.note_extent(window_id, surface.width_px, surface.height_px);
         Ok((window_id, server))
     }
 

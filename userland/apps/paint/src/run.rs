@@ -33,6 +33,9 @@ mod program {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::ClipboardKind;
     use tairix_abi::Errno;
+    use tairix_appdata::{
+        Publication, PublishJob, Published, Refusal as StoreRefusal, RtHost, Settings,
+    };
     use tairix_controls::damage;
     use tairix_geometry::{Region, Scale};
     use tairix_icon::{
@@ -40,14 +43,16 @@ mod program {
     };
     use tairix_image::{encode_png, EncodeError};
     use tairix_paint::canvas::{Canvas, Kind, OutOfMemory, Sample};
-    use tairix_paint::document::{Document, Entry, NewPicture, Picture, Snapshot};
+    use tairix_paint::document::{Document, Entry, Picture, Snapshot};
     use tairix_paint::layout::{Faces, Layout, WINDOW_SIZE};
     use tairix_paint::load::{Assembly, Refusal};
+    use tairix_paint::preferences::Preferences;
     use tairix_paint::render::render_into;
     use tairix_paint::save::{
         encode, format_for, format_named, lost_in, write_back, SaveFormat, SaveRefusal,
     };
     use tairix_paint::selection::adapt_pasted;
+    use tairix_paint::settings::{Category, SettingsLayout, SettingsRequest, SettingsWindow};
     use tairix_paint::view::{compute, Clip, Compute, Computed, Own, View};
     use tairix_raster::Surface;
     use tairix_rt::sync::WorkerWake;
@@ -354,16 +359,35 @@ mod program {
         },
     }
 
+    /// The wait-set token the settings writer's answer wake arrives under.
+    const SETTINGS_TOKEN: u64 = APP_TOKEN + 1;
+
+    /// What the store said after a settings write, or why it said nothing.
+    type SettingsAnswer = Result<Published<Preferences>, Errno>;
+
+    /// The worker Paint's settings are written through, off the loop.
+    type SettingsWriter = Worker<(), PublishJob<Preferences>, SettingsAnswer>;
+
+    /// Carry out one settings write against Paint's own store.
+    fn write_settings(_: &mut (), job: &mut PublishJob<Preferences>) -> SettingsAnswer {
+        tairix_appdata::publish(&mut Settings::open_without_defaults(&mut RtHost), job)
+    }
+
     /// What the painter keeps beside the host's own.
     struct Paint {
         decoder: Arc<DecodeWorker>,
         _decoder_guard: WorkerGuard<Decoder, Option<DecodeJob>, Option<DecodeReply>, DecodeDesk>,
         /// The toolbar glyphs, rasterised once for every window.
         artwork: ArtworkCache,
+        /// The settings in force, and the ones the store last said.
+        preferences: Publication<Preferences>,
+        writer: Arc<SettingsWriter>,
+        _writer_guard: WorkerGuard<(), PublishJob<Preferences>, SettingsAnswer>,
     }
 
     impl DocumentApp for Paint {
         type View = View;
+        type AppView = SettingsWindow;
         type Snapshot = Snapshot;
         type Extra = ();
         type Work = Work;
@@ -375,8 +399,10 @@ mod program {
         /// A copy in flight with the newer one that replaces it waiting, one
         /// of the picture's own jobs — a fill, a transform, a selection put
         /// down or cleared, one at a time, the picture taking no edit while
-        /// it is out — and the save in flight.
-        const JOBS_PER_WINDOW: usize = 4;
+        /// it is out — the save in flight, and the open adjustment's one job,
+        /// its preview or its histogram.
+        const JOBS_PER_WINDOW: usize = 5;
+        const BAR_ROWS: &'static [&'static str] = &["Settings\u{2026}"];
 
         fn start(desktop: &Desktop, set: u64) -> Result<Self, i32> {
             // The decode queue's room grows with each window opened.
@@ -395,16 +421,34 @@ mod program {
             let decoder = Arc::new(decoder);
             docapp::start_worker(APP_NAME, &decoder, set, APP_TOKEN, "decode")?;
             let guard = WorkerGuard::new(&decoder);
+            // Read here, before any window: nothing is on screen yet, so
+            // there is no frame to owe anyone.
+            let (preferences, refusals) =
+                tairix_appdata::loaded(&Settings::open_without_defaults(&mut RtHost));
+            for refusal in refusals {
+                app::report(APP_NAME, refusal);
+            }
+            let writer = Arc::new(SettingsWriter::new(
+                write_settings,
+                (),
+                WorkerWake::create(),
+            ));
+            docapp::start_worker(APP_NAME, &writer, set, SETTINGS_TOKEN, "settings")?;
+            let writer_guard = WorkerGuard::new(&writer);
             Ok(Self {
                 decoder,
                 _decoder_guard: guard,
                 artwork: icon_cache(desktop),
+                preferences: Publication::new(preferences),
+                writer,
+                _writer_guard: writer_guard,
             })
         }
 
         fn wakes(&self) -> Vec<(u64, Arc<dyn AnswerWake>)> {
             let decoder: Arc<dyn AnswerWake> = self.decoder.clone();
-            alloc::vec![(APP_TOKEN, decoder)]
+            let writer: Arc<dyn AnswerWake> = self.writer.clone();
+            alloc::vec![(APP_TOKEN, decoder), (SETTINGS_TOKEN, writer)]
         }
 
         fn faces(theme: &Theme, scale: Scale) -> Faces {
@@ -465,27 +509,33 @@ mod program {
                 .retain_waiting(|job| job.as_ref().is_none_or(|job| job.stamp.window() != window));
         }
 
-        fn untitled(_host: &Host<Self>) -> Result<View, String> {
-            let canvas = NewPicture::DEFAULT
+        fn untitled(host: &Host<Self>) -> Result<View, String> {
+            let preferences = host.app.preferences.live();
+            let canvas = preferences
+                .new
                 .canvas()
                 .map_err(|err| alloc::format!("{err}"))?;
-            Ok(View::new(
-                Document::new(Picture::plain(canvas)),
+            let mut view = View::new(
+                Document::new_as(Picture::plain(canvas), preferences.format),
                 String::from(UNTITLED),
                 Access::Untitled,
-            ))
+            );
+            view.begin(preferences);
+            Ok(view)
         }
 
         /// A single clear pixel stands in until the document lands, so
         /// nothing is shown that the file might be taken to hold.
-        fn placeholder(_host: &Host<Self>, name: &str, access: Access) -> Result<View, String> {
+        fn placeholder(host: &Host<Self>, name: &str, access: Access) -> Result<View, String> {
             let canvas = Canvas::new(1, 1, Kind::Rgba, Sample::Rgba([0; 4]))
                 .map_err(|_| String::from("there is not enough memory"))?;
-            Ok(View::new(
+            let mut view = View::new(
                 Document::new(Picture::plain(canvas)),
                 String::from(name),
                 access,
-            ))
+            );
+            view.begin(host.app.preferences.live());
+            Ok(view)
         }
 
         fn load(host: &mut Host<Self>, index: usize, handle: Arc<Handle>, name: String) {
@@ -509,6 +559,82 @@ mod program {
                     adopt_decode(host, reply);
                 }
             });
+            collect_settings(host);
+        }
+
+        fn leaving(host: &mut Host<Self>) {
+            let paint = &mut host.app;
+            let mut refusals = Vec::new();
+            if let Some(job) = paint.preferences.settle() {
+                let _ = paint.writer.submit(job);
+            }
+            while let Some(answer) = paint.writer.wait() {
+                if let Some(job) = paint.preferences.adopt(answer, &mut refusals) {
+                    let _ = paint.writer.submit(job);
+                }
+            }
+            for refusal in refusals {
+                app::report(APP_NAME, refusal);
+            }
+        }
+
+        fn bar_chosen(host: &mut Host<Self>, _row: usize) {
+            if let Some(index) = host.app_windows.len().checked_sub(1) {
+                host.raise_app_window(index);
+                return;
+            }
+            let record = host.app.preferences.live().clone();
+            let _ = host.open_app_window(SettingsWindow::new(record, Category::General));
+        }
+
+        /// What the settings window was in the middle of is written as it
+        /// goes.
+        fn app_closing(host: &mut Host<Self>, _index: usize) {
+            let job = host.app.preferences.settle();
+            submit_settings(host, job);
+        }
+
+        fn app_request(host: &mut Host<Self>, index: usize, request: SettingsRequest) {
+            match request {
+                SettingsRequest::Edit { was, now, settled } => {
+                    host.app.preferences.edit(&was, &now);
+                    apply_settings(host);
+                    if settled {
+                        let job = host.app.preferences.settle();
+                        submit_settings(host, job);
+                    }
+                }
+                SettingsRequest::Restore => {
+                    let job = host.app.preferences.restore();
+                    submit_settings(host, job);
+                }
+                SettingsRequest::TakePanes => {
+                    let front = host
+                        .windows
+                        .iter()
+                        .position(DocWindow::focused)
+                        .or_else(|| host.windows.len().checked_sub(1));
+                    let Some(front) = front else {
+                        let window = &mut host.app_windows[index];
+                        window.view.say(
+                            Some(String::from(
+                                "No picture window is open to take the panes of",
+                            )),
+                            &window.layout,
+                            &mut window.damage,
+                        );
+                        window.owe_reported();
+                        return;
+                    };
+                    let was = host.app.preferences.live().clone();
+                    let mut now = was.clone();
+                    now.panes.clone_from(host.windows[front].view.panes());
+                    host.app.preferences.edit(&was, &now);
+                    apply_settings(host);
+                    let job = host.app.preferences.settle();
+                    submit_settings(host, job);
+                }
+            }
         }
 
         /// Carry out what each window's deadlines have brought due.
@@ -595,6 +721,79 @@ mod program {
             let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
             render_into(surface, view, layout, theme, scale, faces, &mut source);
         }
+
+        fn render_app(
+            &mut self,
+            surface: &mut Surface,
+            view: &SettingsWindow,
+            layout: &SettingsLayout,
+            style: (&Theme, Scale, Faces),
+            _focused: bool,
+        ) {
+            let mut resolver = InlineArtwork::new(NoArtworkSeam, NoArtworkSeam);
+            let mut source = IconArtworkSource::new(&mut self.artwork, &mut resolver);
+            view.render(surface, layout, style, &mut source);
+        }
+    }
+
+    /// Hand `job`, the settings write owed now, to the writer, and take in
+    /// its answer where it ran here for want of a worker.
+    fn submit_settings(host: &mut Host<Paint>, job: Option<PublishJob<Preferences>>) {
+        if job.is_some_and(|job| host.app.writer.submit(job)) {
+            collect_settings(host);
+        }
+    }
+
+    /// Adopt what the settings writer answered, say what it refused in the
+    /// settings window and on `stderr`, make the write owed behind it, and
+    /// bring every window up to the settings now in force.
+    fn collect_settings(host: &mut Host<Paint>) {
+        let mut refusals = Vec::new();
+        let mut adopted = false;
+        while let Some(answer) = host.app.writer.collect() {
+            adopted = true;
+            let owed = host.app.preferences.adopt(answer, &mut refusals);
+            if !owed.is_some_and(|job| host.app.writer.submit(job)) {
+                break;
+            }
+        }
+        if !adopted {
+            return;
+        }
+        let said = refusals.iter().find_map(|refusal| match refusal {
+            StoreRefusal::NotSaved(_) | StoreRefusal::NotRestored(_) => {
+                Some(alloc::format!("{refusal}"))
+            }
+            _ => None,
+        });
+        for refusal in &refusals {
+            app::report(APP_NAME, refusal);
+        }
+        apply_settings(host);
+        for window in &mut host.app_windows {
+            window
+                .view
+                .say(said.clone(), &window.layout, &mut window.damage);
+            window.owe_reported();
+        }
+    }
+
+    /// Bring every window up to the settings in force: each picture window
+    /// draws as they say, and the settings window shows them.
+    fn apply_settings(host: &mut Host<Paint>) {
+        let preferences = host.app.preferences.live();
+        for window in &mut host.windows {
+            window
+                .view
+                .adopt(preferences, &window.layout, &mut window.damage);
+            window.owe_reported();
+        }
+        for window in &mut host.app_windows {
+            window
+                .view
+                .adopt(preferences, &window.layout, &mut window.damage);
+            window.owe_reported();
+        }
     }
 
     /// The toolbar's glyph cache, budgeted from a window's frame and
@@ -671,6 +870,7 @@ mod program {
             Access::ReadOnly
         };
         let mut view = View::new(document, load.name, access);
+        view.begin(host.app.preferences.live());
         if let Some(refusal) = refusal.filter(|_| writable) {
             view.say(alloc::format!("{refusal}: Save asks where to save it"));
         }
@@ -686,11 +886,12 @@ mod program {
                 let pristine = window.pristine();
                 match picture.canvas() {
                     Ok(canvas) => {
-                        let view = View::new(
+                        let mut view = View::new(
                             Document::new_as(Picture::plain(canvas), format),
                             String::from(UNTITLED),
                             Access::Untitled,
                         );
+                        view.begin(host.app.preferences.live());
                         if pristine {
                             host.show(index, view, None);
                         } else if host.open_view(view).is_none() {

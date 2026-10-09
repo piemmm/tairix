@@ -52,11 +52,11 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 
 ## FI1 — item names one point smaller
 
-Names are set in a new `TextRole::ItemLabel`: an item's name in a dense
-collection view. It sits one point below `Body`: the ladder's sizes are line-box
-heights, and Inter's line box is 2478/2048 of its em, so one point (4/3 px of
-em at the reference density) is about 1.6 px of line box; the rung is two
-pixels below body at the shipped base, 1.2 points of em.
+Names are set in `TextRole::ItemLabel`: an item's name in a dense collection
+view. It was brought to 16 px, a point below the 18 px body it then sat beside;
+since the shipped base came down to 16 px (`plans/NEW-DESKTOP-SETTINGS.md`
+DS26) its rung is the body's, so names keep their 16 px and follow any text size
+the user chooses.
 
 - `IconTile` sets its name in `ItemLabel`, so every icon view — the manager,
   the trusted picker, the desktop's icon field, the greeter's accounts — names
@@ -67,9 +67,9 @@ pixels below body at the shipped base, 1.2 points of em.
 
 ## FI2 — window titles one point smaller
 
-`TextRole::WindowTitle` moves to the same rung as `ItemLabel`. The compositor
-draws every title bar from that one role, so the change is global by
-construction. The title bar's identity icon is sized off the title line and
+`TextRole::WindowTitle` shares `ItemLabel`'s rung, the body's since DS26, so
+titles keep the 16 px this item set them at. The compositor draws every title
+bar from that one role, so the change is global by construction. The title bar's identity icon is sized off the title line and
 follows it, which keeps icon and text aligned.
 
 ## FI3 — compact icon tiles

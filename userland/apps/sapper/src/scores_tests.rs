@@ -5,6 +5,7 @@ use super::*;
 
 use tairix_abi::Errno;
 use tairix_appdata::fake::FakeService;
+use tairix_appdata::Settings;
 
 use crate::board::Dimensions;
 
@@ -45,7 +46,7 @@ fn a_recorded_time_survives_a_round_trip() {
         let mut times = BestTimes::default();
         assert!(times.record(Difficulty::Beginner, 42));
         assert!(times.record(Difficulty::Expert, 300));
-        times.save(&mut settings).expect("the fake commits");
+        tairix_appdata::save(&times, &mut settings).expect("the fake commits");
     }
     let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
@@ -94,13 +95,7 @@ fn a_stored_time_past_the_bound_is_refused_and_named() {
         Some(12),
         "one bad entry costs only itself"
     );
-    assert_eq!(
-        refused,
-        alloc::vec![Refused {
-            key: "best.beginner",
-            reason: Reason::OutOfRange
-        }]
-    );
+    assert_eq!(refused, [Preset::Beginner]);
 }
 
 #[test]
@@ -109,13 +104,7 @@ fn a_stored_time_that_is_not_a_number_is_refused_and_named() {
     let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
     assert_eq!(times.best(Difficulty::Intermediate), None);
-    assert_eq!(
-        refused,
-        alloc::vec![Refused {
-            key: "best.intermediate",
-            reason: Reason::Malformed
-        }]
-    );
+    assert_eq!(refused, [Preset::Intermediate]);
 }
 
 #[test]
@@ -134,7 +123,7 @@ fn a_save_writes_only_what_changed() {
         let mut settings = Settings::open_without_defaults(&mut host);
         let mut times = BestTimes::default();
         times.record(Difficulty::Beginner, 30);
-        times.save(&mut settings).expect("commits");
+        tairix_appdata::save(&times, &mut settings).expect("commits");
     }
     assert_eq!(host.committed().settings().count(), 1);
     assert_eq!(host.committed().get("best.beginner"), Some("30"));
@@ -147,7 +136,7 @@ fn a_save_with_nothing_to_write_leaves_the_document_alone() {
     {
         let mut settings = Settings::open_without_defaults(&mut host);
         let (times, _) = BestTimes::load(&settings);
-        times.save(&mut settings).expect("nothing to do");
+        tairix_appdata::save(&times, &mut settings).expect("nothing to do");
         assert!(!settings.is_dirty(), "nothing was staged");
     }
     assert_eq!(host.committed().get("best.beginner"), Some("30"));
@@ -163,7 +152,7 @@ fn clearing_removes_the_stored_times() {
         assert!(!times.is_empty());
         times.clear();
         assert!(times.is_empty());
-        times.save(&mut settings).expect("commits");
+        tairix_appdata::save(&times, &mut settings).expect("commits");
     }
     let settings = Settings::open_without_defaults(&mut host);
     let (times, refused) = BestTimes::load(&settings);
@@ -182,5 +171,21 @@ fn a_store_the_service_will_not_serve_leaves_the_game_playable() {
     assert!(
         refused.is_empty(),
         "an absent store refused no single entry"
+    );
+}
+
+#[test]
+fn a_save_removes_a_stored_time_the_registry_refused() {
+    let mut host = holding("best.beginner = fastest\nbest.expert = 0\n");
+    {
+        let mut settings = Settings::open_without_defaults(&mut host);
+        let (times, refused) = BestTimes::load(&settings);
+        assert_eq!(refused, [Preset::Beginner, Preset::Expert]);
+        tairix_appdata::save(&times, &mut settings).expect("commits");
+    }
+    assert_eq!(
+        host.committed().settings().count(),
+        0,
+        "neither is read again"
     );
 }

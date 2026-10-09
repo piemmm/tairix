@@ -9,9 +9,9 @@
 //!
 //! This module is the **closed registry** over the store's open key
 //! namespace: the fixed set of keys the file manager reads
-//! ([`SettingKey`]), their typed bridges, and nothing else. A key outside
-//! the registry is one this session leaves alone rather than destroying on
-//! the next save.
+//! ([`SettingKey`]) and their bridges, kept by the shared engine
+//! ([`Registry`], `tairix_appdata::save`). A key outside the registry is one
+//! this session leaves alone rather than destroying on the next save.
 //!
 //! Reading fails **safe**: a store the service cannot serve, an absent key,
 //! or a value that is not a boolean leaves the affected setting at its
@@ -20,10 +20,9 @@
 //! *named* to the caller rather than swallowed, so one broken setting costs
 //! only itself and the user can be told which.
 
-use alloc::vec::Vec;
+use alloc::string::String;
 
-use tairix_abi::Errno;
-use tairix_appdata::Settings as SettingsStore;
+use tairix_appconf::{as_bool, bool_text, Registry};
 
 /// One key of the closed preference registry.
 ///
@@ -81,65 +80,28 @@ impl Default for Settings {
     }
 }
 
+impl Registry for Settings {
+    type Key = SettingKey;
+    const KEYS: &'static [SettingKey] = &SettingKey::ALL;
+
+    fn name(key: SettingKey) -> &'static str {
+        key.name()
+    }
+
+    fn read(&mut self, key: SettingKey, text: &str) -> bool {
+        as_bool(text).is_ok_and(|value| {
+            set_field(self, key, value);
+            true
+        })
+    }
+
+    fn spell(&self, key: SettingKey, out: &mut String) -> bool {
+        out.push_str(bool_text(field_value(*self, key)));
+        true
+    }
+}
+
 impl Settings {
-    /// The preferences the store's layers imply, and every key whose stored
-    /// value the registry refused.
-    ///
-    /// A key no layer sets reads as its documented default, so a fresh
-    /// account and an unreachable store both yield [`Settings::default`]. A
-    /// value that is not a boolean leaves that one setting at its default and
-    /// is named in the returned list, so the caller reports the broken
-    /// setting instead of running on a value the user cannot account for.
-    #[must_use]
-    pub fn load(store: &SettingsStore<'_>) -> (Self, Vec<SettingKey>) {
-        let mut settings = Self::default();
-        let mut refused = Vec::new();
-        for key in SettingKey::ALL {
-            match store.bool(key.name()) {
-                Ok(Some(value)) => set_field(&mut settings, key, value),
-                Ok(None) => {}
-                Err(_) => refused.push(key),
-            }
-        }
-        (settings, refused)
-    }
-
-    /// Publish these preferences, writing only what the store's layers do not
-    /// already imply.
-    ///
-    /// A key whose effective value already matches is left alone, so saving
-    /// preferences the user did not change rewrites nothing and a value that
-    /// comes from the machine's policy is never copied up into the user's own
-    /// document. Both settings land as one atomic commit.
-    ///
-    /// # Errors
-    ///
-    /// The app-data service's own typed refusal — no service bound, no store
-    /// for a caller running no signed bundle, or an unreachable volume. The
-    /// edits stay staged, so a caller may retry.
-    pub fn save(&self, store: &mut SettingsStore<'_>) -> Result<(), Errno> {
-        // The comparison is on the decoded *meaning*, not on the rendered
-        // text, which is what makes it more than the client's own no-op
-        // check: a layer beneath may spell the same boolean `off` where a
-        // write renders `false`, and shadowing a policy value with an
-        // equal one is exactly the copying-up the store exists to avoid.
-        let (stored, _) = Self::load(store);
-        for key in SettingKey::ALL {
-            let value = field_value(*self, key);
-            if field_value(stored, key) == value {
-                continue;
-            }
-            // The registry's own spellings are inside the format's grammar and
-            // a boolean renders as one of two fixed words, so a refusal here
-            // would be a defect in this module rather than a user's mistake;
-            // it is reported as a refused write either way.
-            store
-                .set_bool(key.name(), value)
-                .map_err(|_| Errno::OutOfRange)?;
-        }
-        store.commit()
-    }
-
     /// Whether `key` is currently on.
     #[must_use]
     pub const fn is_on(self, key: SettingKey) -> bool {

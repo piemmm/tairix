@@ -1,12 +1,16 @@
 //! The desktop session: the theme registry and the taskbar model.
 
+use alloc::vec::Vec;
+
+use tairix_abi::font_ipc::FamilyEntry;
 use tairix_cursor::CursorTheme;
 use tairix_icon::IconSet;
 use tairix_taskbar::{Taskbar, TaskbarConfig};
 use tairix_theme::{
-    Accessibility, Appearance, CursorSetId, SurfaceGround, Theme, ThemeError, ThemeId,
+    Accessibility, Appearance, CursorSetId, FamilyKey, SurfaceGround, Theme, ThemeError, ThemeId,
     ThemeRegistry,
 };
+use tairix_wallpaper::{TextFamily, TextSize};
 
 use crate::assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 use tairix_svg::font::FontProvider;
@@ -23,6 +27,9 @@ use tairix_svg::font::FontProvider;
 pub struct DesktopSession {
     themes: ThemeRegistry,
     taskbar: Taskbar,
+    /// The font store's selectable families, listed once at bring-up: the
+    /// store is read once per boot, so the list cannot go stale under it.
+    families: Vec<FamilyEntry>,
 }
 
 impl DesktopSession {
@@ -37,7 +44,31 @@ impl DesktopSession {
     pub fn new(config: TaskbarConfig) -> Self {
         let themes = ThemeRegistry::with_builtins();
         let taskbar = Taskbar::new(config, themes.active_on(SurfaceGround::Floating));
-        Self { themes, taskbar }
+        Self {
+            themes,
+            taskbar,
+            families: Vec::new(),
+        }
+    }
+
+    /// Hold `families`, the font store's selectable families, as the ones a
+    /// text choice is resolved against.
+    pub fn set_font_families(&mut self, families: Vec<FamilyEntry>) {
+        self.families = families;
+    }
+
+    /// Draw the desktop's text in `family` at `size`, resolved against the
+    /// font store, and re-theme the taskbar where that moved anything.
+    ///
+    /// Answers a chosen family the store does not offer, which falls back to
+    /// the theme's own so text is never drawn in a face that draws nothing.
+    pub fn set_text(&mut self, family: TextFamily, size: TextSize) -> Option<FamilyKey> {
+        let resolved =
+            tairix_wallpaper::resolve(family, size, self.themes.selected().fonts(), &self.families);
+        if self.themes.set_text(resolved.text) {
+            self.reground();
+        }
+        resolved.unknown
     }
 
     /// The theme registry.

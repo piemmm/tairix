@@ -118,10 +118,13 @@ and `store_refusal` says why the view is not fresh.
 
 ## Closed registries, and the open namespace that needs enumeration
 
-Most applications read a **closed** registry: a fixed set of keys they know.
-Such an application writes its loader once against `tairix_appconf::Lookup`,
-which `Settings` implements, so the same loader serves its own layered handle
-and the `Document` a foreign read answers with. Some app data is an **open**
+Most applications read a **closed** registry: a fixed set of keys they know,
+declared as a `tairix_appconf::Registry` and read through
+`tairix_appconf::Lookup`, which `Settings` implements. `save`, `clear` and
+`loaded` keep such a record in the private scope, and a settings surface stays
+live while it is written through `Publication` and `publish`: edits write
+nothing, a settle asks for one write off the loop, and the store's answer is
+adopted wherever the user has not edited since. Some app data is an **open**
 namespace, though — a catalog, a recent-file list, a set of per-host
 preferences — and `Settings::settings` lists every key the layers effectively
 carry, each once, with the value that wins. It costs no call: the client

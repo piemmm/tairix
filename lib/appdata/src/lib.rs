@@ -15,6 +15,10 @@
 //! than by a check some caller might forget, and this library has no
 //! privileged surface to misuse.
 //!
+//! A closed registry ([`tairix_appconf::Registry`]) is kept in the private
+//! scope by [`save`], [`clear`] and [`loaded`], and a settings surface stays
+//! responsive while it is written through [`Publication`] and [`publish()`].
+//!
 //! One entry point per scope: [`Settings::open`] for the **private** document,
 //! [`Settings::open_published`] for what the application publishes about
 //! itself and [`read_published`] for another application's, [`Vault`] for its
@@ -76,9 +80,11 @@ use zeroize::Zeroize;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
+mod publish;
 #[cfg(feature = "rt")]
 mod rt;
 
+pub use publish::{clear, loaded, publish, save, Publication, PublishJob, Published, Refusal};
 #[cfg(feature = "rt")]
 pub use rt::RtHost;
 

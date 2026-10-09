@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::cell::OnceCell;
 
 use crate::theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId};
+use crate::typography::DesktopText;
 
 /// Why a registry mutation was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -42,16 +43,16 @@ pub struct Grounds<'a> {
 }
 
 /// The set of available themes, the active selection, and the accessibility
-/// axes laid over it.
+/// axes and the user's text laid over it.
 ///
 /// The two built-in themes are held in a fixed-size array so the registry
 /// is provably never empty: [`active`](Self::active) can always return a
 /// theme without an `unwrap` or an out-of-bounds index.
 ///
 /// [`active`](Self::active) answers the *drawn* theme — the selected one
-/// with [`Accessibility`] applied — because every consumer wants the theme
-/// as it is on screen and none of them should have to remember to apply the
-/// axes itself. The adjusted theme is derived once, whenever the selection
+/// with [`Accessibility`] and the user's [`DesktopText`] applied — because
+/// every consumer wants the theme as it is on screen and none of them should
+/// have to remember to apply either itself. The adjusted theme is derived once, whenever the selection
 /// or the axes move, rather than per call: `active` is read on every paint
 /// and every hit test, and re-deriving a metric table there would put the
 /// axis arithmetic on the hot path.
@@ -61,8 +62,9 @@ pub struct ThemeRegistry {
     custom: Vec<Theme>,
     active: ThemeId,
     axes: Accessibility,
-    /// The selected theme with [`axes`](Self::accessibility) applied: what
-    /// [`active`](Self::active) answers.
+    text: Option<DesktopText>,
+    /// The selected theme with [`axes`](Self::accessibility) and
+    /// [`text`](Self::text) applied: what [`active`](Self::active) answers.
     drawn: Theme,
     /// `drawn` on floating chrome, derived on first use after a redraw.
     floating: OnceCell<Theme>,
@@ -82,6 +84,7 @@ impl ThemeRegistry {
             custom: Vec::new(),
             active: drawn.id(),
             axes: Accessibility::default(),
+            text: None,
             drawn,
             floating: OnceCell::new(),
             frosted: OnceCell::new(),
@@ -140,9 +143,33 @@ impl ThemeRegistry {
         self.axes
     }
 
-    /// Re-derive the drawn theme from the selection and the axes.
+    /// Draw every theme's text as the user chose — or as each theme declares
+    /// it, for `None` — returning whether that changed.
+    ///
+    /// Like the axes, the choice belongs to the desktop rather than to a
+    /// theme, so it survives a theme switch and a custom theme gets it too.
+    pub fn set_text(&mut self, text: Option<DesktopText>) -> bool {
+        if self.text == text {
+            return false;
+        }
+        self.text = text;
+        self.redraw();
+        true
+    }
+
+    /// The user's text laid over the active theme, if they chose any.
+    #[must_use]
+    pub const fn text(&self) -> Option<DesktopText> {
+        self.text
+    }
+
+    /// Re-derive the drawn theme from the selection, the axes and the text.
     fn redraw(&mut self) {
-        self.drawn = self.selected().clone().with_axes(self.axes);
+        self.drawn = self
+            .selected()
+            .clone()
+            .with_axes(self.axes)
+            .with_text(self.text);
         self.floating = OnceCell::new();
         self.frosted = OnceCell::new();
     }
@@ -237,8 +264,8 @@ impl ThemeRegistry {
         }
     }
 
-    /// The active theme as it was *registered*, with no accessibility axes
-    /// applied.
+    /// The active theme as it was *registered*, with neither the
+    /// accessibility axes nor the user's text applied.
     ///
     /// What a surface that is editing the axes reads, so it shows what the
     /// theme declares rather than what the current axes already did to it.
@@ -275,14 +302,15 @@ impl ThemeRegistry {
     }
 }
 
-/// Two registries are equal when they hold the same themes, selection and
-/// axes; every drawn form is derived from those, so none is compared.
+/// Two registries are equal when they hold the same themes, selection, axes
+/// and text; every drawn form is derived from those, so none is compared.
 impl PartialEq for ThemeRegistry {
     fn eq(&self, other: &Self) -> bool {
         self.builtins == other.builtins
             && self.custom == other.custom
             && self.active == other.active
             && self.axes == other.axes
+            && self.text == other.text
     }
 }
 

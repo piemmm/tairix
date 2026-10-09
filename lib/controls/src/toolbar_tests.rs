@@ -1176,3 +1176,158 @@ fn the_orientation_is_drawn_so_it_compares() {
         "a toolbar lies across a window until it is set down one"
     );
 }
+
+// --- A tool box of several lanes -------------------------------------------
+
+/// A two-lane tool box of `count` icon tools in one group.
+fn grid(count: usize) -> Toolbar {
+    (0..count).fold(column(Toolbar::new().with_lanes(2)), |toolbar, _| {
+        toolbar.with_icon(icon(), 0)
+    })
+}
+
+/// Bounds exactly as broad as two lanes, `TALL` long.
+fn grid_bounds() -> Rect {
+    Rect::new(0, 0, 2 * CH + GAP, TALL)
+}
+
+#[test]
+fn a_two_lane_tool_box_seats_its_tools_two_to_a_line_in_reading_order() {
+    let theme = Theme::dark();
+    let tool_box = grid(5);
+    assert_eq!(tool_box.breadth(Scale::ONE, &theme), 2 * CH + GAP);
+    // Three lines — two, two and the one left over — each after a gap.
+    assert_eq!(tool_box.natural_length(Scale::ONE, &theme), 3 * (GAP + CH));
+    let rect = |i| {
+        tool_box
+            .tool_rect(i, grid_bounds(), Scale::ONE, &theme)
+            .expect("seated")
+    };
+    let line = |row: u32| xi(GAP + row * (CH + GAP));
+    assert_eq!(rect(0), Rect::new(0, line(0), CH, CH));
+    assert_eq!(rect(1), Rect::new(xi(CH + GAP), line(0), CH, CH));
+    assert_eq!(rect(2), Rect::new(0, line(1), CH, CH));
+    assert_eq!(rect(3), Rect::new(xi(CH + GAP), line(1), CH, CH));
+    // The short last line keeps to the grid's first column.
+    assert_eq!(rect(4), Rect::new(0, line(2), CH, CH));
+    // The grid is centred in a broader band.
+    let broad = Rect::new(0, 0, 2 * CH + GAP + 10, TALL);
+    assert_eq!(
+        tool_box.tool_rect(1, broad, Scale::ONE, &theme),
+        Some(Rect::new(xi(CH + GAP + 5), line(0), CH, CH))
+    );
+    // And seats nothing in one too narrow for both lanes.
+    let narrow = Rect::new(0, 0, 2 * CH, TALL);
+    assert!(seated(&tool_box, narrow, &theme).is_empty());
+}
+
+#[test]
+fn a_new_group_and_a_broad_tool_each_begin_a_line_of_their_own() {
+    let theme = Theme::dark();
+    let tool_box = column(Toolbar::new().with_lanes(2))
+        .with_icon(icon(), 0)
+        .with_icon(icon(), 1)
+        .with_split(split(), 1)
+        .with_icon(icon(), 1);
+    let bounds = grid_bounds();
+    let rect = |i| {
+        tool_box
+            .tool_rect(i, bounds, Scale::ONE, &theme)
+            .expect("seated")
+    };
+    // Tool 1 starts its group's line, a gutter below tool 0's line.
+    assert_eq!(rect(0), Rect::new(0, xi(GAP), CH, CH));
+    assert_eq!(rect(1).left(), 0);
+    assert_eq!(rect(1).top(), xi(GAP + CH + GAP + GAP));
+    // The split takes both lanes, so it begins a line and fills it.
+    assert_eq!(rect(2).width, 2 * CH);
+    assert_eq!(rect(2).top(), rect(1).top() + xi(CH + GAP));
+    assert_eq!(rect(3).top(), rect(2).top() + xi(CH + GAP));
+    let surface = render_in(&tool_box, bounds, &theme);
+    let divider = premul(theme.palette().border);
+    let between = u32::try_from(rect(0).bottom()).expect("on the surface")
+        ..u32::try_from(rect(1).top()).expect("on the surface");
+    assert!(
+        between.clone().any(|y| (0..bounds.width)
+            .filter(|&x| surface.get(x, y) == Some(divider))
+            .count()
+            > 1),
+        "a divider runs across the strip between the groups"
+    );
+}
+
+#[test]
+fn a_short_two_lane_tool_box_scrolls_a_line_at_a_time() {
+    let theme = Theme::dark();
+    let mut tool_box = grid(9);
+    // Room for two lines and the two reserved slots.
+    let bounds = Rect::new(0, 0, 2 * CH + GAP, 2 * CH + GAP + 2 * (CH + GAP) + GAP);
+    let model = tool_box.scroll_model(bounds, Scale::ONE, &theme);
+    assert_eq!(
+        model.range().content_extent(),
+        5,
+        "nine tools are five lines"
+    );
+    assert!(model.range().is_scrollable());
+    let mut damage = sink();
+    assert!(tool_box.wheel(
+        0,
+        SCROLL_UNITS_PER_DETENT,
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut damage
+    ));
+    let shown: Vec<usize> = seated(&tool_box, bounds, &theme)
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        shown.first(),
+        Some(&2),
+        "a detent moves one line: two tools"
+    );
+}
+
+#[test]
+fn the_arrow_keys_walk_a_two_lane_tool_box_by_line_and_by_tool() {
+    let theme = Theme::dark();
+    let mut tool_box = grid(5);
+    let bounds = grid_bounds();
+    let mut damage = sink();
+    let mut press = |tool_box: &mut Toolbar, key| {
+        tool_box.on_key(Key::Named(key), bounds, Scale::ONE, &theme, &mut damage);
+        tool_box.focused()
+    };
+    tool_box.set_focus(Some(1), bounds, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        press(&mut tool_box, NamedKey::Down),
+        Some(3),
+        "the same lane, a line down"
+    );
+    // Into a short line: the nearest tool before the lane.
+    assert_eq!(press(&mut tool_box, NamedKey::Down), Some(4));
+    assert_eq!(
+        press(&mut tool_box, NamedKey::Down),
+        Some(0),
+        "wrapping to the top"
+    );
+    assert_eq!(
+        press(&mut tool_box, NamedKey::Right),
+        Some(1),
+        "across, in order"
+    );
+    assert_eq!(
+        press(&mut tool_box, NamedKey::Right),
+        Some(2),
+        "on to the next line"
+    );
+    assert_eq!(press(&mut tool_box, NamedKey::Left), Some(1));
+    assert_eq!(
+        press(&mut tool_box, NamedKey::Up),
+        Some(4),
+        "wrapping to the bottom"
+    );
+    assert_eq!(press(&mut tool_box, NamedKey::Home), Some(0));
+    assert_eq!(press(&mut tool_box, NamedKey::End), Some(4));
+}

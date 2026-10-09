@@ -189,10 +189,11 @@ pub fn ink_over(surface: &Surface, bare: &Surface) -> usize {
 /// with the shared mark rather than cutting it where the room ran out.
 ///
 /// The text is one word and then only spaces, so a silent cut draws exactly
-/// the word's own ink and any more is the mark.
+/// the word's own ink and any more is the mark. The spaces outrun any room a
+/// control lays out at any text size the desktop sets.
 #[must_use]
 pub fn marks_elision(render: impl Fn(&str) -> Surface) -> bool {
-    let spilling = alloc::format!("W{}", " ".repeat(80));
+    let spilling = alloc::format!("W{}", " ".repeat(1024));
     let bare = render("");
     ink_over(&render(&spilling), &bare) > ink_over(&render("W"), &bare)
 }

@@ -1309,7 +1309,7 @@ fn a_grid_tile_is_as_tall_as_its_picture_and_two_name_lines() {
     use crate::render::{grid_metrics, TILE_LAYOUT};
 
     let theme = Theme::dark();
-    for (percent, picture, height) in [(100, 42, 94), (200, 84, 188)] {
+    for (percent, picture, height) in [(100, 37, 89), (200, 74, 178)] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
         let tiles = grid_metrics(scale, &theme);
         assert_eq!(tiles.cell_height, height, "at {percent}%");

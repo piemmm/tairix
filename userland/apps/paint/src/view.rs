@@ -15,8 +15,9 @@ use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveEndings};
 use tairix_browse::vfs::write_document_title;
 use tairix_colour::Rgba;
 use tairix_controls::{
-    ColourPicker, Keystroke, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
-    SwatchGrid, SwatchMark, Toolbar, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
+    ColourModel, ColourPicker, Keystroke, PickerView, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange, SwatchGrid, SwatchMark, TitleBar, Toolbar, REPEAT_DELAY_NS,
+    REPEAT_INTERVAL_NS,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{desktop_palette, IndexDepth, Rgba8};
@@ -24,9 +25,10 @@ use tairix_input::{InputEvent, Modifiers, PointerButton};
 use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
 use tairix_theme::Theme;
-use tairix_window::docapp::DocumentView;
+use tairix_window::docapp::{DocumentView, ToolGone, ToolMove, ToolOpening, ToolWindow};
 use tairix_window::document::{Access, SavedDocument};
 
+use crate::adjust::AdjustPane;
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
 use crate::colour::{Ink, BLACK, WHITE};
 use crate::dialog::{Form, Purpose};
@@ -36,6 +38,8 @@ use crate::filter::{Filter, FilterError};
 use crate::gradient::Gradient;
 use crate::layout::{Faces, Floor, Layout, Needs};
 use crate::mask::{Combine, Mask, Recipe};
+use crate::pane::{Arrangement, PaneKind, Side};
+use crate::preferences::{CanvasStyle, OpenAt, Preferences};
 use crate::save::{format_for, natural, save_endings, survey, Loss, SaveFormat, SaveRefusal};
 use crate::selection::{cut_out, Floating};
 use crate::shape::{Bounds, Point as Fx, Shape, Span, FX};
@@ -46,7 +50,7 @@ use crate::tool::{
 };
 use crate::tool_controls::ToolControls;
 use crate::transform::{Transform, TransformError};
-use crate::viewport::{Viewport, GRID_FROM, ZOOMS};
+use crate::viewport::{Viewport, ACTUAL, ZOOMS};
 
 /// The application's name, as window titles end.
 pub const APP_TITLE: &str = "Paint";
@@ -124,6 +128,13 @@ pub enum Compute {
         /// The selection it is held to, if one is.
         clip: Option<Mask>,
     },
+    /// Count `canvas`'s levels for a histogram.
+    Histogram {
+        /// The picture, as it stood.
+        canvas: Canvas,
+        /// The selection it is held to, if one is.
+        clip: Option<Mask>,
+    },
     /// Lay `gradient` over `canvas`.
     Gradient {
         /// The picture, as it stood.
@@ -180,6 +191,8 @@ pub enum Computed {
     Selection(Result<Option<Mask>, OutOfMemory>),
     /// A filter's tiles, each the tile as it now stands.
     Filtered(Result<Vec<(usize, Arc<Tile>)>, FilterError>),
+    /// A histogram.
+    Histogram(Result<crate::histogram::Histogram, OutOfMemory>),
 }
 
 /// Carry out `work`: what the worker runs.
@@ -213,6 +226,9 @@ pub fn compute(work: Compute) -> Computed {
             filter,
             clip,
         } => Computed::Filtered(crate::filter::apply(&mut canvas, &filter, clip.as_ref())),
+        Compute::Histogram { canvas, clip } => {
+            Computed::Histogram(crate::histogram::Histogram::of(&canvas, clip.as_ref()))
+        }
         Compute::PutDown {
             mut canvas,
             floating,
@@ -429,6 +445,8 @@ pub enum Action {
     /// A picture pixel to a screen pixel.
     Actual,
     /// Show or hide the grid between pixels.
+    PixelGrid,
+    /// Show or hide the grid laid over the picture.
     Grid,
     /// Put a floating selection down.
     PutDown,
@@ -467,6 +485,15 @@ pub enum Action {
     Zoom(usize),
     /// Adjust or filter the picture: an entry of [`Filter::ALL`].
     Adjust(usize),
+    /// Show a pane of the chrome, or hide it.
+    Pane(PaneKind),
+    /// Put every pane back where a new window has it.
+    ResetPanes,
+    /// Put the inks back to black and white.
+    ResetColours,
+    /// Take the next press on the picture as a colour for the ink the
+    /// colour pane edits.
+    PickColour,
 }
 
 impl Action {
@@ -492,10 +519,15 @@ impl Action {
                 | Self::ZoomOut
                 | Self::Fit
                 | Self::Actual
+                | Self::PixelGrid
                 | Self::Grid
                 | Self::Rename
                 | Self::Zoom(_)
                 | Self::Tool(Tool::Select)
+                | Self::Pane(_)
+                | Self::ResetPanes
+                | Self::ResetColours
+                | Self::PickColour
         )
     }
 }
@@ -513,18 +545,23 @@ impl Action {
                 | Self::ZoomOut
                 | Self::Fit
                 | Self::Actual
+                | Self::PixelGrid
                 | Self::Grid
                 | Self::Zoom(_)
                 | Self::EditPrimary
                 | Self::EditSecondary
                 | Self::SwapColours
+                | Self::Pane(_)
+                | Self::ResetPanes
+                | Self::ResetColours
+                | Self::PickColour
         ) || self == Self::Tool(tool)
     }
 }
 
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 55] = [
+const PLAIN_ACTIONS: [Action; 59] = [
     Action::NewPicture,
     Action::Open,
     Action::Save,
@@ -564,6 +601,7 @@ const PLAIN_ACTIONS: [Action; 55] = [
     Action::ZoomOut,
     Action::Fit,
     Action::Actual,
+    Action::PixelGrid,
     Action::Grid,
     Action::PutDown,
     Action::GoTo,
@@ -580,6 +618,9 @@ const PLAIN_ACTIONS: [Action; 55] = [
     Action::Flatten,
     Action::ShowLayer,
     Action::LayerProperties,
+    Action::ResetPanes,
+    Action::ResetColours,
+    Action::PickColour,
 ];
 
 /// Where the argument-carrying families' ids start, and the one entry
@@ -591,6 +632,7 @@ const GO_TO_ENTRY: u16 = 301;
 const RENAME_ENTRY: u16 = 302;
 const GO_TO_LAYER: u16 = 303;
 const FILTER_IDS: u16 = 400;
+const PANE_IDS: u16 = 500;
 
 impl Action {
     /// The menu id this action is chosen by.
@@ -602,6 +644,7 @@ impl Action {
             Self::Tool(tool) => at(TOOL_IDS, Some(tool_index(tool))),
             Self::Zoom(rung) => at(ZOOM_IDS, Some(rung)),
             Self::Adjust(index) => at(FILTER_IDS, Some(index)),
+            Self::Pane(kind) => at(PANE_IDS, Some(kind.index())),
             Self::Rename => RENAME_ID,
             plain => at(1, PLAIN_ACTIONS.iter().position(|&a| a == plain)),
         }
@@ -621,10 +664,13 @@ impl Action {
                 (rung < ZOOMS.len()).then_some(Self::Zoom(rung))
             }
             RENAME_ID => Some(Self::Rename),
-            FILTER_IDS.. => {
+            FILTER_IDS..PANE_IDS => {
                 let index = usize::from(id - FILTER_IDS);
                 (index < Filter::ALL.len()).then_some(Self::Adjust(index))
             }
+            PANE_IDS.. => PaneKind::ALL
+                .get(usize::from(id - PANE_IDS))
+                .map(|&kind| Self::Pane(kind)),
             _ => None,
         }
     }
@@ -643,7 +689,7 @@ impl From<ViewCommand> for Action {
             ViewCommand::ZoomIn => Self::ZoomIn,
             ViewCommand::Fit => Self::Fit,
             ViewCommand::Actual => Self::Actual,
-            ViewCommand::Grid => Self::Grid,
+            ViewCommand::PixelGrid => Self::PixelGrid,
         }
     }
 }
@@ -709,9 +755,12 @@ enum Gesture {
         from: (i64, i64),
         start: Bounds,
     },
-    /// A floating selection being dragged from pixel `from`, the pointer last
-    /// over pixel `last`.
-    Move { from: (i64, i64), last: (i64, i64) },
+    /// A floating selection being dragged from pixel `from`, its top left
+    /// then at `corner`.
+    Move {
+        from: (i64, i64),
+        corner: (i64, i64),
+    },
 }
 
 /// A polygon being marked out a corner at a time: `to` is where the pointer
@@ -742,6 +791,8 @@ enum Settles {
     PutDown(Then),
     /// What floated, or was selected, is cleared away.
     Cleared,
+    /// The open adjustment is applied and closed, and `Then` follows.
+    Adjusted(Then),
 }
 
 /// What follows a floating selection's putting down once it has landed.
@@ -802,29 +853,6 @@ enum Lands {
     },
 }
 
-/// A filter being previewed while its settings are open: what is shown,
-/// what is being worked out, and what the shown tiles are.
-#[derive(Debug)]
-struct Previewing {
-    /// The settings the preview was last asked for.
-    filter: Filter,
-    /// The job working the preview out, the settings it was asked for, and
-    /// whether they moved since.
-    job: Option<u64>,
-    asked: Option<Filter>,
-    stale: bool,
-    /// The layer and the document's generation the preview was worked from.
-    layer: usize,
-    generation: u64,
-    /// A colour picture as filtered, and the tiles that made it so.
-    canvas: Option<Canvas>,
-    tiles: Option<Vec<(usize, Arc<Tile>)>>,
-    /// The settings `canvas` shows.
-    shown: Option<Filter>,
-    /// A palette picture's kind with its palette adjusted.
-    kind: Option<Kind>,
-}
-
 /// A palette entry being edited live from the colour dock: the palette it
 /// had before, which settling records the change against as one step.
 #[derive(Debug)]
@@ -848,13 +876,34 @@ pub struct View {
     /// the picture's kind changes.
     inks_for: Kind,
     tool_box: Toolbar,
+    /// Where each pane of the chrome is, and the band each is headed by.
+    panes: Arrangement,
+    headers: [TitleBar; PaneKind::ALL.len()],
+    /// A pane being dragged by its band, and where it would land.
+    pane_drag: Option<PaneDrag>,
+    /// Where a press held on a pane's band lies from the band's top-left.
+    band_grab: Option<Point>,
+    /// Where a floating pane being moved by its tool window would dock.
+    tool_landing: Option<Landing>,
+    /// Where each pane torn out opens its tool window, until it opens.
+    openings: [Option<ToolOpening>; PaneKind::ALL.len()],
+    /// Where each floating pane opens when nothing tore it out: under the top
+    /// band, at the edge of its home side.
+    float_homes: [(i32, i32); PaneKind::ALL.len()],
     /// The view strip: the view's own commands.
     commands: Toolbar,
     bar: ToolControls,
     wells: Vec<Ink>,
     swatches: SwatchGrid,
-    /// The colour dock's picker, editing the ink `editing` names.
+    /// The colour pane's picker, editing the ink `editing` names.
     picker: ColourPicker,
+    /// The colour pane's buttons and choices.
+    colour_controls: crate::panel::Panel,
+    /// The colours last settled, the most recent first, and their wells.
+    recents: Vec<Rgba>,
+    recent_grid: SwatchGrid,
+    /// Whether the next press on the picture is a one-shot colour pick.
+    picking_colour: bool,
     editing: SwatchMark,
     palette_edit: Option<PaletteEdit>,
     vertical: ScrollBar,
@@ -864,6 +913,9 @@ pub struct View {
     dragging: Option<PointerButton>,
     /// The selection held, which painting is held to.
     selection: Option<Mask>,
+    /// Counts every change to the selection, so an answer worked from one
+    /// selection is not landed on another.
+    selection_epoch: u64,
     /// A polygon being marked out.
     draft: Option<Draft>,
     /// The crop tool's box, in picture pixels.
@@ -876,10 +928,22 @@ pub struct View {
     clone_offset: Option<(i64, i64)>,
     /// Whether Space is held, which drags the view whatever the tool.
     space: bool,
-    /// A filter being previewed.
-    preview: Option<Previewing>,
+    /// The Adjustment pane: the open adjustment's settings, or the list to
+    /// open one from.
+    adjustment: AdjustPane,
+    /// What the picture shows of the open adjustment, and the histogram it
+    /// reads.
+    looks: adjust::Looks,
     held: Option<Floating>,
-    grid: bool,
+    /// The grids shown.
+    grids: Grids,
+    style: CanvasStyle,
+    /// The panes *Reset panes* puts back.
+    home_panes: Arrangement,
+    /// The picture is fitted to the window once it is first laid out.
+    open_fitted: bool,
+    /// What *New picture* offers to start.
+    new_picture: (NewPicture, SaveFormat),
     pointer: Point,
     modifiers: Modifiers,
     /// What a Ctrl-wheel turn has left short of a whole zoom rung.
@@ -1089,6 +1153,52 @@ impl DocumentView for View {
         let format = self.save_as.unwrap_or_else(|| natural(entries, origin));
         save_endings(entries, origin, format).map_err(|refusal| alloc::format!("{refusal}"))
     }
+
+    /// Each floating pane, in the rectangle of the drawing laid out for it.
+    fn tool_window(&self, layout: &Layout, index: usize) -> Option<ToolWindow<'_>> {
+        let slot = layout.floating().get(index)?;
+        Some(ToolWindow {
+            id: tool_id(slot.kind),
+            title: slot.kind.title(),
+            rect: slot.frame,
+        })
+    }
+
+    fn tool_opening(&mut self, id: u32) -> ToolOpening {
+        View::tool_opening(self, id)
+    }
+
+    fn tool_moved(
+        &mut self,
+        moved: ToolMove,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        View::tool_moved(self, moved, layout, scale, theme, damage)
+    }
+
+    fn tool_gone(
+        &mut self,
+        id: u32,
+        why: ToolGone,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        View::tool_gone(self, id, why, layout, damage)
+    }
+}
+
+/// The name a floating pane's tool window goes by: its place in the list of
+/// panes.
+fn tool_id(kind: PaneKind) -> u32 {
+    u32::try_from(kind.index()).unwrap_or(u32::MAX)
+}
+
+/// The pane whose tool window goes by `id`.
+fn tool_pane(id: u32) -> Option<PaneKind> {
+    PaneKind::ALL.into_iter().find(|&kind| tool_id(kind) == id)
 }
 
 impl View {
@@ -1113,11 +1223,22 @@ impl View {
             secondary: Ink::Colour(WHITE),
             inks_for: Kind::Rgba,
             tool_box: tool_box(tool),
-            commands: view_strip(false),
+            panes: Arrangement::default(),
+            headers: PaneKind::ALL.map(pane_header),
+            pane_drag: None,
+            band_grab: None,
+            tool_landing: None,
+            openings: [None; PaneKind::ALL.len()],
+            float_homes: [(0, 0); PaneKind::ALL.len()],
+            commands: view_strip(true),
             bar: ToolControls::new(tool, options, smooth),
             wells: Vec::new(),
             swatches: SwatchGrid::new(1, Vec::new()),
             picker: ColourPicker::new(Rgba::from_array(BLACK)),
+            colour_controls: colour::colour_panel(PickerView::Square, ColourModel::Rgb),
+            recents: Vec::new(),
+            recent_grid: colour::recent_grid(),
+            picking_colour: false,
             editing: SwatchMark::Primary,
             palette_edit: None,
             vertical: ScrollBar::new(ScrollOrientation::Vertical, flat()),
@@ -1125,15 +1246,24 @@ impl View {
             gesture: None,
             dragging: None,
             selection: None,
+            selection_epoch: 0,
             draft: None,
             crop: None,
             text: None,
             clone_from: None,
             clone_offset: None,
             space: false,
-            preview: None,
+            adjustment: AdjustPane::choosing(),
+            looks: adjust::Looks::default(),
             held: None,
-            grid: false,
+            grids: Grids {
+                spaced: false,
+                pixels: true,
+            },
+            style: CanvasStyle::default(),
+            home_panes: Arrangement::default(),
+            open_fitted: false,
+            new_picture: (NewPicture::DEFAULT, SaveFormat::Png),
             pointer: Point::new(-1, -1),
             modifiers: Modifiers::default(),
             zoom_carry: 0,
@@ -1211,22 +1341,103 @@ impl View {
         &self.viewport
     }
 
-    /// Whether the grid between pixels is to be drawn.
+    /// Whether the grid between pixels is to be drawn: asked for, and at a
+    /// zoom past the one the settings name.
     #[must_use]
-    pub fn grid_shown(&self) -> bool {
-        self.grid
-            && self
-                .viewport
-                .pixel_span()
-                .0
-                .min(self.viewport.pixel_span().1)
-                >= GRID_FROM
+    pub fn pixel_grid_shown(&self) -> bool {
+        let (across, down) = self.viewport.pixel_span();
+        let from = u64::from(self.style.pixel_grid_from);
+        self.grids.pixels && from != 0 && across.min(down) * 100 >= from
+    }
+
+    /// Whether the grid laid over the picture is to be drawn.
+    #[must_use]
+    pub const fn grid_shown(&self) -> bool {
+        self.grids.spaced
+    }
+
+    /// Whether what is drawn and marked lands on the grid: the grid shown,
+    /// and its snapping on.
+    #[must_use]
+    pub const fn snapping(&self) -> bool {
+        self.grids.spaced && self.style.grid.snap
+    }
+
+    /// `at`, on the grid's nearest crossing where snapping is on.
+    #[must_use]
+    pub(crate) fn on_grid(&self, at: Fx) -> Fx {
+        if self.snapping() {
+            crate::grid::snap_point(&self.style.grid, at)
+        } else {
+            at
+        }
+    }
+
+    /// The box of pixels from `from` to `to`, covering whole cells of the
+    /// grid where snapping is on.
+    #[must_use]
+    pub(crate) fn box_of(&self, from: Fx, to: Fx) -> Span {
+        let (from, to) = (from.pixel(), to.pixel());
+        let (from, to) = if self.snapping() {
+            crate::grid::snap_span(&self.style.grid, from, to)
+        } else {
+            (from, to)
+        };
+        Span { from, to }
+    }
+
+    /// Where the window's panes stand.
+    #[must_use]
+    pub const fn panes(&self) -> &Arrangement {
+        &self.panes
+    }
+
+    /// What the window draws the picture with.
+    #[must_use]
+    pub const fn canvas_style(&self) -> &CanvasStyle {
+        &self.style
+    }
+
+    /// Start as a new window does: with the tool, the panes and the grid the
+    /// settings name, and fitted or at actual size once first laid out.
+    pub fn begin(&mut self, preferences: &Preferences) {
+        self.tool = preferences.tool;
+        self.tool_box.set_active(tool_index(self.tool));
+        self.bar = ToolControls::new(self.tool, self.options, self.kind().sample_bytes() == 4);
+        self.panes.clone_from(&preferences.panes);
+        self.home_panes.clone_from(&preferences.panes);
+        self.grids.spaced = preferences.grid.shown;
+        self.style = preferences.canvas_style();
+        self.open_fitted = preferences.open_at == OpenAt::Fitted;
+        self.new_picture = (preferences.new, preferences.format);
+    }
+
+    /// Draw as the settings now say, and put the panes back to the ones they
+    /// name when asked to; what a window started with stays its own.
+    pub fn adopt(&mut self, preferences: &Preferences, layout: &Layout, damage: &mut Region) {
+        let style = preferences.canvas_style();
+        if style != self.style {
+            self.style = style;
+            damage.add(layout.canvas());
+        }
+        self.home_panes.clone_from(&preferences.panes);
+        self.new_picture = (preferences.new, preferences.format);
     }
 
     /// The selection held, which painting is held to.
     #[must_use]
     pub const fn selection(&self) -> Option<&Mask> {
         self.selection.as_ref()
+    }
+
+    /// Replace the selection held, answering the one it replaces; a change
+    /// is counted, so an answer worked from one selection is not landed on
+    /// another.
+    pub(super) fn set_selection(&mut self, selection: Option<Mask>) -> Option<Mask> {
+        if self.selection.is_some() || selection.is_some() {
+            self.selection_epoch = self.selection_epoch.wrapping_add(1);
+        }
+        core::mem::replace(&mut self.selection, selection)
     }
 
     /// The selection being marked out, if one is.
@@ -1249,10 +1460,7 @@ impl View {
 
     /// The shape the select tool marks out dragged from `from` to `to`.
     fn marquee_shape(&self, from: Fx, to: Fx) -> Shape {
-        let span = Span {
-            from: from.pixel(),
-            to: to.pixel(),
-        };
+        let span = self.box_of(from, to);
         match self.options.marquee {
             Marquee::Ellipse => Shape::Ellipse {
                 span,
@@ -1352,13 +1560,20 @@ impl View {
         let needs = Needs {
             wells: self.wells.len(),
             picker: self.picker.measured_height(dock, scale, theme),
+            colour_controls: self
+                .colour_controls
+                .measured_height(dock, faces, scale, theme),
+            recents: dock / u32::try_from(colour::RECENT_COLUMNS).unwrap_or(1) * 2,
             tool_box: self.tool_box.breadth(scale, theme),
+            tool_box_length: self.tool_box.natural_length(scale, theme),
+            adjustment: self.adjustment.measured_height(dock, faces, scale, theme),
             view_strip,
             // As many rows as any tool's bar takes, so the canvas stays put
             // whichever tool is chosen.
             bar_rows: ToolControls::most_rows(controls, faces, scale, theme),
         };
-        let mut layout = Layout::for_window(width, height, theme, scale, faces, needs);
+        let mut layout =
+            Layout::for_window(width, height, theme, scale, faces, (needs, &self.panes));
         let placement = self
             .bar
             .place(layout.controls(), layout.window(), faces, scale, theme);
@@ -1419,6 +1634,19 @@ impl View {
     /// Bring the scroll, the bars and the palette's rows into line with the
     /// layout.
     pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
+        if core::mem::take(&mut self.open_fitted) {
+            let rung = self
+                .viewport
+                .fitting(self.picture_size(), layout.canvas())
+                .min(ACTUAL);
+            let _ = self.viewport.zoom_to(
+                rung,
+                layout.canvas().center(),
+                self.picture_size(),
+                layout.canvas(),
+            );
+            damage.add(layout.canvas());
+        }
         if self.swatches.columns() != layout.columns() {
             self.swatches.set_columns(layout.columns());
             damage.add(layout.palette());
@@ -1448,6 +1676,7 @@ impl View {
         }
         // The picture may have moved, or changed, under a pointer that did not.
         self.hovered(layout, damage);
+        self.settle_float_homes(layout);
     }
 
     /// The kind the picture showing has, or the inks' own for a kept sprite.
@@ -1494,6 +1723,7 @@ impl View {
             .adopt_colours(self.swatches.columns(), colours);
         self.mark_wells();
         self.sync_picker();
+        self.sync_recents();
         self.bar
             .allow_partial(kind.sample_bytes() == 4, self.options);
         let aspect = self
@@ -1600,10 +1830,7 @@ impl View {
             (self.primary, self.secondary)
         };
         let width = self.options.size;
-        let mut span = Span {
-            from: from.pixel(),
-            to: to.pixel(),
-        };
+        let mut span = self.box_of(from, to);
         if self.modifiers.shift && self.tool != Tool::Line {
             span = span.squared();
         }
@@ -1619,6 +1846,7 @@ impl View {
         };
         match self.tool {
             Tool::Line => {
+                let (from, to) = (self.on_grid(from), self.on_grid(to));
                 let to = if self.modifiers.shift {
                     snapped(from, to)
                 } else {
@@ -1669,9 +1897,12 @@ impl View {
     /// The window gained or lost the keyboard; losing it ends any drag, and
     /// the Space held with it.
     pub fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
+        self.headers_follow_focus(focused, layout, damage);
         if !focused {
             self.space = false;
             self.end_gesture(layout, damage);
+            self.pane_drag = None;
+            self.band_grab = None;
         }
     }
 
@@ -1778,6 +2009,39 @@ impl View {
     }
 }
 
+/// Which grids a window shows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Grids {
+    /// The grid laid over the picture.
+    spaced: bool,
+    /// The grid between pixels, from the zoom the canvas style names.
+    pixels: bool,
+}
+
+/// The mini title band heading pane `kind`.
+fn pane_header(kind: PaneKind) -> TitleBar {
+    let mut header = TitleBar::pane();
+    header.set_title(kind.title());
+    header
+}
+
+/// A pane dragged by its band, the gap down a dock it would land in, and
+/// where the press holds the band from its top-left.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PaneDrag {
+    pub(crate) kind: PaneKind,
+    pub(crate) landing: Option<Landing>,
+    pub(crate) grab: Point,
+}
+
+/// Where a dragged pane lands: before the pane at `before` down `side`, or
+/// at the dock's foot where `before` is its length.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Landing {
+    pub(crate) side: Side,
+    pub(crate) before: usize,
+}
+
 /// The window's controls, for the painter.
 pub(crate) struct Controls<'a> {
     pub(crate) tool_box: &'a Toolbar,
@@ -1833,7 +2097,17 @@ mod tools;
 #[path = "view_layers.rs"]
 mod layers;
 
+#[path = "view_panes.rs"]
+mod panes;
+
+#[path = "view_adjust.rs"]
+mod adjust;
+
+#[path = "view_colour.rs"]
+mod colour;
+
 pub(crate) use input::close_rect;
+pub(crate) use panes::landing_mark;
 pub(crate) use tools::{screen_box, CROP_REACH, MARKER};
 
 #[cfg(test)]

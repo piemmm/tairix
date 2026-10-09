@@ -6,6 +6,7 @@
 //! itself, the category list a shed strip becomes, and the scroll a pane too
 //! tall for its column gets.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
@@ -13,6 +14,7 @@ use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
+use tairix_appconf::Registry;
 use tairix_controls::testkit::keystroke;
 use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, WHEEL_STEP};
 use tairix_font::install_test_transport;
@@ -29,7 +31,7 @@ use crate::pictures::Chooser;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
 use crate::saver::SaverOption;
 use crate::shell::{Shell, ShellOutcome};
-use crate::test_support::{click, clicked, damage, opaque, theme, WIDE};
+use crate::test_support::{click, clicked, damage, opaque, row_at, rows, theme, WIDE};
 use crate::volumes::VolumeReading;
 use tairix_controls::testkit::covers;
 
@@ -1266,7 +1268,7 @@ fn shell_at(location: Location) -> Shell {
 #[test]
 fn the_composed_panes_draw_a_form_rather_than_a_statement() {
     for (pane, groups) in [
-        (Pane::Appearance, 2),
+        (Pane::Appearance, 3),
         (Pane::Accessibility, 4),
         (Pane::Wallpaper, 2),
         (Pane::Screensaver, 3),
@@ -2134,6 +2136,131 @@ fn an_answered_cursor_set_joins_the_pointer_set_row() {
         combo.choices(),
         [CursorSetId::builtin().name(), offered.name()]
     );
+}
+
+/// The store's families and the shipped families' line boxes, as `fontd`
+/// lists them.
+fn font_store() -> Vec<tairix_abi::font_ipc::FamilyEntry> {
+    use tairix_abi::font_ipc::{FamilyEntry, FamilyKind};
+    let key = |name| tairix_theme::FamilyKey::new(name).expect("a family key");
+    alloc::vec![
+        FamilyEntry::new(key("inter"), "Inter", FamilyKind::Proportional, 1210).expect("entry"),
+        FamilyEntry::new(
+            key("noto-serif"),
+            "Noto Serif",
+            FamilyKind::Proportional,
+            1362
+        )
+        .expect("entry"),
+    ]
+}
+
+/// The choices the Appearance pane's `label` row offers, and the one held.
+fn text_row(shell: &Shell, label: &str) -> (Vec<String>, String) {
+    let row = rows(shell)
+        .into_iter()
+        .find(|row| row.label() == label)
+        .expect("the row");
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("{label} draws a choice list");
+    };
+    (
+        combo.choices().to_vec(),
+        crate::test_support::value_of(&row),
+    )
+}
+
+/// The Text rows offer what the font store lists, and their defaults name the
+/// theme's own family and its size in points.
+#[test]
+fn the_text_rows_offer_the_store_and_name_the_theme_default() {
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    let (families, held) = text_row(&shell, Setting::Font.label());
+    assert_eq!(
+        families,
+        ["Default"],
+        "nothing is offered before the store lists"
+    );
+    assert_eq!(held, "Default");
+    shell.adopt_text_choices(font_store(), *theme().fonts());
+    let (families, held) = text_row(&shell, Setting::Font.label());
+    assert_eq!(families, ["Default (Inter)", "Inter", "Noto Serif"]);
+    assert_eq!(held, "Default (Inter)");
+    let (sizes, held) = text_row(&shell, Setting::TextSize.label());
+    assert_eq!(
+        held, "Default (10 pt)",
+        "the shipped 16 px is ten points of Inter"
+    );
+    assert_eq!(sizes.first().map(String::as_str), Some("Default (10 pt)"));
+    assert!(sizes.contains(&String::from("11 pt")));
+    assert_eq!(
+        crate::test_support::captions(&shell),
+        ["APPEARANCE", "TEXT", "INTERFACE"]
+    );
+}
+
+/// A stored family the store no longer lists, and a size off the ladder, are
+/// still offered under their own names, so opening the pane changes nothing.
+#[test]
+fn a_stored_text_choice_off_the_offered_lists_is_kept() {
+    let mut settings = DesktopSettings::default();
+    let gone = tairix_theme::FamilyKey::new("gone-family").expect("a family key");
+    settings.text_family = tairix_wallpaper::TextFamily::Named(gone);
+    settings.text_size = tairix_wallpaper::TextSize::Points(15);
+    let mut shell = Shell::new(settings).expect("a registry");
+    let mut sink = damage();
+    assert!(shell.go_to_pane("appearance", WIDE, Scale::ONE, &theme(), &mut sink));
+    shell.adopt_text_choices(font_store(), *theme().fonts());
+    let (families, held) = text_row(&shell, Setting::Font.label());
+    assert_eq!(families.last().map(String::as_str), Some("gone-family"));
+    assert_eq!(held, "gone-family");
+    let (_, held) = text_row(&shell, Setting::TextSize.label());
+    assert_eq!(held, "15 pt");
+}
+
+/// Choosing a family or a size posts the appearance keys, the text among them,
+/// and nothing of the pinboard's.
+#[test]
+fn choosing_text_posts_the_font_keys() {
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    shell.adopt_text_choices(font_store(), *theme().fonts());
+    let (group, row) = row_at(&shell, "TEXT", Setting::Font.label());
+    let chose = |shell: &mut Shell, row, index| {
+        let outcome = shell
+            .form_mut_for_test()
+            .expect("a composed form")
+            .choose_for_test(group, row, index);
+        let crate::FormOutcome::Apply(document) = outcome else {
+            panic!("a text choice posts a document, not {outcome:?}");
+        };
+        document
+    };
+    let document = chose(&mut shell, row, 2);
+    assert!(document.contains("font.family = noto-serif"), "{document}");
+    assert!(document.contains("font.size = theme"), "{document}");
+    let (_, size_row) = row_at(&shell, "TEXT", Setting::TextSize.label());
+    let document = chose(&mut shell, size_row, 0);
+    assert!(document.contains("font.size = theme"), "{document}");
+    let twelve = text_row(&shell, Setting::TextSize.label())
+        .0
+        .iter()
+        .position(|label| label == "12 pt")
+        .expect("twelve points are offered");
+    let document = chose(&mut shell, size_row, twelve);
+    assert!(document.contains("font.size = 12"), "{document}");
+    for key in SettingsKey::PINBOARD {
+        assert!(
+            !document.contains(key.name()),
+            "{} posted: {document}",
+            key.name()
+        );
+    }
 }
 
 #[test]

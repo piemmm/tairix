@@ -211,10 +211,22 @@ next start — has already replaced.
 ## Closed registries, and the open namespace that needs enumeration
 
 Most applications read a **closed** registry: a fixed set of keys they know, so
-they read those and leave everything else alone. Such an application writes its
-loader once against `tairix_appconf::Lookup`, which `Settings` implements — so
-the same loader serves its own layered handle and the `Document` a foreign read
-answers with.
+they read those and leave everything else alone. Such an application declares
+its record as a `tairix_appconf::Registry` — its keys, their spellings, and the
+bridges between a stored text and a field — and the engine does the rest once
+for every application: `Registry::load` reads it through `Lookup`, which
+`Settings` implements, so one loader serves the layered handle and the
+`Document` a foreign read answers with; `save` writes only what the layers do
+not already imply and replaces a stored value the registry refused; `clear`
+removes the user's opinions; `loaded` reads it and names everything worth
+saying about the read.
+
+A settings *surface* keeps the record in a `Publication`: an edit changes the
+live record and writes nothing, the settle asks for one write, carried out off
+the loop by `publish`, and the store's answer is adopted wherever the user has
+not edited since — a refusal reverts what the write carried and is stated, and
+one write is outstanding at a time, the rest owed behind it. A program sees its
+last write out before it ends (`Worker::wait`).
 
 Some app data is an **open** namespace, though: a catalog, a recent-file list, a
 set of per-host preferences. `Settings::settings` answers those, listing every

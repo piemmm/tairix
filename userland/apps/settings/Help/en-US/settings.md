@@ -20,8 +20,10 @@ desktop session, which owns the user's own settings, or a re-authenticated run
 of the command that already writes that store, so nothing here can raise a
 privilege.
 
-**Appearance** chooses whether the desktop is drawn light or dark, and
-**Accessibility** groups the same contrast, density, motion and interface-scale
+**Appearance** chooses whether the desktop is drawn light or dark, and the
+font its text is set in and how large, in points — *Default* is the theme's
+own, ten points of Inter, and a size keeps the letters the same size whichever
+font draws them. **Accessibility** groups the same contrast, density, motion and interface-scale
 settings the way a reader looking for them would, beside the pointer's artwork,
 size and shadow; both panes show the shared ones, because a reader looks in
 either place. Accessibility also offers three ways to find the pointer: shake

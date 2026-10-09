@@ -211,7 +211,7 @@ side is [Window manager](./wm.md#app-owned-popup-surfaces)).
 
 Uniformly, for every app:
 
-- `WindowClient::create_popup(&PopupSpec { .. })` names the app's own parent
+- `WindowClient::create_popup(&TransientSpec { .. })` names the app's own parent
   window, the popup's granted frame region and event endpoint, its geometry,
   and an offset in physical pixels **from the parent's client origin** — an
   app is never told its own window's screen position, so it never computes a
@@ -237,6 +237,31 @@ Uniformly, for every app:
 The graphical terminal is the first consumer: its settings sheet is a popup
 (`plans/GUI-TERMINAL.md` §9). Its window menu is not — that is the desktop's
 one menu chain ([Menus](menus.md)).
+
+### Tool windows
+
+A palette an app lets the user tear out of its window opens as a **tool
+window** (`plans/APPWIN.md` AW7; the protocol side is
+[Window manager](./wm.md#tool-windows)): framed and moved by the window
+manager's mini title band, above its owner, off the taskbar.
+
+- `WindowClient::create_tool(&ToolSpec { .. })`, or
+  `WindowPane::open_tool`, names the owner, the client's geometry, its offset
+  from the owner's client origin, its title, and optionally a `carry`: the
+  place along the band at which the press the owner still holds carries the
+  new window on, so a palette dragged out of its window keeps following the
+  pointer without the button being let go. The owner then hears no release
+  for that press.
+- While the user moves it, `WindowEvent::ToolMoved` says where the pointer is
+  over the owner's client area, or that it is elsewhere, and whether the move
+  has ended — enough to dock the palette again where it is let go.
+- A document application gets all of this from the document host
+  (`tairix_window::docapp`): its view declares the tool windows it wants
+  (`DocumentView::tool_window`), each a rectangle of the window's own drawing
+  laid out beside the window, and the host opens, resizes, retitles, closes,
+  routes and paints them to match, so the view draws and hit-tests a floating
+  palette with the code that drew it docked. Paint's panes are the first
+  consumer ([Paint](paint.md)).
 
 An overlay's picture is **retained between frames**, exactly as the terminal's
 grid picture is, and its paint is scoped to what the round reported. The

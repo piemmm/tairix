@@ -80,7 +80,7 @@ AD5 migrated it.
   would cut the line at the `#`.
 - **The sheet's controls are not wired to the store** (`AGENTS.md` §28). The
   profile the windows *render* and the profile the store *holds* are separate
-  (`publish::Publication`): a slider drag previews every sample and writes
+  (`tairix_appdata::Publication`): a slider drag previews every sample and writes
   nothing, and only the settle — the released drag, the chosen scheme, the key
   step, the sheet closing — asks for a write. Wiring the value to the write
   cost one store round trip and one disk commit per pointer-motion sample, and
@@ -299,7 +299,7 @@ shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`,
 
 Every edit clamps through `Profile::clamp`, so the sheet can never produce an
 invalid profile. The program applies only the settings an edit changed
-(`Publication::edit`, over the `ProfileKey` registry's typed per-key copy), so
+(`Publication::edit`, over the profile's `Live` per-key bridge), so
 a sheet whose copy has fallen behind — another window's, or one open while the
 menu changed the size — cannot put stale values back, and every open sheet
 follows the live profile (`Settings::adopt`), reporting the rows that moved and

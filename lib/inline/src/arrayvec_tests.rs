@@ -67,6 +67,45 @@ fn remove_shifts_the_tail_and_refuses_an_index_past_the_end() {
 }
 
 #[test]
+fn insert_shifts_the_tail_and_refuses_a_full_vector_or_an_index_past_the_end() {
+    let mut vec: ArrayVec<u32, 5> = ArrayVec::new();
+    assert_eq!(vec.try_insert(0, 2), Ok(()));
+    assert_eq!(vec.try_insert(0, 0), Ok(()));
+    assert_eq!(vec.try_insert(1, 1), Ok(()));
+    assert_eq!(vec.try_insert(3, 3), Ok(()), "at the length, appended");
+    assert_eq!(vec.as_slice(), &[0, 1, 2, 3]);
+    assert_eq!(
+        vec.try_insert(9, 9),
+        Err(CapacityError::new(9)),
+        "past the end"
+    );
+    assert_eq!(vec.try_insert(2, 7), Ok(()));
+    assert_eq!(vec.as_slice(), &[0, 1, 7, 2, 3]);
+    assert_eq!(vec.try_insert(0, 8), Err(CapacityError::new(8)), "full");
+    assert_eq!(
+        vec.as_slice(),
+        &[0, 1, 7, 2, 3],
+        "a refusal changes nothing"
+    );
+}
+
+#[test]
+fn an_inserted_element_is_dropped_once_and_its_neighbours_are_not() {
+    let drops = Counted::counter();
+    {
+        let mut vec: ArrayVec<Counted, 3> = ArrayVec::new();
+        assert!(vec.try_push(Counted::new(&drops)).is_ok());
+        assert!(vec.try_push(Counted::new(&drops)).is_ok());
+        assert!(vec.try_insert(1, Counted::new(&drops)).is_ok());
+        assert_eq!(drops.get(), 0, "the shift drops nothing");
+        let refused = vec.try_insert(0, Counted::new(&drops)).expect_err("full");
+        drop(refused.into_value());
+        assert_eq!(drops.get(), 1);
+    }
+    assert_eq!(drops.get(), 4, "four values, one drop each");
+}
+
+#[test]
 fn swap_remove_moves_the_last_element_into_the_hole() {
     let mut vec: ArrayVec<u32, 8> = ArrayVec::new();
     for value in 0..4 {

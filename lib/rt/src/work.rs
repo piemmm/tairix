@@ -70,6 +70,10 @@ pub trait Desk<Req, Ans>: sealed::Sealed {
     fn leaving(&self) -> bool;
     /// Send the worker away.
     fn leave(&mut self);
+    /// Whether a job is waiting or carried out and not yet answered.
+    fn outstanding(&self) -> bool;
+    /// Take a landed answer, if one has.
+    fn collect(&mut self) -> Option<Ans>;
 }
 
 mod sealed {
@@ -94,6 +98,14 @@ impl<Req, Ans> Desk<Req, Ans> for JobDesk<Req, Ans> {
     fn leave(&mut self) {
         self.stop();
     }
+
+    fn outstanding(&self) -> bool {
+        Self::outstanding(self)
+    }
+
+    fn collect(&mut self) -> Option<Ans> {
+        Self::collect(self)
+    }
 }
 
 impl<Req, Ans> Desk<Req, Ans> for JobQueue<Req, Ans> {
@@ -114,6 +126,14 @@ impl<Req, Ans> Desk<Req, Ans> for JobQueue<Req, Ans> {
     /// away.
     fn leave(&mut self) {
         let _ = self.stop();
+    }
+
+    fn outstanding(&self) -> bool {
+        Self::outstanding(self)
+    }
+
+    fn collect(&mut self) -> Option<Ans> {
+        Self::collect(self)
     }
 }
 
@@ -168,6 +188,30 @@ impl<S, Req, Ans, D: Desk<Req, Ans>> Worker<S, Req, Ans, D> {
     #[must_use]
     pub const fn wake(&self) -> &WorkerWake {
         &self.wake
+    }
+
+    /// Take the oldest landed answer, if one has.
+    pub fn collect(&self) -> Option<Ans> {
+        self.held.lock().desk.collect()
+    }
+
+    /// Block until an answer lands and take it, or answer `None` once
+    /// nothing is left outstanding — for an asker with nothing else to do,
+    /// such as a program seeing its writes out before it ends.
+    pub fn wait(&self) -> Option<Ans> {
+        let mut held = self.held.lock();
+        let answer = loop {
+            if let Some(answer) = held.desk.collect() {
+                break Some(answer);
+            }
+            if !held.desk.outstanding() {
+                break None;
+            }
+            held.awaited = true;
+            held = self.answered.wait(held);
+        };
+        held.awaited = false;
+        answer
     }
 
     /// Ask the worker to leave, and wake it so it does.
@@ -264,11 +308,6 @@ impl<S, Req, Ans> Worker<S, Req, Ans> {
         }
         false
     }
-
-    /// Take a landed answer, if one has.
-    pub fn collect(&self) -> Option<Ans> {
-        self.held.lock().desk.collect()
-    }
 }
 
 impl<S, Req, Ans> Worker<S, Req, Ans, JobQueue<Req, Ans>> {
@@ -315,11 +354,6 @@ impl<S, Req, Ans> Worker<S, Req, Ans, JobQueue<Req, Ans>> {
         Ok(false)
     }
 
-    /// Take the oldest landed answer, if one has.
-    pub fn collect(&self) -> Option<Ans> {
-        self.held.lock().desk.collect()
-    }
-
     /// Hand `adopt` every answer landed by now, oldest first, and none that
     /// lands while they are adopted: a job `adopt` asks for that runs here for
     /// want of a worker waits for the next pass, so a chain of them cannot
@@ -351,25 +385,6 @@ impl<S, Req, Ans> Worker<S, Req, Ans, JobQueue<Req, Ans>> {
     /// Give up room for `fewer` jobs; what is already held is still answered.
     pub fn shrink(&self, fewer: usize) {
         self.held.lock().desk.shrink(fewer);
-    }
-
-    /// Block until an answer lands and take it, or answer `None` once
-    /// nothing is left outstanding — for an asker with nothing else to do,
-    /// such as a program seeing its saves out before it ends.
-    pub fn wait(&self) -> Option<Ans> {
-        let mut held = self.held.lock();
-        let answer = loop {
-            if let Some(answer) = held.desk.collect() {
-                break Some(answer);
-            }
-            if !held.desk.outstanding() {
-                break None;
-            }
-            held.awaited = true;
-            held = self.answered.wait(held);
-        };
-        held.awaited = false;
-        answer
     }
 }
 
@@ -542,6 +557,28 @@ mod tests {
         assert!(matches!(Worker::start(&worker), Err(NoWorker::Wake)));
         assert!(worker.submit(job));
         assert_eq!(worker.collect(), Some(done));
+    }
+
+    /// A program ending waits its last write out: a job taken and answered
+    /// is waited for, and once nothing is outstanding the wait ends.
+    #[test]
+    fn a_latest_wins_worker_is_waited_out() {
+        let (job, done) = job();
+        let worker: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        assert!(!worker.submit(job));
+        let mut taken = worker.held.lock().desk.take().expect("the job is waiting");
+        worker.carry_out(&mut taken, || {});
+        assert_eq!(worker.wait(), Some(done));
+        assert_eq!(worker.wait(), None, "nothing is left outstanding");
+
+        let stopped: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        stopped.stop();
+        assert!(stopped.submit(job));
+        assert!(
+            stopped.wait().is_some(),
+            "run here, and its answer waited for"
+        );
+        assert_eq!(stopped.wait(), None);
     }
 
     type Queued = Worker<u32, Job, Done, JobQueue<Job, Done>>;

@@ -11,9 +11,35 @@ A picture is edited at the depth it is stored in: a 1, 2, 4 or 8-bit palette,
 or 32-bit colour with alpha. The tool-controls bar runs across the top — the
 tool in use and its settings, wrapping onto further rows when they do not fit,
 then the view's own commands (zoom out and in, fit, actual size, and the pixel
-grid, marked while it shows). The tool box runs down the left and the colour
-dock down the right, the canvas and its bars lie between them with the palette
-strip beneath, and the status band runs along the bottom. The window shows the
+grid, marked while it shows). A dock of panes runs down each side — by default
+the Tools pane on the left and the Colour pane on the right, with the
+Adjustment pane beneath it once an adjustment is opened — the canvas and its
+bars lie between them with the palette strip beneath, and the status band runs
+along the bottom.
+
+Each pane is headed by a mini title band naming it, with a roll-up control
+that folds it to its band and a close mark that hides it; View ▸ Panes shows a
+hidden pane again and *Reset panes* puts every pane back where the settings
+say a new window starts.
+Dragging a band moves its pane within its dock or into the other: while the
+drag is over a dock, or near the window's edge where a dock is empty, the gap
+it would land in is marked, and Escape turns the drag down. A dock is as wide
+as its widest pane and gives each pane its height in turn, the open adjustment
+first; a pane given no room shows its band alone.
+
+Let go away from a dock, or carried to the window's edge, a pane floats in a
+tool window of its own: the window manager's mini-titled palette, above the
+picture window, off the icon bar, hidden while the window is minimised and
+closed with it, taking the keyboard only when pressed. Carried out, it opens
+under the pointer held where the press held its band, and the press goes on
+moving it; let go in the window, it opens where it was dropped, its band where
+the pane's would have been. Its close
+mark hides the pane; moved back over a dock, the landing gap is marked and let
+go there it docks again. A floating pane is laid out at its own size in a
+rectangle of the window's drawing beside the window (`Layout::floating`), so
+it is drawn and hit-tested by the same code as a docked one, and its lists
+open within its own window. A pane floating in the arrangement the settings
+name opens under the top band at the edge of its home side. The window shows the
 picture at any zoom from 1/16 to 64, kept in 4096ths of actual size
 (`viewport::Zoom`), every rung of the ladder (`viewport::ZOOMS`) exactly. Ctrl
 and the wheel step it a rung for each detent's worth of turn, a fine wheel's
@@ -23,7 +49,12 @@ direction. A pinch begun over the canvas zooms smoothly by the fingers' spread
 and follows their centre, both measured from where it began, so it accumulates
 no rounding, and a cancelled pinch puts the view back. The picture is drawn as
 tall or wide as the sprite's pixels are, over a checkerboard where it is clear,
-with a grid between pixels once one spans `GRID_FROM` screen pixels. The palette
+with a grid between pixels from the zoom the settings name (*View ▸ Pixel
+grid*, G). *View ▸ Grid* (Ctrl+') lays the settings' grid over the picture: a
+line at every `offset + k × spacing` pixel boundary, drawn where the pixel after
+it starts so it crosses the same pixels at every zoom, as lines, dashes, dots
+or crossings in its colour and opacity, and left out where a cell would be
+under four screen pixels. The palette
 strip holds the picture's palette — the desktop's sixteen colours and the clear
 ink for a truecolour picture — in as few rows as hold every well at least 14
 pixels across, each up to 24; the status band says where the pointer is and the
@@ -34,9 +65,9 @@ setting, nor too small for the largest palette round a canvas.
 
 ## Tools and their settings
 
-The tool box — a toolbar turned on its side ([controls](../lib/controls.md))
-that marks the one in use on its leading edge and scrolls when the window is
-too short — holds select, pencil, brush, airbrush, eraser, clone, fill,
+The tool box — a toolbar turned on its side ([controls](../lib/controls.md)),
+its tools two to a line, that marks the one in use on its leading edge and
+scrolls a line at a time when its pane is too short — holds select, pencil, brush, airbrush, eraser, clone, fill,
 gradient, eyedropper, text, line, rectangle, ellipse, polygon, crop, hand and
 zoom (`tool::Tool`). The bar offers the tool's settings (`tool::Setting`) as
 number fields, choices and switches; a number takes effect as it is typed while
@@ -120,26 +151,74 @@ one hidden layer is shown first, since flattened it would come out clear.
 ## Adjustments and filters
 
 The Adjust menu (`filter::Filter`) holds brightness and contrast, hue and
-saturation, levels, posterise, threshold and desaturate, which map each colour
-alone, and blur, sharpen, pixelate, noise and find edges, which make each pixel
-from its neighbours; Invert colours is the same kind of adjustment, applied at
-once. A setting's form previews the result as its sliders move — the worker
-answers one preview at a time, the latest settings asked again once it lands —
-and applying adopts the preview's own tiles where they show exactly what is
-applied. On a palette picture an adjustment maps the palette alone, and the
-neighbourly filters are not offered.
+saturation, colour balance, levels, curves, white balance, posterise,
+threshold and desaturate, which map each colour alone, and blur, sharpen,
+pixelate, noise and find edges, which make each pixel from its neighbours;
+Invert colours is the same kind of adjustment. One with nothing to set —
+invert, desaturate, find edges — applies at once; one with settings opens in
+the Adjustment pane, and nothing else is taken from the window while it is
+open: the tools, the panes and the menus stay live. With nothing open the pane
+offers the list to open one from.
+
+The picture shows the settings as they move: a worker works the preview out one
+job at a time, the latest settings asked again once it lands, and an answer
+worked from a picture, layer or selection that has moved since is dropped and
+asked again. *Preview* turns it off and on to compare; Reset, or Escape in the
+pane, puts the settings back; closing the pane drops the adjustment; Apply lands
+it as one step, adopting the preview's own tiles where they show exactly what is
+applied. Marking a selection or a crop box, undo and redo leave it open and
+show it over what the picture became; anything else that changes or reads the
+picture — a stroke, a fill, a transform, a save, a copy, another adjustment —
+applies it first, and a press that finds its preview still being worked out
+paints nothing. On a palette picture an adjustment maps the palette alone, and
+the neighbourly filters are not offered.
+
+- **Levels** sets the composite and each channel: input black, grey and white
+  handles beneath the channel's histogram — the grey point placed where the
+  levels between reach half way, so its gamma is `ln p / ln ½` — and output
+  black and white, each value typed in its field, the gamma to two places. The
+  black, grey and white eyedroppers set every colour channel from a pixel of
+  the picture beneath the preview, and Auto stretches each channel over what
+  it holds, setting aside 0.1% at each end.
+- **Curves** sets a tone curve for the composite and each channel through up to
+  16 points, a monotone cubic that never overshoots between them, drawn over
+  the channel's histogram. A press adds a point or takes the one within reach,
+  a point carried out of the graph is taken away, the arrows nudge the chosen
+  point and Delete takes it away, Page Up and Page Down choose another, and its
+  input and output are typed in their fields.
+- **White balance** takes the light the picture was lit by to be a temperature
+  from 2000 to 12000 K and a tint, each on a track showing the cast a grey
+  takes, and corrects it to daylight. The neutral eyedropper reads both from a
+  pixel that should be grey; Auto takes the picture's mean as that pixel.
+- **Hue and saturation** sets the master and each of six colour ranges, a range
+  fading to nothing at the next range's centre and a grey keeping its
+  lightness, over the input and output hue spectra. **Colour balance** moves the
+  shadows, midtones and highlights toward red, green or blue, keeping each
+  colour's lightness when asked. **Threshold** sets its level on a handle
+  beneath the histogram.
+
+The histograms count the layer painted on, held to the selection, each pixel
+weighed by its opacity and its share of the selection
+(`histogram::Histogram`), worked out on the worker while the pane reads one.
 
 The window has no menu bar. A secondary press anywhere opens its menu — Cut,
 Copy, Paste, Select all and Deselect, then File, Edit, Image, Layers, Colours,
 Adjust, Sprites, View and Tools, each a submenu — drawn by the desktop like
 every application's ([menus](menus.md)).
 
-## The colour dock
+## The Colour pane
 
-The dock holds the primary and secondary colours, the secondary behind, and the
-shared colour picker ([controls](../lib/controls.md)) editing whichever of the
-two was last chosen; its caption names it, and on a palette picture which entry
-it is. A palette swatch, the eyedropper, the swap key and the Colours menu all
+The Colour pane holds the primary and secondary colours, the secondary behind,
+with Swap, Reset — black and white, or on a palette picture the entries
+nearest them — and Pick, a one-shot pick that takes the next press on the
+picture into the ink the pane edits while the tool in use carries on (Escape
+puts it down); the shared colour picker ([controls](../lib/controls.md))
+editing whichever of the two was last chosen, its caption naming it and on a
+palette picture which entry it is; and the last sixteen colours settled or
+picked, which a press takes back. The View choice picks on a square, a wheel
+or sliders, and the Fields choice shows the picker's fields in RGB, HSV, HSL,
+CMYK, Lab, LCh or grey, each model's values held as typed, a Lab or LCh value
+outside sRGB shown at its nearest and marked. A palette swatch, the eyedropper, the swap key and the Colours menu all
 set an ink from outside the picker, which then shows the ink's colour with the
 same colour beside it as the earlier one a press takes back. The picker carries
 opacity on a picture that holds it — truecolour, or a palette picture that is
@@ -155,11 +234,12 @@ the palette it had is kept aside until the interaction settles, when the change
 is recorded as one step — a drag is one step however long it runs, a drag
 abandoned with Escape is none, and one that ends where it began records
 nothing. The room for that step is reserved before the first colour lands. A
-palette picture's dock is withheld while a worker has the picture, and so is
-the dock for the mask's clear ink, which is the mask and no colour.
+palette picture's picker is withheld while a worker has the picture, and so is
+the picker for the mask's clear ink, which is the mask and no colour.
 
 Tab walks the keyboard from the picture through the bar's settings, the palette
-strip and the dock's parts, and back to the picture; Shift+Tab walks the other
+strip, the Colour pane's buttons and choices, its picker and its recent
+colours, and the Adjustment pane's settings, and back to the picture; Shift+Tab walks the other
 way, and a part with nothing that can act is passed. In the palette the arrows
 walk the wells. Escape gives the keyboard back to the picture once a field has
 nothing to take back. While a field has the keyboard it takes every key it can
@@ -219,6 +299,36 @@ opens read-only and its Save asks how and where. A document of several pictures
 is refused as a format of one picture, before the file is touched, and a sprite
 kept as its bytes as anything but a sprite area.
 
+## Settings
+
+*Settings…* on the icon bar's menu opens Paint's settings window, or brings
+the open one forward: its categories down a sidebar — General, New picture,
+Grid, Canvas, Panes — each category's settings in a panel beside it, and
+*Restore defaults* beneath.
+
+| Category | Settings |
+|---|---|
+| General | the tool a new window starts with; whether a picture opens fitted to the window, never past actual size, or at actual size |
+| New picture | width, height, format, the colours that format holds, a transparent background where it can be clear — what *New picture* offers to start |
+| Grid | spacing and offset across and down, colour, opacity, style; whether a new window shows it; snapping to it; the zoom from which the pixel grid shows, or never |
+| Canvas | the checkerboard's square and its shades, the theme's or two chosen; what surrounds the picture, the theme's ground or a chosen colour |
+| Panes | the arrangement a new window opens with and *Reset panes* returns to: the front picture window's, taken, or the shipped one |
+
+A change applies to every picture window as the interaction settles and is
+written off the loop to Paint's own app-data store, which no other application
+reads ([app data](../lib/appdata.md)); what the store then says is what
+applies, wherever the user has not changed something since. A refused write is
+said in the settings window and on `stderr`, and the values it carried go back
+to what the store holds. The tool, the panes, the grid shown and the opening
+zoom are a new window's: one already open keeps its own.
+
+With a window's grid shown and snapping on, what is drawn and marked lands on
+the grid: a shape's, a marquee's or a crop box's box covers whole cells,
+whichever way it is dragged and never less than one; a line's ends, a
+gradient's ends and a polygon's corners land on the pixel at the nearest
+crossing; a dragged selection's top left lands on a crossing; a crop handle's
+edge lands on the nearest line.
+
 ## Documents and authority
 
 The manifest requests no filesystem capability and declares
@@ -233,8 +343,10 @@ pasted as they show together. What is copied goes to the clipboard as a PNG.
 ## The loop
 
 Paint runs in the shared document host (`tairix_window::docapp`), which owns
-its windows, their saves and choosers, and the work queue saves are written
-on. Nothing that grows with the picture rather than with the brush runs on the
+its windows — its picture windows and its settings window — their saves and
+choosers, and the work queue saves are written on; the settings are written by
+a worker of their own, and the last of them is seen out before the process
+ends. Nothing that grows with the picture rather than with the brush runs on the
 loop: a decode worker reads documents and pastes, and the queue encodes saves
 and copies and carries out fills, gradients, selections, adjustments and their
 previews, transforms of every layer, merges and flattens, the Save As survey,

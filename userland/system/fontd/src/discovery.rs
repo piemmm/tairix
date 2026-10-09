@@ -346,7 +346,7 @@ mod tests {
                 ),
             ],
         };
-        let service = discover(&mut store, roomy_cache(), &DiscardSink).expect("discovers");
+        let mut service = discover(&mut store, roomy_cache(), &DiscardSink).expect("discovers");
         assert_eq!(service.family_count(), 2, "both directories are discovered");
         let mut reply = vec![0u8; tairix_abi::font_ipc::FONT_MAX_FAMILIES_REPLY];
         let n = service.families_reply(&mut reply).expect("encodes");
@@ -357,5 +357,7 @@ mod tests {
             "the fallback-only set is never offered"
         );
         assert_eq!(list.entries()[0].kind, FamilyKind::Monospace);
+        // Inconsolata EX's `hhea` is 939 up and 198 down on a 1024-unit em.
+        assert_eq!(list.entries()[0].line_box(), 1110);
     }
 }

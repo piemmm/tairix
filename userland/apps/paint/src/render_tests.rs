@@ -108,14 +108,19 @@ fn a_magnified_pixel_fills_its_block_and_the_grid_runs_between_blocks() {
     let (mut view, layout, registry) = magnified(built.finish(), 9);
     let theme = registry.active();
     assert_eq!(view.viewport().pixel_span(), (8, 8));
+    view.act(Action::PixelGrid, &layout, &mut Region::new());
     let surface = paint(&view, &layout, theme);
     let (x, y) = corner_of(&view, &layout, (8, 8), (1, 1));
     let blue = Color::rgb(0, 0, 255).premultiply();
     for (dx, dy) in [(0, 0), (7, 0), (0, 7), (7, 7), (3, 4)] {
         assert_eq!(surface.get(x + dx, y + dy), Some(blue), "({dx}, {dy})");
     }
-    view.act(Action::Grid, &layout, &mut Region::new());
+    view.act(Action::PixelGrid, &layout, &mut Region::new());
     let gridded = paint(&view, &layout, theme);
+    assert!(
+        view.pixel_grid_shown(),
+        "shown from the 800% the settings start with"
+    );
     assert_ne!(
         gridded.get(x, y + 3),
         Some(blue),
@@ -635,4 +640,58 @@ fn view_layout(view: &mut View, theme: &Theme) -> Layout {
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
     view.settle(&layout, &mut Region::new());
     layout
+}
+
+#[test]
+fn the_grid_is_drawn_in_its_colour_where_a_cell_starts() {
+    let canvas = Canvas::new(16, 16, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
+    let (mut view, layout, registry) = magnified(canvas, 7);
+    let mut preferences = crate::preferences::Preferences::default();
+    preferences.grid.spacing = (4, 4);
+    preferences.grid.colour = tairix_colour::Rgb::new(255, 0, 0);
+    preferences.grid.opacity = 1000;
+    preferences.grid.shown = true;
+    preferences.pixel_grid_from = 0;
+    view.begin(&preferences);
+    view.settle(&layout, &mut Region::new());
+    let theme = registry.active();
+    let surface = paint(&view, &layout, theme);
+    let red = Color::rgb(255, 0, 0).premultiply();
+    let white = Color::rgb(255, 255, 255).premultiply();
+    let (x, y) = corner_of(&view, &layout, (16, 16), (4, 1));
+    assert_eq!(surface.get(x, y + 2), Some(red), "a cell's first column");
+    let (x, y) = corner_of(&view, &layout, (16, 16), (5, 1));
+    assert_eq!(surface.get(x, y + 2), Some(white), "the pixel beside it");
+}
+
+#[test]
+fn a_chosen_surround_and_checkerboard_are_drawn() {
+    let canvas = Canvas::new(8, 8, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let (mut view, layout, registry) = window(canvas);
+    let mut preferences = crate::preferences::Preferences::default();
+    let (dark, light) = (
+        tairix_colour::Rgb::new(10, 20, 30),
+        tairix_colour::Rgb::new(200, 210, 220),
+    );
+    preferences.shades = crate::preferences::Shades::Chosen(dark, light);
+    preferences.surround = crate::preferences::Surround::Chosen(tairix_colour::Rgb::new(1, 2, 3));
+    view.adopt(&preferences, &layout, &mut Region::new());
+    let theme = registry.active();
+    let surface = paint(&view, &layout, theme);
+    let area = layout.canvas();
+    let corner = (
+        u32::try_from(area.left()).expect("on screen"),
+        u32::try_from(area.top()).expect("on screen"),
+    );
+    assert_eq!(
+        surface.get(corner.0, corner.1),
+        Some(Color::rgb(1, 2, 3).premultiply()),
+        "around the picture"
+    );
+    let (x, y) = corner_of(&view, &layout, (8, 8), (0, 0));
+    assert_eq!(
+        surface.get(x, y),
+        Some(Color::from(dark).premultiply()),
+        "the dark square"
+    );
 }

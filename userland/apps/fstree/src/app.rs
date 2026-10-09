@@ -855,7 +855,7 @@ pub fn publish_settings(model: &mut Model, store: &mut SettingsStore<'_>) {
         return;
     }
     model.settings_state = SettingsState::Published;
-    match model.settings.save(store) {
+    match tairix_appdata::save(&model.settings, store) {
         Ok(()) => model.message = Some(String::from("settings saved")),
         Err(errno) => {
             model.message = Some(format!(

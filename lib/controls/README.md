@@ -114,11 +114,12 @@ commit as the focus leaves.
 
 The **colour controls** are `SwatchGrid` (`swatch_grid`), a grid of wells with
 a primary mark on at most one and an optional secondary one, and `ColourPicker`
-(`colour_picker`): one colour by its hue, saturation and value plane, a hue
-strip, an opacity strip where it has one, a swatch beside the earlier colour a
-press takes back, a hex field and H/S/V/R/G/B/A number fields — beside the plane
-in wide bounds and beneath it in narrow ones, giving up its fields before its
-plane when short. It holds `lib/colour`'s exact coordinates, so grey and black
+(`colour_picker`): one colour picked on a square, a wheel or sliders
+(`PickerView`), an opacity strip where it has one, a swatch beside the earlier
+colour a press takes back, a hex field and number fields in one model —
+RGB, HSV, HSL, CMYK, Lab, `LCh` or grey (`ColourModel`, `colour_model`), its
+values held as typed — beside the view in wide bounds and beneath it in narrow
+ones, giving up its fields before its view when short. It holds `lib/colour`'s exact coordinates, so grey and black
 keep the hue and saturation shown, and it reports `PickerOutcome::Edited` live
 and `PickerOutcome::Settled` once, as a slider does.
 
@@ -147,7 +148,8 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   with the chain that renders it because its clients are not all in the process
   that owns the chain (`plans/NEW-MENUS.md` §1.6).
 - `toolbar` — `Toolbar` composes `IconButton`/`SplitButton` tools in `u16`
-  groups (raised strip, group dividers, active-tool accent seam), routing
+  groups (raised strip, group dividers, active-tool accent seam), one to a line
+  or several side by side (`with_lanes`, a two-column tool box), routing
   pointer/keyboard input to the tools it owns and emitting a typed
   `ToolbarAction`.
 - `tabs` — `Tab`/`Tabs`, an equal-width strip whose selected tab carries a

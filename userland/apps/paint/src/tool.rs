@@ -760,16 +760,22 @@ impl Setting {
 /// Why smoothing is held off on a palette picture, as its tip says.
 pub const WHOLE_PIXELS: &str = "A palette picture's pixels are one colour each";
 
-/// The tool box: every tool, down a column, the one in use marked.
+/// The tool box: every tool, [`TOOL_BOX_LANES`] to a line down the window's
+/// side, the one in use marked.
 #[must_use]
 pub fn tool_box(active: Tool) -> Toolbar {
-    let mut toolbar = Toolbar::new().with_orientation(ScrollOrientation::Vertical);
+    let mut toolbar = Toolbar::new()
+        .with_orientation(ScrollOrientation::Vertical)
+        .with_lanes(TOOL_BOX_LANES);
     for tool in Tool::ALL {
         toolbar = toolbar.with_icon(IconButton::new(tool.icon(), ControlRole::Neutral), 0);
     }
     toolbar.set_active(tool_index(active));
     toolbar
 }
+
+/// How many tools stand side by side down the tool box.
+pub const TOOL_BOX_LANES: u16 = 2;
 
 /// Where `tool` sits in the tool box.
 #[must_use]
@@ -789,7 +795,7 @@ pub enum ViewCommand {
     /// A picture pixel to a screen pixel.
     Actual,
     /// Show or hide the grid between pixels.
-    Grid,
+    PixelGrid,
 }
 
 /// The view strip's commands, in order, with their glyphs and tips.
@@ -798,7 +804,11 @@ pub const VIEW_COMMANDS: [(IconKind, ViewCommand, &str); 5] = [
     (IconKind::ZoomIn, ViewCommand::ZoomIn, "Zoom in (+)"),
     (IconKind::ZoomFit, ViewCommand::Fit, "Fit in window"),
     (IconKind::ZoomActual, ViewCommand::Actual, "Actual size (1)"),
-    (IconKind::PixelGrid, ViewCommand::Grid, "Pixel grid (G)"),
+    (
+        IconKind::PixelGrid,
+        ViewCommand::PixelGrid,
+        "Pixel grid (G)",
+    ),
 ];
 
 /// The view strip: the view's own commands, the zoom's apart from the
@@ -807,19 +817,19 @@ pub const VIEW_COMMANDS: [(IconKind, ViewCommand, &str); 5] = [
 pub fn view_strip(grid: bool) -> Toolbar {
     let mut toolbar = Toolbar::new();
     for (icon, command, _) in VIEW_COMMANDS {
-        let group = u16::from(command == ViewCommand::Grid);
+        let group = u16::from(command == ViewCommand::PixelGrid);
         toolbar = toolbar.with_icon(IconButton::new(icon, ControlRole::Neutral), group);
     }
-    mark_grid(&mut toolbar, grid);
+    mark_pixel_grid(&mut toolbar, grid);
     toolbar
 }
 
 /// Mark the view strip's grid command while the grid shows, and nothing
 /// while it does not.
-pub fn mark_grid(strip: &mut Toolbar, grid: bool) {
+pub fn mark_pixel_grid(strip: &mut Toolbar, grid: bool) {
     let command = VIEW_COMMANDS
         .iter()
-        .position(|&(_, command, _)| command == ViewCommand::Grid)
+        .position(|&(_, command, _)| command == ViewCommand::PixelGrid)
         .filter(|_| grid);
     strip.set_active(command.unwrap_or(usize::MAX));
 }

@@ -37,10 +37,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
+use tairix_abi::font_ipc::FamilyEntry;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
+use tairix_appconf::Registry;
 use tairix_colour::Rgb;
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
@@ -52,13 +54,13 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_netconfig::{ConfigError, IfaceKey, NetworkConfig};
 use tairix_raster::Surface;
 use tairix_sysconfig::SystemConfig;
-use tairix_theme::{CursorSetId, SignalRole, Theme};
+use tairix_theme::{points_of, CursorSetId, Fonts, SignalRole, Theme};
 use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
     Backdrop, CatalogItem, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort,
     IdleAfter, PointerSpeed, PointerTrail, PrimaryButton, RepeatRate, ScreensaverKind, SettingsKey,
-    WallpaperFit,
+    TextFamily, TextSize, WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
@@ -78,6 +80,10 @@ use crate::saver::SaverOption;
 /// rounded to a neighbour, which would change a setting the reader only came
 /// to look at.
 const SCALE_LADDER: [u32; 7] = [100, 125, 150, 175, 200, 250, 300];
+
+/// The text sizes the Text size row offers beside the theme's own, in points.
+/// A desktop set to one off the ladder keeps it, as a choice of its own.
+const TEXT_POINTS_LADDER: [u16; 12] = [8, 9, 10, 11, 12, 13, 14, 16, 18, 20, 22, 24];
 
 /// The double-click intervals the Mouse pane's slider stops at, in
 /// milliseconds, from the slowest double-click to the fastest. A desktop set
@@ -139,6 +145,18 @@ pub struct Offered<'a> {
     /// The shipped pictures, whose categories the slideshow may be narrowed
     /// to and which the wallpaper chooser offers.
     pub catalog: &'a [CatalogItem],
+    /// The font store's families and the theme's own text, once listed.
+    pub text: Option<&'a TextChoices>,
+}
+
+/// What the Text rows offer beyond the document: the families the font store
+/// lists and the theme's own text, which their *Default* choices name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextChoices {
+    /// The store's selectable families, in the order it listed them.
+    pub families: Vec<FamilyEntry>,
+    /// The theme's own fonts, as it was registered.
+    pub theme: Fonts,
 }
 
 /// One settable of the desktop's settings registry.
@@ -154,6 +172,10 @@ pub enum Setting {
     Motion,
     /// The UI scale every logical length is resolved through.
     Scale,
+    /// The family interface text is drawn in.
+    Font,
+    /// The body size every text role derives from, in points.
+    TextSize,
     /// How the desktop picture is placed on the screen.
     Fit,
     /// The flat colour shown wherever the picture does not reach.
@@ -213,6 +235,8 @@ impl Setting {
             Self::Density => SettingsKey::Density,
             Self::Motion => SettingsKey::Motion,
             Self::Scale => SettingsKey::Scale,
+            Self::Font => SettingsKey::FontFamily,
+            Self::TextSize => SettingsKey::FontSize,
             Self::Fit => SettingsKey::Fit,
             Self::Backdrop => SettingsKey::Backdrop,
             Self::Icons => SettingsKey::Icons,
@@ -248,6 +272,8 @@ impl Setting {
             Self::Density => "Density",
             Self::Motion => "Motion",
             Self::Scale => "Interface scale",
+            Self::Font => "Font",
+            Self::TextSize => "Text size",
             Self::Fit => "Fit",
             Self::Backdrop => "Backdrop",
             Self::Icons => "Icons",
@@ -291,6 +317,14 @@ impl Setting {
                  once rather than over time."
             }
             Self::Scale => "How large every length on the desktop is drawn.",
+            Self::Font => {
+                "The typeface windows, menus and the icon bar set their text in. Terminal text \
+                 keeps its own."
+            }
+            Self::TextSize => {
+                "How large text is set, in points. Every heading and caption follows it, \
+                 whichever font draws it."
+            }
             Self::Fit => "How the picture is placed on the screen.",
             Self::Backdrop => {
                 "The flat colour behind the picture, and instead of it wherever it does not reach."
@@ -379,6 +413,7 @@ impl Setting {
             Self::Density => list(pick(&Density::ALL, settings.density, density_label)),
             Self::Motion => list(pick(&Motion::ALL, settings.motion, motion_label)),
             Self::Scale => list(scale_choices(settings.scale)),
+            Self::Font | Self::TextSize => list(text_choices(self, settings, offered.text)),
             Self::Fit => list(pick(&WallpaperFit::ALL, settings.fit, fit_label)),
             Self::Backdrop => list(backdrop_choices(settings.backdrop)),
             Self::Icons => list(pick(&IconFlow::ALL, settings.icons, icon_flow_label)),
@@ -480,6 +515,20 @@ impl Setting {
             Self::Scale => match scale_ladder(settings.scale).get(index) {
                 Some(scale) => {
                     settings.scale = *scale;
+                    true
+                }
+                None => false,
+            },
+            Self::Font => match family_ladder(settings.text_family, offered.text).get(index) {
+                Some((_, family)) => {
+                    settings.text_family = *family;
+                    true
+                }
+                None => false,
+            },
+            Self::TextSize => match size_ladder(settings.text_size, offered.text).get(index) {
+                Some((_, size)) => {
+                    settings.text_size = *size;
                     true
                 }
                 None => false,
@@ -916,6 +965,86 @@ fn cursor_set_ladder(current: CursorSetId, offered: &[CursorSetId]) -> Vec<Curso
     ladder
 }
 
+/// The families the Font row offers: the theme's own first, as *Default*,
+/// then every family the store lists, and a stored family the store no longer
+/// lists as a choice of its own, so opening the pane changes nothing.
+fn family_ladder(current: TextFamily, text: Option<&TextChoices>) -> Vec<(String, TextFamily)> {
+    let families = text.map_or(&[][..], |text| text.families.as_slice());
+    let default = match text.and_then(|text| {
+        families
+            .iter()
+            .find(|entry| entry.key == text.theme.ui_family())
+    }) {
+        Some(entry) => alloc::format!("Default ({})", entry.label()),
+        None => String::from("Default"),
+    };
+    let mut ladder: Vec<(String, TextFamily)> = core::iter::once((default, TextFamily::Theme))
+        .chain(
+            families
+                .iter()
+                .map(|entry| (entry.label().to_string(), TextFamily::Named(entry.key))),
+        )
+        .collect();
+    if let TextFamily::Named(key) = current {
+        if !ladder.iter().any(|(_, family)| *family == current) {
+            ladder.push((key.as_str().to_string(), current));
+        }
+    }
+    ladder
+}
+
+/// The sizes the Text size row offers: the theme's own first, as *Default*
+/// with its size in points, then [`TEXT_POINTS_LADDER`], and a stored size
+/// off the ladder as a choice of its own.
+fn size_ladder(current: TextSize, text: Option<&TextChoices>) -> Vec<(String, TextSize)> {
+    let own = text.and_then(|text| {
+        text.families
+            .iter()
+            .find(|entry| entry.key == text.theme.ui_family())
+            .map(|entry| points_of(text.theme.base_size_px(), entry.line_box()))
+    });
+    let default = match own {
+        Some(points) => alloc::format!("Default ({points} pt)"),
+        None => String::from("Default"),
+    };
+    let mut ladder: Vec<(String, TextSize)> = core::iter::once((default, TextSize::Theme))
+        .chain(
+            TEXT_POINTS_LADDER
+                .iter()
+                .map(|&points| (alloc::format!("{points} pt"), TextSize::Points(points))),
+        )
+        .collect();
+    if let TextSize::Points(points) = current {
+        if !ladder.iter().any(|(_, size)| *size == current) {
+            ladder.push((alloc::format!("{points} pt"), current));
+        }
+    }
+    ladder
+}
+
+/// The labels a Text row offers and the index of the value `settings` holds,
+/// which its ladder always carries.
+fn text_choices(
+    setting: Setting,
+    settings: &DesktopSettings,
+    text: Option<&TextChoices>,
+) -> (Vec<String>, usize) {
+    fn held<T: PartialEq>(ladder: Vec<(String, T)>, current: &T) -> (Vec<String>, usize) {
+        let at = ladder
+            .iter()
+            .position(|(_, value)| value == current)
+            .unwrap_or(0);
+        (ladder.into_iter().map(|(label, _)| label).collect(), at)
+    }
+    match setting {
+        Setting::TextSize => held(size_ladder(settings.text_size, text), &settings.text_size),
+        _ => held(
+            family_ladder(settings.text_family, text),
+            &settings.text_family,
+        ),
+    }
+}
+
 /// The display label of a pointer size.
 const fn cursor_size_label(size: CursorSize) -> &'static str {
     match size {
@@ -1080,6 +1209,7 @@ impl Declared {
                 Offered {
                     cursor_sets: documents.cursor_sets,
                     catalog: documents.catalog,
+                    text: documents.text,
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
@@ -1163,10 +1293,19 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
 ];
 
 /// The Appearance pane's groups.
-const APPEARANCE_GROUPS: [GroupSpec; 2] = [
+const APPEARANCE_GROUPS: [GroupSpec; 3] = [
     GroupSpec {
         caption: "APPEARANCE",
         settings: &[Declared::Desktop(Setting::Appearance)],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "TEXT",
+        settings: &[
+            Declared::Desktop(Setting::Font),
+            Declared::Desktop(Setting::TextSize),
+        ],
         pictures: None,
         footnote: None,
     },
@@ -1747,6 +1886,8 @@ pub(crate) struct Documents<'a> {
     pub(crate) cursor_sets: &'a [CursorSetId],
     /// The shipped pictures the desktop answered with.
     pub(crate) catalog: &'a [CatalogItem],
+    /// The font store's families and the theme's own text, once listed.
+    pub(crate) text: Option<&'a TextChoices>,
     /// The machine's boot-time configuration, or `None` while it has not
     /// been read.
     pub(crate) config: Option<&'a SystemConfig>,
@@ -1899,6 +2040,9 @@ pub struct Form {
     /// The shipped pictures the desktop answered with, kept for the same
     /// reason.
     catalog: Vec<CatalogItem>,
+    /// The font store's families and the theme's own text, kept for the same
+    /// reason.
+    text: Option<TextChoices>,
     /// What renders each picture the choosers show, and which the desktop
     /// would not.
     pictures: Pictures,
@@ -1942,6 +2086,7 @@ impl Form {
             staged_accounts: documents.staged_accounts.to_vec(),
             cursor_sets: documents.cursor_sets.to_vec(),
             catalog: documents.catalog.to_vec(),
+            text: documents.text.cloned(),
             pictures: Pictures::default(),
             notify_sources: documents.notify_sources.map(<[_]>::to_vec),
             sources_full: documents.sources_full,
@@ -2389,6 +2534,7 @@ impl Form {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
+            text: self.text.as_ref(),
             config: self.config.as_ref(),
             addressing: &self.addressing,
             staged: &self.staged,
@@ -2878,6 +3024,7 @@ impl Form {
                 let offered = Offered {
                     cursor_sets: &self.cursor_sets,
                     catalog: &self.catalog,
+                    text: self.text.as_ref(),
                 };
                 let offered_before = setting.offer(&self.settings, offered).len();
                 if !setting.adopt(index, &mut self.settings, offered) {
@@ -2889,6 +3036,7 @@ impl Form {
                 let offered = Offered {
                     cursor_sets: &self.cursor_sets,
                     catalog: &self.catalog,
+                    text: self.text.as_ref(),
                 };
                 if setting.offer(&self.settings, offered).len() != offered_before {
                     self.rebuild();

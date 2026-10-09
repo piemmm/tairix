@@ -24,8 +24,8 @@ use tairix_theme::Theme;
 use tairix_sandbox::imageedit::MAX_LAYER_NAME;
 
 use crate::canvas::{admissible, MAX_PIXELS, MAX_SIDE};
-use crate::document::{NewPicture, Shown, NAME_REFUSAL};
-use crate::filter::{Filter, Parameter};
+use crate::document::{colours_for, NewPicture, Shown, COLOURS, NAME_REFUSAL};
+use crate::filter::Parameter;
 use crate::save::{Loss, SaveFormat, SaveSettings};
 use crate::transform::{Anchor, PaletteChoice};
 
@@ -34,15 +34,6 @@ const FORM_WIDTH: u32 = 460;
 
 /// The longest a number field takes.
 const NUMBER_LEN: usize = 6;
-
-/// The depths a picture may be made or converted to, as their choices read.
-const DEPTHS: [(Option<IndexDepth>, &str); 5] = [
-    (None, "Millions of colours, and transparency"),
-    (Some(IndexDepth::Eight), "256 colours"),
-    (Some(IndexDepth::Four), "16 colours"),
-    (Some(IndexDepth::Two), "4 colours"),
-    (Some(IndexDepth::One), "2 colours"),
-];
 
 /// The pixel shapes a new sprite may have, as eigen factors across and down.
 const SHAPES: [((u8, u8), &str); 3] = [
@@ -100,8 +91,6 @@ pub enum Purpose {
         /// Close the window once saved.
         then_close: bool,
     },
-    /// An adjustment or a filter's settings, previewed as they move.
-    Filter,
     /// A layer's name, how much of it shows, and whether it shows.
     Layer,
 }
@@ -145,8 +134,6 @@ pub struct Form {
     /// The settings a Save As sheet is answered with, kept as its rows come
     /// and go with the format.
     settings: SaveSettings,
-    /// The filter a filter form sets, as its sliders stand.
-    filter: Option<Filter>,
     /// The opacity a layer form sets, out of 255: exactly the layer's own
     /// until its slider moves.
     opacity: u8,
@@ -192,32 +179,8 @@ impl Form {
             formats: Vec::new(),
             format: SaveFormat::Png,
             settings: SaveSettings::default(),
-            filter: None,
             opacity: u8::MAX,
         }
-    }
-
-    /// The form setting `filter`, a slider for each of its numbers.
-    #[must_use]
-    pub fn filter(filter: Filter) -> Self {
-        let rows = filter
-            .parameters()
-            .iter()
-            .enumerate()
-            .map(|(index, parameter)| {
-                let value = filter.value(index);
-                slider_row(slider_label(parameter, value), parameter, value)
-            })
-            .collect();
-        let mut form = Self::new(Purpose::Filter, filter.label(), "Apply", rows);
-        form.filter = Some(filter);
-        form
-    }
-
-    /// The filter a filter form sets, as its sliders stand.
-    #[must_use]
-    pub const fn filter_answer(&self) -> Option<Filter> {
-        self.filter
     }
 
     /// The form showing a layer as `shown` says.
@@ -258,16 +221,24 @@ impl Form {
         })
     }
 
-    /// The form for a new picture, sized as `size` to start: the format it is
-    /// to be saved as, and the colours and background that format holds.
+    /// The form for a new picture, starting at `picture` to be saved as
+    /// `format`: the format, and the colours and background that format
+    /// holds.
     #[must_use]
-    pub fn new_picture(size: (u32, u32)) -> Self {
+    pub fn new_picture(picture: NewPicture, format: SaveFormat) -> Self {
         let mut form = Self::new(Purpose::NewPicture, "New picture", "Create", Vec::new());
         form.formats = SaveFormat::ALL
             .into_iter()
             .map(|format| (format, Vec::new()))
             .collect();
-        form.rebuild(&size.0.to_string(), &size.1.to_string(), None, false);
+        form.format = format;
+        let (width, height) = picture.size;
+        form.rebuild(
+            &width.to_string(),
+            &height.to_string(),
+            picture.depth,
+            picture.transparent,
+        );
         form
     }
 
@@ -281,7 +252,7 @@ impl Form {
             vec![
                 text_row("Width", &size.0.to_string(), NUMBER_LEN),
                 text_row("Height", &size.1.to_string(), NUMBER_LEN),
-                choice_row("Colours", &DEPTHS.map(|(_, label)| label), 0),
+                choice_row("Colours", &COLOURS.map(|colours| colours.label), 0),
                 toggle_row("Transparent background", false),
             ],
         )
@@ -335,15 +306,10 @@ impl Form {
     /// the background where it can be clear.
     fn rebuild(&mut self, width: &str, height: &str, depth: Option<IndexDepth>, clear: bool) {
         let format = self.format;
-        let offered: Vec<(Option<IndexDepth>, &str)> = DEPTHS
-            .into_iter()
-            .filter(|(depth, _)| format.admits(*depth))
-            .collect();
-        let chosen = offered
-            .iter()
-            .position(|(offered, _)| *offered == depth)
+        let chosen = colours_for(format)
+            .position(|offered| offered.depth == depth)
             .unwrap_or(0);
-        let labels: Vec<&str> = offered.iter().map(|(_, label)| *label).collect();
+        let labels: Vec<&str> = colours_for(format).map(|offered| offered.label).collect();
         let mut rows = vec![
             self.format_row(),
             text_row("Width", width, NUMBER_LEN),
@@ -428,7 +394,7 @@ impl Form {
                 text_row("Name", name, SpriteName::MAX_LEN),
                 text_row("Width", &size.0.to_string(), NUMBER_LEN),
                 text_row("Height", &size.1.to_string(), NUMBER_LEN),
-                choice_row("Colours", &DEPTHS.map(|(_, label)| label), 2),
+                choice_row("Colours", &COLOURS.map(|colours| colours.label), 2),
                 choice_row("Pixel shape", &SHAPES.map(|(_, label)| label), 0),
                 toggle_row("Mask", false),
             ],
@@ -470,16 +436,16 @@ impl Form {
     /// The form converting a picture to another depth.
     #[must_use]
     pub fn convert(current: Option<IndexDepth>) -> Self {
-        let selected = DEPTHS
+        let selected = COLOURS
             .iter()
-            .position(|(depth, _)| *depth == current)
+            .position(|colours| colours.depth == current)
             .unwrap_or(0);
         Self::new(
             Purpose::Convert,
             "Colours",
             "Convert",
             vec![
-                choice_row("Store as", &DEPTHS.map(|(_, label)| label), selected),
+                choice_row("Store as", &COLOURS.map(|colours| colours.label), selected),
                 choice_row("Palette", &PALETTES.map(|(_, label)| label), 1),
                 toggle_row("Dither", true),
             ],
@@ -595,7 +561,6 @@ impl Form {
             Purpose::Scale => self.follow_proportions(acted),
             Purpose::NewPicture => self.follow_new_picture(acted),
             Purpose::SaveAs { .. } => self.follow_save_as(acted),
-            Purpose::Filter => self.follow_filter(acted),
             Purpose::Layer => self.follow_opacity(acted),
             _ => {}
         }
@@ -660,27 +625,9 @@ impl Form {
 
     /// The depth the new-picture form's colours row names.
     fn new_depth(&self) -> Option<IndexDepth> {
-        DEPTHS
-            .into_iter()
-            .filter(|(depth, _)| self.format.admits(*depth))
+        colours_for(self.format)
             .nth(self.choice(3))
-            .and_then(|(depth, _)| depth)
-    }
-
-    fn follow_filter(&mut self, acted: &FieldGroupAction) {
-        let (FieldAction::SetValue { permille } | FieldAction::Settled { permille }) = acted.action
-        else {
-            return;
-        };
-        let Some(filter) = &mut self.filter else {
-            return;
-        };
-        let Some(&parameter) = filter.parameters().get(acted.row) else {
-            return;
-        };
-        filter.set(acted.row, value_of(&parameter, permille));
-        let value = filter.value(acted.row);
-        self.relabel(acted.row, slider_label(&parameter, value));
+            .and_then(|colours| colours.depth)
     }
 
     fn follow_opacity(&mut self, acted: &FieldGroupAction) {
@@ -690,7 +637,7 @@ impl Form {
             return;
         };
         let permille = *permille;
-        let percent = value_of(&OPACITY, permille);
+        let percent = OPACITY.value_of(permille);
         self.opacity = Fraction::from_percent(u32::try_from(percent).unwrap_or(0)).byte();
         self.relabel(1, opacity_label(percent));
     }
@@ -792,7 +739,7 @@ impl Form {
     pub fn new_page_answer(&self) -> Result<NewPicture, String> {
         Ok(NewPicture {
             size: self.size(0)?,
-            depth: DEPTHS[self.choice(2).min(DEPTHS.len() - 1)].0,
+            depth: COLOURS[self.choice(2).min(COLOURS.len() - 1)].depth,
             transparent: self.on(3),
         })
     }
@@ -807,7 +754,7 @@ impl Form {
         let name =
             SpriteName::new(self.text(0).trim()).ok_or_else(|| String::from(NAME_REFUSAL))?;
         let size = self.size(1)?;
-        let depth = DEPTHS[self.choice(3).min(DEPTHS.len() - 1)].0;
+        let depth = COLOURS[self.choice(3).min(COLOURS.len() - 1)].depth;
         let eig = SHAPES[self.choice(4).min(SHAPES.len() - 1)].0;
         Ok(NewSprite {
             name,
@@ -842,7 +789,7 @@ impl Form {
     #[must_use]
     pub fn convert_answer(&self) -> (Option<IndexDepth>, PaletteChoice, bool) {
         (
-            DEPTHS[self.choice(0).min(DEPTHS.len() - 1)].0,
+            COLOURS[self.choice(0).min(COLOURS.len() - 1)].depth,
             PALETTES[self.choice(1).min(PALETTES.len() - 1)].0,
             self.on(2),
         )
@@ -874,42 +821,16 @@ pub struct NewSprite {
 /// A row of a slider labelled `label`, setting `parameter` from `value`; a
 /// key moves the number by at least one.
 fn slider_row(label: String, parameter: &Parameter, value: i32) -> FieldRow {
-    let span = u16::try_from(parameter.most - parameter.least)
-        .unwrap_or(1)
-        .max(1);
-    let line = 1000u16.div_ceil(span);
+    let (line, page) = parameter.steps();
     FieldRow::new(
         label,
-        FieldControl::Slider(
-            Slider::new(permille_of(parameter, value))
-                .with_steps(line, line.saturating_mul(10).min(1000)),
-        ),
+        FieldControl::Slider(Slider::new(parameter.permille_of(value)).with_steps(line, page)),
     )
-}
-
-/// What a filter's slider says: its number's name and value.
-fn slider_label(parameter: &Parameter, value: i32) -> String {
-    alloc::format!("{}: {value}", parameter.label)
 }
 
 /// What the opacity slider says.
 fn opacity_label(percent: i32) -> String {
     alloc::format!("{}: {percent}%", OPACITY.label)
-}
-
-/// Where `value` lies along `parameter`'s slider, in thousandths.
-fn permille_of(parameter: &Parameter, value: i32) -> u16 {
-    let span = i64::from(parameter.most - parameter.least).max(1);
-    let along = i64::from(value.clamp(parameter.least, parameter.most) - parameter.least);
-    u16::try_from(along * 1000 / span).unwrap_or(1000)
-}
-
-/// The value `permille` thousandths along `parameter`'s slider, to the
-/// nearest.
-fn value_of(parameter: &Parameter, permille: u16) -> i32 {
-    let span = i64::from(parameter.most - parameter.least);
-    let along = (i64::from(permille.min(1000)) * span + 500) / 1000;
-    i32::try_from(i64::from(parameter.least) + along).unwrap_or(parameter.least)
 }
 
 fn quality_label(quality: u8) -> String {

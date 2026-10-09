@@ -10,6 +10,33 @@ fn a_fresh_desk_has_no_work_and_no_answer() {
     assert_eq!(desk.collect(), None);
 }
 
+/// A job is outstanding from its submission until its answer lands, behind
+/// any newer one waiting, and a stop leaves only the job in flight.
+#[test]
+fn a_job_is_outstanding_until_its_answer_lands() {
+    let mut desk = JobDesk::<u32, u32>::new();
+    assert!(!desk.outstanding());
+    let _ = desk.submit(1);
+    assert!(desk.outstanding());
+    assert_eq!(desk.next_job(), Some(1));
+    let _ = desk.submit(2);
+    assert!(!desk.deliver(10), "superseded by the one waiting");
+    assert!(desk.outstanding(), "the newer one is still to do");
+    assert_eq!(desk.next_job(), Some(2));
+    assert!(desk.deliver(20));
+    assert!(!desk.outstanding());
+    let _ = desk.submit(3);
+    let _ = desk.next_job();
+    let _ = desk.submit(4);
+    desk.stop();
+    assert!(desk.outstanding(), "the job in flight still lands");
+    let _ = desk.deliver(30);
+    assert!(
+        !desk.outstanding(),
+        "and the one waiting was dropped by the stop"
+    );
+}
+
 /// The first submission is takeable, so the worker is worth waking.
 #[test]
 fn submitting_asks_for_a_worker_and_hands_the_job_over() {

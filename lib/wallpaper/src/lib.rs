@@ -33,7 +33,7 @@
 //!
 //! The settings document is **untrusted input** to every consumer, and this
 //! crate has two readings of it, deliberately different
-//! ([`DesktopSettings::load`] tolerant, [`merge`] strict — [`settings`]
+//! (its [`Registry`](tairix_appconf::Registry) reading tolerant, [`merge`] strict — [`settings`]
 //! records why). Both are bounded: the format engine bounds the document,
 //! the line, the key and the value, and [`MAX_WALLPAPER_PATH_LEN`] bounds
 //! the one value that carries a path. Neither ever half-applies a document:
@@ -64,6 +64,7 @@ pub mod input;
 pub mod notify;
 pub mod saver;
 pub mod settings;
+pub mod text;
 
 #[cfg(feature = "rt")]
 pub use apply::apply;
@@ -94,6 +95,7 @@ pub use settings::{
     WallpaperPathError, MAX_WALLPAPER_PATH_LEN,
 };
 pub use tairix_abi::desktop::ScreensaverKind;
+pub use text::{resolve, ResolvedText, TextFamily, TextSize, TEXT_POINTS_MAX, TEXT_POINTS_MIN};
 
 /// The signed bundle identifier of the desktop session — the application
 /// that owns the pinboard settings and publishes them.

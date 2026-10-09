@@ -24,7 +24,7 @@ use alloc::string::String;
 use tairix_abi::switchboard_ipc::{MachineHost, MachineReport};
 use tairix_abi::time::WallClockReading;
 use tairix_browse::format_date;
-use tairix_theme::{Accessibility, Motion, Theme};
+use tairix_theme::{Accessibility, DesktopText, Motion, Theme};
 use tairix_wallpaper::SystemMonitorOptions;
 use tairix_wm::{Compositor, Rect, Region, Surface, WindowId};
 
@@ -314,18 +314,21 @@ fn shifted(step: usize) -> (i32, i32) {
     (x * reach, y * reach)
 }
 
-/// The theme the board is drawn in: the desktop's dark one, on the axes
-/// `active` is drawn on.
+/// The theme the board is drawn in: the desktop's dark one, on the axes and
+/// in the text `active` is drawn in.
 fn board_theme(active: &Theme) -> Theme {
-    Theme::dark().with_axes(Accessibility {
-        contrast: active.contrast(),
-        density: active.density(),
-        motion: if active.motion().reduced_motion() {
-            Motion::Reduced
-        } else {
-            Motion::Full
-        },
-    })
+    let fonts = active.fonts();
+    Theme::dark()
+        .with_axes(Accessibility {
+            contrast: active.contrast(),
+            density: active.density(),
+            motion: if active.motion().reduced_motion() {
+                Motion::Reduced
+            } else {
+                Motion::Full
+            },
+        })
+        .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok())
 }
 
 #[cfg(test)]

@@ -2132,6 +2132,57 @@ pub enum WindowRequest {
         /// window's client origin, in physical pixels; may be negative.
         offset_y: i32,
     },
+    /// Open a **tool window**: a floating palette hung above the caller's
+    /// own top-level window `parent_window_id`, which the window manager
+    /// frames with a mini title bar the user moves it by
+    /// (`plans/APPWIN.md` AW7).
+    ///
+    /// A popup's sibling rather than a kind of one: like a popup it is a
+    /// transient — above its parent, off the taskbar and the window picker,
+    /// placed relative to the parent's client origin, closed with it and
+    /// hidden while it is minimised — and unlike one it is titled, framed,
+    /// moved by the user, and takes the keyboard only when pressed. While
+    /// the user moves it, its moves are reported to its owner relative to
+    /// the parent ([`WindowEvent::ToolMoved`]). The geometry is the client
+    /// area's: the band and rim are the window manager's. It counts against
+    /// the same budget and answers with the same reply as [`Self::Create`].
+    CreateTool {
+        /// The caller's own top-level window the tool window belongs to;
+        /// never zero, and never a transient itself.
+        parent_window_id: u64,
+        /// The `shm_grant` handle minted to the session's serving task,
+        /// naming the region that holds the tool window's frames.
+        shm_handle: u64,
+        /// The caller's own endpoint the session delivers this tool
+        /// window's [`WindowEvent`]s to. Never a reserved endpoint.
+        event_endpoint: u64,
+        /// Frames laid out back-to-back in the region
+        /// (`1..=WINDOW_MAX_FRAMES`).
+        frame_count: u32,
+        /// Client width in pixels; never zero.
+        width_px: u32,
+        /// Client height in pixels; never zero.
+        height_px: u32,
+        /// Bytes between consecutive scanlines; at least one scanline.
+        stride_bytes: u32,
+        /// Pixel encoding of the frames.
+        format: DisplayFormat,
+        /// Horizontal offset of the client's top-left from the parent's
+        /// client origin, in physical pixels; may be negative.
+        offset_x: i32,
+        /// Vertical offset of the client's top-left from the parent's client
+        /// origin, in physical pixels; may be negative.
+        offset_y: i32,
+        /// Where along the mini title band, in pixels from the client's left
+        /// edge, the pointer holds the tool window when the parent still
+        /// holds the primary press that asked for it: the session hands that
+        /// press over to a move of the new window, so a palette torn out of a
+        /// window goes on following it. `None`, or a press already let go,
+        /// opens it at the offset. Less than `width_px`.
+        carry: Option<u32>,
+        /// What its mini title bar reads.
+        title: WindowTitle,
+    },
     /// Show frame `frame_index` of window `window_id`, of which only
     /// `damage` changed since the previously presented frame.
     Present {
@@ -2851,6 +2902,8 @@ const OP_ACTIVATE_WINDOW: u16 = 33;
 const OP_DRAG_VERDICT: u16 = 34;
 /// Wire operation discriminant of [`WindowRequest::QueryDragSpot`].
 const OP_QUERY_DRAG_SPOT: u16 = 35;
+/// Wire operation discriminant of [`WindowRequest::CreateTool`].
+const OP_CREATE_TOOL: u16 = 36;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3025,17 +3078,29 @@ const fn hand_over_wire_len(path: usize, name: usize) -> usize {
 const HAND_OVER_MAX_WIRE_LEN: usize =
     hand_over_wire_len(HAND_OVER_RUN_PATH_MAX, crate::FS_NAME_MAX);
 
-/// Byte offset of a [`WindowRequest::CreatePopup`] operand tail that
-/// follows the shared frame-layout block: the parent window id (8), then
-/// the two signed placement offsets (4 each). Only this tail is
-/// popup-specific.
-const POPUP_PARENT_OFFSET: usize = FRAME_LAYOUT_END;
-/// Byte offset of [`WindowRequest::CreatePopup::offset_x`].
-const POPUP_OFFSET_X: usize = POPUP_PARENT_OFFSET + 8;
-/// Byte offset of [`WindowRequest::CreatePopup::offset_y`].
-const POPUP_OFFSET_Y: usize = POPUP_OFFSET_X + 4;
-/// Encoded size of a [`WindowRequest::CreatePopup`].
-const CREATE_POPUP_WIRE_LEN: usize = POPUP_OFFSET_Y + 4;
+/// Byte offset of the tail every transient — a popup or a tool window —
+/// carries after the shared frame-layout block: the parent window id (8),
+/// then the two signed placement offsets (4 each).
+const TRANSIENT_PARENT_OFFSET: usize = FRAME_LAYOUT_END;
+/// Byte offset of a transient's horizontal placement offset.
+const TRANSIENT_OFFSET_X: usize = TRANSIENT_PARENT_OFFSET + 8;
+/// Byte offset of a transient's vertical placement offset.
+const TRANSIENT_OFFSET_Y: usize = TRANSIENT_OFFSET_X + 4;
+/// One past the transient tail.
+const TRANSIENT_END: usize = TRANSIENT_OFFSET_Y + 4;
+/// Encoded size of a [`WindowRequest::CreatePopup`]: a popup carries the
+/// transient tail and nothing more.
+const CREATE_POPUP_WIRE_LEN: usize = TRANSIENT_END;
+/// Byte offset of a [`WindowRequest::CreateTool`]'s carry flag: `1` when it
+/// asks to be carried, `0` when it opens at its offset.
+const TOOL_CARRY_FLAG_OFFSET: usize = TRANSIENT_END;
+/// Byte offset of the carry's place along the band, zero when it carries
+/// none.
+const TOOL_CARRY_OFFSET: usize = TOOL_CARRY_FLAG_OFFSET + 1;
+/// Byte offset of a [`WindowRequest::CreateTool`]'s title length.
+const TOOL_TITLE_LEN_OFFSET: usize = TOOL_CARRY_OFFSET + 4;
+/// Encoded size of a [`WindowRequest::CreateTool`].
+const CREATE_TOOL_WIRE_LEN: usize = TOOL_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
 
 /// Byte offset of [`WindowRequest::OpenLayer::x`], the first operand after
 /// the shared frame-layout block.
@@ -3269,7 +3334,10 @@ impl WindowRequest {
     /// frame rather than padding out to this.
     pub const MAX_WIRE_LEN: usize = longer(
         longer(
-            longer(CREATE_WIRE_LEN, HAND_OVER_MAX_WIRE_LEN),
+            longer(
+                longer(CREATE_WIRE_LEN, CREATE_TOOL_WIRE_LEN),
+                HAND_OVER_MAX_WIRE_LEN,
+            ),
             longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
         ),
         PREVIEW_SCREENSAVER_MAX_WIRE_LEN,
@@ -3286,6 +3354,7 @@ impl WindowRequest {
         match *self {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
+            Self::CreateTool { .. } => CREATE_TOOL_WIRE_LEN,
             Self::Present { ref damage, .. } => PRESENT_WIRE_LEN + damage.len() * PRESENT_RECT_LEN,
             Self::Close { .. }
             | Self::TakePickedName { .. }
@@ -3405,6 +3474,7 @@ impl WindowRequest {
         match *self {
             Self::Create { .. } => OP_CREATE,
             Self::CreatePopup { .. } => OP_CREATE_POPUP,
+            Self::CreateTool { .. } => OP_CREATE_TOOL,
             Self::Present { .. } => OP_PRESENT,
             Self::Close { .. } => OP_CLOSE,
             Self::PickFile { .. } => OP_PICK_FILE,
@@ -3476,7 +3546,10 @@ impl WindowRequest {
     fn write_operands(&self, out: &mut [u8]) {
         match *self {
             Self::Create { .. } => self.write_create_operands(out),
-            Self::CreatePopup { .. } => self.write_popup_operands(out),
+            Self::CreatePopup { .. } | Self::CreateTool { .. } => {
+                self.write_transient_operands(out);
+            }
+            Self::Resize { .. } => self.write_resize_operands(out),
             Self::Present { .. } => self.write_present_operands(out),
             Self::Close { window_id }
             | Self::TakePickedName { window_id }
@@ -3520,26 +3593,6 @@ impl WindowRequest {
                 ref run_path,
                 ref document,
             } => write_hand_over_operands(out, run_path, document.as_ref()),
-            Self::Resize {
-                window_id,
-                shm_handle,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-            } => {
-                put_u64(out, 8, window_id);
-                put_u64(out, 16, shm_handle);
-                FrameLayout {
-                    frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
-                }
-                .write_to(out);
-            }
             Self::SetTitle { window_id, title } => encode_set_title(out, window_id, &title),
             Self::SetTooltip {
                 window_id,
@@ -3630,41 +3683,91 @@ impl WindowRequest {
         }
     }
 
-    /// Write a [`CreatePopup`](Self::CreatePopup)'s operand block: the
-    /// shared surface prologue, then the parent it hangs above and the
-    /// offsets from that parent's client origin. A no-op for any other
-    /// request.
-    fn write_popup_operands(&self, out: &mut [u8]) {
-        let Self::CreatePopup {
-            parent_window_id,
+    /// Write a [`Resize`](Self::Resize)'s operand block: the window, the
+    /// region it moves onto, and the shared frame layout. A no-op for any
+    /// other request.
+    fn write_resize_operands(&self, out: &mut [u8]) {
+        let Self::Resize {
+            window_id,
             shm_handle,
-            event_endpoint,
             frame_count,
             width_px,
             height_px,
             stride_bytes,
             format,
-            offset_x,
-            offset_y,
         } = *self
         else {
             return;
         };
-        write_surface_operands(
-            out,
-            shm_handle,
-            event_endpoint,
-            &FrameLayout {
+        put_u64(out, 8, window_id);
+        put_u64(out, 16, shm_handle);
+        FrameLayout {
+            frame_count,
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+        }
+        .write_to(out);
+    }
+
+    /// The surface, parent and placement a popup or a tool window opens
+    /// with, or `None` for any other request.
+    const fn transient(&self) -> Option<Transient> {
+        match *self {
+            Self::CreatePopup {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
                 frame_count,
                 width_px,
                 height_px,
                 stride_bytes,
                 format,
-            },
-        );
-        put_u64(out, POPUP_PARENT_OFFSET, parent_window_id);
-        put_i32(out, POPUP_OFFSET_X, offset_x);
-        put_i32(out, POPUP_OFFSET_Y, offset_y);
+                offset_x,
+                offset_y,
+            }
+            | Self::CreateTool {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                offset_x,
+                offset_y,
+                ..
+            } => Some(Transient {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
+                layout: FrameLayout {
+                    frame_count,
+                    width_px,
+                    height_px,
+                    stride_bytes,
+                    format,
+                },
+                offset: (offset_x, offset_y),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Write a transient's operand block: what every transient opens with,
+    /// then a tool window's carry and title. A no-op for any other request.
+    fn write_transient_operands(&self, out: &mut [u8]) {
+        let Some(transient) = self.transient() else {
+            return;
+        };
+        transient.write_to(out);
+        if let Self::CreateTool { carry, title, .. } = *self {
+            out[TOOL_CARRY_FLAG_OFFSET] = u8::from(carry.is_some());
+            put_u32(out, TOOL_CARRY_OFFSET, carry.unwrap_or(0));
+            encode_title(out, TOOL_TITLE_LEN_OFFSET, &title);
+        }
     }
 
     /// Write an [`OpenLayer`](Self::OpenLayer)'s operand block: the shared
@@ -3783,6 +3886,7 @@ impl WindowRequest {
         match op {
             OP_CREATE => read_create(bytes),
             OP_CREATE_POPUP => read_create_popup(bytes),
+            OP_CREATE_TOOL => read_create_tool(bytes),
             OP_PRESENT => read_present(bytes),
             OP_CLOSE => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
@@ -4243,9 +4347,7 @@ fn read_input_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, SET_TITLE_WIRE_LEN)?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
-    let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
-    title_bytes.copy_from_slice(&bytes[SET_TITLE_TEXT_OFFSET..SET_TITLE_WIRE_LEN]);
-    let title = WindowTitle::from_wire(bytes[SET_TITLE_LEN_OFFSET], &title_bytes)?;
+    let title = decode_title(bytes, SET_TITLE_LEN_OFFSET)?;
     Ok(WindowRequest::SetTitle { window_id, title })
 }
 
@@ -4555,6 +4657,15 @@ fn encode_title(out: &mut [u8], len_at: usize, title: &WindowTitle) {
     out[text..text.saturating_add(WINDOW_TITLE_MAX)].copy_from_slice(&title.bytes);
 }
 
+/// Read the fixed-width title field whose length byte sits at `len_at`, as
+/// [`encode_title`] wrote it.
+fn decode_title(bytes: &[u8], len_at: usize) -> Result<WindowTitle, Errno> {
+    let text = len_at + 1;
+    let mut title = [0u8; WINDOW_TITLE_MAX];
+    title.copy_from_slice(&bytes[text..text + WINDOW_TITLE_MAX]);
+    WindowTitle::from_wire(bytes[len_at], &title)
+}
+
 /// Encode the window id + title payload of [`WindowRequest::SetTitle`]
 /// (mirrors [`read_set_title`]).
 fn encode_set_title(out: &mut [u8], window_id: u64, title: &WindowTitle) {
@@ -4582,11 +4693,7 @@ fn read_create(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         return Err(Errno::OutOfRange);
     }
     let layout = read_frame_layout(bytes)?;
-    let mut title_bytes = [0u8; WINDOW_TITLE_MAX];
-    title_bytes.copy_from_slice(
-        &bytes[CREATE_TITLE_TEXT_OFFSET..CREATE_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX],
-    );
-    let title = WindowTitle::from_wire(bytes[CREATE_TITLE_LEN_OFFSET], &title_bytes)?;
+    let title = decode_title(bytes, CREATE_TITLE_LEN_OFFSET)?;
     Ok(WindowRequest::Create {
         shm_handle,
         event_endpoint,
@@ -4652,27 +4759,63 @@ const fn crossed_sizing(sizing: WindowSizing) -> bool {
         || crossed(sizing.min_height_px(), sizing.max_height_px())
 }
 
-/// Decode the operands of a [`WindowRequest::CreatePopup`]: the granted
-/// region and event route and the frame layout (the same offsets a
-/// `Create` carries, reusing [`read_frame_layout`]), then the popup's own
-/// tail — the parent window id it is anchored above and the signed
-/// placement offsets from the parent's client origin.
-///
-/// Fails closed exactly as `Create`: a reserved endpoint, a bad geometry,
-/// a zero parent window id, or a dirty reserved tail is refused. The
-/// offsets are unconstrained signed values — the session clamps the popup
-/// onto the screen, so any offset is a legitimate request.
-fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    exact_len(bytes, CREATE_POPUP_WIRE_LEN)?;
+/// What a [`WindowRequest::CreatePopup`] and a [`WindowRequest::CreateTool`]
+/// both open with: the surface prologue and frame layout every
+/// surface-opening request carries, the parent the transient hangs from, and
+/// its offset from that parent's client origin.
+struct Transient {
+    parent_window_id: u64,
+    shm_handle: u64,
+    event_endpoint: u64,
+    layout: FrameLayout,
+    offset: (i32, i32),
+}
+
+impl Transient {
+    /// Write the block at the offsets [`read_transient`] reads it from.
+    fn write_to(&self, out: &mut [u8]) {
+        write_surface_operands(out, self.shm_handle, self.event_endpoint, &self.layout);
+        put_u64(out, TRANSIENT_PARENT_OFFSET, self.parent_window_id);
+        put_i32(out, TRANSIENT_OFFSET_X, self.offset.0);
+        put_i32(out, TRANSIENT_OFFSET_Y, self.offset.1);
+    }
+}
+
+/// Decode what every transient opens with, failing closed exactly as
+/// `Create` does — a reserved endpoint or a bad geometry — and on a zero
+/// parent window id. The offsets are unconstrained: the session clamps a
+/// transient onto the screen, so any offset is a legitimate request.
+fn read_transient(bytes: &[u8]) -> Result<Transient, Errno> {
     let shm_handle = read_u64(bytes, 8);
     let event_endpoint = read_u64(bytes, 16);
     if crate::ipc::is_reserved_endpoint(event_endpoint) {
         return Err(Errno::OutOfRange);
     }
     let layout = read_frame_layout(bytes)?;
-    let parent_window_id = nonzero_id(read_u64(bytes, POPUP_PARENT_OFFSET))?;
-    let offset_x = read_i32(bytes, POPUP_OFFSET_X);
-    let offset_y = read_i32(bytes, POPUP_OFFSET_Y);
+    let parent_window_id = nonzero_id(read_u64(bytes, TRANSIENT_PARENT_OFFSET))?;
+    Ok(Transient {
+        parent_window_id,
+        shm_handle,
+        event_endpoint,
+        layout,
+        offset: (
+            read_i32(bytes, TRANSIENT_OFFSET_X),
+            read_i32(bytes, TRANSIENT_OFFSET_Y),
+        ),
+    })
+}
+
+/// Decode the operands of a [`WindowRequest::CreatePopup`]: what every
+/// transient opens with, and nothing more.
+fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, CREATE_POPUP_WIRE_LEN)?;
+    let Transient {
+        parent_window_id,
+        shm_handle,
+        event_endpoint,
+        layout,
+        offset: (offset_x, offset_y),
+    } = read_transient(bytes)?;
     Ok(WindowRequest::CreatePopup {
         parent_window_id,
         shm_handle,
@@ -4684,6 +4827,44 @@ fn read_create_popup(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         format: layout.format,
         offset_x,
         offset_y,
+    })
+}
+
+/// Decode the operands of a [`WindowRequest::CreateTool`]: what every
+/// transient opens with, then the carry and the title.
+///
+/// A carry has one encoding: a flag of `0` with a zero place, or `1` with a
+/// place along the band — inside the client's width, since the band is as
+/// wide as the client. A dirty carry field is refused as a dirty tail is.
+fn read_create_tool(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, CREATE_TOOL_WIRE_LEN)?;
+    let Transient {
+        parent_window_id,
+        shm_handle,
+        event_endpoint,
+        layout,
+        offset: (offset_x, offset_y),
+    } = read_transient(bytes)?;
+    let place = read_u32(bytes, TOOL_CARRY_OFFSET);
+    let carry = match bytes[TOOL_CARRY_FLAG_OFFSET] {
+        0 if place == 0 => None,
+        0 => return Err(Errno::BadMagic),
+        1 if place < layout.width_px => Some(place),
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowRequest::CreateTool {
+        parent_window_id,
+        shm_handle,
+        event_endpoint,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+        offset_x,
+        offset_y,
+        carry,
+        title: decode_title(bytes, TOOL_TITLE_LEN_OFFSET)?,
     })
 }
 
@@ -5153,6 +5334,23 @@ pub enum DragAt {
     Desktop,
     /// Over nothing the application can drop on.
     Nowhere,
+}
+
+/// Where the pointer is while the user moves a tool window, as
+/// [`WindowEvent::ToolMoved`] tells its owner: over the client area of the
+/// window the tool window belongs to, or not. Nothing about the screen.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ToolOver {
+    /// Over the parent window's client area, with nothing else drawn above it
+    /// there, at this client-local point.
+    Parent {
+        /// Client-local x.
+        x: u32,
+        /// Client-local y.
+        y: u32,
+    },
+    /// Anywhere else.
+    Elsewhere,
 }
 
 /// Where a carried drag was dropped, as [`WindowEvent::DragEnded`] reports
@@ -6260,6 +6458,8 @@ const EV_LAYER_POINTER: u16 = 19;
 const EV_PREVIEW_RENDERED: u16 = 20;
 /// Wire kind of [`WindowEvent::Pinch`].
 const EV_PINCH: u16 = 21;
+/// Wire kind of [`WindowEvent::ToolMoved`].
+const EV_TOOL_MOVED: u16 = 23;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -6634,6 +6834,22 @@ pub enum WindowEvent {
         /// Pointer position in physical screen pixels.
         y: i32,
     },
+    /// The user is moving a tool window ([`WindowRequest::CreateTool`]) by
+    /// its band, and the pointer is `over` its parent or elsewhere: one per
+    /// move sample, the last with `ended` once the button comes up.
+    ///
+    /// Relative to the parent and nothing else, so an application can dock
+    /// a palette dragged back over its window without being told where
+    /// anything is on screen. A run of samples folds to the newest; the end
+    /// of a move is never dropped.
+    ToolMoved {
+        /// The tool window being moved.
+        window_id: u64,
+        /// Where the pointer is.
+        over: ToolOver,
+        /// The move is over: this is where it was let go.
+        ended: bool,
+    },
 }
 
 impl WindowEvent {
@@ -6752,6 +6968,7 @@ impl WindowEvent {
             | Self::Pinch { window_id, .. }
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
+            | Self::ToolMoved { window_id, .. }
             | Self::MenuClosed { window_id, .. } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } | Self::OpenRequested => None,
         }
@@ -6773,6 +6990,7 @@ impl WindowEvent {
                 serial, at, shift, ..
             } => write_drag_over(&mut out, serial, at, shift),
             Self::DragEnded { site, .. } => write_drop_site(&mut out, site),
+            Self::ToolMoved { over, ended, .. } => write_tool_moved(&mut out, over, ended),
             Self::Key { key, .. } => {
                 put_u16(&mut out, 6, EV_KEY);
                 out[16..16 + KeyInput::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
@@ -6917,6 +7135,7 @@ impl WindowEvent {
                 })
             }
             EV_DRAG_OVER => read_drag_over(window_id, bytes),
+            EV_TOOL_MOVED => read_tool_moved(window_id, bytes),
             EV_DRAG_ENDED => Ok(Self::DragEnded {
                 window_id,
                 site: read_drop_site(bytes)?,
@@ -7060,6 +7279,60 @@ fn write_drag_over(out: &mut [u8; WindowEvent::WIRE_LEN], serial: u32, at: DragA
         DragAt::Desktop => DRAG_AT_DESKTOP,
     };
     out[DRAG_EVENT_SHIFT_OFFSET] = u8::from(shift);
+}
+
+/// Byte offset of a [`WindowEvent::ToolMoved`]'s kind: over the parent, or
+/// elsewhere.
+const TOOL_EVENT_KIND_OFFSET: usize = 16;
+/// Byte offset of its ended flag.
+const TOOL_EVENT_ENDED_OFFSET: usize = 17;
+/// Byte offset of its client-local x, then y.
+const TOOL_EVENT_POINT_OFFSET: usize = 20;
+/// [`ToolOver::Elsewhere`].
+const TOOL_OVER_ELSEWHERE: u8 = 0;
+/// [`ToolOver::Parent`].
+const TOOL_OVER_PARENT: u8 = 1;
+
+/// Decode where a moved tool window's pointer is: the point is carried only
+/// over the parent, and every byte a case does not carry is zero.
+fn read_tool_moved(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, TOOL_EVENT_POINT_OFFSET + 8)?;
+    if bytes[TOOL_EVENT_ENDED_OFFSET + 1..TOOL_EVENT_POINT_OFFSET]
+        .iter()
+        .any(|&b| b != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let (x, y) = (
+        read_u32(bytes, TOOL_EVENT_POINT_OFFSET),
+        read_u32(bytes, TOOL_EVENT_POINT_OFFSET + 4),
+    );
+    let over = match bytes[TOOL_EVENT_KIND_OFFSET] {
+        TOOL_OVER_PARENT => ToolOver::Parent { x, y },
+        TOOL_OVER_ELSEWHERE if x == 0 && y == 0 => ToolOver::Elsewhere,
+        TOOL_OVER_ELSEWHERE => return Err(Errno::BadMagic),
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowEvent::ToolMoved {
+        window_id,
+        over,
+        ended: flag_at(bytes, TOOL_EVENT_ENDED_OFFSET)?,
+    })
+}
+
+/// Write where a moved tool window's pointer is into a
+/// [`WindowEvent::ToolMoved`] frame.
+fn write_tool_moved(out: &mut [u8; WindowEvent::WIRE_LEN], over: ToolOver, ended: bool) {
+    put_u16(out, 6, EV_TOOL_MOVED);
+    out[TOOL_EVENT_KIND_OFFSET] = match over {
+        ToolOver::Parent { x, y } => {
+            put_u32(out, TOOL_EVENT_POINT_OFFSET, x);
+            put_u32(out, TOOL_EVENT_POINT_OFFSET + 4, y);
+            TOOL_OVER_PARENT
+        }
+        ToolOver::Elsewhere => TOOL_OVER_ELSEWHERE,
+    };
+    out[TOOL_EVENT_ENDED_OFFSET] = u8::from(ended);
 }
 
 /// Write where a drag was dropped into a [`WindowEvent::DragEnded`] frame.
@@ -7601,6 +7874,23 @@ mod tests {
         }
     }
 
+    fn sample_create_tool(carry: Option<u32>) -> WindowRequest {
+        WindowRequest::CreateTool {
+            parent_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 2,
+            width_px: 180,
+            height_px: 240,
+            stride_bytes: 720,
+            format: DisplayFormat::Bgra8888,
+            offset_x: -40,
+            offset_y: 32,
+            carry,
+            title: WindowTitle::new("Colour").expect("a title"),
+        }
+    }
+
     /// Distinct tasks get distinct mailbox ids that embed the pid recoverably
     /// and never land on a reserved rendezvous, right up to the widest pid
     /// the kernel draws; only a derived id reads as one.
@@ -7892,6 +8182,14 @@ mod tests {
         });
     }
 
+    /// Visit one of every operation that opens a window or a transient.
+    fn each_opening_request(visit: &mut impl FnMut(WindowRequest)) {
+        visit(sample_create());
+        visit(sample_create_popup());
+        visit(sample_create_tool(None));
+        visit(sample_create_tool(Some(179)));
+    }
+
     /// Visit one of every operation the request codec encodes, including the
     /// narrowest and widest form of each variable-width one.
     ///
@@ -7900,8 +8198,7 @@ mod tests {
     /// one at a time rather than collected: a request carries a whole menu
     /// inline, so a list of them is more than belongs on a stack frame.
     fn each_request(mut visit: impl FnMut(WindowRequest)) {
-        visit(sample_create());
-        visit(sample_create_popup());
+        each_opening_request(&mut visit);
         visit(sample_present());
         visit(widest_present());
         visit(WindowRequest::Close { window_id: 9 });
@@ -10256,7 +10553,7 @@ mod tests {
         // A zero parent window id is refused: a popup must name a real
         // window it is anchored above.
         let mut zero_parent = base.frame();
-        zero_parent[super::POPUP_PARENT_OFFSET..super::POPUP_PARENT_OFFSET + 8]
+        zero_parent[super::TRANSIENT_PARENT_OFFSET..super::TRANSIENT_PARENT_OFFSET + 8]
             .copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_parent),
@@ -10276,14 +10573,150 @@ mod tests {
         // The offsets sit just past the parent id and round-trip signed.
         assert_eq!(
             i32::from_le_bytes([
-                bytes[super::POPUP_OFFSET_X],
-                bytes[super::POPUP_OFFSET_X + 1],
-                bytes[super::POPUP_OFFSET_X + 2],
-                bytes[super::POPUP_OFFSET_X + 3],
+                bytes[super::TRANSIENT_OFFSET_X],
+                bytes[super::TRANSIENT_OFFSET_X + 1],
+                bytes[super::TRANSIENT_OFFSET_X + 2],
+                bytes[super::TRANSIENT_OFFSET_X + 3],
             ]),
             -12
         );
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
+    }
+
+    #[test]
+    fn a_tool_window_round_trips_with_and_without_a_carry() {
+        for carry in [None, Some(0), Some(179)] {
+            let request = sample_create_tool(carry);
+            let frame = request.frame();
+            assert_eq!(frame.len(), super::CREATE_TOOL_WIRE_LEN);
+            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+        }
+    }
+
+    #[test]
+    fn a_tool_window_refuses_what_a_transient_refuses_and_a_bad_carry_or_title() {
+        let base = sample_create_tool(Some(12));
+        let refused = |edit: &dyn Fn(&mut [u8])| {
+            let mut frame = base.frame();
+            edit(&mut frame);
+            WindowRequest::from_bytes(&frame)
+        };
+        assert_eq!(
+            refused(&|frame| frame[16..24].copy_from_slice(&SEATMGR_ENDPOINT.to_le_bytes())),
+            Err(Errno::OutOfRange),
+            "a reserved endpoint"
+        );
+        assert_eq!(
+            refused(&|frame| frame[28..32].copy_from_slice(&0u32.to_le_bytes())),
+            Err(Errno::LengthOutOfRange),
+            "a zero extent"
+        );
+        let parent = super::TRANSIENT_PARENT_OFFSET;
+        assert_eq!(
+            refused(&|frame| frame[parent..parent + 8].copy_from_slice(&0u64.to_le_bytes())),
+            Err(Errno::OutOfRange),
+            "no parent"
+        );
+        let flag = super::TOOL_CARRY_FLAG_OFFSET;
+        let place = super::TOOL_CARRY_OFFSET;
+        assert_eq!(refused(&|frame| frame[flag] = 2), Err(Errno::OutOfRange));
+        assert_eq!(
+            refused(&|frame| frame[flag] = 0),
+            Err(Errno::BadMagic),
+            "a place with no carry"
+        );
+        assert_eq!(
+            refused(&|frame| frame[place..place + 4].copy_from_slice(&180u32.to_le_bytes())),
+            Err(Errno::OutOfRange),
+            "a place off the band"
+        );
+        let title = super::TOOL_TITLE_LEN_OFFSET;
+        assert_eq!(
+            refused(&|frame| frame[title] = u8::try_from(WINDOW_TITLE_MAX + 1).expect("a byte")),
+            Err(Errno::LengthOutOfRange),
+            "a title past its field"
+        );
+        assert_eq!(
+            refused(&|frame| frame[title + 1] = 0x1b),
+            Err(Errno::OutOfRange),
+            "a control character"
+        );
+        assert_eq!(
+            refused(&|frame| frame[title + 1 + 6] = b'x'),
+            Err(Errno::BadMagic),
+            "text past the title's length"
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame().over_long(1)),
+            Err(Errno::BadMagic)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame()[..super::CREATE_TOOL_WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn a_tool_move_round_trips_over_its_parent_and_elsewhere() {
+        for over in [
+            super::ToolOver::Parent { x: 0, y: 0 },
+            super::ToolOver::Parent {
+                x: 1279,
+                y: u32::MAX,
+            },
+            super::ToolOver::Elsewhere,
+        ] {
+            for ended in [false, true] {
+                let event = WindowEvent::ToolMoved {
+                    window_id: 6,
+                    over,
+                    ended,
+                };
+                assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+                assert_eq!(event.window_id(), Some(6));
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_move_has_one_encoding() {
+        let event = WindowEvent::ToolMoved {
+            window_id: 6,
+            over: super::ToolOver::Elsewhere,
+            ended: true,
+        };
+        let refused = |edit: &dyn Fn(&mut [u8; WindowEvent::WIRE_LEN])| {
+            let mut frame = event.to_le_bytes();
+            edit(&mut frame);
+            WindowEvent::from_bytes(&frame)
+        };
+        let kind = super::TOOL_EVENT_KIND_OFFSET;
+        let point = super::TOOL_EVENT_POINT_OFFSET;
+        assert_eq!(refused(&|frame| frame[kind] = 2), Err(Errno::OutOfRange));
+        assert_eq!(
+            refused(&|frame| frame[point] = 1),
+            Err(Errno::BadMagic),
+            "a point while elsewhere"
+        );
+        assert_eq!(
+            refused(&|frame| frame[super::TOOL_EVENT_ENDED_OFFSET] = 2),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            refused(&|frame| frame[18] = 1),
+            Err(Errno::BadMagic),
+            "padding"
+        );
+        assert_eq!(
+            refused(&|frame| frame[39] = 1),
+            Err(Errno::BadMagic),
+            "the tail"
+        );
+        assert_eq!(
+            refused(&|frame| frame[8..16].copy_from_slice(&0u64.to_le_bytes())),
+            Err(Errno::OutOfRange),
+            "no window"
+        );
     }
 
     /// The desktop the query tests round-trip.

@@ -30,7 +30,7 @@ use core::fmt;
 
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
-use tairix_abi::window_ipc::{LayerDepth, WindowEvent, WindowSizing, WINDOW_ENDPOINT};
+use tairix_abi::window_ipc::{LayerDepth, WindowEvent, WindowSizing, WindowTitle, WINDOW_ENDPOINT};
 use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
@@ -39,7 +39,7 @@ use tairix_theme::{Accessibility, ThemeRegistry};
 use crate::client::{retained_damage, WindowClient, WindowTransport};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
-use crate::server::{LayerSpec, PopupSpec};
+use crate::server::{LayerSpec, ToolSpec, TransientSpec};
 
 /// Exit code when the shared frame region could not be created or granted to
 /// the window endpoint. A reserved, fail-closed value.
@@ -401,12 +401,13 @@ pub fn bring_up_desktop<T: WindowTransport>(
     Ok((desktop, themes))
 }
 
-/// Bring `themes` into step with `desktop`: its appearance and its
-/// accessibility axes, which a surface drawn on one without the other would
-/// get half wrong.
+/// Bring `themes` into step with `desktop`: its appearance, its
+/// accessibility axes and the user's text, which a surface drawn on some
+/// without the others would get partly wrong.
 fn follow(themes: &mut ThemeRegistry, desktop: &Desktop) {
     themes.set_appearance(desktop.appearance());
     themes.set_accessibility(Accessibility::of(&desktop.info()));
+    themes.set_text(desktop.info().text());
 }
 
 /// Read the desktop state the session published, adopt it into `desktop`, and
@@ -415,8 +416,8 @@ fn follow(themes: &mut ThemeRegistry, desktop: &Desktop) {
 ///
 /// What a [`Wake::DesktopChanged`] owes, and the exact pair
 /// [`bring_up_desktop`] establishes at start-up, so an application follows a
-/// light/dark switch — or a contrast, density or motion change — with the
-/// same one call it opened with. The read is a
+/// light/dark switch — or a contrast, density, motion or text change — with
+/// the same one call it opened with. The read is a
 /// plain syscall rather than a call to the session, so it costs no IPC round
 /// trip on the loop that owes the user a frame; the answer is `false` when the
 /// published state equals the one already held, so a wake with nothing in it
@@ -597,7 +598,7 @@ impl WindowPane {
     ) -> Result<Self, ShellError> {
         let (frames, grant) = Self::region(mode)?;
         let (window, replied) = client
-            .create_popup(&PopupSpec {
+            .create_popup(&TransientSpec {
                 parent_window_id: parent,
                 shm_handle: grant,
                 event_endpoint,
@@ -614,6 +615,65 @@ impl WindowPane {
             return Err(ShellError::new(
                 EXIT_NO_WINDOW,
                 "popup reply came from another sender",
+                Errno::PermissionDenied,
+            ));
+        }
+        Ok(Self {
+            window,
+            frames,
+            mode: *mode,
+        })
+    }
+
+    /// Open a tool window of client `mode` titled `title`, hung from
+    /// `parent` at `offset` from its client origin or carried by the press
+    /// it holds at `carry` along the band, refusing a create reply that did
+    /// not come from `server` exactly as [`Self::open_popup`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
+    /// title or create, and [`Errno::PermissionDenied`] under
+    /// [`EXIT_NO_WINDOW`] for an imposter reply.
+    pub fn open_tool<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        (parent, server): (u64, ProcId),
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        offset: (i32, i32),
+        carry: Option<u32>,
+        title: &str,
+    ) -> Result<Self, ShellError> {
+        let title = WindowTitle::new(title).map_err(|err| {
+            ShellError::new(EXIT_NO_WINDOW, "the tool window's title was refused", err)
+        })?;
+        let (frames, grant) = Self::region(mode)?;
+        let (window, replied) = client
+            .create_tool(&ToolSpec {
+                transient: TransientSpec {
+                    parent_window_id: parent,
+                    shm_handle: grant,
+                    event_endpoint,
+                    frame_count: FRAME_COUNT,
+                    surface: *mode,
+                    offset_x: offset.0,
+                    offset_y: offset.1,
+                },
+                carry,
+                title,
+            })
+            .map_err(|err| {
+                ShellError::new(
+                    EXIT_NO_WINDOW,
+                    "desktop session refused the tool window",
+                    err,
+                )
+            })?;
+        if replied != server {
+            let _ = client.close(window);
+            return Err(ShellError::new(
+                EXIT_NO_WINDOW,
+                "tool-window reply came from another sender",
                 Errno::PermissionDenied,
             ));
         }

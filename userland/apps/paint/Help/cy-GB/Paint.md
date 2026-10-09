@@ -52,16 +52,27 @@ dudalennau, yn eu hychwanegu, eu copïo, eu dileu a'u haildrefnu.
 
 Mae'r prif fotwm (chwith) yn paentio â'r prif liw a'r botwm canol â'r
 ail liw; o ddal Alt, codir lliw yn lle hynny, fel y mae'r haenau'n ei
-ddangos. Yr offer i lawr y blwch offer ar y chwith yw dewis, pensil, brwsh,
-brwsh aer, rhwbiwr, clonio, llenwi, graddiant, piped, testun, llinell,
-petryal, elips, polygon, tocio, llaw a chwyddo. Mae'r bar ar draws y brig
-yn enwi'r offeryn sydd ar waith ac yn dal ei osodiadau — maint, caledwch,
-didreiddedd, llif a bylchau brwsh, goddefiant llenwad, siâp graddiant, maint
-y testun, corneli petryal — wedi'u teipio neu eu camu â'r bysellau saeth, a'r
-botymau sy'n chwyddo ac yn dangos grid y picseli; mae'r stribed palet o dan y
-llun yn dal palet y llun, neu liwiau'r bwrdd gwaith. Mae'r brwsh aer yn dal
-i chwistrellu tra caiff ei ddal yn llonydd. O ddal Shift, lluniadir sgwâr,
-cylch neu linell ar luosrif o 45 gradd.
+ddangos. Mae'r blwch offer, yn y cwarel Offer, yn dal yr offer mewn dwy
+golofn: dewis, pensil, brwsh, brwsh aer, rhwbiwr, clonio, llenwi, graddiant,
+piped, testun, llinell, petryal, elips, polygon, tocio, llaw a chwyddo. Mae'r
+bar ar draws y brig yn enwi'r offeryn sydd ar waith ac yn dal ei osodiadau —
+maint, caledwch, didreiddedd, llif a bylchau brwsh, goddefiant llenwad, siâp
+graddiant, maint y testun, corneli petryal — wedi'u teipio neu eu camu â'r
+bysellau saeth, a'r botymau sy'n chwyddo ac yn dangos grid y picseli; mae'r
+stribed palet o dan y llun yn dal palet y llun, neu liwiau'r bwrdd gwaith.
+Mae'r brwsh aer yn dal i chwistrellu tra caiff ei ddal yn llonydd. O ddal
+Shift, lluniadir sgwâr, cylch neu linell ar luosrif o 45 gradd.
+
+Mae cwarelau'n rhedeg i lawr dwy ochr y ffenestr: fel arfer y cwarel Offer ar
+y chwith a'r cwarel Lliw ar y dde, gyda'r cwarel Addasiad oddi tano cyn gynted
+ag yr agorir addasiad. Mae band main ar ben pob un yn ei enwi, gyda rheolydd
+sy'n ei rolio i fyny i'w fand a marc sy'n ei gau; mae Golwg ▸ Cwarelau yn
+dangos cwarel caeedig eto, ac mae Ailosod cwarelau yn rhoi pob cwarel yn ôl
+fel y mae gan ffenestr newydd hwy. Mae llusgo band yn symud ei gwarel ar ei
+ochr neu i'r llall, gan nodi ar y ffordd lle bydd yn glanio; o'i ollwng i
+ffwrdd o'r ddwy ochr, neu o'i lusgo allan o'r ffenestr, mae'r cwarel yn
+arnofio mewn ffenestr fach ei hun, a symudir gan ei fand ac a gedwir uwchben y
+llun, a'i marc yn ei chau; o'i lusgo'n ôl dros ochr, mae'n docio yno eto.
 
 Mae'r offeryn dewis yn nodi petryal, elips, lasŵ llawrydd, polygon a
 gliciwyd gornel wrth gornel, neu â'r ffon hud y picseli a gysylltir ag un
@@ -85,20 +96,53 @@ Mae'r llaw yn llusgo'r llun ar draws y ffenestr, fel y mae Space gydag
 unrhyw offeryn; mae'r offeryn chwyddo'n chwyddo clic, neu ag Alt yn ei
 leihau, ac mae blwch a lusgwyd yn llenwi'r ffenestr.
 
-Mae'r ddewislen Addasu'n newid disgleirdeb a chyferbyniad, arlliw a
-dirlawnder a lefelau, yn posteru, yn trothwyo, yn dad-ddirlenwi, yn pylu, yn
-miniogi, yn picseleiddio, yn ychwanegu sŵn ac yn canfod ymylon; dangosir pob
-un ar y llun wrth i'w osodiadau symud, ac fe'i cedwir dim ond pan gaiff ei
-gymhwyso. Ar lun â phalet mae addasiad yn newid ei balet, ac ni chynigir y
-rhai sydd angen lliwiau cyfagos.
+Mae'r ddewislen Addasu yn agor addasiad yn y cwarel Addasiad, lle mae pob
+offeryn, cwarel a dewislen arall yn dal wrth law: disgleirdeb a chyferbyniad,
+arlliw a dirlawnder, cydbwysedd lliw, lefelau, cromliniau, cydbwysedd gwyn,
+posteru, trothwy, pylu, miniogi, picselu ac ychwanegu sŵn; mae dad-ddirlenwi a
+chanfod ymylon, sydd heb osodiadau, yn gweithio ar unwaith. Mae'r llun yn
+dangos yr addasiad wrth i'w osodiadau symud, mae Rhagolwg yn ei ddiffodd a'i
+ailgynnau i gymharu, mae Ailosod yn rhoi ei osodiadau'n ôl ac mae Gweithredu
+yn ei gadw fel un newid i'w ddadwneud; mae paentio, llenwi neu ddewis addasiad
+arall yn ei weithredu yn gyntaf. Mae lefelau'n gosod pwyntiau du, llwyd a gwyn
+dros histogram o'r haen, i'r holl sianeli gyda'i gilydd neu bob un ar ei
+ben ei hun, gyda phipedau sy'n eu cymryd o'r llun ac Awto; mae cromliniau'n
+plygu tonau sianel drwy bwyntiau a lusgir dros ei histogram; mae cydbwysedd
+gwyn yn gosod tymheredd ac arlliw'r golau, o bicsel niwtral a ddewisir neu
+drwy Awto; mae arlliw a dirlawnder yn troi, yn cryfhau ac yn goleuo'r holl
+liwiau neu un ystod ohonynt; mae cydbwysedd lliw yn symud y cysgodion, y
+canoldonau a'r uchafbwyntiau tuag at goch, gwyrdd neu las, gan gadw eu
+goleuni os gofynnir. Mae popeth wedi'i gyfyngu i'r dewis. Ar lun â phalet,
+mae addasiad yn newid ei balet, ac ni chynigir y rhai sydd angen lliwiau
+cyfagos.
 
-Mae'r doc lliw ar y dde yn dal y prif liw a'r ail liw a dewisydd lliw ar
-gyfer pa un bynnag ohonynt a ddewiswyd: cliciwch liw i'w ddewis, yna ei
-osod yn ôl arlliw, dirlawnder a gwerth, yn ôl coch, gwyrdd a glas, yn ôl ei
-sillafiad hecsadegol ac, lle mae'r llun yn dal tryloywder, yn ôl ei
-ddidreiddedd. Saif y lliw a oedd ganddo wrth ei ochr, ac mae clic yn ei gael
-yn ôl. Ar lun â phalet, ei gofnodion yw'r lliwiau, felly mae'r dewisydd yn
-golygu'r palet, ac mae pob golygiad yn un newid i'w ddadwneud.
+Mae'r cwarel Lliw yn dal y prif liw a'r ail liw a dewisydd lliw i ba un
+bynnag ohonynt a ddewisir: mae clic ar liw yn ei ddewis, yna fe'i codir ar
+sgwâr o ddirlawnder a gwerth wrth ymyl stribed o arlliwiau, ar olwyn arlliwiau
+o amgylch triongl, neu ar lithrydd i bob sianel, ac fe'i teipir mewn RGB, HSV,
+HSL, CMYK, Lab, LCh neu fel llwyd, neu drwy ei sillafiad hecsadegol ac, lle
+mae'r llun yn dal tryloywder, ei ddidreiddedd. Dangosir lliw Lab neu LCh na
+all y sgrin ei ddangos mor agos ag y gellir, a'i nodi. Mae Cyfnewid yn
+cyfnewid y ddau liw, mae Ailosod yn eu gwneud yn ddu a gwyn, ac mae Codi yn
+cymryd y lliw nesaf a gliciwyd yn y llun. Saif y lliw oedd ganddo wrth ei
+ymyl, mae clic yn ei gymryd yn ôl, ac mae'r lliwiau a ddewiswyd ddiwethaf yn
+aros oddi tano i'w dewis eto. Ar lun â phalet, ei gofnodion yw'r lliwiau, felly
+mae'r dewisydd yn golygu'r palet, ac mae pob golygiad yn un newid i'w
+ddadwneud.
+
+Mae Gosodiadau, yn newislen y bar eiconau, yn agor ffenestr osodiadau Paint:
+yr offeryn y mae ffenestr newydd yn dechrau ag ef, ac a yw llun yn agor wedi'i
+ffitio i'r ffenestr neu ar ei faint go iawn; y maint, y fformat, y lliwiau a'r
+cefndir a gynigir gan Llun newydd; bylchau, gwrthbwyso, lliw, didreiddedd ac
+arddull y grid — llinellau, llinellau toredig, dotiau neu groesfannau —, a yw
+ffenestr newydd yn ei ddangos, snapio ato, a'r chwyddo y dangosir y grid rhwng
+picseli ohono; maint a thonau'r bwrdd siec a'r hyn sydd o amgylch y llun; a'r
+cwarelau y mae ffenestr newydd yn agor â hwy. Mae newid yn berthnasol i bob
+ffenestr ar unwaith ac fe'i cedwir at y tro nesaf; mae Adfer rhagosodiadau yn
+eu rhoi i gyd yn ôl. Mae Golwg ▸ Grid yn dangos grid ffenestr. Tra bo'n
+weladwy a snapio ymlaen, mae siapiau, dewisiadau a fframiau tocio yn gorchuddio
+celloedd cyfan, mae pennau llinell a graddiant a chorneli polygon yn glanio ar
+ei groesfannau, ac mae dewis a lusgir yn glanio â'i gornel ar un.
 
 Nid oes gan y rhaglen unrhyw ganiatâd ar y system ffeiliau. Mae'n golygu
 dim ond y ffeil a roddwyd iddi. Rhoddir ffeil y caiff y defnyddiwr ei newid
@@ -138,6 +182,7 @@ gyntaf.
 * `Ctrl` + olwyn — chwyddo i mewn neu allan o amgylch y pwyntydd
 * Pinsio â dau fys — chwyddo'n llyfn; ar sgrin gyffwrdd mae'r llun yn dilyn y bysedd
 * `G` — dangos neu guddio'r grid rhwng picseli
+* `Ctrl+'` — dangos neu guddio'r grid
 * `Page Up` / `Page Down` — y corlun neu'r dudalen cynt neu nesaf
 * bysellau saeth — symud dewis sy'n arnofio un picsel; â `Shift`, deg; yn y stribed palet, camu trwy ei liwiau
 

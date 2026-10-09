@@ -207,14 +207,15 @@ pub struct Window {
     /// to present them again. Off until the embedder says otherwise, so a
     /// window nobody can repaint is never released.
     app_presented: bool,
-    /// The window this one is a *transient* of — the surface it belongs to
-    /// and is stacked immediately above (a menu's or a sheet's owner) — or
-    /// `None` for a top-level window that stands on its own.
+    /// What this window is to the window it is a *transient* of — the
+    /// surface it belongs to and is stacked immediately above (a menu's, a
+    /// sheet's or a palette's owner) — or `None` for a top-level window that
+    /// stands on its own.
     ///
     /// Stacking reads it: a restack moves an owner and its transients
     /// together, which is what keeps a menu on its own window and stops
     /// anything landing between the two.
-    parent: Option<WindowId>,
+    tie: Option<Tie>,
     /// The smallest client extent the owning application declared it can lay
     /// out at, in physical pixels; `(0, 0)` for an application that declared
     /// none and is content at any size.
@@ -237,6 +238,20 @@ pub struct Window {
     /// no frame of its own: a menu plate, a popover, a tooltip. A decorated
     /// window casts by virtue of its frame, as it wears its rim by it.
     casts: bool,
+}
+
+/// What a transient is to the window it belongs to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Tie {
+    /// The window it belongs to.
+    owner: WindowId,
+    /// It floats beside its owner — a tool window — rather than hanging from
+    /// it as a menu or a sheet does: it takes the keyboard only when pressed,
+    /// never because its family was raised.
+    floating: bool,
+    /// It was hidden because its owner was, so showing the owner shows it
+    /// again and nothing else does.
+    hidden_with_owner: bool,
 }
 
 /// The outer extents an interactive resize of one window is held between,
@@ -336,7 +351,7 @@ impl Window {
             size_state: WindowSizeState::Restored,
             restore_outer: None,
             app_presented: false,
-            parent: None,
+            tie: None,
             min_client: (0, 0),
             max_client: (0, 0),
             casts: false,
@@ -359,7 +374,10 @@ impl Window {
     /// its own.
     #[must_use]
     pub const fn parent(&self) -> Option<WindowId> {
-        self.parent
+        match self.tie {
+            Some(tie) => Some(tie.owner),
+            None => None,
+        }
     }
 
     /// Make this window a transient of `parent`, or a top-level window again
@@ -369,7 +387,45 @@ impl Window {
     /// in the same breath: the link and the stacking it implies are
     /// established together, so no frame can see one without the other.
     pub(crate) fn set_parent(&mut self, parent: Option<WindowId>) {
-        self.parent = parent;
+        self.tie = parent.map(|owner| Tie {
+            owner,
+            floating: false,
+            hidden_with_owner: false,
+        });
+    }
+
+    /// Whether this is a transient that floats beside its owner, a tool
+    /// window, rather than one that hangs from it.
+    #[must_use]
+    pub const fn is_floating(&self) -> bool {
+        matches!(self.tie, Some(Tie { floating: true, .. }))
+    }
+
+    /// Mark this transient as floating beside its owner; a window of its own
+    /// floats beside nothing.
+    pub(crate) fn set_floating(&mut self, floating: bool) {
+        if let Some(tie) = &mut self.tie {
+            tie.floating = floating;
+        }
+    }
+
+    /// Whether this transient is hidden only because its owner is.
+    #[must_use]
+    pub(crate) const fn hidden_with_owner(&self) -> bool {
+        matches!(
+            self.tie,
+            Some(Tie {
+                hidden_with_owner: true,
+                ..
+            })
+        )
+    }
+
+    /// Note whether this transient is hidden only because its owner is.
+    pub(crate) fn set_hidden_with_owner(&mut self, hidden: bool) {
+        if let Some(tie) = &mut self.tie {
+            tie.hidden_with_owner = hidden;
+        }
     }
 
     /// Per-window opacity (`255` opaque).

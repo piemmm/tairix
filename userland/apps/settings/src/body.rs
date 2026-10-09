@@ -20,7 +20,7 @@ use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::accounts::{AccountFacts, AccountSetting};
 use crate::facts::{Facts, MachineFacts};
-use crate::form::{Documents, Form, FormPlace};
+use crate::form::{Documents, Form, FormPlace, TextChoices};
 use crate::network::{IfaceSetting, NetworkFacts};
 use crate::registry::{PaneContent, PaneRow};
 use crate::statement;
@@ -38,6 +38,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) cursor_sets: &'a [CursorSetId],
     /// The shipped pictures the desktop answered with.
     pub(crate) catalog: &'a [CatalogItem],
+    /// The font store's families and the theme's own text, once listed.
+    pub(crate) text: Option<&'a TextChoices>,
     /// The mounted volumes the mount-table walk answered with.
     pub(crate) volumes: &'a [VolumeReading],
     /// The machine's boot-time configuration, or `None` while the read has
@@ -72,6 +74,7 @@ impl<'a> Answered<'a> {
             settings: self.settings,
             cursor_sets: self.cursor_sets,
             catalog: self.catalog,
+            text: self.text,
             config: self.config,
             addressing: &self.network.addressing,
             staged: self.staged,

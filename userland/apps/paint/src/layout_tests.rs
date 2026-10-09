@@ -2,6 +2,7 @@ use tairix_geometry::Scale;
 use tairix_theme::{Theme, ThemeRegistry};
 
 use super::{Faces, Floor, Layout, Needs, LEAST_WELL, MIN_CANVAS, MOST_WELL};
+use crate::pane::{Arrangement, PaneKind, Side};
 use crate::view::MOST_WELLS;
 
 const SLOT: u32 = 28;
@@ -10,20 +11,28 @@ fn needs(wells: usize) -> Needs {
     Needs {
         wells,
         picker: 300,
+        colour_controls: 0,
+        recents: 0,
         tool_box: SLOT,
+        tool_box_length: 9 * (SLOT + 8),
+        adjustment: 0,
         view_strip: 188,
         bar_rows: 1,
     }
 }
 
 fn layout(theme: &Theme, width: u32, height: u32, needs: Needs) -> Layout {
+    arranged(theme, width, height, needs, &Arrangement::default())
+}
+
+fn arranged(theme: &Theme, width: u32, height: u32, needs: Needs, panes: &Arrangement) -> Layout {
     Layout::for_window(
         width,
         height,
         theme,
         Scale::ONE,
         Faces::of(theme, Scale::ONE),
-        needs,
+        (needs, panes),
     )
 }
 
@@ -61,18 +70,25 @@ fn the_bands_tile_the_window_without_overlapping() {
         SLOT,
         "the tool box as broad as its tools"
     );
-    assert_eq!(layout.tool_box().right(), layout.canvas().left());
+    let (left, right) = (
+        layout.dock_on(Side::Left).rect,
+        layout.dock_on(Side::Right).rect,
+    );
+    assert_eq!(left.right(), layout.canvas().left());
     assert_eq!(layout.canvas().right(), layout.vertical_bar().left());
     assert_eq!(
         layout.vertical_bar().right(),
-        layout.dock().left(),
-        "the dock on the right"
+        right.left(),
+        "the right dock beside the bar"
     );
+    for (dock, body) in [(left, layout.tool_box()), (right, layout.dock())] {
+        assert_eq!(dock.intersection(&body), body, "each pane inside its dock");
+    }
     assert_eq!(layout.horizontal_bar().bottom(), layout.palette().top());
     assert_eq!(
         (layout.palette().left(), layout.palette().right()),
-        (layout.tool_box().right(), layout.dock().left()),
-        "the palette strip runs between the tool box and the dock"
+        (left.right(), right.left()),
+        "the palette strip runs between the docks"
     );
     assert_eq!(layout.palette().bottom(), layout.status().top());
     assert_eq!(layout.view_strip().width, 188);
@@ -181,7 +197,7 @@ fn the_least_window_seats_its_bars_and_the_largest_palette_round_a_canvas() {
     assert!(least.canvas().height >= MIN_CANVAS);
     assert!(least.tools().height >= floor.tool_box.1, "a tool showing");
     assert_eq!(
-        least.dock().width,
+        least.dock_on(Side::Right).rect.width,
         Layout::dock_inner_width(theme, Scale::ONE) + 16,
         "the dock at its width"
     );
@@ -249,4 +265,120 @@ fn the_view_strip_keeps_the_first_row_and_the_bar_its_column_below() {
         Layout::controls_width(900, 188, theme, Scale::ONE),
         one.controls().width
     );
+}
+
+/// The header a pane is laid out with: its band atop its plate, and its body
+/// beneath.
+fn slot(layout: &Layout, kind: PaneKind) -> super::PaneSlot {
+    *layout.pane(kind).expect("the pane is shown")
+}
+
+#[test]
+fn a_pane_is_its_mini_band_over_its_body() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let layout = layout(theme, 900, 640, needs(17));
+    let band = tairix_controls::TitleBar::height_of(
+        tairix_controls::TitleBarCommands::Pane,
+        Scale::ONE,
+        theme,
+    );
+    for kind in [PaneKind::Tools, PaneKind::Colour] {
+        let pane = slot(&layout, kind);
+        assert_eq!(pane.header.top(), pane.frame.top(), "{kind:?}");
+        assert_eq!(pane.header.height, band, "{kind:?}");
+        assert_eq!(pane.body.top(), pane.header.bottom(), "{kind:?}");
+        assert_eq!(pane.body.bottom(), pane.frame.bottom(), "{kind:?}");
+    }
+    assert_eq!(layout.pane(PaneKind::Adjustment), None);
+    assert!(layout.adjustment().is_empty());
+    assert_eq!(
+        slot(&layout, PaneKind::Colour)
+            .body
+            .intersection(&layout.picker()),
+        layout.picker()
+    );
+}
+
+#[test]
+fn a_rolled_up_pane_shows_its_band_alone_and_a_hidden_one_is_nowhere() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut panes = Arrangement::default();
+    panes.toggle_collapsed(PaneKind::Colour);
+    let rolled = arranged(theme, 900, 640, needs(17), &panes);
+    let colour = slot(&rolled, PaneKind::Colour);
+    assert_eq!(colour.frame, colour.header);
+    assert!(colour.body.is_empty());
+    assert!(rolled.picker().is_empty() && rolled.wells().is_empty());
+    panes.hide(PaneKind::Tools);
+    let hidden = arranged(theme, 900, 640, needs(17), &panes);
+    assert_eq!(hidden.pane(PaneKind::Tools), None);
+    assert!(hidden.tools().is_empty());
+    assert!(
+        hidden.dock_on(Side::Left).rect.is_empty(),
+        "an empty dock takes no width"
+    );
+    assert!(
+        hidden.canvas().width > layout(theme, 900, 640, needs(17)).canvas().width,
+        "the canvas takes the room"
+    );
+}
+
+#[test]
+fn panes_stack_down_a_dock_and_one_past_the_room_shows_its_band() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut panes = Arrangement::default();
+    panes.move_to(PaneKind::Colour, Side::Left, 1);
+    let both = arranged(theme, 900, 640, needs(17), &panes);
+    let (tools, colour) = (slot(&both, PaneKind::Tools), slot(&both, PaneKind::Colour));
+    assert!(
+        colour.frame.top() > tools.frame.bottom(),
+        "the colour pane beneath the tools"
+    );
+    assert_eq!(
+        both.dock_on(Side::Left).rect.width,
+        Layout::dock_inner_width(theme, Scale::ONE) + 16,
+        "the dock as broad as its broadest pane"
+    );
+    assert!(both.dock_on(Side::Right).rect.is_empty());
+    // A window too short for both bodies gives the lower pane its band.
+    let short = arranged(
+        theme,
+        900,
+        420,
+        Needs {
+            tool_box_length: 300,
+            ..needs(17)
+        },
+        &panes,
+    );
+    let colour = slot(&short, PaneKind::Colour);
+    assert!(colour.header.height > 0, "its band is always seated");
+    assert!(colour.frame.bottom() <= short.dock_on(Side::Left).rect.bottom());
+}
+
+#[test]
+fn the_colour_pane_stacks_its_wells_controls_picker_and_recent_colours() {
+    let registry = ThemeRegistry::with_builtins();
+    let mut tall = needs(17);
+    tall.picker = 200;
+    tall.colour_controls = 96;
+    tall.recents = 54;
+    let layout = layout(registry.active(), 900, 900, tall);
+    assert!(layout.wells().bottom() < layout.colour_controls().top());
+    assert!(layout.colour_controls().bottom() < layout.picker().top());
+    assert!(layout.picker().bottom() < layout.recents().top());
+    assert_eq!(layout.recents().height, 54);
+    let short = layout_short(registry.active(), tall);
+    assert!(
+        short.recents().is_empty(),
+        "the recent colours give way first, whole"
+    );
+    assert!(!short.picker().is_empty());
+}
+
+fn layout_short(theme: &Theme, needs: Needs) -> Layout {
+    layout(theme, 900, 440, needs)
 }

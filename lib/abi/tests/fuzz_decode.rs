@@ -111,7 +111,7 @@ use tairix_abi::window_ipc::{
     AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
     AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
     DropOperation, DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose,
-    PreviewOutcome, PreviewSubject, SaveEndings, TooltipText, WindowEvent, WindowRegion,
+    PreviewOutcome, PreviewSubject, SaveEndings, ToolOver, TooltipText, WindowEvent, WindowRegion,
     WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
@@ -1886,18 +1886,6 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
                 max_height_px: 1080,
             },
         },
-        WindowRequest::CreatePopup {
-            parent_window_id: 3,
-            shm_handle: 7,
-            event_endpoint: 0x900d,
-            frame_count: 1,
-            width_px: 120,
-            height_px: 80,
-            stride_bytes: 480,
-            format: DisplayFormat::Bgra8888,
-            offset_x: -12,
-            offset_y: 24,
-        },
         WindowRequest::Present {
             window_id: 3,
             frame_index: 1,
@@ -1954,9 +1942,43 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             radius_px: 8,
         },
     ];
+    seeds.extend(window_request_transient_seeds());
     seeds.extend(window_request_desktop_seeds());
     seeds.extend(window_request_text_seeds());
     seeds
+}
+
+/// The seeds of the requests that hang a surface from one of the caller's
+/// windows: a popup, and a tool window carried by a held press.
+fn window_request_transient_seeds() -> [WindowRequest; 2] {
+    [
+        WindowRequest::CreatePopup {
+            parent_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 120,
+            height_px: 80,
+            stride_bytes: 480,
+            format: DisplayFormat::Bgra8888,
+            offset_x: -12,
+            offset_y: 24,
+        },
+        WindowRequest::CreateTool {
+            parent_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 120,
+            height_px: 80,
+            stride_bytes: 480,
+            format: DisplayFormat::Bgra8888,
+            offset_x: -12,
+            offset_y: 24,
+            carry: Some(40),
+            title: WindowTitle::new("Tools").expect("a valid title"),
+        },
+    ]
 }
 
 /// The seeds of the requests the desktop answers for itself rather than for a
@@ -2213,6 +2235,12 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         }
         .to_le_bytes(),
         WindowEvent::OpenRequested.to_le_bytes(),
+        WindowEvent::ToolMoved {
+            window_id: 3,
+            over: ToolOver::Parent { x: 10, y: 20 },
+            ended: true,
+        }
+        .to_le_bytes(),
         WindowEvent::DragOver {
             window_id: 3,
             serial: 5,

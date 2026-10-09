@@ -38,18 +38,19 @@ mod program {
         AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
         AppMenuShortcut, WindowEvent,
     };
-    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
-    use tairix_appdata::{RtHost, Settings};
+    use tairix_abi::{Errno, ProcId};
+    use tairix_appdata::{PublishJob, Refusal, RtHost, Settings};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_input::InputEvent;
     use tairix_rng::{FastRng, RandU64};
+    use tairix_rt::sync::WorkerWake;
+    use tairix_rt::work::WorkerGuard;
     use tairix_sapper::board::Difficulty;
     use tairix_sapper::game::{Game, Reaction};
     use tairix_sapper::layout::WindowGeometry;
-    use tairix_sapper::scores::{BestTimes, SaveError};
+    use tairix_sapper::scores::BestTimes;
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
-    use tairix_util::defer::JobDesk;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
@@ -71,99 +72,22 @@ mod program {
     /// The name this program states its refusals under.
     const APP_NAME: &str = "sapper";
 
-    // ---- the best-times writer -----------------------------------------
+    /// The best-times writer: latest-wins with at most one write in flight,
+    /// so a run of quick wins costs one further write rather than a backlog,
+    /// and two writes never race for what the store ends up saying.
+    type Writer = tairix_rt::work::Worker<(), BestTimes, Result<(), Errno>>;
 
-    /// The desk the loop submits a best-times write to and the worker takes it
-    /// from.
-    ///
-    /// Latest-wins with at most one write in flight, so a run of quick wins
-    /// costs one further write rather than a backlog, and two writes can never
-    /// race for what the store ends up saying.
-    struct Writer {
-        desk: tairix_rt::sync::Mutex<JobDesk<BestTimes, Result<(), SaveError>>>,
-        signal: tairix_rt::sync::Condvar,
-        wake: tairix_rt::sync::WorkerWake,
+    /// Write `times` into the game's own store.
+    fn write_times(_: &mut (), times: &mut BestTimes) -> Result<(), Errno> {
+        let mut host = RtHost;
+        let mut settings = Settings::open_without_defaults(&mut host);
+        tairix_appdata::publish(&mut settings, &PublishJob::Save(*times)).map(drop)
     }
 
-    impl Writer {
-        fn new() -> Self {
-            Self {
-                desk: tairix_rt::sync::Mutex::new(JobDesk::new()),
-                signal: tairix_rt::sync::Condvar::new(),
-                wake: tairix_rt::sync::WorkerWake::create(),
-            }
-        }
-
-        /// Hand a write to the worker, or — with no worker to take it — do it
-        /// here. Slower under load, never wrong, and never a dropped record.
-        fn submit(&self, times: BestTimes, armed: bool) {
-            if !armed {
-                if let Err(err) = Self::write(times) {
-                    app::report(APP_NAME, format_args!("{err}"));
-                }
-                return;
-            }
-            let submitted = self.desk.lock().submit(times);
-            if submitted.wake {
-                self.signal.notify_one();
-            }
-        }
-
-        /// The worker's whole life: park until a write is wanted, do it, wake
-        /// the loop.
-        fn serve(&self) {
-            loop {
-                let job = {
-                    let mut desk = self.desk.lock();
-                    loop {
-                        if desk.stopping() {
-                            return;
-                        }
-                        if let Some(job) = desk.next_job() {
-                            break job;
-                        }
-                        desk = self.signal.wait(desk);
-                    }
-                };
-                // The round trip itself, with no lock held: this is the call
-                // that would otherwise have stalled the window.
-                let outcome = Self::write(job);
-                if self.desk.lock().deliver(outcome) {
-                    self.wake.nudge();
-                }
-            }
-        }
-
-        /// Open the store and write `times` into it.
-        fn write(times: BestTimes) -> Result<(), SaveError> {
-            let mut host = RtHost;
-            let mut settings = Settings::open_without_defaults(&mut host);
-            times.save(&mut settings)
-        }
-
-        /// Take a landed answer, if one has.
-        fn collect(&self) -> Option<Result<(), SaveError>> {
-            self.desk.lock().collect()
-        }
-
-        /// Ask the worker to leave and wake it.
-        fn stop(&self) {
-            self.desk.lock().stop();
-            self.signal.notify_all();
-        }
-    }
-
-    /// Stops the writer on every way out, so it is not left mid-write for a
-    /// window that has gone.
-    ///
-    /// The thread is *detached* rather than joined: a worker mid-round-trip to
-    /// a slow service would otherwise hold the teardown for as long as that
-    /// service takes, and it leaves at its next turn round its loop anyway.
-    struct WriterGuard(Arc<Writer>);
-
-    impl Drop for WriterGuard {
-        fn drop(&mut self) {
-            self.0.stop();
+    /// Say why a best time could not be kept: it is still a best time played.
+    fn report_write(written: Option<Result<(), Errno>>) {
+        if let Some(Err(err)) = written {
+            app::report(APP_NAME, Refusal::NotSaved(err));
         }
     }
 
@@ -211,7 +135,7 @@ mod program {
                     // The readiness is a level peek, so leaving it undrained
                     // would report ready for ever and turn the park into a
                     // spin.
-                    self.writer.wake.drain();
+                    self.writer.wake().drain();
                     Ok(Parked::Interrupted)
                 }
                 Wake::PressureChanged => {
@@ -520,7 +444,6 @@ mod program {
         themes: &'a mut ThemeRegistry,
         rng: &'a mut dyn RandU64,
         writer: &'a Writer,
-        armed: bool,
     }
 
     /// Apply one delivered event, reporting what it concluded.
@@ -582,10 +505,11 @@ mod program {
             // owns the region and the theme.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::MenuClosed { .. }
-            // The layer-surface feeds address a desktop surface this
-            // application never opens, so neither can arrive here.
+            // The layer-surface feeds and a tool window's moves address
+            // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::ToolMoved { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
@@ -605,8 +529,8 @@ mod program {
     /// Adopt a reaction: hand a new best time to the writer, and say whether
     /// the window's geometry moved with it.
     fn settle(round: &mut Round<'_>, reaction: Reaction) -> Acted {
-        if reaction.record {
-            round.writer.submit(round.game.best_times(), round.armed);
+        if reaction.record && round.writer.submit(round.game.best_times()) {
+            report_write(round.writer.collect());
         }
         if reaction.resized {
             return Acted::Reshaped;
@@ -668,9 +592,7 @@ mod program {
 
             // A landed write is reported and otherwise costs the game nothing:
             // a best time that could not be kept is still a best time played.
-            if let Some(Err(err)) = round.writer.collect() {
-                app::report(APP_NAME, format_args!("{err}"));
-            }
+            report_write(round.writer.collect());
 
             // Every wake advances the clock and the animation, whether it was
             // the deadline that fired or an event that arrived.
@@ -796,19 +718,13 @@ mod program {
         }
     }
 
-    /// Read the best times the store holds, reporting every entry it refused.
+    /// Read the best times the store holds, saying what of it could not be
+    /// read.
     fn load_best_times() -> BestTimes {
         let mut host = RtHost;
-        let settings = Settings::open_without_defaults(&mut host);
-        let (times, refused) = BestTimes::load(&settings);
-        for entry in refused {
-            app::report(
-                APP_NAME,
-                format_args!(
-                    "the stored best time `{}` is unreadable ({:?}); starting that board with none",
-                    entry.key, entry.reason
-                ),
-            );
+        let (times, refusals) = tairix_appdata::loaded(&Settings::open_without_defaults(&mut host));
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
         }
         times
     }
@@ -854,11 +770,9 @@ mod program {
         };
         let event_endpoint = binding.endpoint();
 
-        let writer = Arc::new(Writer::new());
-        let armed = start_writer(&writer, binding.set());
-        // Declared after the thread, so it runs first: the desk stops, then the
-        // handle detaches.
-        let _guard = WriterGuard(Arc::clone(&writer));
+        let writer = Arc::new(Writer::new(write_times, (), WorkerWake::create()));
+        start_writer(&writer, binding.set());
+        let _guard = WorkerGuard::new(&writer);
 
         let reduced = themes.active().motion().reduced_motion();
         let difficulty = Difficulty::Beginner;
@@ -902,58 +816,42 @@ mod program {
             themes: &mut themes,
             rng: &mut rng,
             writer: &writer,
-            armed,
         };
-        run_event_loop(
+        let code = run_event_loop(
             &mut surface,
             &mut round,
             event_endpoint,
             &deadline,
             &desktop_moved,
             events,
-        )
+        );
+        // The last best time is seen out, not dropped with the worker.
+        while let Some(written) = writer.wait() {
+            report_write(Some(written));
+        }
+        code
     }
 
-    /// Start the best-times writer and join its wake to the loop's wait-set,
-    /// reporting whether the loop may hand it work.
+    /// Start the best-times writer and join its wake to the loop's wait-set.
     ///
     /// A kernel that will not grant the thread or the pipe is not a failure:
     /// the write moves back onto the event loop, which is slower under load but
     /// never loses a record.
-    fn start_writer(writer: &Arc<Writer>, set: u64) -> bool {
-        let Some(read) = writer.wake.read_end() else {
+    fn start_writer(writer: &Arc<Writer>, set: u64) {
+        if let Err(reason) = Writer::start(writer) {
             app::report(
                 APP_NAME,
-                "no writer wake pipe; best times are written on the event loop",
+                format_args!("no writer ({reason:?}); best times are written on the event loop"),
             );
-            return false;
-        };
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Stream,
-            u64::from(read),
-            WRITER_TOKEN,
-        ) != 0
-        {
-            app::report(
-                APP_NAME,
-                "writer wake refused; best times are written on the event loop",
-            );
-            return false;
+            return;
         }
-        let served = Arc::clone(writer);
-        match tairix_rt::thread::Thread::spawn(move || served.serve()) {
-            Ok(_) => true,
-            Err(err) => {
-                app::report(
-                    APP_NAME,
-                    format_args!(
-                        "no writer thread ({err:?}); best times are written on the event loop"
-                    ),
-                );
-                false
-            }
+        if let Err(err) = app::watch_wake(set, writer.wake(), WRITER_TOKEN) {
+            // An answer nothing wakes the loop for is still collected at the
+            // next event, so the game plays on; only the report waits.
+            app::report(
+                APP_NAME,
+                format_args!("writer wake refused ({err}); a failed write is said late"),
+            );
         }
     }
 

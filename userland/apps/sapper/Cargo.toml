@@ -45,12 +45,11 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 
 # The freestanding `Run` binary additionally drives the window channel's client
-# half, the deferral desk the best-times write is handed to, and the pure-Rust
-# userland runtime (`_start`, the allocator, the syscall wrappers). Bare-metal
-# only; on the host the binary is an inert stub.
+# half and the pure-Rust userland runtime (`_start`, the allocator, the syscall
+# wrappers, the worker the best-times write is handed to). Bare-metal only; on
+# the host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The app-data client's runtime transport, so the best-times store reaches the
 # real service; the base dependency stays host-neutral for the tests below.

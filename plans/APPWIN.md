@@ -422,7 +422,7 @@ Done. What now holds:
   answer `NotFound`); the geometry is validated exactly as `Create`; the
   popup's frames are charged against the same per-client byte budget; the host
   is told before anything is committed, so a refusal leaves no record, no
-  id consumed, and the mapping dropped. One shared `PopupSpec` describes
+  id consumed, and the mapping dropped. One shared `TransientSpec` describes
   the request on both halves (`WindowClient::create_popup`).
 - **Undecorated by construction**: the session opens it through
   `DesktopShell::open_popup_window` (compositor `add_transient_window` +
@@ -458,6 +458,52 @@ Done. What now holds:
   leaving the parent's task, the pair staying glued through an intruder
   raise, and a popup hover repainting only the popup), the compositor's own
   transient suite, and `lib/geometry`'s `clamped_onto` tests.
+
+### AW7 — tool windows `[x]`
+
+For Paint's floating panes (`plans/PAINT.md` PT28). A tool window is the
+decorated counterpart of a popup: a transient of one of the caller's own
+top-level windows that the user moves by a mini title bar the window manager
+draws (`plans/COMPOSITOR-WORK.md` stage M).
+
+- **Protocol**: `WindowRequest::CreateTool { parent_window_id, shm_handle,
+  event_endpoint, frame_count, width_px, height_px, stride_bytes, format,
+  offset_x, offset_y, carry, title }` — the popup's geometry block and
+  parent-relative offset (of the client), a `WindowTitle`, and `carry`, the
+  place along the band, from the client's left edge and within its width, to
+  hold under the pointer. Both halves describe one through `ToolSpec`, a
+  `TransientSpec` plus the carry and title; the engine opens both kinds through
+  one transient path (`WindowServer::open_transient`).
+- **Carried open**: when `carry` is set and the parent holds the seat's
+  primary press, the session ends the parent's client grab without a release,
+  places the tool window with that place of its band, halfway down, under the
+  pointer, and starts the window manager's move of it (`InputRouter::carry`).
+  Otherwise the offset places it, clamped on screen; `carry` never moves a
+  window the user is not holding.
+- **Moves are reported to the owner, relative to the owner**:
+  `WindowEvent::ToolMoved { window_id, over, ended }` per move sample and at
+  its end, `ToolOver::Parent { x, y }` over the parent's client area with
+  nothing but the tool window itself above it there, else
+  `ToolOver::Elsewhere`. The hold-back folds samples and never sheds an end.
+- **Lifetime and stacking**: a floating transient (`add_floating_window`) —
+  above its owner, moved in the family by `raise`/`lower`, raised above its
+  floating siblings when pressed, off the taskbar and the window picker,
+  closed with its owner. A family hides and shows with its owner, popups and
+  tool windows alike. It takes the keyboard when pressed, never because its
+  family was raised (`family_front` passes it over). One level only: a
+  transient's parent is a top-level window of the caller's, never a transient
+  or a layer surface (`NotSupported`), for popups as for tool windows. Not
+  opened while the seat is held, since opening restacks the family.
+- Coverage: `lib/abi` round trip and fail-closed decode (zero parent, a
+  reserved endpoint, a bad extent, a dirty or out-of-band carry, an over-long,
+  dirty or control-character title) and the fuzz decode table; the
+  `lib/window` loopback suite (its own host path, close alone, a transient's
+  transient refused, the shared budget, parent-close cascade); the
+  compositor's floating-transient, family-visibility and carry tests; the
+  session suite (framed, off the taskbar, keyboard left alone, retitle,
+  minimise hiding the family, carry under a held press, `ToolMoved` over and
+  off the parent, refused while the seat is held) and the hold-back's fold
+  and end rules.
 
 ## 2. Documentation
 

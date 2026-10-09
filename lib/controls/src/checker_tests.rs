@@ -45,3 +45,19 @@ fn a_zero_side_is_one_pixel() {
         1
     );
 }
+
+#[test]
+fn chosen_shades_alternate_as_the_themes_do() {
+    let registry = ThemeRegistry::with_builtins();
+    let (dark, light) = (
+        Color::rgba(10, 20, 30, 255),
+        Color::rgba(200, 210, 220, 255),
+    );
+    let board = Checker::new(registry.active(), Scale::ONE)
+        .with_side(4)
+        .with_shades(dark, light);
+    assert_eq!(
+        (board.at(0, 0), board.at(4, 0), board.at(4, 4)),
+        (dark, light, dark)
+    );
+}

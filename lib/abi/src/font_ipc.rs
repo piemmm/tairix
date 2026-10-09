@@ -43,7 +43,7 @@
 //! same ABI discipline as the syscall table and frozen on the first release —
 //! mutable now, `abi-v1` is not frozen.
 
-use crate::le::{put_i32, put_u32, read_i32, read_u32};
+use crate::le::{put_i32, put_u16, put_u32, read_i32, read_u16, read_u32};
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the font service (`"FNT"`
@@ -120,6 +120,14 @@ pub const FONT_FAMILY_LABEL_LEN: usize = 32;
 /// so this bounds the reply a client must be prepared to receive. A
 /// validation bound, not a capacity.
 pub const FONT_MAX_FAMILIES: usize = 16;
+
+/// The shortest line box, in thousandths of the em, a family may report:
+/// below half an em no line could hold a face's ascent and descent.
+pub const FONT_MIN_LINE_BOX: u16 = 500;
+
+/// The tallest line box, in thousandths of the em, a family may report: a
+/// line three ems tall is a corrupt `hhea`, not a design.
+pub const FONT_MAX_LINE_BOX: u16 = 3000;
 
 /// The key naming one installed font family — the directory name under
 /// `/System/Fonts`, as a validated fixed-width wire value.
@@ -1974,7 +1982,7 @@ pub fn decode_metrics_reply(bytes: &[u8]) -> Result<FontMetrics, Errno> {
 
 /// One installed selectable family, as a [`FontRequest::Families`] reply
 /// lists it: the key a request names it by, the label a settings surface
-/// shows, and how it lays text out.
+/// shows, how it lays text out, and how tall its line is for one em.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FamilyEntry {
     /// The key a [`FontRequest`] names this family by.
@@ -1983,6 +1991,9 @@ pub struct FamilyEntry {
     label: [u8; FONT_FAMILY_LABEL_LEN],
     /// Whether the family is fixed-pitch.
     pub kind: FamilyKind,
+    /// The primary face's line box — ascent and descent — in thousandths of
+    /// its em.
+    line_box: u16,
 }
 
 impl FamilyEntry {
@@ -1995,20 +2006,31 @@ impl FamilyEntry {
         key: FamilyKey::MONO,
         label: [0u8; FONT_FAMILY_LABEL_LEN],
         kind: FamilyKind::Monospace,
+        line_box: FONT_MIN_LINE_BOX,
     };
 
-    /// The entry for `key`, shown as `label`, laid out as `kind`.
+    /// The entry for `key`, shown as `label`, laid out as `kind`, its line
+    /// `line_box` thousandths of its em tall.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] when `label` is empty or longer than
     /// [`FONT_FAMILY_LABEL_LEN`] bytes; [`Errno::OutOfRange`] when it
-    /// carries a control byte, which a picker must never be asked to draw.
-    pub fn new(key: FamilyKey, label: &str, kind: FamilyKind) -> Result<Self, Errno> {
+    /// carries a control byte, which a picker must never be asked to draw,
+    /// or when `line_box` lies outside
+    /// [`FONT_MIN_LINE_BOX`]`..=`[`FONT_MAX_LINE_BOX`].
+    pub fn new(
+        key: FamilyKey,
+        label: &str,
+        kind: FamilyKind,
+        line_box: u16,
+    ) -> Result<Self, Errno> {
         if label.is_empty() || label.len() > FONT_FAMILY_LABEL_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        if label.bytes().any(|byte| byte < 0x20 || byte == 0x7F) {
+        if label.bytes().any(|byte| byte < 0x20 || byte == 0x7F)
+            || !(FONT_MIN_LINE_BOX..=FONT_MAX_LINE_BOX).contains(&line_box)
+        {
             return Err(Errno::OutOfRange);
         }
         let mut padded = [0u8; FONT_FAMILY_LABEL_LEN];
@@ -2017,7 +2039,15 @@ impl FamilyEntry {
             key,
             label: padded,
             kind,
+            line_box,
         })
+    }
+
+    /// How tall the family's line is for one em, in thousandths of it: what
+    /// a size in points becomes on a ladder of line-box heights.
+    #[must_use]
+    pub const fn line_box(&self) -> u16 {
+        self.line_box
     }
 
     /// The label a font picker shows.
@@ -2033,8 +2063,7 @@ impl FamilyEntry {
 }
 
 /// Bytes one [`FamilyEntry`] occupies on the wire: the key, the label, the
-/// kind discriminant, and three bytes of zero padding that keep the record
-/// four-byte aligned.
+/// kind discriminant, a reserved zero byte, and the little-endian line box.
 pub const FONT_FAMILY_ENTRY_LEN: usize = FONT_FAMILY_KEY_LEN + FONT_FAMILY_LABEL_LEN + 4;
 
 /// Fixed prefix of a [`FontRequest::Families`] reply: the status word and
@@ -2078,7 +2107,8 @@ pub fn encode_families_reply(
         buf[at..key_end].copy_from_slice(&entry.key.to_wire());
         buf[key_end..label_end].copy_from_slice(&entry.label);
         buf[label_end] = entry.kind.to_wire();
-        buf[label_end + 1..label_end + 4].fill(0);
+        buf[label_end + 1] = 0;
+        put_u16(buf, label_end + 2, entry.line_box);
         at = label_end + 4;
     }
     Ok(total)
@@ -2106,8 +2136,8 @@ impl FamilyList {
 ///
 /// * The carried [`Errno`] when the service refused the request.
 /// * [`Errno::BufferTooSmall`] — a truncated frame.
-/// * [`Errno::OutOfRange`] — a corrupt status word, an unknown kind, or a
-///   malformed key or label.
+/// * [`Errno::OutOfRange`] — a corrupt status word, an unknown kind, a
+///   malformed key or label, or a line box outside its bounds.
 /// * [`Errno::LengthOutOfRange`] — a count past [`FONT_MAX_FAMILIES`].
 /// * [`Errno::BadMagic`] — a dirty padding tail in a record.
 pub fn decode_families_reply(reply: &[u8]) -> Result<FamilyList, Errno> {
@@ -2138,10 +2168,10 @@ pub fn decode_families_reply(reply: &[u8]) -> Result<FamilyList, Errno> {
         let key = FamilyKey::from_wire(key)?;
         let label = decode_label(&reply[key_end..label_end])?;
         let kind = FamilyKind::from_wire(reply[label_end])?;
-        if reply[label_end + 1..label_end + 4].iter().any(|&b| b != 0) {
+        if reply[label_end + 1] != 0 {
             return Err(Errno::BadMagic);
         }
-        *slot = FamilyEntry::new(key, label, kind)?;
+        *slot = FamilyEntry::new(key, label, kind, read_u16(reply, label_end + 2))?;
     }
     Ok(list)
 }

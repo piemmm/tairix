@@ -248,10 +248,19 @@ router**:
   family instead cost a 1000×700 translucent, blurred terminal a full-window
   blur (`blur_px 700000`) to open a 220×180 menu on it; it now costs the menu
   (`damaged_px 39600`, `blur_px 0`).
+
+  A *floating* transient (`add_floating_window`) is a tool window: it stacks,
+  restacks and closes with its family, but `family_front` — the window a
+  raised family gives the keyboard to — passes it over, and raising it brings
+  it above its floating siblings. A family hides and shows with its owner:
+  `set_visible` on an owner carries to its transients, showing again only
+  those that hid with it. `window_at_except` resolves what a moving window is
+  over, looking past the window itself.
 - Input routing (`input`): the `InputRouter` tracks the pointer and the
   focused window, raises and focuses the window under a primary press
   (click-to-activate), and drives explicit interactive window
-  move-grabs; `Compositor::window_at` is the top-most hit-test. Keyboard
+  move-grabs, one of which `carry` starts from a press another window's
+  content holds — the press that tore a palette out goes on moving it; `Compositor::window_at` is the top-most hit-test. Keyboard
   focus can also be moved programmatically with `focus(window, &Compositor)`
   (validated against the compositor, fail-closed) and dropped with `unfocus`,
   so the session glue's taskbar can activate a window by id without a pointer

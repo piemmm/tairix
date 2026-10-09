@@ -441,6 +441,22 @@ pub(crate) struct FamilyRuntime<'a> {
 }
 
 impl<'a> FamilyRuntime<'a> {
+    /// The primary face's line box — ascent and descent — in thousandths of
+    /// its em, rounded.
+    fn line_box(&mut self) -> Result<u16, Errno> {
+        let face = self
+            .faces
+            .first_mut()
+            .ok_or(Errno::NotFound)?
+            .default_face()?;
+        let em = i64::from(face.units_per_em());
+        let line = i64::from(face.ascent()) + i64::from(face.descent());
+        if em <= 0 || line <= 0 {
+            return Err(Errno::BadMagic);
+        }
+        u16::try_from((line * 1000 + em / 2) / em).map_err(|_| Errno::OutOfRange)
+    }
+
     pub(crate) fn new(
         key: FamilyKey,
         label: String,
@@ -845,11 +861,20 @@ impl<'a> FontService<'a> {
 
     /// The installed selectable families — never a fallback-role family —
     /// in discovery order, framed as a [`FontRequest::Families`] reply.
-    pub(crate) fn families_reply(&self, reply: &mut [u8]) -> Result<usize, Errno> {
+    ///
+    /// A family whose primary face cannot be read is not offered: a picker
+    /// must never list a family that would draw nothing.
+    pub(crate) fn families_reply(&mut self, reply: &mut [u8]) -> Result<usize, Errno> {
         let mut entries: Vec<FamilyEntry> = Vec::new();
-        for family in &self.families {
-            if let Some(kind) = family.kind {
-                entries.push(FamilyEntry::new(family.key, &family.label, kind)?);
+        for family in &mut self.families {
+            let Some(kind) = family.kind else {
+                continue;
+            };
+            let Ok(line_box) = family.line_box() else {
+                continue;
+            };
+            if let Ok(entry) = FamilyEntry::new(family.key, &family.label, kind, line_box) {
+                entries.push(entry);
             }
         }
         encode_families_reply(reply, Ok(&entries))

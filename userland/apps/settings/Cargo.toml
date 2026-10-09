@@ -55,6 +55,8 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # the session's, not this application's — Settings holds no authority to
 # write it and only asks.
 tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# The closed-registry engine the desktop settings are read and rendered by.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The four closed value sets the appearance rows offer, read from the one
 # place the document and the window channel both take them from.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

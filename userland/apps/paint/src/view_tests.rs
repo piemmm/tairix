@@ -4,12 +4,13 @@ use alloc::vec::Vec;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
 use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView, CursorShape};
-use tairix_controls::Keystroke;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_colour::Rgba;
+use tairix_controls::{Keystroke, WindowControlKind};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_image::{IndexDepth, SpriteMode, SpriteName, SpritePalette, Unkept};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::{Theme, ThemeRegistry};
-use tairix_window::docapp::{DocumentView, Relayout};
+use tairix_window::docapp::{DocumentView, Relayout, ToolGone, ToolMove, ToolOpening};
 use tairix_window::document::{Access, SavedDocument};
 
 use super::input::shortcut;
@@ -22,6 +23,7 @@ use crate::colour::Ink;
 use crate::document::{Document, Entry, NewPicture, Origin, Picture, SpriteInfo};
 use crate::layout::{Faces, Layout};
 use crate::mask::Mask;
+use crate::pane::{PaneKind, Side};
 use crate::save::SaveRefusal;
 use crate::save::{SaveFormat, SaveSettings};
 use crate::shape::{Bounds, Point as Fx};
@@ -596,6 +598,7 @@ fn the_window_menu_holds_every_command() {
         .into_iter()
         .chain(Tool::ALL.map(Action::Tool))
         .chain((0..crate::filter::Filter::ALL.len()).map(Action::Adjust))
+        .chain(PaneKind::ALL.map(Action::Pane))
         .chain([Action::Rename]);
     for action in offered {
         assert!(ids.contains(&action.id()), "{action:?} is offered");
@@ -780,8 +783,12 @@ fn the_title_marks_a_changed_and_a_read_only_document() {
 }
 
 #[test]
-fn a_new_picture_asked_for_is_handed_to_run() {
+fn a_new_picture_asked_for_starts_from_the_settings_and_is_handed_to_run() {
     let mut window = Window::white(10, 10);
+    let mut preferences = crate::preferences::Preferences::default();
+    preferences.new.size = (24, 12);
+    preferences.format = SaveFormat::Bmp;
+    window.view.begin(&preferences);
     window.act(Action::NewPicture);
     assert!(window.view.asking());
     let outcome = window.key(Key::Named(NamedKey::Enter), plain());
@@ -791,11 +798,11 @@ fn a_new_picture_asked_for_is_handed_to_run() {
     assert_eq!(
         picture,
         NewPicture {
-            size: (10, 10),
+            size: (24, 12),
             ..NewPicture::DEFAULT
         }
     );
-    assert_eq!(format, SaveFormat::Png);
+    assert_eq!(format, SaveFormat::Bmp);
 }
 
 #[test]
@@ -1674,8 +1681,8 @@ fn a_tool_chosen_in_the_tool_box_brings_its_own_bar() {
     );
 }
 
-/// The view strip zooms, and marks the grid while it shows; the key and
-/// the strip agree.
+/// The view strip zooms, and marks the pixel grid while it is asked for; the
+/// key and the strip agree.
 #[test]
 fn the_view_strip_zooms_and_marks_the_grid() {
     let mut window = Window::white(40, 40);
@@ -1683,17 +1690,21 @@ fn the_view_strip_zooms_and_marks_the_grid() {
     let zoom_in = command_rect(&window, ViewCommand::ZoomIn);
     click_on(&mut window, zoom_in);
     assert!(window.view.viewport().zoom() > zoom);
-    let grid = command_rect(&window, ViewCommand::Grid);
-    click_on(&mut window, grid);
-    assert!(window.view.grid);
     let index = VIEW_COMMANDS.len() - 1;
+    assert!(
+        window.view.grids.pixels && window.view.commands.is_active(index),
+        "asked for at first"
+    );
+    let grid = command_rect(&window, ViewCommand::PixelGrid);
+    click_on(&mut window, grid);
+    assert!(!window.view.grids.pixels);
+    assert!(!window.view.commands.is_active(index));
+    window.key(Key::Char('g'), plain());
+    assert!(window.view.grids.pixels);
     assert!(
         window.view.commands.is_active(index),
         "the grid's command is marked"
     );
-    window.key(Key::Char('g'), plain());
-    assert!(!window.view.grid);
-    assert!(!window.view.commands.is_active(index));
 }
 
 /// A press held on one strip and let go over another chooses nothing on
@@ -1763,8 +1774,23 @@ fn tab_walks_the_bar_the_palette_and_the_dock_and_back() {
     );
     assert!(window.view.bar.focus().is_none());
     tab(&mut window, plain());
-    assert!(window.view.picker.state().focus.focused, "then the dock");
+    assert_eq!(
+        window.view.colour_controls.focus(),
+        Some((0, 0)),
+        "then the colour pane's buttons"
+    );
     assert!(!window.view.swatches.state().focus.focused);
+    for _ in 0..4 {
+        tab(&mut window, plain());
+    }
+    assert_eq!(
+        window.view.colour_controls.focus(),
+        Some((2, 0)),
+        "and its choices"
+    );
+    tab(&mut window, plain());
+    assert!(window.view.picker.state().focus.focused, "then the dock");
+    assert_eq!(window.view.colour_controls.focus(), None);
     for _ in 0..20 {
         if !window.view.picker.state().focus.focused {
             break;
@@ -1788,9 +1814,17 @@ fn tab_walks_the_bar_the_palette_and_the_dock_and_back() {
         }
         tab(&mut window, shift);
     }
+    assert_eq!(
+        window.view.colour_controls.focus(),
+        Some((2, 0)),
+        "the colour pane's choices before it"
+    );
+    for _ in 0..5 {
+        tab(&mut window, shift);
+    }
     assert!(
         window.view.swatches.state().focus.focused,
-        "the palette before it"
+        "the palette before them"
     );
     tab(&mut window, shift);
     assert_eq!(
@@ -1960,7 +1994,7 @@ fn tips_name_tools_commands_and_settings() {
     };
     window.move_to(tool_rect(&window, Tool::Fill).center());
     assert_eq!(tip(&window), Some("Fill (F)"));
-    window.move_to(command_rect(&window, ViewCommand::Grid).center());
+    window.move_to(command_rect(&window, ViewCommand::PixelGrid).center());
     assert_eq!(tip(&window), Some("Pixel grid (G)"));
     let size = window.layout.bar().control(0).expect("seated");
     window.move_to(size.center());
@@ -2800,38 +2834,93 @@ fn filter_index(label: &str) -> usize {
         .expect("a filter")
 }
 
+/// Where `spot` on the Adjustment pane is.
+fn spot_at(window: &Window, spot: crate::adjust::Spot) -> Point {
+    let theme = window.registry.active();
+    window
+        .view
+        .adjustment
+        .spot(
+            spot,
+            window.layout.adjustment_settings(),
+            (faces(theme), Scale::ONE, theme),
+        )
+        .expect("on the pane")
+}
+
+/// Press and let go on `spot` of the Adjustment pane, answering what asked
+/// for more: the press or the release.
+fn press_at(window: &mut Window, spot: crate::adjust::Spot) -> Outcome {
+    let at = spot_at(window, spot);
+    window.move_to(at);
+    let pressed = window.press(PointerButton::Primary);
+    let released = window.release(PointerButton::Primary);
+    if pressed.request.is_some() {
+        pressed
+    } else {
+        released
+    }
+}
+
 #[test]
-fn a_filter_is_previewed_as_it_is_set_and_applied_as_one_step() {
+fn an_adjustment_opens_docked_and_leaves_the_window_live() {
+    let mut window = Window::white(30, 30);
+    let outcome = window.act(Action::Adjust(filter_index("Blur")));
+    assert!(!window.view.asking(), "nothing modal");
+    assert!(window.view.shows(PaneKind::Adjustment));
+    assert!(!window.layout.adjustment_settings().is_empty());
+    assert_eq!(
+        window.view.adjusting(),
+        Some(crate::filter::Filter::Blur { radius: 2 })
+    );
+    window.run_worker(outcome);
+    assert!(window.view.preview_canvas().is_some(), "previewed");
+    assert_eq!(
+        window.colour(3, 3),
+        [255; 4],
+        "the picture itself untouched"
+    );
+    assert_eq!(window.view.document().history_depth(), 0);
+    window.act(Action::Tool(Tool::Pencil));
+    window.act(Action::ZoomIn);
+    assert!(
+        window.view.adjusting().is_some(),
+        "the view and the tools leave it open"
+    );
+}
+
+#[test]
+fn a_filter_is_previewed_one_job_at_a_time_and_applied_as_one_step() {
     let mut window = Window::white(30, 30);
     window.act(Action::Tool(Tool::Pencil));
     window.drag((15, 0), (15, 29));
     let before = window.colour(14, 10);
-    let outcome = window.act(Action::Adjust(filter_index("Blur")));
-    assert!(window.view.asking(), "its settings are open");
-    window.run_worker(outcome);
-    assert!(window.view.preview_canvas().is_some(), "previewed");
-    assert_eq!(
-        window.colour(14, 10),
-        before,
-        "the picture itself untouched"
-    );
-    assert_eq!(window.view.document().history_depth(), 1);
-    let moved = window.key(Key::Named(NamedKey::Right), plain());
-    assert!(
-        matches!(moved.request, Some(Request::Own(Own::Compute { .. }))),
-        "a moved setting asks for its preview"
-    );
-    let still = window.key(Key::Named(NamedKey::Right), plain());
-    assert!(still.request.is_none(), "one at a time");
-    let again = window.run_worker(moved);
+    let first = window.act(Action::Adjust(filter_index("Blur")));
+    assert!(matches!(
+        first.request,
+        Some(Request::Own(Own::Compute { .. }))
+    ));
+    let moved = press_at(&mut window, crate::adjust::Spot::Number(300));
+    assert!(moved.request.is_none(), "one at a time");
+    let again = window.run_worker(first);
     assert!(
         matches!(again.request, Some(Request::Own(Own::Compute { .. }))),
         "the settings moved meanwhile are asked once it lands"
     );
     window.run_worker(again);
-    let applied = window.key(Key::Named(NamedKey::Enter), plain());
+    assert!(window.view.preview_canvas().is_some());
+    assert_eq!(
+        window.colour(14, 10),
+        before,
+        "the picture itself untouched"
+    );
+    let applied = press_at(&mut window, crate::adjust::Spot::Apply);
     assert!(applied.request.is_none(), "the preview's own tiles land");
-    assert!(!window.view.asking());
+    assert_eq!(
+        window.view.adjusting(),
+        None,
+        "the pane goes back to its list"
+    );
     assert!(window.view.preview_canvas().is_none());
     assert_eq!(window.view.document().history_depth(), 2, "as one step");
     assert_ne!(
@@ -2842,14 +2931,28 @@ fn a_filter_is_previewed_as_it_is_set_and_applied_as_one_step() {
 }
 
 #[test]
-fn a_filter_turned_down_leaves_the_picture_as_it_was() {
+fn an_adjustment_reset_or_closed_leaves_the_picture_as_it_was() {
     let mut window = Window::white(20, 20);
-    let outcome = window.act(Action::Adjust(filter_index("Brightness and contrast")));
-    window.run_worker(outcome);
-    window.key(Key::Named(NamedKey::Escape), plain());
-    assert!(!window.view.asking());
-    assert!(window.view.preview_canvas().is_none());
+    let opened = window.act(Action::Adjust(filter_index("Brightness and contrast")));
+    assert!(opened.request.is_none(), "nothing to preview yet");
+    let moved = press_at(&mut window, crate::adjust::Spot::Number(100));
+    window.run_worker(moved);
+    assert!(window.view.preview_canvas().is_some());
+    press_at(&mut window, crate::adjust::Spot::Reset);
+    assert!(
+        window.view.preview_canvas().is_none(),
+        "back where it started"
+    );
+    let close = band_point(
+        &window,
+        PaneKind::Adjustment,
+        Some(WindowControlKind::Close),
+    );
+    click_at(&mut window, close);
+    assert_eq!(window.view.adjusting(), None);
+    assert!(!window.view.shows(PaneKind::Adjustment));
     assert_eq!(window.view.document().history_depth(), 0);
+    assert_eq!(window.colour(5, 5), [255; 4]);
 }
 
 #[test]
@@ -2865,22 +2968,142 @@ fn a_palette_picture_is_adjusted_through_its_palette_and_refuses_a_filter() {
     );
     assert_eq!(window.view.document().history_depth(), 1);
     window.act(Action::Adjust(filter_index("Blur")));
-    assert!(!window.view.asking(), "no settings open");
+    assert_eq!(window.view.adjusting(), None, "not opened");
     assert!(window
         .view
         .message()
         .is_some_and(|said| said.contains("colour picture")));
-    let outcome = window.act(Action::Adjust(filter_index("Brightness and contrast")));
-    assert!(outcome.request.is_none(), "a palette is previewed at once");
-    window.key(Key::Named(NamedKey::Right), plain());
+    window.act(Action::Adjust(filter_index("Brightness and contrast")));
+    let moved = press_at(&mut window, crate::adjust::Spot::Number(900));
+    assert!(moved.request.is_none(), "a palette is previewed at once");
     assert!(window.view.preview_kind().is_some());
     assert_eq!(
         window.palette(),
         grey,
         "the palette itself untouched until applied"
     );
-    window.key(Key::Named(NamedKey::Enter), plain());
+    press_at(&mut window, crate::adjust::Spot::Apply);
     assert_ne!(window.palette(), grey, "applied");
+    assert_eq!(window.view.adjusting(), None);
+}
+
+#[test]
+fn a_preview_worked_from_a_picture_since_changed_is_dropped_and_asked_again() {
+    let mut window = Window::white(20, 20);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((5, 5), (5, 15));
+    let out = window.act(Action::Adjust(filter_index("Blur")));
+    window.act(Action::Undo);
+    assert!(window.view.adjusting().is_some(), "undo leaves it open");
+    let again = window.run_worker(out);
+    assert!(
+        window.view.preview_canvas().is_none(),
+        "worked from the picture before the undo"
+    );
+    assert!(
+        matches!(again.request, Some(Request::Own(Own::Compute { .. }))),
+        "asked again of the picture as it now stands"
+    );
+    window.run_worker(again);
+    assert!(window.view.preview_canvas().is_some());
+}
+
+#[test]
+fn a_stroke_applies_the_adjustment_first_and_one_that_finds_it_unfinished_paints_nothing() {
+    let mut window = Window::white(20, 20);
+    window.act(Action::Tool(Tool::Pencil));
+    let preview = window.act(Action::Adjust(filter_index("Blur")));
+    let at = window.screen_of((3, 3));
+    window.move_to(at);
+    let applying = window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_eq!(window.colour(3, 3), [255; 4], "the press painted nothing");
+    let Some(Request::Own(Own::Compute { .. })) = applying.request else {
+        panic!(
+            "the adjustment applied on a worker, not {:?}",
+            applying.request
+        );
+    };
+    window.run_worker(applying);
+    assert_eq!(window.view.adjusting(), None, "applied and closed");
+    assert_eq!(window.view.document().history_depth(), 1);
+    let late = window.run_worker(preview);
+    assert!(
+        late.request.is_none(),
+        "the preview's late answer is dropped"
+    );
+    window.drag((3, 3), (3, 3));
+    assert_eq!(window.colour(3, 3), [0, 0, 0, 255], "then the tool paints");
+}
+
+#[test]
+fn preview_turned_off_shows_the_picture_and_on_again_shows_the_preview_at_once() {
+    let mut window = Window::white(20, 20);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((5, 5), (5, 15));
+    let out = window.act(Action::Adjust(filter_index("Blur")));
+    window.run_worker(out);
+    assert!(window.view.preview_canvas().is_some());
+    let off = press_at(&mut window, crate::adjust::Spot::Preview);
+    assert!(off.request.is_none());
+    assert!(
+        window.view.preview_canvas().is_none(),
+        "the picture as it is"
+    );
+    let on = press_at(&mut window, crate::adjust::Spot::Preview);
+    assert!(on.request.is_none(), "kept to compare");
+    assert!(window.view.preview_canvas().is_some());
+}
+
+/// A 256×1 picture of greys from 40 to 167.
+fn greys() -> Window {
+    let mut built =
+        crate::canvas::CanvasBuilder::new(256, 1, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    for x in 0..256u32 {
+        let level = u8::try_from(x / 2 + 40).expect("a level");
+        built.set(x, 0, Sample::Rgba([level, level, level, 255]));
+    }
+    Window::new(Document::new(Picture::plain(built.finish())))
+}
+
+#[test]
+fn levels_read_a_histogram_and_auto_stretches_what_it_holds() {
+    let mut window = greys();
+    let histogram = window.act(Action::Adjust(filter_index("Levels")));
+    assert!(window.view.histogram().is_none());
+    window.run_worker(histogram);
+    assert!(window.view.histogram().is_some());
+    let auto = press_at(&mut window, crate::adjust::Spot::Picker(3));
+    let Some(crate::filter::Filter::Levels(levels)) = window.view.adjusting() else {
+        panic!("levels open");
+    };
+    let red = levels.of(crate::tone::Channel::Red);
+    assert!(red.black >= 40 && red.white <= 167, "{red:?}");
+    window.run_worker(auto);
+    assert!(window.view.preview_canvas().is_some());
+    press_at(&mut window, crate::adjust::Spot::Apply);
+    assert_eq!(window.colour(0, 0)[0], 0, "the darkest grey is black");
+}
+
+#[test]
+fn an_eyedropper_takes_the_colour_beneath_the_preview() {
+    let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba([30, 20, 10, 255])).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    let histogram = window.act(Action::Adjust(filter_index("Levels")));
+    window.run_worker(histogram);
+    press_at(&mut window, crate::adjust::Spot::Picker(0));
+    assert_eq!(
+        window.view.adjustment.picking(),
+        Some(crate::adjust::Pick::Black)
+    );
+    let picked = click(&mut window, (4, 4));
+    let Some(crate::filter::Filter::Levels(levels)) = window.view.adjusting() else {
+        panic!("levels open");
+    };
+    assert_eq!(levels.of(crate::tone::Channel::Green).black, 20);
+    assert_eq!(window.view.adjustment.picking(), None, "put down");
+    window.run_worker(picked);
+    assert_eq!(window.view.document().history_depth(), 0, "nothing painted");
 }
 
 /// A window on a 10×10 picture of a layer of each colour and opacity, the
@@ -3248,4 +3471,663 @@ fn a_layer_is_renamed_and_faded_through_its_form_and_undone_whole() {
     assert_eq!(layers_of(&window)[1].name, "Sky");
     window.key(Key::Char('z'), ctrl());
     assert_eq!(layers_of(&window)[1].name, "layer");
+}
+
+/// Where pane `kind`'s band seats `control`, or the middle of the span it is
+/// dragged by.
+fn band_point(window: &Window, kind: PaneKind, control: Option<WindowControlKind>) -> Point {
+    let slot = window.layout.pane(kind).expect("shown");
+    let band = window
+        .view
+        .header(kind)
+        .layout(slot.header, Scale::ONE, window.registry.active());
+    let rect = match control {
+        Some(control) => band
+            .controls()
+            .iter()
+            .find_map(|&(seated, rect)| (seated == control).then_some(rect))
+            .expect("seated"),
+        None => band.drag,
+    };
+    rect.center()
+}
+
+fn click_at(window: &mut Window, at: Point) {
+    window.move_to(at);
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+}
+
+/// Whether View ▸ Panes ticks pane `kind`.
+fn ticked(window: &Window, kind: PaneKind) -> bool {
+    window
+        .view
+        .menu(MenuKind::Window)
+        .rows()
+        .any(|(row, _)| match row {
+            AppMenuRowView::Item(item) => {
+                item.id.get() == Action::Pane(kind).id()
+                    && item.mark == tairix_abi::window_ipc::AppMenuMark::Check
+            }
+            _ => false,
+        })
+}
+
+#[test]
+fn a_pane_closed_by_its_band_gives_up_its_dock_and_the_view_menu_shows_it_again() {
+    let mut window = Window::white(10, 10);
+    let canvas = window.layout.canvas();
+    assert!(ticked(&window, PaneKind::Colour));
+    let close = band_point(&window, PaneKind::Colour, Some(WindowControlKind::Close));
+    click_at(&mut window, close);
+    assert!(!window.view.shows(PaneKind::Colour));
+    assert!(window.layout.pane(PaneKind::Colour).is_none());
+    assert!(window.layout.dock_on(Side::Right).rect.is_empty());
+    assert!(
+        window.layout.canvas().width > canvas.width,
+        "the canvas takes its room"
+    );
+    assert!(!ticked(&window, PaneKind::Colour));
+    window.act(Action::Pane(PaneKind::Colour));
+    assert_eq!(
+        window.view.arrangement().place(PaneKind::Colour),
+        Some((Side::Right, 0))
+    );
+    assert_eq!(window.layout.canvas(), canvas);
+}
+
+#[test]
+fn a_pane_rolls_up_to_its_band_and_opens_again() {
+    let mut window = Window::white(10, 10);
+    let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
+    click_at(&mut window, roll);
+    let slot = window.layout.pane(PaneKind::Tools).expect("still shown");
+    assert!(slot.body.is_empty());
+    assert!(window.layout.tool_box().is_empty());
+    assert!(window.view.shows(PaneKind::Tools));
+    let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
+    click_at(&mut window, roll);
+    assert!(!window.layout.tool_box().is_empty());
+}
+
+#[test]
+fn a_band_dragged_over_the_other_dock_marks_where_it_lands_and_lands_there() {
+    let mut window = Window::white(10, 10);
+    let grip = band_point(&window, PaneKind::Tools, None);
+    window.move_to(grip);
+    window.press(PointerButton::Primary);
+    let right = window.layout.dock_on(Side::Right).rect;
+    let under_colour = Point::new(right.center().x, right.bottom() - 2);
+    window.move_to(under_colour);
+    let drag = window.view.pane_drag.expect("dragging");
+    assert_eq!(drag.kind, PaneKind::Tools);
+    assert_eq!(
+        drag.landing,
+        Some(super::Landing {
+            side: Side::Right,
+            before: 1
+        })
+    );
+    let over_colour = Point::new(right.center().x, right.top() + 4);
+    window.move_to(over_colour);
+    assert_eq!(
+        window.view.pane_drag.and_then(|drag| drag.landing),
+        Some(super::Landing {
+            side: Side::Right,
+            before: 0
+        })
+    );
+    window.release(PointerButton::Primary);
+    assert!(window.view.pane_drag.is_none());
+    assert_eq!(
+        window.view.arrangement().place(PaneKind::Tools),
+        Some((Side::Right, 0))
+    );
+    assert!(window.layout.dock_on(Side::Left).rect.is_empty());
+    let tools = window.layout.pane(PaneKind::Tools).expect("shown");
+    let colour = window.layout.pane(PaneKind::Colour).expect("shown");
+    assert!(
+        tools.frame.bottom() < colour.frame.top(),
+        "above the colour pane"
+    );
+}
+
+#[test]
+fn a_band_dragged_to_the_edge_of_an_empty_dock_lands_in_it() {
+    let mut window = Window::white(10, 10);
+    window.act(Action::Pane(PaneKind::Tools));
+    assert!(window.layout.dock_on(Side::Left).rect.is_empty());
+    let grip = band_point(&window, PaneKind::Colour, None);
+    window.move_to(grip);
+    window.press(PointerButton::Primary);
+    let middle = window.layout.canvas().center().y;
+    window.move_to(Point::new(2, middle));
+    assert_eq!(
+        window.view.pane_drag.and_then(|drag| drag.landing),
+        Some(super::Landing {
+            side: Side::Left,
+            before: 0
+        })
+    );
+    window.release(PointerButton::Primary);
+    assert_eq!(
+        window.view.arrangement().place(PaneKind::Colour),
+        Some((Side::Left, 0))
+    );
+    assert!(window.layout.dock_on(Side::Right).rect.is_empty());
+}
+
+#[test]
+fn a_pane_drag_holds_the_pointer_and_one_let_go_away_from_a_dock_floats_where_it_went() {
+    let mut window = Window::white(10, 10);
+    window.act(Action::Tool(Tool::Pencil));
+    let grip = band_point(&window, PaneKind::Tools, None);
+    let band = window.layout.pane(PaneKind::Tools).expect("docked").header;
+    window.move_to(grip);
+    window.press(PointerButton::Primary);
+    window.move_to(window.screen_of((2, 2)));
+    assert_eq!(window.view.pane_drag.and_then(|drag| drag.landing), None);
+    let to = window.screen_of((7, 7));
+    window.move_to(to);
+    window.release(PointerButton::Primary);
+    assert!(window.view.arrangement().floats(PaneKind::Tools));
+    assert_eq!(window.colour(2, 2), [255; 4], "the canvas took nothing");
+    assert_eq!(window.colour(7, 7), [255; 4]);
+    let opening = window.view.tool_opening(super::tool_id(PaneKind::Tools));
+    let grab = (grip.x - band.left(), grip.y - band.top());
+    assert_eq!(
+        opening,
+        ToolOpening {
+            offset: (to.x - grab.0, to.y - grab.1 + to_i32(band.height)),
+            carry: None,
+        },
+        "its band lies where the pane's would have, and nothing carries it"
+    );
+}
+
+/// Drag pane `kind` by its band to `to`, the press still held.
+fn drag_band(window: &mut Window, kind: PaneKind, to: Point) -> Outcome {
+    let grip = band_point(window, kind, None);
+    window.move_to(grip);
+    window.press(PointerButton::Primary);
+    window.move_to(Point::new(grip.x, grip.y + 30));
+    window.move_to(to)
+}
+
+#[test]
+fn a_band_carried_to_the_windows_edge_tears_its_pane_out_under_the_press() {
+    let mut window = Window::white(10, 10);
+    let grip = band_point(&window, PaneKind::Colour, None);
+    let band = window.layout.pane(PaneKind::Colour).expect("docked").header;
+    let edge = Point::new(to_i32(WINDOW.0) - 1, grip.y + 40);
+    let outcome = drag_band(&mut window, PaneKind::Colour, edge);
+    assert_eq!(outcome.relayout, Relayout::Whole);
+    assert!(
+        window.view.pane_drag.is_none(),
+        "the press is the tool window's now"
+    );
+    assert!(window.view.arrangement().floats(PaneKind::Colour));
+    assert!(window.layout.dock_on(Side::Right).rect.is_empty());
+    let id = super::tool_id(PaneKind::Colour);
+    let opening = window.view.tool_opening(id);
+    assert_eq!(
+        opening.carry,
+        Some(u32::try_from(grip.x - band.left()).expect("on the band"))
+    );
+    assert_eq!(
+        window.view.tool_opening(id).carry,
+        None,
+        "a carry is for the open it was asked for"
+    );
+    // The tool window shows the pane laid out beside the window, never over it.
+    let wanted = window
+        .view
+        .tool_window(&window.layout, 0)
+        .expect("one tool window");
+    assert_eq!((wanted.id, wanted.title), (id, "Colour"));
+    assert!(wanted.rect.intersection(&window.layout.window()).is_empty());
+    assert_eq!(window.layout.pane_window(PaneKind::Colour), wanted.rect);
+    assert!(wanted.rect.contains(window.layout.picker().center()));
+    assert!(window.view.tool_window(&window.layout, 1).is_none());
+    // Its band's press went with it: the next sample over the old band is a
+    // hover, not a drag.
+    window.release(PointerButton::Primary);
+    window.move_to(grip);
+    assert!(window.view.pane_drag.is_none());
+}
+
+#[test]
+fn a_tool_window_moved_over_a_dock_marks_it_and_let_go_there_docks_its_pane() {
+    let mut window = Window::white(10, 10);
+    window.view.panes.float(PaneKind::Tools);
+    window.relayout();
+    let id = super::tool_id(PaneKind::Tools);
+    let left = window.layout.window().left() + 2;
+    let middle = window.layout.canvas().center().y;
+    let moved = |over, ended| ToolMove { id, over, ended };
+    let mut damage = Region::new();
+    let theme = window.registry.active();
+    let outcome = window.view.tool_moved(
+        moved(Some(Point::new(left, middle)), false),
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    assert_eq!(outcome.relayout, Relayout::None);
+    assert_eq!(
+        window.view.landing(),
+        Some(super::Landing {
+            side: Side::Left,
+            before: 0
+        })
+    );
+    assert!(!damage.is_empty(), "the mark is drawn");
+    let outcome = window.view.tool_moved(
+        moved(None, false),
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    assert_eq!(outcome.relayout, Relayout::None);
+    assert_eq!(
+        window.view.landing(),
+        None,
+        "off the window, nothing is marked"
+    );
+    let outcome = window.view.tool_moved(
+        moved(Some(Point::new(left, middle)), true),
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    window.apply(&outcome);
+    assert_eq!(window.view.landing(), None);
+    assert_eq!(
+        window.view.arrangement().place(PaneKind::Tools),
+        Some((Side::Left, 0))
+    );
+    assert!(
+        window.view.tool_window(&window.layout, 0).is_none(),
+        "its tool window goes"
+    );
+}
+
+#[test]
+fn a_tool_windows_close_mark_hides_its_pane_and_a_refusal_docks_it_home() {
+    let mut window = Window::white(10, 10);
+    window.view.panes.float(PaneKind::Colour);
+    window.view.panes.float(PaneKind::Tools);
+    window.relayout();
+    let outcome = window.view.tool_gone(
+        super::tool_id(PaneKind::Colour),
+        ToolGone::Closed,
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.apply(&outcome);
+    assert!(!window.view.shows(PaneKind::Colour));
+    let outcome = window.view.tool_gone(
+        super::tool_id(PaneKind::Tools),
+        ToolGone::Refused,
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.apply(&outcome);
+    assert_eq!(
+        window.view.arrangement().place(PaneKind::Tools),
+        Some((Side::Left, 0))
+    );
+}
+
+#[test]
+fn floating_panes_are_laid_out_apart_and_open_at_home_when_nothing_tore_them_out() {
+    let mut window = Window::white(10, 10);
+    window.act(Action::Pane(PaneKind::Adjustment));
+    for kind in PaneKind::ALL {
+        window.view.panes.float(kind);
+    }
+    window.relayout();
+    let slots = window.layout.floating();
+    assert_eq!(slots.len(), 3);
+    for (index, slot) in slots.iter().enumerate() {
+        assert!(slot.frame.intersection(&window.layout.window()).is_empty());
+        assert!(slot.header.is_empty(), "the window manager draws its band");
+        for other in &slots[index + 1..] {
+            assert!(slot.frame.intersection(&other.frame).is_empty());
+        }
+    }
+    let tools = window.view.tool_opening(super::tool_id(PaneKind::Tools));
+    let colour = window.view.tool_opening(super::tool_id(PaneKind::Colour));
+    let below = window.layout.top().bottom();
+    assert_eq!(
+        tools,
+        ToolOpening {
+            offset: (0, below),
+            carry: None
+        }
+    );
+    let width = window
+        .layout
+        .pane(PaneKind::Colour)
+        .expect("floating")
+        .frame
+        .width;
+    assert_eq!(
+        colour.offset,
+        (to_i32(WINDOW.0) - to_i32(width), below),
+        "against the right edge, its home"
+    );
+}
+
+#[test]
+fn escape_or_losing_the_keyboard_turns_a_pane_drag_down() {
+    for lose_focus in [false, true] {
+        let mut window = Window::white(10, 10);
+        let before = window.view.arrangement().clone();
+        let grip = band_point(&window, PaneKind::Tools, None);
+        window.move_to(grip);
+        window.press(PointerButton::Primary);
+        let right = window.layout.dock_on(Side::Right).rect;
+        window.move_to(right.center());
+        assert!(window.view.pane_drag.is_some());
+        if lose_focus {
+            window
+                .view
+                .focus_changed(false, &window.layout, &mut Region::new());
+        } else {
+            window.key(Key::Named(NamedKey::Escape), plain());
+        }
+        assert!(window.view.pane_drag.is_none());
+        window.release(PointerButton::Primary);
+        assert_eq!(
+            window.view.arrangement(),
+            &before,
+            "lose focus: {lose_focus}"
+        );
+    }
+}
+
+#[test]
+fn reset_panes_puts_every_pane_back_open_where_it_starts() {
+    let mut window = Window::white(10, 10);
+    let start = window.layout.clone();
+    window.act(Action::Pane(PaneKind::Adjustment));
+    window.act(Action::Pane(PaneKind::Colour));
+    let roll = band_point(&window, PaneKind::Tools, Some(WindowControlKind::Minimize));
+    click_at(&mut window, roll);
+    window.act(Action::ResetPanes);
+    assert_eq!(
+        window.view.arrangement(),
+        &crate::pane::Arrangement::default()
+    );
+    assert_eq!(window.layout, start);
+}
+
+/// Where control `cell` of part `part` of the colour pane's panel is.
+fn colour_control(window: &Window, part: usize, cell: usize) -> Point {
+    let theme = window.registry.active();
+    window
+        .view
+        .colour_controls
+        .place_of(
+            part,
+            window.layout.colour_controls(),
+            faces(theme),
+            Scale::ONE,
+            theme,
+        )
+        .expect("laid out")
+        .controls[cell]
+        .center()
+}
+
+#[test]
+fn the_colour_pane_swaps_resets_and_picks_once() {
+    let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba([200, 30, 60, 255])).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::Tool(Tool::Pencil));
+    let at = colour_control(&window, 0, 0);
+    click_at(&mut window, at);
+    assert_eq!(
+        window.view.inks(),
+        (Ink::Colour([255; 4]), Ink::Colour([0, 0, 0, 255])),
+        "swapped"
+    );
+    let at = colour_control(&window, 0, 1);
+    click_at(&mut window, at);
+    assert_eq!(
+        window.view.inks(),
+        (Ink::Colour([0, 0, 0, 255]), Ink::Colour([255; 4])),
+        "reset"
+    );
+    let at = colour_control(&window, 0, 2);
+    click_at(&mut window, at);
+    assert!(window.view.picking_colour);
+    click(&mut window, (4, 4));
+    assert_eq!(
+        window.view.inks().0,
+        Ink::Colour([200, 30, 60, 255]),
+        "picked once"
+    );
+    assert!(!window.view.picking_colour);
+    assert_eq!(
+        window.view.tool(),
+        Tool::Pencil,
+        "the tool in use carries on"
+    );
+    assert_eq!(
+        window.colour(4, 4),
+        [200, 30, 60, 255],
+        "the press painted nothing"
+    );
+    assert_eq!(
+        window.view.recents.first(),
+        Some(&Rgba::from_array([200, 30, 60, 255]))
+    );
+    window.act(Action::PickColour);
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert!(!window.view.picking_colour, "Escape puts it down");
+}
+
+#[test]
+fn the_colour_pane_chooses_the_pickers_view_and_fields() {
+    let mut window = Window::white(10, 10);
+    let at = colour_control(&window, 1, 0);
+    click_at(&mut window, at);
+    window.key(Key::Named(NamedKey::Down), plain());
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert_eq!(
+        window.view.picker.view(),
+        tairix_controls::PickerView::Wheel
+    );
+    let at = colour_control(&window, 2, 0);
+    click_at(&mut window, at);
+    for _ in 0..3 {
+        window.key(Key::Named(NamedKey::Down), plain());
+    }
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert_eq!(
+        window.view.picker.model(),
+        tairix_controls::ColourModel::Cmyk
+    );
+}
+
+#[test]
+fn colours_settled_are_remembered_and_chosen_again() {
+    let mut built =
+        crate::canvas::CanvasBuilder::new(4, 4, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
+    built.set(1, 1, Sample::Rgba([10, 20, 30, 255]));
+    built.set(2, 2, Sample::Rgba([40, 50, 60, 255]));
+    let mut window = Window::new(Document::new(Picture::plain(built.finish())));
+    window.act(Action::Tool(Tool::Eyedropper));
+    for pixel in [(1, 1), (2, 2), (1, 1)] {
+        window.drag(pixel, pixel);
+    }
+    assert_eq!(
+        window.view.recents,
+        [
+            Rgba::from_array([10, 20, 30, 255]),
+            Rgba::from_array([40, 50, 60, 255])
+        ],
+        "the latest first, once"
+    );
+    let recents = window.view.recents_rect(&window.layout);
+    let second = window
+        .view
+        .recent_grid
+        .cell_rect(recents, 1)
+        .expect("a well");
+    click_at(&mut window, second.center());
+    assert_eq!(window.view.inks().0, Ink::Colour([40, 50, 60, 255]));
+    let mut palette = four_colours();
+    assert!(
+        !palette.view.recent_grid.state().enabled,
+        "a palette picture's inks are its entries"
+    );
+    palette.act(Action::ResetColours);
+    assert!(matches!(palette.view.inks().0, Ink::Index(_)));
+}
+
+/// Settings with the grid shown and snapped to, its cells `spacing` across.
+fn snapping(spacing: u32) -> crate::preferences::Preferences {
+    let mut preferences = crate::preferences::Preferences::default();
+    preferences.grid.spacing = (spacing, spacing);
+    preferences.grid.shown = true;
+    preferences.grid.snap = true;
+    preferences
+}
+
+#[test]
+fn a_new_window_starts_with_the_tool_panes_grid_and_fit_the_settings_name() {
+    let mut window = Window::white(2000, 1600);
+    let mut preferences = crate::preferences::Preferences {
+        tool: Tool::Line,
+        ..crate::preferences::Preferences::default()
+    };
+    preferences.panes.hide(PaneKind::Colour);
+    preferences.grid.shown = true;
+    window.view.begin(&preferences);
+    window.relayout();
+    assert_eq!(window.view.tool(), Tool::Line);
+    assert!(!window.view.panes().shows(PaneKind::Colour));
+    assert!(window.view.grid_shown());
+    assert!(
+        window.view.viewport().zoom()
+            < crate::viewport::Zoom::of(crate::viewport::ZOOMS[crate::viewport::ACTUAL]),
+        "a picture larger than the window opens fitted"
+    );
+    // Reset panes puts back what the settings name, not the shipped ones.
+    window.act(Action::Pane(PaneKind::Colour));
+    window.act(Action::ResetPanes);
+    assert!(!window.view.panes().shows(PaneKind::Colour));
+}
+
+#[test]
+fn a_picture_opened_at_actual_size_is_not_fitted() {
+    let mut window = Window::white(2000, 1600);
+    let mut preferences = crate::preferences::Preferences::default();
+    preferences.open_at = crate::preferences::OpenAt::Actual;
+    window.view.begin(&preferences);
+    window.relayout();
+    assert_eq!(window.view.viewport().rung(), Some(crate::viewport::ACTUAL));
+}
+
+#[test]
+fn the_pixel_grid_shows_from_the_zoom_the_settings_name() {
+    let mut window = Window::white(16, 16);
+    let mut preferences = crate::preferences::Preferences {
+        pixel_grid_from: 300,
+        ..crate::preferences::Preferences::default()
+    };
+    window
+        .view
+        .adopt(&preferences, &window.layout, &mut Region::new());
+    let rung = |percent| {
+        crate::viewport::ZOOMS
+            .iter()
+            .position(|&(n, d)| n * 100 / d == percent)
+            .expect("a rung")
+    };
+    window.act(Action::Zoom(rung(200)));
+    assert!(!window.view.pixel_grid_shown());
+    window.act(Action::Zoom(rung(300)));
+    assert!(window.view.pixel_grid_shown());
+    preferences.pixel_grid_from = 0;
+    window
+        .view
+        .adopt(&preferences, &window.layout, &mut Region::new());
+    assert!(!window.view.pixel_grid_shown(), "never");
+}
+
+#[test]
+fn snapping_puts_a_marquee_on_whole_cells_only_while_the_grid_shows() {
+    let mut window = Window::white(64, 64);
+    window.view.begin(&snapping(16));
+    window.act(Action::Tool(Tool::Select));
+    window.drag((3, 2), (29, 20));
+    let bounds = window.view.selection().expect("a selection").bounds();
+    assert_eq!((bounds.x0, bounds.y0, bounds.x1, bounds.y1), (0, 0, 32, 16));
+    window.act(Action::Deselect);
+    window.act(Action::Grid);
+    window.drag((3, 2), (29, 20));
+    let bounds = window.view.selection().expect("a selection").bounds();
+    assert_eq!(
+        (bounds.x0, bounds.y0),
+        (3, 2),
+        "the grid hidden, nothing snaps"
+    );
+}
+
+#[test]
+fn snapping_puts_a_shapes_corners_and_a_lines_ends_on_the_grid() {
+    let mut window = Window::white(64, 64);
+    window.view.begin(&snapping(8));
+    window.act(Action::Tool(Tool::Rectangle));
+    window.drag((3, 3), (13, 13));
+    assert_eq!(
+        window.colour(0, 0),
+        [0, 0, 0, 255],
+        "the outline starts on the line"
+    );
+    assert_eq!(
+        window.colour(15, 15),
+        [0, 0, 0, 255],
+        "and ends on the last pixel of the cell"
+    );
+    assert_eq!(window.colour(8, 8), [255; 4], "inside, untouched");
+    assert_eq!(window.colour(16, 16), [255; 4], "nothing past the cell");
+
+    let mut lined = Window::white(64, 64);
+    lined.view.begin(&snapping(8));
+    lined.act(Action::Tool(Tool::Line));
+    lined.drag((3, 30), (13, 30));
+    assert_eq!(
+        lined.colour(0, 32),
+        [0, 0, 0, 255],
+        "from the crossing's pixel"
+    );
+    assert_eq!(
+        lined.colour(16, 32),
+        [0, 0, 0, 255],
+        "to the next crossing's"
+    );
+    assert_eq!(lined.colour(21, 32), [255; 4], "and no further");
+}
+
+#[test]
+fn a_moved_selections_corner_lands_on_the_grid() {
+    let mut window = Window::white(64, 64);
+    window.view.begin(&snapping(8));
+    window.act(Action::Tool(Tool::Select));
+    window.drag((0, 0), (7, 7));
+    window.drag((2, 2), (13, 2));
+    let floating = window.view.floating().expect("lifted and moved").bounds();
+    assert_eq!(
+        (floating.x0, floating.y0),
+        (8, 0),
+        "eleven across lands on the cell beyond"
+    );
 }

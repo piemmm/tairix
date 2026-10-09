@@ -19,13 +19,13 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use tairix_abi::desktop::{DesktopInfo, Motion};
+use tairix_abi::desktop::{DesktopInfo, DesktopText, Motion};
 use tairix_abi::driver::display::{DamageList, DisplayMode};
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation,
     HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose, PointerAction,
-    TerrainPlate, WindowEvent, WindowRegion,
+    TerrainPlate, ToolOver, WindowEvent, WindowRegion,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
@@ -36,7 +36,8 @@ use tairix_log::{EventId, Field, FieldValue};
 use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
 use tairix_window::{
-    Activation, ClientRegion, CursorSetName, HandOverDesk, PreviewSize, WallpaperName, WindowHost,
+    Activation, ClientRegion, CursorSetName, HandOverDesk, PreviewSize, ToolSpec, WallpaperName,
+    WindowHost,
 };
 
 use crate::launch::{
@@ -294,11 +295,11 @@ struct WindowRecord {
     /// (`Compositor::present_window_content`), so the session keeps no
     /// second copy to convert into and clone from.
     wm: WindowId,
-    /// For a popup surface, the compositor window of the parent that owns
-    /// it; `None` for a top-level window. It is what tells a close which
-    /// teardown the surface takes, and the window manager holds the same
-    /// link itself for stacking, so no re-assertion happens here.
-    parent: Option<WindowId>,
+    /// What the window is to the window it may hang from. It is what tells
+    /// a close which teardown the surface takes and a move whom to report
+    /// it to; the window manager holds the same link itself for stacking, so
+    /// no re-assertion happens here.
+    standing: Standing,
     /// How far this window has got towards being seen.
     first_frame: FirstFrame,
     /// Whether a retitle of this already-shown window has yet to be carried
@@ -313,6 +314,30 @@ struct WindowRecord {
     /// its parent's). What a menu chain's information row resolves its
     /// attested identity from.
     owner: ProcId,
+}
+
+/// What a served window is to the window it may hang from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Standing {
+    /// A window of its own, listed on the taskbar.
+    TopLevel,
+    /// An undecorated popup the compositor window holds and its application
+    /// places.
+    Popup(WindowId),
+    /// A tool window the compositor window holds, framed and moved by the
+    /// user, its moves reported to its owner.
+    Tool(WindowId),
+}
+
+impl Standing {
+    /// The compositor window a transient hangs from; `None` for a window of
+    /// its own.
+    const fn parent(self) -> Option<WindowId> {
+        match self {
+            Self::TopLevel => None,
+            Self::Popup(parent) | Self::Tool(parent) => Some(parent),
+        }
+    }
 }
 
 /// The session's bookkeeping for every live served window.
@@ -533,7 +558,7 @@ impl SessionWindows {
     pub fn top_level(&self) -> impl Iterator<Item = u64> + '_ {
         self.records
             .iter()
-            .filter(|(_, record)| record.parent.is_none())
+            .filter(|(_, record)| record.standing == Standing::TopLevel)
             .map(|(&ipc, _)| ipc)
     }
 
@@ -577,13 +602,13 @@ impl SessionWindows {
         self.opened_owners.push((wm, owner));
     }
 
-    /// Record the freshly opened window `ipc`, shown as `wm` and owned by
-    /// `parent` when it is a popup, having got as far as `first_frame`.
+    /// Record the freshly opened window `ipc`, shown as `wm` and standing
+    /// as `standing` says, having got as far as `first_frame`.
     fn insert(
         &mut self,
         ipc: u64,
         wm: WindowId,
-        parent: Option<WindowId>,
+        standing: Standing,
         owner: ProcId,
         first_frame: FirstFrame,
     ) {
@@ -591,7 +616,7 @@ impl SessionWindows {
             ipc,
             WindowRecord {
                 wm,
-                parent,
+                standing,
                 first_frame,
                 retitled: false,
                 sized: None,
@@ -749,6 +774,41 @@ pub fn resize_drag_event(
         width_px: client.width,
         height_px: client.height,
         state,
+    })
+}
+
+/// The [`WindowEvent::ToolMoved`] owed to the app owning tool window `wm` for
+/// one sample of a move, or its end, with the pointer at `pointer`: over the
+/// parent's client area where nothing but the tool window itself is drawn
+/// above it there, else elsewhere. `None` for anything but a tool window.
+#[must_use]
+pub fn tool_move_event(
+    wm: WindowId,
+    ended: bool,
+    pointer: Point,
+    compositor: &Compositor,
+    windows: &SessionWindows,
+) -> Option<WindowEvent> {
+    let window_id = windows.ipc_id(wm)?;
+    let Standing::Tool(parent) = windows.records.get(&window_id)?.standing else {
+        return None;
+    };
+    let over = compositor
+        .window_client_rect(parent)
+        .filter(|client| {
+            client.contains(pointer) && compositor.window_at_except(pointer, wm) == Some(parent)
+        })
+        .and_then(|client| {
+            Some(ToolOver::Parent {
+                x: u32::try_from(pointer.x - client.left()).ok()?,
+                y: u32::try_from(pointer.y - client.top()).ok()?,
+            })
+        })
+        .unwrap_or(ToolOver::Elsewhere);
+    Some(WindowEvent::ToolMoved {
+        window_id,
+        over,
+        ended,
     })
 }
 
@@ -1186,8 +1246,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             self.compositor.move_window(wm, placed.origin);
         }
         self.windows.opened += 1;
-        self.windows
-            .insert(window_id, wm, None, owner, FirstFrame::Unpresented);
+        self.windows.insert(
+            window_id,
+            wm,
+            Standing::TopLevel,
+            owner,
+            FirstFrame::Unpresented,
+        );
         // Who owns this window is the kernel's answer, kept for the
         // identification pass that runs once this request is served.
         self.windows.opened_owners.push((wm, owner));
@@ -1256,8 +1321,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             depth,
         });
         self.windows.layers.note(LayerDecision::Opened);
-        self.windows
-            .insert(window_id, wm, None, owner, FirstFrame::Awaited);
+        self.windows.insert(
+            window_id,
+            wm,
+            Standing::TopLevel,
+            owner,
+            FirstFrame::Awaited,
+        );
         Ok(())
     }
 
@@ -1352,8 +1422,63 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             return Err(Errno::NotFound);
         };
         self.compositor.set_app_presented(wm, true);
-        self.windows
-            .insert(window_id, wm, Some(parent), owner, FirstFrame::Awaited);
+        self.windows.insert(
+            window_id,
+            wm,
+            Standing::Popup(parent),
+            owner,
+            FirstFrame::Awaited,
+        );
+        Ok(())
+    }
+
+    fn tool_opened(&mut self, window_id: u64, spec: &ToolSpec) -> Result<(), Errno> {
+        // Opening one restacks its family to the front, which must never put
+        // an application's window over a lock, the picker or a prompt.
+        if self.seat_held {
+            return Err(Errno::SeatBusy);
+        }
+        let transient = &spec.transient;
+        let Some(parent) = self.windows.wm_id(transient.parent_window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(owner) = self.windows.owner_of(transient.parent_window_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(client) = self.compositor.window_client_rect(parent) else {
+            return Err(Errno::NotFound);
+        };
+        let (width, height) = (transient.surface.width_px, transient.surface.height_px);
+        let Some(content) = Surface::filled(width, height, OPEN_FILL.premultiply()) else {
+            return Err(Errno::OutOfMemory);
+        };
+        // As for a popup, the offset is from the parent's client origin, the
+        // one place an application can name without being told the screen.
+        let at = Point::new(
+            client.left().saturating_add(transient.offset_x),
+            client.top().saturating_add(transient.offset_y),
+        );
+        let Some(wm) =
+            self.shell
+                .open_tool_window(self.compositor, parent, at, content, spec.title.as_str())
+        else {
+            return Err(Errno::NotFound);
+        };
+        self.compositor.set_app_presented(wm, true);
+        // A press the parent no longer holds carries nothing: the window
+        // stays where the offset put it.
+        if let Some(along) = spec.carry {
+            let _ = self
+                .shell
+                .carry_tool_window(self.compositor, parent, wm, along);
+        }
+        self.windows.insert(
+            window_id,
+            wm,
+            Standing::Tool(parent),
+            owner,
+            FirstFrame::Awaited,
+        );
         Ok(())
     }
 
@@ -1490,7 +1615,14 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let Some(record) = self.windows.records.get_mut(&window_id) else {
             return Err(Errno::NotFound);
         };
-        if !self.shell.retitle_window(self.compositor, record.wm, title) {
+        // A tool window's band is its only label: it has no taskbar entry.
+        let retitled = match record.standing {
+            Standing::Tool(_) => self.compositor.set_window_title(record.wm, title),
+            Standing::TopLevel | Standing::Popup(_) => {
+                self.shell.retitle_window(self.compositor, record.wm, title)
+            }
+        };
+        if !retitled {
             return Err(Errno::NotFound);
         }
         // A window not yet on screen shows its title with its first frame,
@@ -1661,10 +1793,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // here rather than needing a teardown path of their own.
         let was_layer = self.windows.layers.closed(window_id);
         if let Some(record) = self.windows.take(window_id) {
-            // A popup and a layer surface were never tasks, so they leave
+            // A transient and a layer surface were never tasks, so they leave
             // through the taskbar-less path; the engine tears a parent's
-            // popups down with it, so each arrives here in its own turn.
-            let _ = if record.parent.is_some() || was_layer {
+            // transients down with it, so each arrives here in its own turn.
+            let _ = if record.standing.parent().is_some() || was_layer {
                 self.shell.close_popup_window(self.compositor, record.wm)
             } else {
                 self.shell.close_window(self.compositor, record.wm)
@@ -1950,7 +2082,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 /// receives, and the announcement the session pushes when any of it
 /// changes. Every fact comes from the compositor — it owns the output it
 /// scans out to, that output's density, and the theme the desktop is
-/// actually drawn with, accessibility axes and all — so an application
+/// actually drawn with, accessibility axes and text all — so an application
 /// reads the very values the desktop draws itself with rather than a copy
 /// that could drift.
 ///
@@ -1965,13 +2097,17 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
     let screen = compositor.screen_rect();
     let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
     let theme = compositor.theme();
-    DesktopInfo::new(screen.width, screen.height, scale, theme.appearance())?
-        .with_axes(
-            theme.contrast(),
-            theme.density(),
-            Motion::from_reduced(theme.motion().reduced_motion()),
-        )
-        .with_double_click(compositor.double_click())
+    let fonts = theme.fonts();
+    Ok(
+        DesktopInfo::new(screen.width, screen.height, scale, theme.appearance())?
+            .with_axes(
+                theme.contrast(),
+                theme.density(),
+                Motion::from_reduced(theme.motion().reduced_motion()),
+            )
+            .with_double_click(compositor.double_click())?
+            .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok()),
+    )
 }
 
 #[cfg(test)]

@@ -38,6 +38,13 @@ pub use tairix_abi::font_ipc::FontWeight;
 /// restated, so a theme cannot name a family a request could not carry.
 pub use tairix_abi::font_ipc::FamilyKey;
 
+/// The text a user chose for the desktop: the family every interface role is
+/// drawn in and the body size the ladder derives from.
+///
+/// The desktop notice's own type, re-exported rather than restated, so the
+/// choice an application is handed is the one its theme applies.
+pub use tairix_abi::desktop::DesktopText;
+
 /// The job a run of text does, which is what a theme sizes and weights.
 ///
 /// The set is closed: a widget picks the role whose *job* matches, and the
@@ -155,14 +162,6 @@ pub const fn lifted(weight: FontWeight) -> FontWeight {
     }
 }
 
-/// The rung a point below body, as a percentage of the base.
-///
-/// Ladder sizes are line-box heights, and the shipped face's line box is about
-/// six fifths of its em, so a point of em (four thirds of a pixel at the
-/// reference density) is about 1.6 px of line box: at the shipped base this
-/// rung is two pixels below body.
-const POINT_BELOW_BODY: u32 = 89;
-
 /// One rung of the ladder: a role's size as a percentage of the base size,
 /// and the weight the boards set it in.
 struct Rung {
@@ -199,7 +198,7 @@ const LADDER: [Rung; TextRole::ALL.len()] = [
     },
     Rung {
         role: TextRole::WindowTitle,
-        percent: POINT_BELOW_BODY,
+        percent: 100,
         weight: FontWeight::MEDIUM,
     },
     Rung {
@@ -209,7 +208,7 @@ const LADDER: [Rung; TextRole::ALL.len()] = [
     },
     Rung {
         role: TextRole::ItemLabel,
-        percent: POINT_BELOW_BODY,
+        percent: 100,
         weight: FontWeight::REGULAR,
     },
     Rung {
@@ -320,14 +319,15 @@ impl Fonts {
         self.monospace_family
     }
 
-    /// The same ladder with every non-monospace role redrawn in `family`.
+    /// The same ladder rebuilt on the user's `text`: every non-monospace role
+    /// drawn in its family, and every rung derived from its size.
     ///
-    /// A user's chosen desktop font is applied here rather than by rebuilding
-    /// the theme, so the choice cannot drift from the ladder's sizes and
-    /// weights and the fixed-width role keeps its own family.
+    /// A user's chosen desktop text is applied here rather than by rebuilding
+    /// the theme, so the choice cannot drift from the ladder's proportions and
+    /// weights, and the fixed-width role keeps its own family.
     #[must_use]
-    pub fn with_ui_family(self, family: FamilyKey) -> Self {
-        Self::ladder(family, self.monospace_family, self.base_size_px)
+    pub fn with_text(self, text: DesktopText) -> Self {
+        Self::ladder(text.family(), self.monospace_family, text.size_px())
     }
 
     /// The authored base (body) size in logical pixels, from which every rung
@@ -336,6 +336,36 @@ impl Fonts {
     pub const fn base_size_px(&self) -> u16 {
         self.base_size_px
     }
+}
+
+/// Logical pixels in a point at the reference density: 96 per inch over 72.
+const PX_PER_POINT: (u32, u32) = (4, 3);
+
+/// The body size, in logical pixels of line box, of text `points` points of em
+/// in a family whose line is `line_box` thousandths of its em tall, held to
+/// the ladder's bounds.
+///
+/// The one conversion from a size a person names to the size the ladder is
+/// authored in: ladder sizes are line-box heights, so one point size draws the
+/// same em in every family only once each family's own line box is counted.
+#[must_use]
+pub fn line_box_px(points: u16, line_box: u16) -> u16 {
+    let (num, den) = PX_PER_POINT;
+    let scaled = u32::from(points) * u32::from(line_box) * num;
+    let divisor = den * 1000;
+    let px = u16::try_from((scaled + divisor / 2) / divisor).unwrap_or(u16::MAX);
+    px.clamp(Fonts::MIN_BASE_SIZE_PX, Fonts::MAX_BASE_SIZE_PX)
+}
+
+/// The size in points, to the nearest whole point, of a body `size_px`
+/// logical pixels of line box in a family whose line is `line_box`
+/// thousandths of its em tall: [`line_box_px`] read back.
+#[must_use]
+pub fn points_of(size_px: u16, line_box: u16) -> u16 {
+    let (num, den) = PX_PER_POINT;
+    let divisor = u32::from(line_box.max(1)) * num;
+    let scaled = u32::from(size_px) * den * 1000;
+    u16::try_from((scaled + divisor / 2) / divisor).unwrap_or(u16::MAX)
 }
 
 /// A rung's size in logical pixels: `percent` of `base`, rounded to the

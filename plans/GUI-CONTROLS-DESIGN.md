@@ -963,6 +963,14 @@ Toolbars are containers for IconButtons, SplitButtons, fields, and grouped actio
   regions side by side, so a column holding one is two slots broad. Seating,
   scrolling, routing and the repaint gate are one implementation for both
   axes, so a tool box cannot behave differently from a strip.
+- **Lanes: several tools to a line.** `Toolbar::with_lanes(n)` packs the tools
+  into lines `n` cells across — a tool box two tools wide — in reading order; a
+  new group starts a line, a tool broader than a lane takes the lanes it spans,
+  and a short last line keeps to the grid's columns. The lanes are centred
+  across the strip as one grid, the strip scrolls a line at a time, and the
+  keys along the axis move a line (to the same lane, or the nearest before it)
+  while the keys across it step through the tools in order. One lane is the
+  strip as it always was.
 - A held affordance draws the same as an idle one, so the press latch is
   **not** part of the render-equivalence comparison; the offset is.
 
@@ -2212,11 +2220,16 @@ A `NumberField` is a whole number between two bounds, typed or stepped: a
 `TextField` (§11.8) with the text family's plate, caret, selection and
 validation.
 
+- **Decimal places** (`with_decimals`, up to four): the value stays a whole
+  number of the smallest place and is spelled and typed with a point — a gamma
+  held as `100` to `999` reads `1.00` to `9.99`. A point is taken only by a
+  field with places, and more decimals than it holds spell no number.
+
 - **Typing takes effect while it spells a number in range,** so what the value
   drives follows the digits; anything else shows as invalid and moves nothing.
-  It takes only what can be part of a number — digits, and a minus sign where
-  the bounds reach below zero — and a paste holding anything else is refused
-  whole.
+  It takes only what can be part of a number — digits, a minus sign where
+  the bounds reach below zero, and a point where it has decimal places — and a
+  paste holding anything else is refused whole.
 - **Live and settled are distinct.** A digit is `Edited`; a step, Enter, Escape
   taking typing back, and the focus leaving are each a whole interaction and
   `Settled`, so typing `255` is three edits and one settle, and durable work
@@ -2232,10 +2245,24 @@ validation.
 
 ### 11.46 ColourPicker
 
-A `ColourPicker` edits one colour: a saturation and value plane, a hue strip,
-an alpha strip where the owner edits opacity, the earlier colour, a hex field,
-and `NumberField`s for hue, saturation, value, red, green, blue and alpha. The
-coordinates are `lib/colour`'s, exact for every 8-bit colour.
+A `ColourPicker` edits one colour: a view to pick it on, an alpha strip where
+the owner edits opacity, the earlier colour, a hex field, and `NumberField`s for
+the channels of one model and alpha. The coordinates are `lib/colour`'s, exact
+for every 8-bit colour.
+
+- **Three views** (`PickerView`): the *square* — saturation across and value up
+  a plane at the colour's hue, the hue on a strip beside it; the *wheel* — the
+  hue round a ring and saturation and value in a triangle inside it, its pure
+  corner turned to the hue, each edge smoothed by its coverage; the *sliders* —
+  a track per channel of the model and one for opacity, each drawn as that
+  channel sweeps with the rest held.
+- **Seven models** (`ColourModel`): RGB, HSV, HSL, device CMYK, CIE L\*a\*b\*,
+  `LCh` and a grey. A model's values are held as typed, so editing one channel
+  keeps the others as shown even where the colour rounds them away; HSV edits
+  the picker's own coordinates at full precision. The CIE values are held to
+  tenths, since whole ones move a colour near sRGB's corners by several levels.
+  A value outside sRGB shows its nearest colour there, and the swatch carries a
+  warning bead while it does. The view and the model are the owner's to keep.
 
 - **One colour, several views of it.** Every part shows the same colour and a
   change in one reaches the others in the same event. A grey's hue and black's
@@ -2257,8 +2284,9 @@ coordinates are `lib/colour`'s, exact for every 8-bit colour.
   chords, so typing reaches no shortcut while Ctrl+S still saves; Ctrl+A
   selects the field's text.
 - **It fits the room it is given.** Side by side where the width holds the
-  plane, the strips and the fields; stacked otherwise, dropping the fields'
-  grid and then the hex row before the plane. One layout serves paint, hit
+  view, the strips and the fields; stacked otherwise, dropping the fields'
+  grid and then the hex row before the view. The lengths are measured across
+  every model, so switching one moves nothing else. One layout serves paint, hit
   testing and the damage a change reports, and its lengths are measured once
   per scale and face.
 - **One bead.** The picker's fields take its enablement and authority, and the

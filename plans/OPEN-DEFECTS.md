@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 353 open, 485 closed, 838 total.
+**closed**, and a partial fix stays **open**. 355 open, 487 closed, 842 total.
 
-### Open (353)
+### Open (355)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -381,9 +381,11 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D842 | the file manager's rename flow: F2 and the menu's Rename do not wait for a navigation in progress, whose target the rename's re-list then replaces; a rename that landed but whose re-list failed leaves the editor open as refused, and Enter resubmits; every rename re-reads the whole directory even when change reports cover it; opening the editor by F2, the menu or New repaints the whole window; and the menu's quick-entry field opens with nothing selected, though FI17 and `apps.md` say every way selects the stem | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `userland/apps/files/src/run.rs`, `lib/browse/src/browser.rs` `finish_rename`, `chrome.rs` |
 | D843 | per-sample and per-paint work in the file grid: the selection band rebuilds its edge cells with a text layout of each name on every pointer sample, a whole column over the band's auto-scrolled height when an edge sits in a margin (plausible, unmeasured), and a tile with no artwork rasterises the built-in picture and blurs a fresh shadow on every paint | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `userland/apps/files/src/marquee.rs`, `layout.rs`; `lib/controls/src/collection.rs` |
 | D844 | `lib/raster`'s `blit_transformed` clamps its walk to the buffer rather than the surface's origin-relative extent (no current caller is affected); `lib/icon/src/folder.rs`'s `fit_within` duplicates `imagerender.rs`'s fit and already rounds differently; and docs drift: `docs/src/lib/icon.md` says a folder card shares the member's tile thumbnail, which only files.app's store does, `display_ipc.rs`'s test helper's first doc line is stale, and the `autoload_input` fixture numbers two steps "5." | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/raster/src/transformed.rs`, `lib/icon/src/folder.rs`, `docs/src/lib/icon.md` |
+| D845 | `fstree` commits its preferences and does its filesystem work on its key loop: a toggle in the settings overlay is an app-data commit — a service round trip and a disk write — before the next frame, and a listing, a stat or a viewer read is a filesystem round trip, so a slow volume or a busy service freezes the session | **medium**; noticed moving its preferences onto the shared settings registry, not absorbed: taking the work off the loop turns its input wait into a wait-set park over the tty, a worker's wake and the walk tick (`lib/curses`'s `Tty` seam), which is the program's whole I/O structure. Its regression test: a toggle and a listing each return to the key loop before the store or the volume answers. `userland/apps/fstree/src/app.rs` `run`, `publish_settings` |
+| D847 | `cinder`'s frame loop never drained its writer's wake, so after the first saved mood the wait-set reported the pipe ready at every park and the loop spun until the next frame deadline, every time | **medium**; the drain is in (`userland/apps/cinder/src/run.rs`, the writer's token), so the spin is fixed; the entry stays open for its regression test, which needs the cinder vertical no image yet runs: a saved mood followed by a park that sleeps until the frame deadline. A loop that watches a worker's wake and forgets its drain is not caught structurally anywhere |
 
 
-### Closed (485)
+### Closed (487)
 
 | ID | Subject |
 |---|---|
@@ -872,6 +874,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D826 | D450's fix was incomplete: `repaint_desktop` still cloned its damage on every call, each composite dropped its damage buffer, plan and hit list, and each present allocated the region it sent, so every icon hover and crossfade step allocated; all are now kept and reused; `a_frame_repainting_the_desktop_allocates_nothing_of_its_own`, `a_repaint_of_kept_content_allocates_nothing_of_its_own` |
 | D829 | a continue reaching a thread born into a stopped group before its creator started it ran the thread early: `stop` turned the parked newborn `Stopped`, which `resume` made `Ready`, so it ran before its creator had recorded the stack it owns; a parked task is now stopped into `TaskState::StoppedParked`, which `resume` leaves parked and a wake makes `Stopped`, owed its run — and a park a stop overtakes keeps a racing wake; `a_continue_before_its_start_leaves_a_newborn_parked`, `a_continue_leaves_a_task_parked_under_a_stop_parked` and `a_body_parking_as_a_stop_lands_stays_parked_beneath_it` (every policy) |
 | D830 | a stop's report could outlive the continue that overtook it: a continue recorded before a racing stop's fan-out recorded, so `wait` read a running child stopped; the reports now carry the job-control generation and one no newer than the last is dropped; `a_job_control_report_older_than_the_last_changes_nothing` |
+| D846 | a latest-wins worker dropped the write still waiting when its program ended: `JobDesk::stop` drops the job not yet taken and nothing waited a settings writer out, so a setting changed just before a quit — the terminal's profile, sapper's best time, cinder's mood on Quit, WinterSun's graphics choice — could be lost; `Worker::wait` now serves every desk and each program sees its writes out before its worker is stopped; `a_latest_wins_worker_is_waited_out`, `a_job_is_outstanding_until_its_answer_lands` |
+| D848 | a settings registry's save compared what it wrote with a reload that had already defaulted every refused value, so a stored value the registry refused was never replaced and was refused again at every start (the terminal, fstree, sapper, which also never removed a malformed time), and cinder's writer reported every refusal as `NoSpace`; the shared registry save replaces a refused value and the shared publish reports the service's own refusal; `a_save_mends_a_stored_value_the_registry_refused_and_spares_another_apps_keys`, `a_save_removes_a_stored_time_the_registry_refused` |
 
 ## Scope
 
@@ -9198,8 +9202,8 @@ pointer moved again settled on the reset value. Four more ways the same path
 lost an edit are closed with it:
 
 - **An answer applies only where the user is not editing.** `Publication`
-  records the settings each edit touched (`ProfileKeys`, over the registry's
-  typed `Profile::set_from`/`differing`) until a save carries them; the answer
+  records the settings each edit touched (`Keys`, over the registry's
+  `Live::set_from`/`differing`) until a save carries them; the answer
   — or on a refusal the last profile the store held — replaces every other
   setting. A policy or a restore still wins there, and a setting dragged back
   onto its written value is still the user's.
@@ -9218,7 +9222,7 @@ lost an edit are closed with it:
   (`SwatchGrid::adopt_scheme`) and reports the rows whose value moved rather
   than invalidating the sheet.
 
-Regression tests: `publish::tests` (`an_answer_landing_mid_drag_leaves_the_dragged_setting_alone`
+Regression tests: `tairix_appdata`'s `publish::tests` (`an_answer_landing_mid_drag_leaves_the_dragged_setting_alone`
 and the restore, refusal, owed-write and stale-copy cases),
 `settings::tests::adopting_mid_drag_leaves_the_drag_in_hand`,
 `settings::tests::adopting_keeps_the_well_the_channel_sliders_edit`,

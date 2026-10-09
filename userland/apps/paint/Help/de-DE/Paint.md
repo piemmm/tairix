@@ -55,18 +55,31 @@ Seiten zu Seiten, fügt sie hinzu, kopiert, löscht und ordnet sie neu.
 
 Die primäre (linke) Taste malt mit der Primärfarbe und die mittlere Taste
 mit der Sekundärfarbe; mit gedrückter Alt-Taste wird stattdessen eine Farbe
-aufgenommen, so wie die Ebenen sie zeigen. Die Werkzeuge im Werkzeugkasten
-links sind Auswahl, Stift, Pinsel, Airbrush, Radierer, Klonen, Füllen,
-Verlauf, Farbpipette, Text, Linie, Rechteck, Ellipse, Polygon, Zuschneiden,
-Hand und Zoom. Die Leiste oben nennt das gewählte Werkzeug und enthält seine
-Einstellungen — Größe, Härte, Deckkraft, Fluss und Abstand eines Pinsels,
-die Toleranz einer Füllung, die Form eines Verlaufs, die Textgröße, die
-Ecken eines Rechtecks —, getippt oder mit den Pfeiltasten verstellt, und die
-Schaltflächen zum Zoomen und für das Pixelraster; der Palettenstreifen unter
-dem Bild enthält die Palette des Bildes oder die Desktop-Farben. Der
-Airbrush sprüht weiter, solange er still gehalten wird. Mit gedrückter
-Umschalttaste entsteht ein Quadrat, ein Kreis oder eine Linie im Vielfachen
-von 45 Grad.
+aufgenommen, so wie die Ebenen sie zeigen. Der Werkzeugkasten im Bereich
+Werkzeuge enthält die Werkzeuge in zwei Spalten: Auswahl, Stift, Pinsel,
+Airbrush, Radierer, Klonen, Füllen, Verlauf, Farbpipette, Text, Linie,
+Rechteck, Ellipse, Polygon, Zuschneiden, Hand und Zoom. Die Leiste oben nennt
+das gewählte Werkzeug und enthält seine Einstellungen — Größe, Härte,
+Deckkraft, Fluss und Abstand eines Pinsels, die Toleranz einer Füllung, die
+Form eines Verlaufs, die Textgröße, die Ecken eines Rechtecks —, getippt oder
+mit den Pfeiltasten verstellt, und die Schaltflächen zum Zoomen und für das
+Pixelraster; der Palettenstreifen unter dem Bild enthält die Palette des
+Bildes oder die Desktop-Farben. Der Airbrush sprüht weiter, solange er still
+gehalten wird. Mit gedrückter Umschalttaste entsteht ein Quadrat, ein Kreis
+oder eine Linie im Vielfachen von 45 Grad.
+
+An beiden Seiten des Fensters laufen Bereiche entlang: standardmäßig links der
+Bereich Werkzeuge und rechts der Bereich Farbe, darunter der Bereich
+Korrektur, sobald eine Korrektur geöffnet wird. Jeder trägt oben ein schmales
+Band mit seinem Namen, einem Schalter, der ihn auf sein Band einrollt, und
+einem Zeichen, das ihn schließt; Ansicht ▸ Bereiche zeigt einen geschlossenen
+Bereich wieder, und Bereiche zurücksetzen stellt alle Bereiche so, wie ein
+neues Fenster sie hat. Ein gezogenes Band verschiebt seinen Bereich auf seiner
+Seite oder auf die andere, und die Stelle, an der er landen wird, ist dabei
+markiert; abseits beider Seiten losgelassen oder aus dem Fenster gezogen,
+schwebt der Bereich in einem kleinen eigenen Fenster, das an seinem Band
+verschoben wird, über dem Bild bleibt und mit seiner Markierung geschlossen
+wird; zurück über eine Seite gezogen, dockt er dort wieder an.
 
 Das Auswahlwerkzeug zieht ein Rechteck, eine Ellipse, ein freihändiges
 Lasso oder ein Polygon Ecke für Ecke auf, oder es wählt mit dem Zauberstab
@@ -92,22 +105,56 @@ Hand schiebt das Bild durch das Fenster, wie die Leertaste mit jedem
 Werkzeug; das Zoomwerkzeug vergrößert per Klick, mit Alt verkleinert es,
 und ein aufgezogener Rahmen füllt das Fenster.
 
-Das Menü Korrekturen ändert Helligkeit und Kontrast, Farbton und Sättigung
-und die Tonwerte, posterisiert, setzt einen Schwellwert, entsättigt,
-zeichnet weich, schärft, verpixelt, fügt Rauschen hinzu und findet Kanten;
-jede Korrektur zeigt sich am Bild, während ihre Einstellungen sich bewegen,
-und bleibt nur, wenn sie angewendet wird. Bei einem Bild mit Palette ändert
-eine Korrektur dessen Palette, und solche, die benachbarte Farben brauchen,
-werden nicht angeboten.
+Das Menü Korrekturen öffnet eine Korrektur im Bereich Korrektur, wobei jedes
+andere Werkzeug, jeder Bereich und jedes Menü zur Hand bleibt: Helligkeit und
+Kontrast, Farbton und Sättigung, Farbbalance, Tonwerte, Gradationskurven,
+Weißabgleich, Posterisieren, Schwellwert, Weichzeichnen, Schärfen, Verpixeln
+und Rauschen hinzufügen; Entsättigen und Kanten finden, die keine
+Einstellungen haben, wirken sofort. Das Bild zeigt die Korrektur, während sich
+ihre Einstellungen bewegen, Vorschau schaltet das zum Vergleich aus und ein,
+Zurücksetzen stellt ihre Einstellungen zurück, und Anwenden behält sie als
+einen Schritt, der sich rückgängig machen lässt; Malen, Füllen oder das Wählen
+einer anderen Korrektur wendet sie zuerst an. Tonwerte setzt Schwarz-, Grau-
+und Weißpunkt über einem Histogramm der Ebene, für alle Kanäle zusammen oder
+jeden einzeln, mit Pipetten, die sie aus dem Bild nehmen, und Auto;
+Gradationskurven biegen die Töne eines Kanals durch Punkte, die über sein
+Histogramm gezogen werden; der Weißabgleich setzt Temperatur und Tönung des
+Lichts, aus einem gewählten neutralen Pixel oder per Auto; Farbton und
+Sättigung drehen, verstärken und erhellen alle Farben oder einen Bereich von
+ihnen; die Farbbalance verschiebt Tiefen, Mitteltöne und Lichter zu Rot, Grün
+oder Blau und erhält auf Wunsch ihre Helligkeit. Alles bleibt auf die Auswahl
+beschränkt. Bei einem Bild mit Palette ändert eine Korrektur dessen Palette,
+und solche, die benachbarte Farben brauchen, werden nicht angeboten.
 
-Das Farbdock rechts enthält Primär- und Sekundärfarbe und einen Farbwähler
-für die gewählte der beiden: Ein Klick auf eine Farbe wählt sie, dann wird
-sie über Farbton, Sättigung und Hellwert, über Rot, Grün und Blau, über ihre
-hexadezimale Schreibweise und, wo das Bild Transparenz hält, über ihre
-Deckkraft eingestellt. Daneben steht die Farbe, die sie hatte, und ein Klick
-stellt sie wieder her. In einem Bild mit Palette sind die Farben ihre
-Einträge, der Farbwähler bearbeitet also die Palette, und jede Bearbeitung
-ist ein Schritt, der sich rückgängig machen lässt.
+Der Bereich Farbe enthält Primär- und Sekundärfarbe und einen Farbwähler für
+die gewählte der beiden: Ein Klick auf eine Farbe wählt sie, dann wird sie auf
+einem Quadrat aus Sättigung und Hellwert neben einem Streifen der Farbtöne, auf
+einem Farbkreis um ein Dreieck oder mit einem Schieberegler je Kanal gewählt
+und in RGB, HSV, HSL, CMYK, Lab, LCh oder als Grau eingegeben, oder über ihre
+hexadezimale Schreibweise und, wo das Bild Transparenz hält, ihre Deckkraft.
+Eine Lab- oder LCh-Farbe, die der Bildschirm nicht zeigen kann, wird so nah
+wie möglich gezeigt und markiert. Tauschen vertauscht die beiden Farben,
+Zurücksetzen macht sie schwarz und weiß, und Aufnehmen nimmt die Farbe, die
+als Nächstes im Bild angeklickt wird. Daneben steht die Farbe, die sie hatte,
+ein Klick stellt sie wieder her, und die zuletzt gewählten Farben warten
+darunter darauf, wieder gewählt zu werden. In einem Bild mit Palette sind die
+Farben ihre Einträge, der Farbwähler bearbeitet also die Palette, und jede
+Bearbeitung ist ein Schritt, der sich rückgängig machen lässt.
+
+Einstellungen im Menü der Symbolleiste öffnet das Einstellungsfenster von
+Paint: das Werkzeug, mit dem ein neues Fenster beginnt, und ob ein Bild an
+das Fenster angepasst oder in Originalgröße öffnet; Größe, Format, Farben und
+Hintergrund, die Neues Bild anbietet; Abstand, Versatz, Farbe, Deckkraft und
+Stil des Rasters — Linien, Striche, Punkte oder Kreuzungen —, ob ein neues
+Fenster es zeigt, das Einrasten daran und der Zoom, ab dem das Raster zwischen
+den Pixeln erscheint; Größe und Töne des Schachbretts und was das Bild umgibt;
+und die Bereiche, mit denen ein neues Fenster öffnet. Eine Änderung gilt sofort
+für jedes Fenster und bleibt für das nächste Mal; Standard wiederherstellen
+stellt alles zurück. Ansicht ▸ Raster zeigt das Raster eines Fensters. Solange
+es sichtbar ist und das Einrasten an ist, decken Formen, Auswahlen und
+Zuschneiderahmen ganze Zellen ab, die Enden einer Linie, eines Verlaufs und die
+Ecken eines Polygons landen auf seinen Kreuzungen, und eine gezogene Auswahl
+landet mit ihrer Ecke auf einer.
 
 Das Programm besitzt keine Dateisystem-Berechtigung. Es bearbeitet nur die
 Datei, die ihm übergeben wurde. Eine Datei, die der Benutzer ändern darf,
@@ -148,6 +195,7 @@ Menüleiste. Das Schließen eines Fensters oder Beenden mit ungespeicherten
 * `Ctrl` + Mausrad — um den Zeiger herum vergrößern oder verkleinern
 * Zwei Finger spreizen oder zusammenführen — stufenlos vergrößern oder verkleinern; auf einem Touchscreen folgt das Bild den Fingern
 * `G` — das Raster zwischen den Pixeln ein- oder ausblenden
+* `Ctrl+'` — das Raster ein- oder ausblenden
 * `Page Up` / `Page Down` — das vorige oder nächste Sprite, die vorige oder nächste Seite
 * Pfeiltasten — eine schwebende Auswahl um ein Pixel verschieben; mit `Shift` um zehn; im Palettenstreifen durch seine Farben gehen
 

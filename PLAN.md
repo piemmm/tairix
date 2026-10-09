@@ -66,7 +66,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FS-MAC | Measure the per-block MAC on Pi hardware; adopt a faster audited authenticator if it dominates | planned |
 | FMAP-X | Wild-jump cases in the aarch64 and riscv64 file-map verticals (x86_64 has `wild_fault_qemu_x86_64`) | planned |
 | ENT-RNG200 | Pi 4 platform entropy from a discovered, health-tested BCM2711 RNG200 source | planned |
-| FONT-PICK | A desktop font-family choice, persisted per user, validated against `FontRequest::Families` | planned |
+| FONT-PICK | A desktop font-family choice, persisted per user, validated against `FontRequest::Families` (`plans/NEW-DESKTOP-SETTINGS.md` DS26) | done |
 | README-SHOTS | Recapture the README gallery's text-console images (old 68×27 grid) and add the Settings Wallpaper pane | planned |
 | UNLOCK-FLAKE | A correct passphrase refused once under parallel `ci` load | planned |
 | PANEL-NOTCH | A `Panel`'s anchor notch is drawn outside its bounds, so the icon bar's panel-sized popovers clip it away | planned |

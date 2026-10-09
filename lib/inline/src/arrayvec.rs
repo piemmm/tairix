@@ -97,6 +97,31 @@ impl<T, const N: usize> ArrayVec<T, N> {
         Ok(())
     }
 
+    /// Insert `value` at `index`, shifting the tail one place right; `index`
+    /// may be the length, appending it.
+    ///
+    /// # Errors
+    ///
+    /// [`CapacityError`] carrying `value` back when the vector is full or
+    /// `index` lies past its length.
+    pub fn try_insert(&mut self, index: usize, value: T) -> Result<(), CapacityError<T>> {
+        if self.len == N || index > self.len {
+            return Err(CapacityError::new(value));
+        }
+        // SAFETY: `index <= len < N`, so slots `index..len` are initialised and
+        // slot `len` is in bounds and free. The tail moves up one into it,
+        // leaving slot `index` a bitwise duplicate of its old occupant, which
+        // is overwritten without being dropped; the length then grows to cover
+        // the moved tail, so every live slot holds exactly one value.
+        unsafe {
+            let base = self.slots.as_mut_ptr().cast::<T>();
+            ptr::copy(base.add(index), base.add(index + 1), self.len - index);
+            ptr::write(base.add(index), value);
+        }
+        self.len += 1;
+        Ok(())
+    }
+
     /// Remove and return the last element.
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {

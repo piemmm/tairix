@@ -12,11 +12,11 @@ use super::{
     FONT_FAMILY_ENTRY_LEN, FONT_FAMILY_KEY_LEN, FONT_FAMILY_LABEL_LEN,
     FONT_GLYPHS_REPLY_HEADER_LEN, FONT_GLYPH_RECORD_HEADER_LEN, FONT_MAX_COVERAGE_LEN,
     FONT_MAX_FAMILIES, FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN,
-    FONT_MAX_GLYPH_WIDTH, FONT_MAX_OUTLINE_POINTS, FONT_MAX_OUTLINE_REPLY, FONT_MAX_PIXEL_HEIGHT,
-    FONT_MAX_STRETCH, FONT_MAX_SYNTH_BOLD, FONT_MAX_SYNTH_SHEAR, FONT_MAX_WEIGHT,
-    FONT_METRICS_REPLY_LEN, FONT_MIN_PIXEL_HEIGHT, FONT_MIN_STRETCH, FONT_MIN_WEIGHT,
-    FONT_OUTLINE_CONTOUR_HEADER_LEN, FONT_OUTLINE_RECORD_HEADER_LEN, FONT_OUTLINE_REPLY_HEADER_LEN,
-    FONT_REQUEST_MAGIC,
+    FONT_MAX_GLYPH_WIDTH, FONT_MAX_LINE_BOX, FONT_MAX_OUTLINE_POINTS, FONT_MAX_OUTLINE_REPLY,
+    FONT_MAX_PIXEL_HEIGHT, FONT_MAX_STRETCH, FONT_MAX_SYNTH_BOLD, FONT_MAX_SYNTH_SHEAR,
+    FONT_MAX_WEIGHT, FONT_METRICS_REPLY_LEN, FONT_MIN_LINE_BOX, FONT_MIN_PIXEL_HEIGHT,
+    FONT_MIN_STRETCH, FONT_MIN_WEIGHT, FONT_OUTLINE_CONTOUR_HEADER_LEN,
+    FONT_OUTLINE_RECORD_HEADER_LEN, FONT_OUTLINE_REPLY_HEADER_LEN, FONT_REQUEST_MAGIC,
 };
 use crate::Errno;
 use alloc::vec;
@@ -600,6 +600,7 @@ fn entries(count: usize) -> Vec<FamilyEntry> {
                 } else {
                     FamilyKind::Monospace
                 },
+                1000 + u16::try_from(i).expect("a small index") * 25,
             )
             .expect("a well-formed entry")
         })
@@ -622,6 +623,7 @@ fn families_reply_round_trips_from_empty_to_full() {
             assert_eq!(got.key, want.key);
             assert_eq!(got.label(), want.label());
             assert_eq!(got.kind, want.kind);
+            assert_eq!(got.line_box(), want.line_box());
         }
     }
 }
@@ -677,6 +679,16 @@ fn families_reply_decode_fails_closed() {
     dirty_pad[kind_at + 1] = 1;
     assert_eq!(decode_families_reply(&dirty_pad), Err(Errno::BadMagic));
 
+    for line_box in [0, FONT_MIN_LINE_BOX - 1, FONT_MAX_LINE_BOX + 1] {
+        let mut bad_line = buf.clone();
+        bad_line[kind_at + 2..kind_at + 4].copy_from_slice(&line_box.to_le_bytes());
+        assert_eq!(
+            decode_families_reply(&bad_line),
+            Err(Errno::OutOfRange),
+            "a line box of {line_box} thousandths is refused"
+        );
+    }
+
     // A NUL followed by more label bytes is a smuggled second field.
     let label_at = FONT_FAMILIES_REPLY_HEADER_LEN + FONT_FAMILY_KEY_LEN;
     let mut truncated_label = buf.clone();
@@ -702,22 +714,29 @@ fn families_reply_decode_fails_closed() {
 #[test]
 fn family_entry_label_is_bounded_and_printable() {
     let mono = FamilyKey::MONO;
-    assert_eq!(
-        FamilyEntry::new(mono, "", FamilyKind::Monospace),
-        Err(Errno::LengthOutOfRange)
-    );
+    let entry = |label: &str| FamilyEntry::new(mono, label, FamilyKind::Monospace, 1110);
+    assert_eq!(entry(""), Err(Errno::LengthOutOfRange));
     let overlong = "x".repeat(FONT_FAMILY_LABEL_LEN + 1);
-    assert_eq!(
-        FamilyEntry::new(mono, &overlong, FamilyKind::Monospace),
-        Err(Errno::LengthOutOfRange)
-    );
-    assert_eq!(
-        FamilyEntry::new(mono, "two\nlines", FamilyKind::Monospace),
-        Err(Errno::OutOfRange)
-    );
+    assert_eq!(entry(&overlong), Err(Errno::LengthOutOfRange));
+    assert_eq!(entry("two\nlines"), Err(Errno::OutOfRange));
     let exact = "x".repeat(FONT_FAMILY_LABEL_LEN);
-    let entry = FamilyEntry::new(mono, &exact, FamilyKind::Monospace).expect("encodes");
-    assert_eq!(entry.label(), exact);
+    assert_eq!(entry(&exact).expect("encodes").label(), exact);
+}
+
+#[test]
+fn family_entry_line_box_is_held_to_its_bounds() {
+    let entry =
+        |line_box| FamilyEntry::new(FamilyKey::MONO, "Mono", FamilyKind::Monospace, line_box);
+    for refused in [0, FONT_MIN_LINE_BOX - 1, FONT_MAX_LINE_BOX + 1, u16::MAX] {
+        assert_eq!(
+            entry(refused),
+            Err(Errno::OutOfRange),
+            "{refused} is refused"
+        );
+    }
+    for kept in [FONT_MIN_LINE_BOX, 1210, FONT_MAX_LINE_BOX] {
+        assert_eq!(entry(kept).map(|e| e.line_box()), Ok(kept));
+    }
 }
 
 /// A contour of one line and one quadratic, in whole font units.

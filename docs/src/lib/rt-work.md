@@ -33,9 +33,7 @@ The desk is the worker's last type parameter, one of a sealed pair (`Desk`):
   the order asked, within a bound the owner grows and shrinks with what it
   serves (`grow`, `shrink`) — for work where every request is its own, such as
   the saves of a file. `submit` hands a job back when the bound is full,
-  `retain_waiting` withdraws what the owner no longer awaits, and `wait` blocks
-  for the next answer, or answers `None` once nothing is outstanding, for an
-  owner seeing its work out before it ends. `collect_landed` adopts exactly the
+  `retain_waiting` withdraws what the owner no longer awaits. `collect_landed` adopts exactly the
   answers that had landed when it began (`JobQueue::landed`), so a loop's pass
   is bounded: what lands while it adopts waits for the next wake rather than
   holding the loop from the input behind it. That wake is never missing: a
@@ -59,7 +57,11 @@ exactly as correct as one with them.
 `WorkerGuard` stops the worker when the scope holding it ends. The thread is
 *detached* rather than joined: a worker mid-write of a slow store would
 otherwise hold the teardown for as long as that store takes, and it leaves at
-its next turn round its loop anyway.
+its next turn round its loop anyway. Stopping drops a job not yet taken, so a
+program whose last write must land waits it out first: `wait`, on either desk,
+blocks for the next answer and answers `None` once nothing is outstanding —
+the terminal's profile, a game's best time, a companion's mood and Paint's
+settings are each seen out this way before their worker is stopped.
 
 ## Reaching the loop: the wake is level-triggered
 

@@ -61,6 +61,7 @@ dropped is a category the surface then has to lie about.
 | **DS23** | The System Monitor screensaver (`screensaver.kind` = `system_monitor`): the machine's own readings set out to be read from across a room — processors, memory, tasks, storage and network under a verdict naming what needs attention — from the Switchboard's machine report, with whether the busiest tasks are named as its one option | DS18, DS19, `plans/NEW-SWITCHBOARD.md` M3 | DS23 | done |
 | **DS24** | The ray tracer's scene detail: `screensaver.raytrace.detail`, `simple` (the default) or `maximum`, a *Detail* dropdown in its group on the pane reading *Simple* or *Maximum realism*, carried to the tracing host at launch and falling back to Simple where the memory band says Maximum's peak is not free | DS21, `plans/RAYTRACE.md` RT39 | DS24 | done |
 | **DS25** | Trackpad — tap to click, natural scrolling and the touchpad speed (`touchpad.*`), handed to the seat's gesture recogniser; the Touchscreen pane states what it would need to set anything | DS11 | §2, §3; `plans/POINTING.md` PO6 | done |
+| **DS26** | Text — the desktop font and its size (`font.family`, `font.size`, in points) on Appearance's TEXT group, resolved by the session against the font store and carried to every application in the desktop notice; the shipped base one point smaller (16 px, 10 pt of Inter) | DS3, `plans/FONT-SERVICE.md` | DS26 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -400,7 +401,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | General → Login & startup | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
 | General → Caching | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
 | General → Date & Time | `WallClockReading` | elevated `datetime.app` (launched) | refusal stated, clock untouched |
-| Appearance | the session's published settings document | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
+| Appearance | the session's published settings document; the font store's families (`FontRequest::Families`) | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Theme | — | — (no theme model, §3) | pane states absence |
 | Displays | `SEAT_LIST`, `DesktopInfo`, `Compositor::window_scale` | session apply (scale only) | mode change: no interface (§3) |
@@ -736,6 +737,40 @@ re-derives:
 - **`AppearanceWork` gained a `cursor` flag.** The pair moves the pointer and
   nothing else: a re-theme would repaint every surface and a rescale would
   move every length, for a change only the pointer can see.
+
+### DS26 — Text: the desktop font and its size
+
+`font.family` and `font.size` join `SettingsKey::APPEARANCE`, and Appearance
+gains a TEXT group of two rows, *Font* and *Size*. What it guarantees:
+
+- **A size is points of em, not pixels of line box.** The theme's ladder is
+  line-box heights, and families differ in how tall a line is for one em
+  (Inter 1.210 em, Noto 1.362), so a size kept in pixels would shrink every
+  glyph by a tenth on a change of family. `FamilyEntry` carries each family's
+  line box in thousandths of its em, read by `fontd` from the face it
+  resolves, and `tairix_theme::line_box_px` is the one conversion: points ×
+  96/72 × line box, rounded, held to the ladder's bounds.
+- **`theme` is the default spelling of both keys**, as `Backdrop::Theme` is: no
+  family or size is restated in the document, so a user who has chosen
+  nothing follows the shipped theme. The shipped base is 16 px of Inter, which
+  is 10 pt; it was 18 px (11 pt). Item names (`ItemLabel`) and window titles
+  (`WindowTitle`), which had been set a point below an 18 px body, keep their
+  16 px at the body's rung.
+- **The family list is the store's, offered once.** Settings lists
+  `tairix_font::families()` before its first frame, as it lists cursor sets;
+  the session lists them at bring-up, since `fontd` reads its store once per
+  boot. A stored family the store no longer holds is still a legal value: it
+  parses, is offered under its key, and falls back to the theme's family where
+  it is resolved, said on `stderr` — never a face that draws nothing.
+- **Resolved once, by the session, and carried in the desktop notice.**
+  `DesktopInfo` carries the drawn family and base size (`DesktopText`, read off
+  the compositor's theme), so `adopt_desktop` hands every application the
+  user's text in the call it already makes, and no application converts points
+  or asks `fontd` anything. `ThemeRegistry::set_text` is the overlay beside
+  `Accessibility`; `Theme::with_text` is the one place it reaches the ladder.
+- **A text change is theme work.** `AppearanceWork::theme` covers the two keys,
+  so a font change re-themes and re-lays every surface as an appearance change
+  does, through the one `adopt_appearance`, bring-up included.
 
 ### DS4 — Wallpaper: the gallery absorbed, and `wallpaper.app` deleted
 

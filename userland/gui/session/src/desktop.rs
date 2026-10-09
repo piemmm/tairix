@@ -197,10 +197,10 @@ pub struct BackdropWork {
 /// screen.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct AppearanceWork {
-    /// The appearance, contrast, density or motion changed: the embedder
-    /// must re-theme the desktop and republish it, because every open
-    /// application draws its own pixels and would otherwise be left in the
-    /// appearance the user has just stopped asking for.
+    /// The appearance, contrast, density, motion or text changed: the
+    /// embedder must re-theme the desktop and republish it, because every
+    /// open application draws its own pixels and would otherwise be left in
+    /// the appearance the user has just stopped asking for.
     pub theme: bool,
     /// The UI scale changed: the embedder must rescale the output and
     /// republish, so every logical length on the desktop and in every
@@ -438,7 +438,9 @@ impl<S: DirectorySource> Desktop<S> {
             theme: settings.appearance != self.settings.appearance
                 || settings.contrast != self.settings.contrast
                 || settings.density != self.settings.density
-                || settings.motion != self.settings.motion,
+                || settings.motion != self.settings.motion
+                || settings.text_family != self.settings.text_family
+                || settings.text_size != self.settings.text_size,
             scale: settings.scale != self.settings.scale,
             cursor: settings.cursor_set != self.settings.cursor_set
                 || settings.cursor_size != self.settings.cursor_size

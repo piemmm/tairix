@@ -53,8 +53,7 @@ tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # private to the terminal and no other app the user launches can read or
 # rewrite it — and no path, user, or bundle identifier is spelled here.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
-# The one `key = value` document engine, for the key-grammar assertion the
-# profile registry's own test makes against every key it publishes.
+# The shared closed-registry engine the profile is kept by.
 tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The app half of the window channel: `WindowClient` (create / present / close
 # over the `WindowTransport` seam) and the desktop's one icon-bar menu convention

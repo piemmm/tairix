@@ -86,7 +86,6 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_raster::Surface;
-    use tairix_rt::io::{Stderr, Write};
     use tairix_terminal::appbar::{self, BarCommand};
     use tairix_terminal::effects::{EffectState, Effects, Phase};
     use tairix_terminal::layout::{
@@ -94,9 +93,8 @@ mod program {
     };
     use tairix_terminal::menu::{self, Command};
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
-    use tairix_appdata::{RtHost, Settings as SettingsStore};
+    use tairix_appdata::{Publication, PublishJob, Published, RtHost, Settings as SettingsStore};
     use tairix_terminal::profile::{Invalidation, Profile};
-    use tairix_terminal::publish::{refusal_warnings, Publication, PublishJob, Published};
     use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
@@ -186,27 +184,9 @@ mod program {
     /// the user cannot see. A key the registry refuses costs only itself and
     /// is named.
     fn load_profile(settings: &SettingsStore<'_>) -> Profile {
-        if let Some(err) = settings.store_refusal() {
-            app::report(
-                OWN_WORD,
-                format_args!("settings unavailable ({err:?}); running on this build's defaults"),
-            );
-        }
-        if let Some(err) = settings.defaults_refusal() {
-            app::report(
-                OWN_WORD,
-                format_args!("this bundle's shipped defaults could not be read ({err:?})"),
-            );
-        }
-        let (profile, refused) = Profile::load(settings);
-        for key in refused {
-            app::report(
-                OWN_WORD,
-                format_args!(
-                    "{}: not a value this setting accepts; using its default",
-                    key.name()
-                ),
-            );
+        let (profile, refusals) = tairix_appdata::loaded(settings);
+        for refusal in refusals {
+            app::report(OWN_WORD, refusal);
         }
         profile
     }
@@ -1117,7 +1097,7 @@ mod program {
         // readiness is a level peek, so work left undrained re-reports on the
         // next wait. The park carries a frame deadline only while some window
         // has an animated effect in force.
-        loop {
+        let code = 'serve: loop {
             let animated = publication
                 .live()
                 .effects
@@ -1135,12 +1115,18 @@ mod program {
                     for open in &mut windows {
                         open.look.phase = open.look.phase.advance();
                         if open.present(&mut client).is_err() {
-                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, "present refused");
+                            break 'serve app::fail(
+                                OWN_WORD,
+                                app::EXIT_CHANNEL_LOST,
+                                "present refused",
+                            );
                         }
                     }
                     continue;
                 }
-                Err(_) => return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, "wait-set lost"),
+                Err(_) => {
+                    break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, "wait-set lost")
+                }
             };
             // A shell the wait-set could not watch is reaped on any wake.
             ending.reap(None, reap_shell, |shell, reason| {
@@ -1186,9 +1172,9 @@ mod program {
                         },
                     ) {
                         Applied::Running => {}
-                        Applied::Ended => return 0,
+                        Applied::Ended => break 'serve 0,
                         Applied::Lost(reason) => {
-                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                            break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
                         }
                     }
                 }
@@ -1216,9 +1202,9 @@ mod program {
                         },
                     ) {
                         Applied::Running => {}
-                        Applied::Ended => return 0,
+                        Applied::Ended => break 'serve 0,
                         Applied::Lost(reason) => {
-                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                            break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
                         }
                     }
                 }
@@ -1252,9 +1238,9 @@ mod program {
                             },
                         ) {
                             Applied::Running => {}
-                            Applied::Ended => return 0,
+                            Applied::Ended => break 'serve 0,
                             Applied::Lost(reason) => {
-                                return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                                break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
                             }
                         }
                     }
@@ -1297,7 +1283,7 @@ mod program {
                     match ended {
                         ShellEnd::Running => {}
                         ShellEnd::Lost(reason) => {
-                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                            break 'serve app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
                         }
                         ShellEnd::Exited(reason) => {
                             windows.remove(index).close(&mut client, set);
@@ -1309,6 +1295,26 @@ mod program {
                     }
                 }
             }
+        };
+        see_out(&publisher, &mut publication);
+        code
+    }
+
+    /// See the profile's writes out before the program ends, so the last
+    /// change is never dropped with the worker: an edit still to settle is
+    /// settled, and every write owed behind the one outstanding is made.
+    fn see_out(publisher: &Publisher, publication: &mut Publication<Profile>) {
+        let mut refusals = Vec::new();
+        if let Some(job) = publication.settle() {
+            let _ = publisher.submit(job);
+        }
+        while let Some(answer) = publisher.wait() {
+            if let Some(job) = publication.adopt(answer, &mut refusals) {
+                let _ = publisher.submit(job);
+            }
+        }
+        for refusal in refusals {
+            app::report(OWN_WORD, refusal);
         }
     }
 
@@ -1372,10 +1378,10 @@ mod program {
     /// writes and answers with what the store then holds; the loop adopts that
     /// on the wake it nudges.
     /// A fresh store handle per job, so the work keeps no state.
-    type Publisher = tairix_rt::work::Worker<(), PublishJob, PublishAnswer>;
+    type Publisher = tairix_rt::work::Worker<(), PublishJob<Profile>, PublishAnswer>;
 
     /// What the store said, or why it said nothing.
-    type PublishAnswer = Result<Published, Errno>;
+    type PublishAnswer = Result<Published<Profile>, Errno>;
 
     /// Carry out one publish job against the user's own store, and answer with
     /// the profile the store then implies.
@@ -1388,18 +1394,9 @@ mod program {
     /// The answer is deliberately what the store *now says* rather than what
     /// was asked for, so a value a machine policy or a shipped default supplies
     /// wins over the widget's, and *Restore defaults* needs no second path.
-    fn write_profile(_: &mut (), job: &mut PublishJob) -> PublishAnswer {
+    fn write_profile(_: &mut (), job: &mut PublishJob<Profile>) -> PublishAnswer {
         let mut host = RtHost;
-        let mut store = SettingsStore::open(&mut host, OWN_WORD);
-        match job {
-            PublishJob::Save(profile) => profile.save(&mut store)?,
-            PublishJob::Restore => Profile::clear(&mut store)?,
-        }
-        let (profile, refused) = Profile::load(&store);
-        Ok(Published {
-            profile,
-            warnings: refusal_warnings(&refused),
-        })
+        tairix_appdata::publish(&mut SettingsStore::open(&mut host, OWN_WORD), job)
     }
 
     /// Adopt whatever the publisher has answered with, state anything it could
@@ -1410,17 +1407,17 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
     ) -> Applied {
-        let mut warnings = Vec::new();
+        let mut refusals = Vec::new();
         // With no worker a submission runs here and its answer is already
         // waiting, so the owed chain is followed until one is really in flight.
         while let Some(answer) = ctx.publisher.collect() {
-            let owed = ctx.publication.adopt(answer, &mut warnings);
+            let owed = ctx.publication.adopt(answer, &mut refusals);
             if !owed.is_some_and(|job| ctx.publisher.submit(job)) {
                 break;
             }
         }
-        for warning in &warnings {
-            let _ = write!(Stderr, "{warning}");
+        for refusal in refusals {
+            app::report(OWN_WORD, refusal);
         }
         if apply_profile_change(windows, client, ctx).is_err() {
             return Applied::Lost("present refused");
@@ -1454,7 +1451,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
     ) -> Result<(), ()> {
-        let changed = ctx.publication.take_pending();
+        let changed = ctx.publication.take_pending(Invalidation::between);
         let profile = *ctx.publication.live();
         let theme = ctx.themes.active();
         let scale = ctx.desktop.scale();
@@ -1502,7 +1499,7 @@ mod program {
         let profile = *ctx.publication.live();
         // The whole surface is rebuilt from the live profile, so nothing is
         // left for the next scoped pass to catch up on.
-        let _ = ctx.publication.take_pending();
+        ctx.publication.take_pending(|_, _| ());
         let theme = ctx.themes.active();
         let scale = ctx.desktop.scale();
         for open in windows.iter_mut() {
@@ -1536,7 +1533,7 @@ mod program {
         next_slot: &'a mut u64,
         /// The user's profile — what the windows render, and what the store
         /// last said — shared by every window.
-        publication: &'a mut Publication,
+        publication: &'a mut Publication<Profile>,
         /// The theme registry the appearance is switched in, and whose
         /// active theme every window draws with.
         themes: &'a mut ThemeRegistry,
@@ -1883,7 +1880,7 @@ mod program {
         command: Command,
         window: u64,
         terminal: &mut Terminal<S>,
-        publication: &mut Publication,
+        publication: &mut Publication<Profile>,
     ) -> EventOutcome {
         // A menu row is one whole interaction, so each of these settles.
         let mut resize = |change: fn(&mut Profile)| {
@@ -1917,7 +1914,7 @@ mod program {
     /// at — and never against the terminal window's.
     fn route_overlay_pointer(
         overlay: &mut Overlay,
-        publication: &mut Publication,
+        publication: &mut Publication<Profile>,
         input: impl IntoIterator<Item = InputEvent>,
         scale: Scale,
         theme: &Theme,
@@ -1949,7 +1946,7 @@ mod program {
     /// into that sheet.
     fn route_overlay_key(
         overlay: &mut Overlay,
-        publication: &mut Publication,
+        publication: &mut Publication<Profile>,
         key: tairix_abi::input::KeyInput,
         scale: Scale,
         theme: &Theme,
@@ -2047,7 +2044,7 @@ mod program {
     #[allow(clippy::too_many_lines)] // One dispatch over the whole window vocabulary; splitting it would hide the routing order.
     fn drain_events(
         windows: &mut [TerminalWindow],
-        publication: &mut Publication,
+        publication: &mut Publication<Profile>,
         desktop: &Desktop,
         theme: &Theme,
         events: &mut WindowEvents<EventMailbox>,
@@ -2290,10 +2287,12 @@ mod program {
                 | WindowEvent::AppBarDefault
                 | WindowEvent::AppBarMenu { .. }
                 | WindowEvent::MenuClosed { .. }
-                // The layer-surface feeds address a desktop surface this
-                // application never opens, so neither can arrive here.
+                // The layer-surface feeds and a tool window's moves address
+                // surfaces this application never opens, so none can arrive
+                // here.
                 | WindowEvent::TerrainChanged { .. }
                 | WindowEvent::LayerPointer { .. }
+                | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }
                 // The emulator keeps no scrollback and reports no mouse
                 // input to the program, so a wheel over the screen itself

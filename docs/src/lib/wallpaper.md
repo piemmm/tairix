@@ -40,8 +40,9 @@ desktop appear to say something it never said.
 
 ## Two readings, deliberately different
 
-`DesktopSettings::load` is the **tolerant** one, for a document held in a
-store: a value the registry refuses leaves that one field at its documented
+The registry load — `DesktopSettings` is a `tairix_appconf::Registry`, read
+by the shared engine's `Registry::load` — is the **tolerant** one, for a
+document held in a store: a value the registry refuses leaves that one field at its documented
 default and is *named* to the caller, so one stale setting costs only itself
 and never blanks a user's desktop. It reads through `tairix_appconf::Lookup`,
 so the same loader serves the session's own published-scope handle and the
@@ -85,6 +86,8 @@ that key's own closed vocabulary:
 | `density`   | `compact` \| `normal` \| `comfortable`            | `normal`                                      |
 | `motion`    | `full` \| `reduced`                               | `full`                                        |
 | `scale`     | a bare decimal percentage in `Scale`'s own range  | `100`                                         |
+| `font.family` | `theme`, or a font family's key (`[a-z0-9-]`, at most 16 bytes); a family the store no longer holds is kept and falls back where it is resolved | `theme` |
+| `font.size` | `theme`, or whole points, `TEXT_POINTS_MIN..=TEXT_POINTS_MAX` (6–48) | `theme`                                   |
 | `cursor.set`| a cursor-set name (a plain leaf name within `CURSOR_SET_NAME_MAX`) | `Standard`                   |
 | `cursor.size`| `normal` \| `large` \| `larger` \| `largest`     | `normal`                                      |
 | `cursor.shake`| `true` \| `false`                              | `true`                                        |
@@ -359,6 +362,12 @@ every source pixel at 1:1 and so needs the native size.
   category_path, wallpaper_path, default_wallpaper_path,
   is_wallpaper_category_name, is_wallpaper_file_name, catalog_categories,
   catalog_entries, CatalogEntry}` — the shipped set and the listing model.
+- `text::{TextFamily, TextSize, resolve, ResolvedText, TEXT_POINTS_MIN,
+  TEXT_POINTS_MAX}` — the desktop's text as chosen, each the theme's own until
+  chosen, and the one resolution of it against the font store's families into
+  the `DesktopText` the session publishes: a size in points becomes a line-box
+  height through the drawing family's own line box, and a family the store
+  does not list falls back to the theme's and is named.
 - `fit::{place, decode_request, nominal_source_size, Placement}` — the
   placement geometry.
 - `PINBOARD_PUBLISHER` — the desktop session's signed bundle identifier, the

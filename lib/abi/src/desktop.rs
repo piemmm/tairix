@@ -1,7 +1,7 @@
 //! The desktop a window is displayed on, as its session reports it: the
 //! screen extent, the UI scale, the four axes of how its theme is drawn —
-//! light or dark, contrast, density, and motion — and the one double-click
-//! interval every surface pairs presses under.
+//! light or dark, contrast, density, and motion — the one double-click
+//! interval every surface pairs presses under, and the text the user chose.
 //!
 //! These are the facts an application needs before it can lay itself out
 //! honestly — how large the screen it will be shown on is, how many
@@ -31,6 +31,7 @@
 //! appearance code, or a dirty reserved byte is refused rather than
 //! guessed at.
 
+use crate::font_ipc::{FamilyKey, FONT_FAMILY_KEY_LEN};
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::time::Duration64;
 use crate::Errno;
@@ -471,6 +472,47 @@ pub const DOUBLE_CLICK_MAX: Duration64 = Duration64::from_millis(2_000);
 /// another.
 pub const DOUBLE_CLICK_DEFAULT: Duration64 = Duration64::from_millis(500);
 
+/// The text a user chose for the desktop, as the session resolved it: the
+/// family every interface role is drawn in and the body size, in logical
+/// pixels of line box, the whole type ladder derives from.
+///
+/// The session resolves a choice in points against the font store before it
+/// publishes one, so an application applies this as it stands and never
+/// converts a size or asks the store anything. The bounds of a usable size
+/// belong to the theme's ladder, which holds a size to them, not to the wire.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DesktopText {
+    family: FamilyKey,
+    size_px: u16,
+}
+
+impl DesktopText {
+    /// Body text `size_px` logical pixels tall, drawn in `family`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a zero size, which the wire spells as no
+    /// choice at all.
+    pub const fn new(family: FamilyKey, size_px: u16) -> Result<Self, Errno> {
+        if size_px == 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self { family, size_px })
+    }
+
+    /// The family every interface role is drawn in.
+    #[must_use]
+    pub const fn family(&self) -> FamilyKey {
+        self.family
+    }
+
+    /// The body size in logical pixels of line box; never zero.
+    #[must_use]
+    pub const fn size_px(&self) -> u16 {
+        self.size_px
+    }
+}
+
 /// The desktop a window is displayed on.
 ///
 /// Opaque and validated on the way in: a desktop with a zero-sized screen
@@ -490,17 +532,24 @@ pub struct DesktopInfo {
     density: Density,
     motion: Motion,
     double_click: Duration64,
+    text: Option<DesktopText>,
 }
 
 /// Byte offset of the double-click interval in an encoded [`DesktopInfo`].
 const DOUBLE_CLICK_OFFSET: usize = 16;
 
+/// Byte offset of the text size in an encoded [`DesktopInfo`]; the family
+/// follows it.
+const TEXT_OFFSET: usize = DOUBLE_CLICK_OFFSET + Duration64::WIRE_LEN;
+
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
     /// scale percentage (2), appearance (1), one reserved byte that must be
     /// zero, contrast (1), density (1), motion (1), a second reserved byte
-    /// that must be zero, and the double-click interval (12).
-    pub const WIRE_LEN: usize = DOUBLE_CLICK_OFFSET + Duration64::WIRE_LEN;
+    /// that must be zero, the double-click interval (12), the text size (2)
+    /// and the text family (16) — a zero size and an all-zero family where
+    /// the user chose none.
+    pub const WIRE_LEN: usize = TEXT_OFFSET + 2 + FONT_FAMILY_KEY_LEN;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen,
     /// drawn at `scale_percent` of the reference density in `appearance`,
@@ -534,7 +583,15 @@ impl DesktopInfo {
             density: Density::Normal,
             motion: Motion::Full,
             double_click: DOUBLE_CLICK_DEFAULT,
+            text: None,
         })
+    }
+
+    /// The same desktop drawing its text as `text` says, or in each theme's
+    /// own where it is `None`.
+    #[must_use]
+    pub const fn with_text(self, text: Option<DesktopText>) -> Self {
+        Self { text, ..self }
     }
 
     /// The same desktop pairing presses under `interval`.
@@ -614,6 +671,12 @@ impl DesktopInfo {
         self.double_click
     }
 
+    /// The text the user chose, or `None` where each theme draws its own.
+    #[must_use]
+    pub const fn text(&self) -> Option<DesktopText> {
+        self.text
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -646,7 +709,11 @@ impl DesktopInfo {
         out[12] = self.contrast.code();
         out[13] = self.density.code();
         out[14] = self.motion.code();
-        out[DOUBLE_CLICK_OFFSET..].copy_from_slice(&self.double_click.to_le_bytes());
+        out[DOUBLE_CLICK_OFFSET..TEXT_OFFSET].copy_from_slice(&self.double_click.to_le_bytes());
+        if let Some(text) = self.text {
+            put_u16(out, TEXT_OFFSET, text.size_px);
+            out[TEXT_OFFSET + 2..].copy_from_slice(&text.family.to_wire());
+        }
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -661,8 +728,9 @@ impl DesktopInfo {
     ///   interval outside its bounds.
     /// * [`Errno::TimestampOutOfRange`] — a double-click interval whose
     ///   nanosecond field is not canonical.
-    /// * [`Errno::BadMagic`] — either reserved byte is not zero (wire
-    ///   corruption or a smuggled field, never silently ignored).
+    /// * [`Errno::BadMagic`] — either reserved byte is not zero, or a
+    ///   family is carried with no size (wire corruption or a smuggled
+    ///   field, never silently ignored).
     pub fn from_bytes_at(bytes: &[u8], at: usize) -> Result<Self, Errno> {
         let Some(record) = bytes.get(at..at + Self::WIRE_LEN) else {
             return Err(Errno::BufferTooSmall);
@@ -670,7 +738,7 @@ impl DesktopInfo {
         if record[11] != 0 || record[15] != 0 {
             return Err(Errno::BadMagic);
         }
-        Self::new(
+        let desktop = Self::new(
             read_u32(record, 0),
             read_u32(record, 4),
             read_u16(record, 8),
@@ -681,7 +749,10 @@ impl DesktopInfo {
             Density::from_code(record[13])?,
             Motion::from_code(record[14])?,
         )
-        .with_double_click(Duration64::from_bytes(&record[DOUBLE_CLICK_OFFSET..])?)
+        .with_double_click(Duration64::from_bytes(
+            &record[DOUBLE_CLICK_OFFSET..TEXT_OFFSET],
+        )?)?;
+        Ok(desktop.with_text(decode_text(&record[TEXT_OFFSET..])?))
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -694,12 +765,28 @@ impl DesktopInfo {
     }
 }
 
+/// The text a record's last `2 + FONT_FAMILY_KEY_LEN` bytes carry.
+fn decode_text(field: &[u8]) -> Result<Option<DesktopText>, Errno> {
+    let size_px = read_u16(field, 0);
+    let mut family = [0u8; FONT_FAMILY_KEY_LEN];
+    family.copy_from_slice(&field[2..2 + FONT_FAMILY_KEY_LEN]);
+    if size_px == 0 {
+        return if family.iter().all(|&byte| byte == 0) {
+            Ok(None)
+        } else {
+            Err(Errno::BadMagic)
+        };
+    }
+    DesktopText::new(FamilyKey::from_wire(family)?, size_px).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Appearance, Contrast, Density, DesktopInfo, Motion, ScreensaverKind, DOUBLE_CLICK_DEFAULT,
-        DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
+        Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, ScreensaverKind,
+        DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET, TEXT_OFFSET,
     };
+    use crate::font_ipc::FamilyKey;
     use crate::time::Duration64;
     use crate::Errno;
 
@@ -748,10 +835,10 @@ mod tests {
     #[test]
     fn a_double_click_interval_outside_its_bounds_is_refused_on_decode() {
         let mut bytes = desktop().to_le_bytes();
-        bytes[DOUBLE_CLICK_OFFSET..].copy_from_slice(&Duration64::ZERO.to_le_bytes());
+        bytes[DOUBLE_CLICK_OFFSET..TEXT_OFFSET].copy_from_slice(&Duration64::ZERO.to_le_bytes());
         assert_eq!(DesktopInfo::from_bytes(&bytes), Err(Errno::OutOfRange));
         let mut uncanonical = desktop().to_le_bytes();
-        uncanonical[DOUBLE_CLICK_OFFSET + 8..].copy_from_slice(&u32::MAX.to_le_bytes());
+        uncanonical[DOUBLE_CLICK_OFFSET + 8..TEXT_OFFSET].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(
             DesktopInfo::from_bytes(&uncanonical),
             Err(Errno::TimestampOutOfRange)
@@ -770,6 +857,38 @@ mod tests {
         // only in how it is drawn still describes the same screen.
         assert_eq!(info.screen_width_px(), desktop().screen_width_px());
         assert_eq!(info.appearance(), desktop().appearance());
+    }
+
+    #[test]
+    fn the_text_choice_round_trips_and_its_absence_is_all_zero() {
+        assert_eq!(desktop().text(), None);
+        let bytes = desktop().to_le_bytes();
+        assert!(bytes[TEXT_OFFSET..].iter().all(|&byte| byte == 0));
+        let family = FamilyKey::new("noto-serif").expect("a well-formed key");
+        let text = DesktopText::new(family, 18).expect("a non-zero size");
+        let info = desktop().with_text(Some(text));
+        assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
+        assert_eq!(
+            info.text().map(|t| (t.family(), t.size_px())),
+            Some((family, 18))
+        );
+        assert_eq!(DesktopText::new(family, 0), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_malformed_text_choice_is_refused_on_decode() {
+        let family = FamilyKey::new("inter").expect("a well-formed key");
+        let info = desktop().with_text(Some(DesktopText::new(family, 16).expect("non-zero")));
+        // A family with no size is a smuggled field, not an absent choice.
+        let mut sizeless = info.to_le_bytes();
+        sizeless[TEXT_OFFSET..TEXT_OFFSET + 2].fill(0);
+        assert_eq!(DesktopInfo::from_bytes(&sizeless), Err(Errno::BadMagic));
+        let mut bad_family = info.to_le_bytes();
+        bad_family[TEXT_OFFSET + 2] = b'/';
+        assert_eq!(DesktopInfo::from_bytes(&bad_family), Err(Errno::OutOfRange));
+        let mut nameless = info.to_le_bytes();
+        nameless[TEXT_OFFSET + 2..].fill(0);
+        assert_eq!(DesktopInfo::from_bytes(&nameless), Err(Errno::OutOfRange));
     }
 
     #[test]

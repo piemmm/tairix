@@ -11,7 +11,7 @@
 //!    rendered text is itself within [`tairix_appconf::MAX_DOCUMENT_LEN`],
 //!    so a writer can never emit a document the reader would refuse as too
 //!    long.
-//! 3. [`DesktopSettings::load`] — the tolerant reading — never panics and
+//! 3. `DesktopSettings`' registry load — the tolerant reading — never panics and
 //!    is *total*: whatever a stored document says, every field it does not
 //!    accept is left at its documented default and named in the refusal
 //!    list, so the two readings agree on every document the strict one
@@ -24,7 +24,7 @@
 //! The fixed sweep runs under plain `cargo test`; under `cargo xtask fuzz`
 //! the same seeded stream keeps being drawn until the budget elapses.
 
-use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
+use tairix_appconf::{Document, Registry, MAX_DOCUMENT_LEN};
 use tairix_fuzzseed::Prng;
 use tairix_wallpaper::{merge, DesktopSettings};
 
@@ -63,6 +63,16 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         "scale",
         &["100", "150", "300"],
         &["24", "801", "-100", "1e3"],
+    ),
+    (
+        "font.family",
+        &["theme", "inter", "noto-serif", "gone-family"],
+        &["Inter", "../fonts", ""],
+    ),
+    (
+        "font.size",
+        &["theme", "6", "10", "48"],
+        &["5", "49", "+10", "10pt"],
     ),
     (
         "cursor.set",

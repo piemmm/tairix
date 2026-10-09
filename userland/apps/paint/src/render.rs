@@ -12,7 +12,10 @@ use core::fmt::Write as _;
 use core::ops::Range;
 
 use tairix_colour::Rgba;
-use tairix_controls::{blend_area, fill_area, paint_run, withheld, Checker, SwatchMark};
+use tairix_controls::{
+    blend_area, fill_area, paint_run, paint_titled_surface_plate, withheld, Checker, ChromeLayer,
+    FrameRim, SwatchMark,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{saturate_i32, to_i32, Point, Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -26,13 +29,16 @@ use crate::colour::Ink;
 use crate::compose::compose_run;
 use crate::document::{Entry, Layer, Picture};
 use crate::gradient::Laying;
-use crate::layout::{Faces, Layout};
+use crate::grid::GridLines;
+use crate::layout::{Faces, Layout, PaneSlot};
 use crate::mask::Mask;
+use crate::pane::{PaneKind, Side};
+use crate::preferences::{CanvasStyle, Shades, Surround};
 use crate::selection::Floating;
 use crate::shape::{line_pixels, Bounds, Point as Fx, Shape, ShapeScratch, FX};
 use crate::stroke::{lay_over, Blend, Coat};
 use crate::text::TextEntry;
-use crate::view::{Marking, View};
+use crate::view::{landing_mark, Marking, View};
 use crate::viewport::{screen_rect, Viewport};
 
 /// How much a modal question darkens the window behind it, in 255ths.
@@ -68,16 +74,34 @@ pub fn render_into(
             .commands
             .render(surface, layout.view_strip(), scale, theme, artwork);
     }
-    if !withheld(surface, layout.tool_box()) {
-        fill_area(surface, layout.tool_box(), chrome);
-        controls
-            .tool_box
-            .render(surface, layout.tools(), scale, theme, artwork);
+    for side in Side::BOTH {
+        let dock = layout.dock_on(side);
+        if withheld(surface, dock.rect) {
+            continue;
+        }
+        fill_area(surface, dock.rect, chrome);
+        for slot in &dock.panes {
+            pane(surface, view, layout, slot, (theme, scale, faces), artwork);
+        }
     }
-    if !withheld(surface, layout.dock()) {
-        fill_area(surface, layout.dock(), chrome);
-        wells(surface, view, layout, theme, scale, faces.status);
-        view.dock().0.render(surface, layout.picker(), scale, theme);
+    // A floating pane is its tool window's whole client: the band around it
+    // is the window manager's.
+    for slot in layout.floating() {
+        if !withheld(surface, slot.frame) {
+            fill_area(surface, slot.frame, chrome);
+            pane_body(
+                surface,
+                view,
+                layout,
+                slot.kind,
+                (theme, scale, faces),
+                artwork,
+            );
+        }
+    }
+    if let Some(landing) = view.landing() {
+        let mark = landing_mark(layout, landing, scale, theme);
+        fill_area(surface, mark, Color::from(palette.accent));
     }
     if !withheld(surface, layout.canvas()) {
         canvas(surface, view, layout, theme, scale, faces.status);
@@ -106,9 +130,26 @@ pub fn render_into(
     controls
         .bar
         .render_popup(surface, layout.bar(), scale, theme);
+    view.adjustment_pane().render_popup(
+        surface,
+        layout.adjustment_settings(),
+        layout.pane_window(PaneKind::Adjustment),
+        (faces, scale, theme),
+    );
+    view.colour_controls().render_popup(
+        surface,
+        layout.colour_controls(),
+        layout.pane_window(PaneKind::Colour),
+        (faces, scale, theme),
+    );
     if let Some(modal) = view.modal() {
         let window = layout.window();
-        blend_area(surface, window, palette.drop_shadow.with_alpha(VEIL_ALPHA));
+        // The question takes the whole window, its floating panes with it.
+        let veil = palette.drop_shadow.with_alpha(VEIL_ALPHA);
+        blend_area(surface, window, veil);
+        for slot in layout.floating() {
+            blend_area(surface, slot.frame, veil);
+        }
         match modal {
             Ok(dialog) => {
                 let bounds = crate::view::close_rect(dialog, window, scale, theme);
@@ -116,6 +157,78 @@ pub fn render_into(
             }
             Err(form) => form.render(surface, window, scale, theme),
         }
+    }
+}
+
+/// One docked pane: its plate, its mini title band, and its body.
+fn pane(
+    surface: &mut Surface,
+    view: &View,
+    layout: &Layout,
+    slot: &PaneSlot,
+    (theme, scale, faces): (&Theme, Scale, Faces),
+    artwork: &mut dyn IconArtwork,
+) {
+    if withheld(surface, slot.frame) {
+        return;
+    }
+    let Some((x, y)) = slot.frame.surface_origin() else {
+        return;
+    };
+    let rim = FrameRim::of(scale, theme);
+    let _ = paint_titled_surface_plate(
+        surface,
+        (x, y, slot.frame.width, slot.frame.height),
+        (rim.radius, rim.thickness),
+        slot.header.height,
+        theme,
+        (theme.palette().surface_raised, ChromeLayer::Plate),
+    );
+    view.header(slot.kind)
+        .render(surface, slot.header, scale, theme, None);
+    pane_body(
+        surface,
+        view,
+        layout,
+        slot.kind,
+        (theme, scale, faces),
+        artwork,
+    );
+}
+
+/// What pane `kind` holds, wherever it is laid out.
+fn pane_body(
+    surface: &mut Surface,
+    view: &View,
+    layout: &Layout,
+    kind: PaneKind,
+    (theme, scale, faces): (&Theme, Scale, Faces),
+    artwork: &mut dyn IconArtwork,
+) {
+    match kind {
+        PaneKind::Tools => {
+            view.controls()
+                .tool_box
+                .render(surface, layout.tools(), scale, theme, artwork);
+        }
+        PaneKind::Colour => {
+            wells(surface, view, layout, theme, scale, faces.status);
+            view.colour_controls().render(
+                surface,
+                layout.colour_controls(),
+                (faces, scale, theme),
+                &crate::panel::Plain,
+            );
+            view.dock().0.render(surface, layout.picker(), scale, theme);
+            view.recent_colours()
+                .render(surface, view.recents_rect(layout), scale, theme);
+        }
+        PaneKind::Adjustment => view.adjustment_pane().render(
+            surface,
+            layout.adjustment_settings(),
+            (faces, scale, theme),
+            view.histogram(),
+        ),
     }
 }
 
@@ -237,6 +350,9 @@ fn canvas(
     font: BitmapFont,
 ) {
     let area = layout.canvas();
+    if let Surround::Chosen(colour) = view.canvas_style().surround {
+        fill_area(surface, area, Color::from(colour));
+    }
     let Some(picture) = view.document().picture() else {
         kept(surface, view, area, theme, font);
         return;
@@ -401,7 +517,10 @@ struct Rows<'a> {
     span: (u64, u64, u64),
     columns: ColumnMap,
     checker: Checker,
-    grid: Option<Color>,
+    /// The grid between pixels, in its ink.
+    pixel_grid: Option<Color>,
+    /// The grid laid over the picture.
+    lines: Option<GridLines>,
     /// The shape being dragged, each layer's coverage traced once a paint.
     preview: [Option<(Coat, CoverageRows<'a>)>; 2],
     /// The selection the shape is held to, as it will be when it lands.
@@ -435,10 +554,24 @@ impl<'a> Rows<'a> {
         (theme, scale): (&Theme, Scale),
         shapes: &'a mut [ShapeScratch; 2],
     ) -> Self {
-        let grid = view.grid_shown().then(|| {
+        let pixel_grid = view.pixel_grid_shown().then(|| {
             let ink = theme.palette().on_surface_muted;
             Color::rgba(ink.r, ink.g, ink.b, GRID_ALPHA)
         });
+        let style = view.canvas_style();
+        let span = view.viewport().span();
+        let lines = view
+            .grid_shown()
+            .then(|| {
+                GridLines::new(
+                    &style.grid,
+                    origin,
+                    span,
+                    (columns.screen.start, columns.screen.end),
+                    scale,
+                )
+            })
+            .flatten();
         let mut preview = [None, None];
         if let Some(dragged) = view.preview() {
             // A preview whose outline cannot be held is not drawn; the shape
@@ -462,8 +595,9 @@ impl<'a> Rows<'a> {
             origin,
             span: view.viewport().span(),
             columns,
-            checker: Checker::new(theme, scale),
-            grid,
+            checker: checker_of(style, theme, scale),
+            pixel_grid,
+            lines,
             preview,
             clip: view.selection(),
             gradient: view.gradient().map(|gradient| gradient.on(kind)),
@@ -695,7 +829,11 @@ impl<'a> Rows<'a> {
         let (across, down, den) = self.span;
         let origin = self.origin;
         let checker = self.checker;
-        let grid = self.grid;
+        let grid = self.pixel_grid;
+        let lines = self
+            .lines
+            .as_ref()
+            .map(|lines| (lines, lines.row(screen_y)));
         let on_row_line = grid.is_some() && {
             let offset = i64::from(screen_y) - origin.1;
             let step = i64::try_from(down / den.max(1)).unwrap_or(1).max(1);
@@ -719,6 +857,9 @@ impl<'a> Rows<'a> {
                     pixel = line.premultiply().over(pixel);
                 }
             }
+            if let Some((lines, row)) = lines {
+                pixel = lines.over(row, at, screen_y, pixel);
+            }
             *slot = pixel;
         }
     }
@@ -730,6 +871,10 @@ impl<'a> Rows<'a> {
         let width = screen.end - screen.start;
         let checker = self.checker;
         let checker_origin = (self.origin.0.max(0), self.origin.1.max(0));
+        let lines = self
+            .lines
+            .as_ref()
+            .map(|lines| (lines, lines.row(screen_y)));
         let Some((start, span)) = surface.row_span_mut(screen_y, screen.start, width) else {
             return;
         };
@@ -747,7 +892,11 @@ impl<'a> Rows<'a> {
                 a: mean(sum[3]),
             };
             let below = checker_at(&checker, at, screen_y, checker_origin).premultiply();
-            *slot = pixel.over(below);
+            let shown = pixel.over(below);
+            *slot = match lines {
+                Some((lines, row)) => lines.over(row, at, screen_y, shown),
+                None => shown,
+            };
         }
     }
 }
@@ -772,6 +921,15 @@ fn taps_in(start: i64, covered: u64, length: u32) -> [i64; 2] {
     let covered = i64::try_from(covered.max(1)).unwrap_or(i64::MAX);
     let there = (last - start + 1).min(covered);
     [start + there / 4, start + there * 3 / 4]
+}
+
+/// The checkerboard `style` asks for under `theme` at `scale`.
+fn checker_of(style: &CanvasStyle, theme: &Theme, scale: Scale) -> Checker {
+    let board = Checker::new(theme, scale).with_side(scale.scale_length(style.checker_side));
+    match style.shades {
+        Shades::Theme => board,
+        Shades::Chosen(dark, light) => board.with_shades(Color::from(dark), Color::from(light)),
+    }
 }
 
 /// The checkerboard's colour at screen pixel `(x, y)`, its squares counted

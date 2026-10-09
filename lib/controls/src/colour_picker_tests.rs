@@ -10,7 +10,8 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use super::{ColourPicker, Component, Layout, Part, PickerOutcome};
+use super::{ColourPicker, Layout, Part, PickerOutcome, ALPHA};
+use crate::colour_model::{ColourModel, PickerView};
 use crate::damage;
 use crate::paint::authority_rgba;
 use crate::state::{AuthorityState, ControlState};
@@ -119,14 +120,20 @@ fn render(picker: &ColourPicker, bounds: Rect, theme: &Theme) -> Surface {
     surface
 }
 
-fn readouts(picker: &ColourPicker) -> [i32; 7] {
+fn readouts(picker: &ColourPicker) -> [i32; 5] {
     picker.numbers.each_ref().map(super::NumberField::value)
 }
 
 #[test]
 fn every_readout_shows_the_colour() {
     let picker = picker(SLATE);
-    assert_eq!(readouts(&picker), [210, 67, 60, 0x33, 0x66, 0x99, 255]);
+    let fields = readouts(&picker);
+    assert_eq!(
+        [fields[0], fields[1], fields[2], fields[ALPHA]],
+        [0x33, 0x66, 0x99, 255]
+    );
+    let hsv = picker.clone().with_model(ColourModel::Hsv);
+    assert_eq!(readouts(&hsv)[..3], [210, 67, 60]);
     assert_eq!(picker.hex.text(), "#336699");
     assert_eq!(picker.colour(), SLATE);
 }
@@ -140,7 +147,7 @@ fn a_picker_without_opacity_is_opaque_and_one_with_it_spells_its_alpha() {
     picker.set_colour(translucent);
     assert_eq!(picker.colour(), translucent);
     assert_eq!(picker.hex.text(), "#33669980");
-    assert_eq!(readouts(&picker)[Component::Alpha.index()], 0x80);
+    assert_eq!(readouts(&picker)[ALPHA], 0x80);
 }
 
 #[test]
@@ -154,7 +161,7 @@ fn wide_bounds_put_the_fields_beside_the_plane_and_narrow_ones_beneath_it() {
     assert!(narrow.numbers[0].top() > narrow.hex.top());
     for layout in [wide, narrow] {
         assert!(layout.alpha.is_empty() && layout.earlier.is_empty());
-        assert!(layout.numbers[Component::Alpha.index()].is_empty());
+        assert!(layout.numbers[ALPHA].is_empty());
         for part in [Part::Plane, Part::Hue, Part::Hex] {
             assert!(!layout.rect_of(part).is_empty(), "{part:?}");
         }
@@ -171,7 +178,7 @@ fn short_bounds_give_up_the_fields_then_the_hex_row_but_never_the_plane() {
         .iter()
         .all(|&i| !whole.numbers[i].is_empty()));
     assert_eq!(
-        u32::try_from(whole.numbers[Component::Blue.index()].bottom()).expect("fits"),
+        u32::try_from(whole.numbers[2].bottom()).expect("fits"),
         full,
         "the measured height is exactly what every part needs"
     );
@@ -183,8 +190,8 @@ fn short_bounds_give_up_the_fields_then_the_hex_row_but_never_the_plane() {
     assert!(plane_only.hex.is_empty() && !plane_only.plane.is_empty());
 }
 
-/// The fields a picker without opacity lays out.
-const COMPONENTS_SHOWN: [usize; 6] = [0, 1, 2, 3, 4, 5];
+/// The fields an RGB picker without opacity lays out.
+const COMPONENTS_SHOWN: [usize; 3] = [0, 1, 2];
 
 #[test]
 fn a_drag_on_the_plane_is_live_and_settles_once_on_release() {
@@ -225,9 +232,9 @@ fn a_drag_that_comes_back_to_where_it_began_still_settles() {
 
 #[test]
 fn a_colour_taken_to_black_keeps_its_hue_and_saturation() {
-    let mut picker = picker(SLATE);
+    let mut picker = picker(SLATE).with_model(ColourModel::Hsv);
     let before = picker.hsv;
-    tab_to(&mut picker, Part::Number(Component::Value));
+    tab_to(&mut picker, Part::Number(2));
     type_over(&mut picker, "0");
     assert_eq!(picker.colour(), Rgba::rgb(0, 0, 0));
     assert_eq!(
@@ -264,8 +271,9 @@ fn the_hue_strip_sets_the_hue_alone() {
     move_to(&mut picker, into(&layout, Part::Hue, 500, 1000), WIDE);
     assert_eq!(picker.hsv.hue, tairix_colour::Hue::RED, "red at both ends");
     move_to(&mut picker, into(&layout, Part::Hue, 500, 500), WIDE);
+    let pixel = 360 / (layout.inner(Part::Hue).height - 1) + 1;
     assert!(
-        picker.hsv.hue.degrees().abs_diff(180) <= 1,
+        picker.hsv.hue.degrees().abs_diff(180) <= pixel,
         "half way down is cyan, to the pixel"
     );
     assert!(matches!(
@@ -372,11 +380,7 @@ fn hex_typing_is_live_and_enter_settles() {
         "#ff80 carries an alpha this picker lacks"
     );
     assert_eq!(typed[6], PickerOutcome::Edited(Rgba::rgb(0xff, 0x80, 0x00)));
-    assert_eq!(
-        readouts(&picker)[Component::Red.index()],
-        0xff,
-        "the fields follow"
-    );
+    assert_eq!(readouts(&picker)[0], 0xff, "the fields follow");
     assert_eq!(
         named(&mut picker, NamedKey::Enter),
         PickerOutcome::Settled(Rgba::rgb(0xff, 0x80, 0x00))
@@ -441,23 +445,23 @@ fn escape_takes_back_hex_typing() {
 #[test]
 fn number_fields_edit_their_own_coordinate() {
     let mut picker = picker(SLATE);
-    tab_to(&mut picker, Part::Number(Component::Red));
+    tab_to(&mut picker, Part::Number(0));
     assert_eq!(
         named(&mut picker, NamedKey::Up),
         PickerOutcome::Settled(Rgba::rgb(0x34, 0x66, 0x99))
     );
     assert_eq!(picker.hex.text(), "#346699");
-    tab_to(&mut picker, Part::Number(Component::Value));
+    picker.set_model(ColourModel::Hsv);
+    tab_to(&mut picker, Part::Number(2));
     let typed = type_over(&mut picker, "100");
     assert!(matches!(typed[2], PickerOutcome::Edited(_)));
     assert_eq!(picker.hsv.value, tairix_colour::Fraction::ALL);
-    assert_eq!(
-        readouts(&picker)[Component::Value.index()],
-        100,
-        "the typed field keeps its text"
-    );
+    assert_eq!(readouts(&picker)[2], 100, "the typed field keeps its text");
     assert!(
-        matches!(named(&mut picker, NamedKey::Tab), PickerOutcome::Settled(_)),
+        matches!(
+            key_with(&mut picker, Key::Named(NamedKey::Tab), shift()),
+            PickerOutcome::Settled(_)
+        ),
         "leaving commits"
     );
 }
@@ -501,7 +505,7 @@ fn committing_settles_typing_and_keeps_the_keyboard() {
 #[test]
 fn a_field_left_with_typing_settles_as_the_owner_blurs_the_picker() {
     let mut picker = picker(SLATE);
-    tab_to(&mut picker, Part::Number(Component::Green));
+    tab_to(&mut picker, Part::Number(1));
     type_over(&mut picker, "7");
     let outcome = picker.blur(WIDE, Scale::ONE, &Theme::dark(), &mut damage::sink());
     assert_eq!(outcome, PickerOutcome::Settled(Rgba::rgb(0x33, 7, 0x99)));
@@ -517,11 +521,11 @@ fn tab_walks_every_part_shown_and_hands_on_past_the_ends() {
     while named(&mut picker, NamedKey::Tab) != PickerOutcome::Ignored {
         walked.push(picker.part);
     }
-    assert_eq!(walked, super::PARTS);
+    assert_eq!(walked, picker.parts().as_slice());
     while key_with(&mut picker, Key::Named(NamedKey::Tab), shift()) != PickerOutcome::Ignored {}
     assert_eq!(picker.part, Part::Plane);
     picker.enter_focus(false, WIDE, Scale::ONE, &Theme::dark());
-    assert_eq!(picker.part, Part::Number(Component::Alpha));
+    assert_eq!(picker.part, Part::Number(ALPHA));
 }
 
 #[test]
@@ -710,9 +714,9 @@ fn bookkeeping_is_not_drawn() {
 #[test]
 fn the_wheel_steps_a_focused_number_field_under_the_pointer() {
     let mut picker = picker(SLATE);
-    tab_to(&mut picker, Part::Number(Component::Blue));
+    tab_to(&mut picker, Part::Number(2));
     let layout = layout(&picker, WIDE);
-    let field = layout.numbers[Component::Blue.index()];
+    let field = layout.numbers[2];
     move_to(
         &mut picker,
         Point::new(field.left() + 4, field.top() + 4),
@@ -758,5 +762,149 @@ fn a_theme_with_taller_controls_is_measured_anew() {
     assert_eq!(
         picker.measured_height(WIDE.width, Scale::ONE, &base),
         shipped
+    );
+}
+
+/// Editing one channel of a model keeps the others as they were typed, even
+/// where the colour they name rounds them away.
+#[test]
+fn a_models_values_are_held_as_typed() {
+    let mut picker = picker(SLATE).with_model(ColourModel::Cmyk);
+    tab_to(&mut picker, Part::Number(3));
+    type_over(&mut picker, "100");
+    assert_eq!(picker.colour(), Rgba::rgb(0, 0, 0), "full black");
+    let held = readouts(&picker);
+    assert_eq!(held[3], 100);
+    assert!(
+        held[0] > 0,
+        "cyan kept as typed, though black holds no colour"
+    );
+    type_over(&mut picker, "0");
+    assert_ne!(
+        picker.colour(),
+        Rgba::rgb(255, 255, 255),
+        "the inks typed come back"
+    );
+}
+
+#[test]
+fn a_lab_value_past_srgb_is_clipped_and_marked() {
+    let mut picker = picker(SLATE).with_model(ColourModel::Lab);
+    tab_to(&mut picker, Part::Number(1));
+    type_over(&mut picker, "127.0");
+    assert!(picker.clipped());
+    let theme = Theme::dark();
+    let marked = render(&picker, WIDE, &theme);
+    picker.set_colour(SLATE);
+    assert!(!picker.clipped(), "an owner's colour is in sRGB");
+    assert_ne!(marked.pixels(), render(&picker, WIDE, &theme).pixels());
+}
+
+#[test]
+fn switching_the_model_shows_its_fields_and_keeps_the_colour() {
+    let mut picker = picker(SLATE);
+    picker.set_model(ColourModel::Lch);
+    assert_eq!(picker.model(), ColourModel::Lch);
+    assert_eq!(picker.colour(), SLATE);
+    let wide = layout(&picker, WIDE);
+    assert!(!wide.numbers[2].is_empty() && wide.numbers[3].is_empty());
+    picker.set_model(ColourModel::Grey);
+    let grey = layout(&picker, WIDE);
+    assert!(grey.numbers[1].is_empty(), "one field");
+    tab_to(&mut picker, Part::Number(0));
+    type_over(&mut picker, "100");
+    assert_eq!(picker.colour(), Rgba::rgb(0, 0, 0));
+}
+
+#[test]
+fn the_wheel_sets_the_hue_on_its_ring_and_saturation_and_value_in_its_triangle() {
+    let mut picker = picker(SLATE).with_view(PickerView::Wheel);
+    let layout = layout(&picker, NARROW);
+    let area = layout.inner(Part::Ring);
+    let wheel = super::Wheel::in_area(area);
+    let mid = wheel.outer.midpoint(wheel.inner);
+    let on_ring = Point::new(
+        tairix_util::mathf::round_i32(wheel.cx),
+        tairix_util::mathf::round_i32(wheel.cy - mid),
+    );
+    assert_eq!(
+        layout.part_at(on_ring, &picker.parts(), picker.hsv.hue),
+        Some(Part::Ring)
+    );
+    move_to(&mut picker, on_ring, NARROW);
+    let pressed = pointer(&mut picker, &PRESS, NARROW);
+    assert!(matches!(pressed, PickerOutcome::Edited(_)));
+    let degrees = picker.hsv.hue.degrees();
+    assert!(
+        (88..=92).contains(&degrees),
+        "straight up is a quarter turn: {degrees}"
+    );
+    assert!(matches!(
+        pointer(&mut picker, &RELEASE, NARROW),
+        PickerOutcome::Settled(_)
+    ));
+    let [_, white, _] = wheel.corners(picker.hsv.hue);
+    let near_white = Point::new(
+        tairix_util::mathf::round_i32(white.0 * 0.9 + wheel.cx * 0.1),
+        tairix_util::mathf::round_i32(white.1 * 0.9 + wheel.cy * 0.1),
+    );
+    move_to(&mut picker, near_white, NARROW);
+    pointer(&mut picker, &PRESS, NARROW);
+    pointer(&mut picker, &RELEASE, NARROW);
+    let colour = picker.colour();
+    assert!(
+        colour.r > 200 && colour.g > 200 && colour.b > 200,
+        "near white: {colour:?}"
+    );
+    let theme = Theme::dark();
+    let pure_green = premul(tairix_colour::Rgba::rgb(0, 255, 0));
+    assert!(
+        has_pixel(&render(&picker, NARROW, &theme), pure_green),
+        "the ring shows every hue"
+    );
+}
+
+#[test]
+fn a_slider_sets_its_channel_and_draws_it_swept() {
+    let mut picker = picker(SLATE)
+        .with_view(PickerView::Sliders)
+        .with_opacity(true);
+    let layout = layout(&picker, NARROW);
+    assert!(layout.hue.is_empty(), "no hue strip");
+    assert!(
+        layout.alpha.width > layout.alpha.height,
+        "the opacity is a slider too"
+    );
+    let red = layout.inner(Part::Track(0));
+    move_to(
+        &mut picker,
+        Point::new(red.right() - 1, red.top() + 2),
+        NARROW,
+    );
+    pointer(&mut picker, &PRESS, NARROW);
+    assert_eq!(
+        pointer(&mut picker, &RELEASE, NARROW),
+        PickerOutcome::Settled(Rgba::rgb(255, 0x66, 0x99))
+    );
+    tab_to(&mut picker, Part::Track(1));
+    assert_eq!(
+        named(&mut picker, NamedKey::Home),
+        PickerOutcome::Settled(Rgba::rgb(255, 0, 0x99))
+    );
+    let theme = Theme::dark();
+    let surface = render(&picker, NARROW, &theme);
+    let groove = layout.inner(Part::Track(2));
+    let at = |x: i32| {
+        surface
+            .get(
+                u32::try_from(x).expect("on"),
+                u32::try_from(groove.top() + 2).expect("on"),
+            )
+            .expect("drawn")
+    };
+    assert_ne!(
+        at(groove.left() + 2),
+        at(groove.right() - 3),
+        "swept from no blue to all"
     );
 }

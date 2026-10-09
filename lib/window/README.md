@@ -98,10 +98,10 @@ server and every app's client can never drift apart.
   ends depend on them agreeing: the session reads a refused delivery as
   evidence that the owner has stopped draining, which would mean
   different things per app if each chose its own slack.
-- **Popup surfaces** (`WindowRequest::CreatePopup`, `PopupSpec`): an app
+- **Popup surfaces** (`WindowRequest::CreatePopup`, `TransientSpec`): an app
   opens an undecorated child surface above one of its own windows, so a
   context menu or a settings sheet is never clipped by the window that owns
-  it. `WindowClient::create_popup` takes one `PopupSpec` — the parent
+  it. `WindowClient::create_popup` takes one `TransientSpec` — the parent
   window, the grant handle, the event endpoint, the frame count and
   geometry, and an offset in physical pixels from the *parent's client
   origin*, since an app is never told its own window's screen position. The
@@ -116,9 +116,18 @@ server and every app's client can never drift apart.
   taskbar. `present`, `set_backdrop_blur`, and `close` act on a popup's id
   exactly as on a top-level id; closing the **parent** tears down every
   popup keyed to it (as does `client_exited`), while closing the popup's
-  own id tears down only the popup. One `PopupSpec` definition serves both
+  own id tears down only the popup. One `TransientSpec` definition serves both
   halves, so the app's request and the engine's validated view cannot
-  drift.
+  drift. A transient hangs only from a top-level window: a popup, a tool
+  window or a layer surface named as a parent is refused `NotSupported`.
+- **Tool windows** (`WindowRequest::CreateTool`, `ToolSpec`): a floating
+  palette hung from one of the app's own windows, which the window manager
+  frames with a mini title band reading its title and the user moves. It is
+  validated, owned, budgeted and torn down exactly as a popup, through the
+  same engine path (`WindowHost::tool_opened`); `ToolSpec::carry` asks for the
+  press the parent still holds to carry it on, and its moves come back as
+  `WindowEvent::ToolMoved`. `WindowClient::create_tool` and
+  `WindowPane::open_tool` open one.
 - **The seat's desktop is asked for here, and kept current here.** An app
   cannot draw honestly without knowing the screen it is on, the desktop's
   UI scale, and whether the theme runs light or dark — and the compositor
@@ -252,7 +261,20 @@ server and every app's client can never drift apart.
   as long as the save is outstanding, a closing window keeps a room for each
   save it leaves behind, and the process ends only once every save has landed.
   What differs per application is `DocumentApp`: reading a document in, its
-  own requests and workers, and its pixels.
+  own requests and workers, its pixels, the icon-bar rows of its own after
+  *New window*, and the windows of its own that hold no document — a settings
+  window, say — each an `AppView` the host opens, routes, paints and closes
+  (`NoAppView` for an application with none), closed by Quit only once the
+  quit can no longer be turned down. `DocumentApp::leaving` gives the
+  application its turn to see its own workers out before the process ends.
+  A document window's view may tear palettes out into tool windows
+  (`DocumentView::tool_window`): each shows a rectangle of the window's own
+  drawing laid out beside it (`ToolWindow::fits_beside`), and after every
+  round the host opens, resizes, retitles and closes them to match, routes
+  their input to the view in its drawing's coordinates, hands it their moves
+  and close marks, and paints what the view reports inside each into that
+  window alone. The view hears it has the keyboard while the window or any of
+  its tool windows does.
 - **A tooltip is asked for once per tool** (`DeclaredTip`): the region a
   window last asked a tip for, so pointer samples over one tool cost no
   further request, and a session that refuses tips is not asked again until

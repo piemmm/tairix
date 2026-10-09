@@ -46,6 +46,11 @@ channel. The `Lookup` trait names that one question — implemented here for
 written once rather than once per surface, which is how two loaders come to
 disagree about what a missing key means.
 
+The registry is written once as well: a record declares its keys and the
+bridges between a stored text and a field (`Registry`), and loading it,
+rendering it, and — for one edited live (`Live`) — telling which settings two
+records disagree on (`Keys`) are this crate's.
+
 The key grammar also *contains* `lib/abi`'s one store-name grammar: every
 bundle identifier and bulk-store name it admits is a legal key, which is what
 lets a registry key on an identifier (`<bundle-id>.<field>`) with no risk of

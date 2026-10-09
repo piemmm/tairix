@@ -187,13 +187,15 @@ Four panes, two kinds.
 
 ## Appearance and Accessibility
 
-Two views of one registry: light/dark is Appearance's alone, and contrast,
-density, motion and the interface scale appear in both — from one definition,
-because a reader looks for them in either place.
+Two views of one registry: light/dark and the text are Appearance's alone, and
+contrast, density, motion and the interface scale appear in both — from one
+definition, because a reader looks for them in either place.
 
 | Setting | What it changes |
 |---|---|
 | Appearance | Light or dark. |
+| Font | The family windows, menus and the icon bar set their text in; *Default* is the theme's own (Appearance's alone). |
+| Text size | How large text is set, in points of em; every rung of the type ladder follows it (Appearance's alone). |
 | Contrast | Normal, high, or monochrome — monochrome tells every state apart by shape rather than by colour. |
 | Density | Compact, normal, or comfortable. It moves the three metrics that decide how much room a control is given and nothing else, so a compact desktop packs the same controls closer rather than drawing different ones. |
 | Motion | Full, or reduced — a reduced state change is still visible, it just happens at once. |
@@ -239,6 +241,16 @@ whatever the store carries, and a set the document names that the store no
 longer holds is still offered under its own name, so opening the pane never
 quietly changes the pointer someone chose. [The cursors
 page](./cursors.md) has the store's layout and the artwork pipeline.
+
+Appearance's **TEXT** group holds the two text rows. Like the pointer set, the
+families are a choice space the document cannot supply: Settings lists the font
+store's selectable families once before its first frame
+(`tairix_font::families()`, capability-free, since `fontd` reads its store once
+per boot), and a family the document names that the store no longer lists is
+still offered under its key. *Default* names the theme's own family and its
+size in points — ten points of Inter on the shipped themes — and a choice
+writes `font.family` and `font.size`, which the session resolves into the
+text every application draws ([theming](./theming.md#the-users-text)).
 
 Its **FINDING THE POINTER** group holds the three aids that help find and
 follow the pointer — shaking it, a lone press of Ctrl, and its trail — beside

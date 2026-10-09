@@ -695,6 +695,18 @@ pub struct WindowFurnitureState {
 }
 
 impl WindowFurnitureState {
+    /// An active band that is moved by its own drag and never resized: a menu
+    /// plate's, a tool window's, a docked pane's.
+    #[must_use]
+    pub const fn active_fixed() -> Self {
+        Self {
+            activation: WindowActivationState::Active,
+            size: WindowSizeState::Restored,
+            movable: true,
+            resizable: false,
+        }
+    }
+
     /// The next action a size-toggle control shows for this window.
     #[must_use]
     pub const fn size_action(self) -> SizeAction {

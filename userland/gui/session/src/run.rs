@@ -128,7 +128,7 @@ mod program {
         launch_argv, load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report,
         open_entry, open_tray, parse, publish_pinboard, reap_launched, relay_power,
         resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
-        serve_pinboard_apply, serve_switchboard_request, size_state_name,
+        serve_pinboard_apply, serve_switchboard_request, size_state_name, tool_move_event,
         window_control_alternate_event, window_control_event, Acquisition, AidPolicy, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
         BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
@@ -2016,6 +2016,11 @@ mod program {
             .map(|(id, _)| tairix_window::CursorSetName(alloc::string::String::from(id.name())))
             .collect();
         shell.set_cursors(cursor_sets, &mut compositor);
+        // The font store is read once per boot, so its families are listed
+        // once, before the stored text choice is resolved against them.
+        shell
+            .session_mut()
+            .set_font_families(tairix_font::families());
         let mut clipboard =
             tairix_desktop_session::clipboard::SessionClipboard::new(RtPayloadRegions);
 
@@ -7046,12 +7051,32 @@ mod program {
                         );
                     }
                 }
+                // A move is the window manager's own, except a tool window's:
+                // its owner is told where the pointer is over the window the
+                // palette belongs to, so it can dock it there.
+                InputResponse::Moved { window, .. } | InputResponse::MoveEnded { window } => {
+                    let ended = matches!(response, InputResponse::MoveEnded { .. });
+                    let pointer = shell.router().pointer();
+                    if let Some(event) =
+                        tool_move_event(window, ended, pointer, compositor, windows)
+                    {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &event,
+                        );
+                    }
+                }
                 // Window-manager-local outcomes the session does not forward
-                // app-ward: a scrollbar press and a move-grab.
+                // app-ward: a scrollbar press.
                 InputResponse::Scrolled { .. }
                 | InputResponse::FurniturePressed { .. }
-                | InputResponse::Moved { .. }
-                | InputResponse::MoveEnded { .. }
                 // A pointer motion or key that reached no window belongs to
                 // the desktop's icon column, which `route_desktop` has
                 // already applied; nothing is forwarded app-ward.
@@ -8011,6 +8036,18 @@ mod program {
                 density: settings.density,
                 motion: settings.motion,
             });
+            if let Some(gone) = shell
+                .session_mut()
+                .set_text(settings.text_family, settings.text_size)
+            {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "the font family `{}` is not installed; the theme's own is drawn",
+                        gone.as_str()
+                    ),
+                );
+            }
             shell.sync_theme(compositor);
             shell.present(compositor);
         }

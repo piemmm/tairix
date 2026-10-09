@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
-use tairix_abi::window_ipc::{PointerAction, WindowEvent, WindowSizeState};
+use tairix_abi::window_ipc::{PointerAction, ToolOver, WindowEvent, WindowSizeState};
 use tairix_abi::Errno;
 
 use crate::holdback::{Delivery, HoldBack, HOLD_BACK_CAPACITY};
@@ -71,6 +71,14 @@ fn scrolled(window_id: u64, dy: i32) -> WindowEvent {
         dx: 0,
         dy,
         modifiers: Modifiers::default(),
+    }
+}
+
+fn tool_moved(window_id: u64, x: u32, ended: bool) -> WindowEvent {
+    WindowEvent::ToolMoved {
+        window_id,
+        over: ToolOver::Parent { x, y: 3 },
+        ended,
     }
 }
 
@@ -682,4 +690,38 @@ fn forgetting_an_owner_discards_everything_it_was_owed() {
     assert!(!held.owes(MAILBOX));
     assert!(held.owes(OTHER_MAILBOX), "its neighbour is untouched");
     assert!(!held.forget(MAILBOX), "forgetting twice arms nothing");
+}
+
+#[test]
+fn a_tool_windows_move_folds_to_its_newest_sample_and_its_end_withdraws_the_rest() {
+    let mut held = HoldBack::new();
+    hold(&mut held, tool_moved(WINDOW, 1, false));
+    hold(&mut held, tool_moved(WINDOW, 2, false));
+    assert_eq!(
+        held.depth(MAILBOX, Some(WINDOW)),
+        1,
+        "a run of samples is one"
+    );
+    hold(&mut held, typed(WINDOW));
+    hold(&mut held, tool_moved(WINDOW, 3, false));
+    hold(&mut held, tool_moved(WINDOW, 4, true));
+    // The first move's end is where it was let go; the next move's samples
+    // and end supersede it, and the key between them is still owed in order.
+    hold(&mut held, tool_moved(WINDOW, 5, false));
+    hold(&mut held, tool_moved(WINDOW, 6, true));
+    assert_eq!(
+        drain_events(&mut held),
+        vec![typed(WINDOW), tool_moved(WINDOW, 6, true)]
+    );
+}
+
+#[test]
+fn a_tool_windows_move_end_is_never_shed() {
+    let mut held = HoldBack::new();
+    hold(&mut held, tool_moved(WINDOW, 1, true));
+    for _ in 0..HOLD_BACK_CAPACITY * 2 {
+        hold(&mut held, typed(WINDOW));
+    }
+    assert_eq!(held.depth(MAILBOX, Some(WINDOW)), HOLD_BACK_CAPACITY);
+    assert_eq!(drain_events(&mut held)[0], tool_moved(WINDOW, 1, true));
 }

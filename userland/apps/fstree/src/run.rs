@@ -575,21 +575,16 @@ mod program {
         let mut host = RtHost;
         let mut store = SettingsStore::open(&mut host, OWN_WORD);
         model.settings_refusal = store.store_refusal();
-        let (settings, refused) = Settings::load(&store);
+        let (settings, refusals) = tairix_appdata::loaded::<Settings>(&store);
         model.settings = settings;
         // A packaging defect and a broken stored value are each said out
         // loud, before the terminal is switched, so neither is hidden behind
-        // the alternate screen.
-        if let Some(errno) = store.defaults_refusal() {
-            write_stderr_line(&alloc::format!(
-                "fstree: this bundle's shipped defaults could not be read ({errno:?})"
-            ));
-        }
-        for key in refused {
-            write_stderr_line(&alloc::format!(
-                "fstree: {}: not a value this setting accepts; using its default",
-                key.name()
-            ));
+        // the alternate screen; an unreadable store is said in the settings
+        // menu instead.
+        for refusal in refusals {
+            if !matches!(refusal, tairix_appdata::Refusal::StoreUnreadable(_)) {
+                write_stderr_line(&alloc::format!("fstree: {refusal}"));
+            }
         }
 
         // The raw input discipline: keystrokes reach the session verbatim

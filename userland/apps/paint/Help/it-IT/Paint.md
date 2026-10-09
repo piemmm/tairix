@@ -54,18 +54,31 @@ ne copia, le elimina e le riordina.
 
 Il pulsante principale (sinistro) dipinge con il colore principale e quello
 centrale con il colore secondario; tenendo premuto Alt si preleva invece un
-colore, come lo mostrano i livelli. Gli strumenti nella cassetta a sinistra
-sono selezione, matita, pennello, aerografo, gomma, clone, riempimento,
-sfumatura, contagocce, testo, linea, rettangolo, ellisse, poligono, ritaglio,
-mano e zoom. La barra in alto nomina lo strumento in uso e contiene le sue
-impostazioni — la dimensione, la durezza, l'opacità, il flusso e la
-spaziatura di un pennello, la tolleranza di un riempimento, la forma di una
-sfumatura, la dimensione del testo, gli angoli di un rettangolo — digitate
-o regolate con i tasti freccia, e i pulsanti che ingrandiscono e mostrano la
-griglia dei pixel; la striscia della tavolozza sotto l'immagine contiene la
-tavolozza dell'immagine, o i colori del desktop. L'aerografo continua a
-spruzzare finché è tenuto fermo. Tenendo premuto Maiusc si disegna un
-quadrato, un cerchio o una linea a un multiplo di 45 gradi.
+colore, come lo mostrano i livelli. La cassetta degli strumenti, nel pannello
+Strumenti, dispone gli strumenti su due colonne: selezione, matita, pennello,
+aerografo, gomma, clone, riempimento, sfumatura, contagocce, testo, linea,
+rettangolo, ellisse, poligono, ritaglio, mano e zoom. La barra in alto nomina
+lo strumento in uso e contiene le sue impostazioni — la dimensione, la
+durezza, l'opacità, il flusso e la spaziatura di un pennello, la tolleranza
+di un riempimento, la forma di una sfumatura, la dimensione del testo, gli
+angoli di un rettangolo — digitate o regolate con i tasti freccia, e i
+pulsanti che ingrandiscono e mostrano la griglia dei pixel; la striscia della
+tavolozza sotto l'immagine contiene la tavolozza dell'immagine, o i colori del
+desktop. L'aerografo continua a spruzzare finché è tenuto fermo. Tenendo
+premuto Maiusc si disegna un quadrato, un cerchio o una linea a un multiplo
+di 45 gradi.
+
+Lungo i due lati della finestra corrono dei pannelli: di norma il pannello
+Strumenti a sinistra e il pannello Colore a destra, con il pannello
+Regolazione sotto di esso non appena si apre una regolazione. Ognuno ha in
+cima una sottile fascia col suo nome, con un comando che lo arrotola sulla
+fascia e un segno che lo chiude; Vista ▸ Pannelli mostra di nuovo un pannello
+chiuso, e Ripristina pannelli rimette ogni pannello come lo ha una finestra
+nuova. Trascinare una fascia sposta il suo pannello sul suo lato o sull'altro,
+marcando strada facendo dove atterrerà; rilasciato lontano da entrambi i lati,
+o trascinato fuori dalla finestra, il pannello fluttua in una piccola finestra
+sua, spostata dalla sua fascia, tenuta sopra l'immagine e chiusa dal suo
+segno; riportato sopra un lato, vi si aggancia di nuovo.
 
 Lo strumento di selezione delimita un rettangolo, un'ellisse, un lazo a mano
 libera, un poligono cliccato angolo per angolo o, con la bacchetta magica, i
@@ -88,20 +101,56 @@ maniglie ne spostano i bordi, e Invio ritaglia. La mano trascina l'immagine
 nella finestra, come Spazio con qualsiasi strumento; lo zoom ingrandisce con
 un clic, o con Alt riduce, e un riquadro trascinato riempie la finestra.
 
-Il menu Regolazioni cambia luminosità e contrasto, tonalità e saturazione e
-livelli, posterizza, applica una soglia, desatura, sfoca, aumenta la
-nitidezza, pixella, aggiunge rumore e trova i bordi; ognuna si vede
-sull'immagine mentre le sue impostazioni si muovono e resta solo se
-applicata. Su un'immagine con tavolozza una regolazione cambia la sua
-tavolozza, e quelle che richiedono i colori vicini non sono offerte.
+Il menu Regolazioni apre una regolazione nel pannello Regolazione, dove ogni
+altro strumento, pannello e menu resta a portata di mano: luminosità e
+contrasto, tonalità e saturazione, bilanciamento colore, livelli, curve,
+bilanciamento del bianco, posterizza, soglia, sfoca, nitidezza, pixel e
+aggiungi rumore; desatura e trova bordi, che non hanno impostazioni, si
+applicano subito. L'immagine mostra la regolazione man mano che le sue
+impostazioni si muovono, Anteprima la spegne e la riaccende per confrontare,
+Ripristina rimette le sue impostazioni e Applica la conserva come un'unica
+modifica da annullare; dipingere, riempire o scegliere un'altra regolazione la
+applica prima. I livelli fissano i punti di nero, grigio e bianco su un
+istogramma del livello, per tutti i canali insieme o ciascuno da solo, con
+contagocce che li prendono dall'immagine e Auto; le curve piegano i toni di un
+canale con punti trascinati sul suo istogramma; il bilanciamento del bianco
+fissa la temperatura e la tinta della luce, da un pixel neutro scelto o con
+Auto; tonalità e saturazione ruotano, rafforzano e schiariscono tutti i colori
+o una gamma di essi; il bilanciamento colore sposta ombre, toni medi e luci
+verso il rosso, il verde o il blu, conservandone la luminosità se richiesto.
+Tutto resta limitato alla selezione. Su un'immagine con tavolozza una
+regolazione cambia la sua tavolozza, e quelle che hanno bisogno dei colori
+vicini non sono offerte.
 
-Il pannello dei colori a destra contiene i colori principale e secondario e
-un selettore di colore per quello dei due che è scelto: un clic su un colore
-lo sceglie, poi lo si regola per tonalità, saturazione e valore, per rosso,
-verde e blu, per la sua scrittura esadecimale e, dove l'immagine contiene
-trasparenza, per la sua opacità. Il colore che aveva sta accanto, e un clic
-lo riprende. In un'immagine con tavolozza i colori sono le sue voci, quindi
-il selettore modifica la tavolozza, e ogni modifica è una sola da annullare.
+Il pannello Colore contiene i colori principale e secondario e un selettore
+di colore per quello dei due che è scelto: un clic su un colore lo sceglie,
+poi lo si prende su un quadrato di saturazione e valore accanto a una striscia
+di tonalità, su una ruota di tonalità attorno a un triangolo, o su un cursore
+per canale, e lo si digita in RGB, HSV, HSL, CMYK, Lab, LCh o come grigio, o
+con la sua scrittura esadecimale e, dove l'immagine ha trasparenza, la sua
+opacità. Un colore Lab o LCh che lo schermo non può mostrare è mostrato il più
+vicino possibile, e segnalato. Scambia inverte i due colori, Ripristina li
+rende nero e bianco, e Preleva prende il prossimo colore cliccato
+nell'immagine. Il colore che aveva sta accanto, un clic lo riprende, e gli
+ultimi colori scelti attendono sotto di essere scelti di nuovo. In
+un'immagine con tavolozza i colori sono le sue voci, quindi il selettore
+modifica la tavolozza, e ogni modifica è un'unica modifica da annullare.
+
+Impostazioni, nel menu della barra delle icone, apre la finestra delle
+impostazioni di Paint: lo strumento con cui comincia una finestra nuova e se
+un'immagine si apre adattata alla finestra o a dimensione reale; la
+dimensione, il formato, i colori e lo sfondo che offre Nuova immagine; la
+spaziatura, lo scostamento, il colore, l'opacità e lo stile della griglia —
+linee, trattini, punti o incroci —, se una finestra nuova la mostra,
+l'aggancio ad essa e lo zoom da cui compare la griglia tra i pixel; la
+dimensione e i toni della scacchiera e ciò che circonda l'immagine; e i
+pannelli con cui si apre una finestra nuova. Una modifica vale subito per ogni
+finestra e resta per la volta successiva; Ripristina predefiniti le rimette
+tutte. Vista ▸ Griglia mostra la griglia di una finestra. Finché è visibile e
+l'aggancio è attivo, le forme, le selezioni e i riquadri di ritaglio coprono
+celle intere, gli estremi di una linea e di una sfumatura e gli angoli di un
+poligono cadono sui suoi incroci, e una selezione trascinata vi cade con il
+suo angolo.
 
 Il programma non ha alcun permesso sul file system. Modifica soltanto il
 file che gli è stato consegnato. Un file che l'utente può cambiare viene
@@ -141,6 +190,7 @@ modifiche non salvate chiede prima conferma.
 * `Ctrl` + rotella — ingrandire o ridurre attorno al puntatore
 * Pizzicare con due dita — ingrandire o ridurre con continuità; su un touchscreen l'immagine segue le dita
 * `G` — mostrare o nascondere la griglia tra i pixel
+* `Ctrl+'` — mostrare o nascondere la griglia
 * `Page Up` / `Page Down` — lo sprite o la pagina precedente o successiva
 * tasti freccia — spostare una selezione sospesa di un pixel; con `Shift`, di dieci; nella striscia della tavolozza, scorrerne i colori
 

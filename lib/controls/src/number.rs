@@ -1,7 +1,8 @@
 //! The number field: typed, range-checked integer entry.
 //!
 //! A [`NumberField`] is a [`TextField`] that holds a number between two
-//! bounds. Digits typed into it take effect as soon as they spell a number in
+//! bounds, as a whole number or, given decimal places, in hundredths or the
+//! like — `150` shown and typed as `1.50`. Digits typed into it take effect as soon as they spell a number in
 //! range, so whatever the value drives follows the typing; one that does not
 //! — an empty field, a number past a bound — shows as invalid and moves
 //! nothing until it is fixed or committed. Up and Down step it by a line,
@@ -51,6 +52,9 @@ pub struct NumberField {
     value: i32,
     min: i32,
     max: i32,
+    /// The decimal places the value is spelled with: a value of `150` at two
+    /// places reads `1.50`.
+    places: u8,
     line: i32,
     page: i32,
     /// The value the last interaction settled on, which Escape returns to.
@@ -65,14 +69,15 @@ impl NumberField {
     pub fn new(value: i32, min: i32, max: i32) -> Self {
         let (min, max) = (min.min(max), min.max(max));
         let value = value.clamp(min, max);
-        let mut digits = [0; 12];
+        let mut spelt = [0; SPELT];
         Self {
             field: TextField::new()
-                .with_max_len(longest(min, max))
-                .with_text(format_i32(value, &mut digits)),
+                .with_max_len(longest(min, max, 0))
+                .with_text(spell(value, 0, &mut spelt)),
             value,
             min,
             max,
+            places: 0,
             line: 1,
             page: 10,
             settled: value,
@@ -89,11 +94,30 @@ impl NumberField {
         self
     }
 
+    /// This field spelling its value with `places` decimals, at most
+    /// [`MOST_PLACES`]: the value stays a whole number of the smallest place,
+    /// so a gamma of `1.00` to `9.99` is held as `100` to `999`.
+    #[must_use]
+    pub fn with_decimals(mut self, places: u8) -> Self {
+        self.places = places.min(MOST_PLACES);
+        let mut spelt = [0; SPELT];
+        self.field = TextField::new()
+            .with_max_len(longest(self.min, self.max, self.places))
+            .with_text(spell(self.value, self.places, &mut spelt));
+        self
+    }
+
     /// The value held: the last number typed in range, or the last one
     /// stepped to or committed.
     #[must_use]
     pub const fn value(&self) -> i32 {
         self.value
+    }
+
+    /// What the field shows.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> &str {
+        self.field.text()
     }
 
     /// The bounds, `(min, max)`.
@@ -133,10 +157,10 @@ impl NumberField {
     #[must_use]
     pub fn preferred_width(&self, scale: Scale, theme: &Theme) -> u32 {
         let font = role_font(theme, scale, TextRole::Body);
-        let mut digits = [0; 12];
+        let mut spelt = [0; SPELT];
         let widest = font
-            .text_width(format_i32(self.min, &mut digits))
-            .max(font.text_width(format_i32(self.max, &mut digits)))
+            .text_width(spell(self.min, self.places, &mut spelt))
+            .max(font.text_width(spell(self.max, self.places, &mut spelt)))
             .max(font.text_width("0"));
         let edge = plate_border(theme, scale)
             .saturating_add(scale.scale_length(theme.metrics().control_inset));
@@ -235,7 +259,7 @@ impl NumberField {
             .text()
             .len()
             .saturating_sub(self.field.selected_text().map_or(0, str::len));
-        if kept.saturating_add(text.len()) > longest(self.min, self.max) {
+        if kept.saturating_add(text.len()) > longest(self.min, self.max, self.places) {
             return None;
         }
         let action = self.field.insert_text(text, bounds, damage);
@@ -264,7 +288,9 @@ impl NumberField {
 
     /// Whether `character` can stand in a number this field holds.
     fn admits(&self, character: char) -> bool {
-        character.is_ascii_digit() || (character == '-' && self.min < 0)
+        character.is_ascii_digit()
+            || (character == '-' && self.min < 0)
+            || (character == '.' && self.places > 0)
     }
 
     /// Move the value `delta` and settle there, held to the bounds; nothing
@@ -291,9 +317,9 @@ impl NumberField {
     /// settled value again. `None` when there is nothing to take back, so the
     /// owner may give Escape its own meaning.
     fn take_back(&mut self, bounds: Rect, damage: &mut Region) -> Option<NumberAction> {
-        let mut digits = [0; 12];
+        let mut spelt = [0; SPELT];
         let pending = self.value != self.settled
-            || self.field.text() != format_i32(self.settled, &mut digits);
+            || self.field.text() != spell(self.settled, self.places, &mut spelt);
         if !pending {
             return None;
         }
@@ -325,16 +351,17 @@ impl NumberField {
         Some(NumberAction::Edited { value })
     }
 
-    /// The number the text spells, however far past the bounds.
+    /// The number the text spells, in the smallest place, however far past
+    /// the bounds; more decimals than the field holds spell none.
     fn typed(&self) -> Option<i64> {
-        self.field.text().parse::<i64>().ok()
+        parse_fixed(self.field.text(), self.places)
     }
 
     /// Show the value as its canonical digits, valid, answering whether that
     /// changed what the field draws.
     fn show_value(&mut self) -> bool {
-        let mut digits = [0; 12];
-        let text = format_i32(self.value, &mut digits);
+        let mut spelt = [0; SPELT];
+        let text = spell(self.value, self.places, &mut spelt);
         let state = self.field.state();
         let changed = self.field.text() != text || state.validation != ValidationState::Valid;
         if self.field.text() != text {
@@ -356,10 +383,74 @@ impl NumberField {
     }
 }
 
+/// The most decimal places a field spells.
+pub const MOST_PLACES: u8 = 4;
+
+/// The room a spelt value takes: a sign, ten digits, the point and the
+/// leading zero a value smaller than one place's unit needs.
+const SPELT: usize = 16;
+
 /// The most characters a number between `min` and `max` is spelled in.
-fn longest(min: i32, max: i32) -> usize {
-    let mut digits = [0; 12];
-    format_i32(min, &mut digits)
+fn longest(min: i32, max: i32, places: u8) -> usize {
+    let mut spelt = [0; SPELT];
+    spell(min, places, &mut spelt)
         .len()
-        .max(format_i32(max, &mut digits).len())
+        .max(spell(max, places, &mut spelt).len())
+}
+
+/// `value`, a whole number of `10^-places`, spelled with that many decimals.
+pub(crate) fn spell(value: i32, places: u8, out: &mut [u8; SPELT]) -> &str {
+    let mut digits = [0; 12];
+    let spelt = format_i32(value, &mut digits);
+    let magnitude = spelt.trim_start_matches('-').as_bytes();
+    let places = usize::from(places);
+    let pad = (places + 1).saturating_sub(magnitude.len());
+    let whole = magnitude.len() + pad - places;
+    let mut len = 0;
+    if value < 0 {
+        out[0] = b'-';
+        len = 1;
+    }
+    let zeros = core::iter::repeat_n(b'0', pad);
+    for (index, byte) in zeros.chain(magnitude.iter().copied()).enumerate() {
+        if places > 0 && index == whole {
+            out[len] = b'.';
+            len += 1;
+        }
+        out[len] = byte;
+        len += 1;
+    }
+    core::str::from_utf8(&out[..len]).unwrap_or("0")
+}
+
+/// The whole number of `10^-places` `text` spells: digits, a sign, and up to
+/// `places` decimals after a point; anything else spells none.
+pub(crate) fn parse_fixed(text: &str, places: u8) -> Option<i64> {
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, fraction) = body.split_once('.').unwrap_or((body, ""));
+    let places = usize::from(places);
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if (whole.is_empty() && fraction.is_empty())
+        || fraction.len() > places
+        || (places == 0 && body.contains('.'))
+        || !digits(whole)
+        || !digits(fraction)
+    {
+        return None;
+    }
+    let mut value: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    for byte in fraction.bytes() {
+        value = value.checked_mul(10)?.checked_add(i64::from(byte - b'0'))?;
+    }
+    for _ in fraction.len()..places {
+        value = value.checked_mul(10)?;
+    }
+    Some(if negative { -value } else { value })
 }

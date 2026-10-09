@@ -10,7 +10,6 @@ use tairix_util::fallible;
 use super::{Aim, Compute, Draft, Gesture, Lands, Outcome, Settles, View};
 use crate::colour::Ink;
 use crate::crop::{set_out, Grab};
-use crate::filter::Filter;
 use crate::gradient::Gradient;
 use crate::layout::Layout;
 use crate::mask::Mask;
@@ -72,7 +71,7 @@ impl View {
         };
         Some(Gradient {
             from,
-            to,
+            to: self.on_grid(to),
             shape: self.options.gradient,
             inks,
         })
@@ -180,6 +179,7 @@ impl View {
 
     /// Begin a gradient from `at`, its inks swapped when `secondary`.
     pub(super) fn begin_gradient(&mut self, at: Fx, secondary: bool) {
+        let at = self.on_grid(at);
         self.gesture = Some(Gesture::Gradient {
             from: at,
             to: at,
@@ -491,7 +491,12 @@ impl View {
             }
         }
         let before = self.crop;
-        self.crop = Some(set_out(pixel, pixel, Bounds::picture(size.0, size.1)));
+        let (from, to) = if self.snapping() {
+            crate::grid::snap_span(&self.canvas_style().grid, pixel, pixel)
+        } else {
+            (pixel, pixel)
+        };
+        self.crop = Some(set_out(from, to, Bounds::picture(size.0, size.1)));
         self.gesture = Some(Gesture::CropNew {
             from: pixel,
             before,
@@ -509,10 +514,18 @@ impl View {
     ) {
         let size = self.picture_size();
         let within = Bounds::picture(size.0, size.1);
+        let grid = self.snapping().then(|| self.canvas_style().grid);
         let crop = match self.gesture {
-            Some(Gesture::CropNew { from, .. }) => set_out(from, to, within),
+            Some(Gesture::CropNew { from, .. }) => {
+                let (from, to) =
+                    grid.map_or((from, to), |grid| crate::grid::snap_span(&grid, from, to));
+                set_out(from, to, within)
+            }
             Some(Gesture::CropAdjust { grab, from, start }) => {
-                grab.dragged(start, (to.0 - from.0, to.1 - from.1), within)
+                let moved = grab.dragged(start, (to.0 - from.0, to.1 - from.1), within);
+                grid.map_or(moved, |grid| {
+                    crate::grid::snap_edges(&grid, moved, start).intersection(&within)
+                })
             }
             _ => return,
         };
@@ -643,239 +656,4 @@ pub(crate) fn screen_box(a: Point, b: Point) -> Rect {
     let width = u32::try_from(a.x.max(b.x) - x0 + 1).unwrap_or(1);
     let height = u32::try_from(a.y.max(b.y) - y0 + 1).unwrap_or(1);
     Rect::new(x0, y0, width, height)
-}
-
-impl View {
-    /// The picture as a filter being previewed shows it, if one is.
-    #[must_use]
-    pub(crate) fn preview_canvas(&self) -> Option<&crate::canvas::Canvas> {
-        self.preview
-            .as_ref()
-            .and_then(|preview| preview.canvas.as_ref())
-    }
-
-    /// A palette picture's kind as an adjustment being previewed shows it.
-    #[must_use]
-    pub(crate) fn preview_kind(&self) -> Option<&crate::canvas::Kind> {
-        self.preview
-            .as_ref()
-            .and_then(|preview| preview.kind.as_ref())
-    }
-
-    /// Adjust or filter the picture with `filter`: at once where nothing
-    /// sets it, and otherwise through its form, previewed as it moves.
-    pub(super) fn adjust(
-        &mut self,
-        filter: Filter,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        if !self.editable(layout, damage) {
-            return Outcome::none();
-        }
-        let palette = self.kind().palette().is_some();
-        if palette && filter.neighbourly() {
-            let refusal = alloc::format!(
-                "{} needs a colour picture: convert it to millions of colours first",
-                filter.label()
-            );
-            self.state(&refusal, layout, damage);
-            return Outcome::none();
-        }
-        if filter.parameters().is_empty() {
-            return self.apply_filter(filter, layout, damage);
-        }
-        self.modal = Some(super::Modal::Form(alloc::boxed::Box::new(
-            crate::dialog::Form::filter(filter),
-        )));
-        self.preview = Some(super::Previewing {
-            filter,
-            job: None,
-            stale: false,
-            asked: None,
-            layer: self.active_layer(),
-            generation: self.document.generation(),
-            canvas: None,
-            tiles: None,
-            shown: None,
-            kind: None,
-        });
-        damage.add(layout.window());
-        self.refresh_preview(layout, damage)
-    }
-
-    /// The filter form's settings moved: preview them.
-    pub(super) fn filter_moved(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        let Some(super::Modal::Form(form)) = &self.modal else {
-            return Outcome::none();
-        };
-        let (Some(filter), Some(preview)) = (form.filter_answer(), &mut self.preview) else {
-            return Outcome::none();
-        };
-        if preview.filter == filter {
-            return Outcome::none();
-        }
-        preview.filter = filter;
-        self.refresh_preview(layout, damage)
-    }
-
-    /// Show the preview of the settings held: a palette's at once, a colour
-    /// picture's by a worker — one at a time, the last settings asked again
-    /// once the one working lands.
-    fn refresh_preview(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        let Some(filter) = self.preview.as_ref().map(|preview| preview.filter) else {
-            return Outcome::none();
-        };
-        let mapped =
-            match self.kind() {
-                crate::canvas::Kind::Indexed {
-                    depth,
-                    palette,
-                    masked,
-                } => Some(filter.mapped_palette(palette).map(|palette| {
-                    crate::canvas::Kind::Indexed {
-                        depth: *depth,
-                        palette,
-                        masked: *masked,
-                    }
-                })),
-                crate::canvas::Kind::Rgba => None,
-            };
-        let Some(preview) = &mut self.preview else {
-            return Outcome::none();
-        };
-        if let Some(kind) = mapped {
-            preview.kind = kind;
-            damage.add(layout.canvas());
-            return Outcome::none();
-        }
-        if preview.job.is_some() {
-            preview.stale = true;
-            return Outcome::none();
-        }
-        // Copied only once a worker is to be asked: a slider dragged while one
-        // works would otherwise copy the picture's tile table each step.
-        let Some(Ok(canvas)) = self
-            .document
-            .picture()
-            .map(|picture| picture.canvas().try_clone())
-        else {
-            return Outcome::none();
-        };
-        let job = self.next_job;
-        self.next_job += 1;
-        preview.job = Some(job);
-        preview.stale = false;
-        preview.asked = Some(filter);
-        preview.generation = self.document.generation();
-        let work = Compute::Filter {
-            canvas,
-            filter,
-            clip: self.selection.clone(),
-        };
-        Outcome::asking(super::Request::Own(super::Own::Compute { job, work }))
-    }
-
-    /// Whether job `job` is the preview being worked out.
-    pub(super) fn previewing(&self, job: u64) -> bool {
-        self.preview
-            .as_ref()
-            .is_some_and(|preview| preview.job == Some(job))
-    }
-
-    /// The preview's answer landed: show it, and ask again where the
-    /// settings moved meanwhile.
-    pub(super) fn previewed(
-        &mut self,
-        answer: super::Computed,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        let shown = self
-            .document
-            .picture()
-            .map(|picture| picture.canvas().try_clone());
-        let Some(preview) = &mut self.preview else {
-            return Outcome::none();
-        };
-        preview.job = None;
-        match (answer, shown) {
-            (super::Computed::Filtered(Ok(tiles)), Some(Ok(mut canvas))) => {
-                for (index, tile) in &tiles {
-                    canvas.replace_tile(*index, alloc::sync::Arc::clone(tile));
-                }
-                preview.canvas = Some(canvas);
-                preview.tiles = Some(tiles);
-                preview.shown = preview.asked;
-                damage.add(layout.canvas());
-            }
-            _ => self.state("There is not enough memory to preview that", layout, damage),
-        }
-        let stale = self.preview.as_ref().is_some_and(|preview| preview.stale);
-        if stale {
-            return self.refresh_preview(layout, damage);
-        }
-        Outcome::none()
-    }
-
-    /// Carry out `filter`: a palette's adjustment as a palette change, a
-    /// colour picture's by the preview's own tiles where they show exactly
-    /// this, else by a worker.
-    pub(super) fn apply_filter(
-        &mut self,
-        filter: Filter,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
-        let preview = self.preview.take();
-        damage.add(layout.canvas());
-        if let Some(palette) = self.kind().palette() {
-            if let Some(mapped) = filter.mapped_palette(palette) {
-                self.change_palette(mapped, layout, damage);
-            }
-            return Outcome::none();
-        }
-        let current = (
-            self.document.generation(),
-            self.active_layer(),
-            Some(filter),
-        );
-        if let Some(preview) =
-            preview.filter(|preview| (preview.generation, preview.layer, preview.shown) == current)
-        {
-            // Tiles that no longer fit, or no room to keep them, leave it to
-            // a worker.
-            let layer = preview.layer;
-            if let Some(Ok(true)) = preview
-                .tiles
-                .map(|tiles| self.document.adopt_tiles(layer, tiles))
-            {
-                return Outcome::none();
-            }
-        }
-        let Some(Ok(canvas)) = self
-            .document
-            .picture()
-            .map(|picture| picture.canvas().try_clone())
-        else {
-            self.state(
-                "There is not enough memory to filter the picture",
-                layout,
-                damage,
-            );
-            return Outcome::none();
-        };
-        let work = Compute::Filter {
-            canvas,
-            filter,
-            clip: self.selection.clone(),
-        };
-        self.begin_work(
-            work,
-            Lands::Tiles(Settles::Nothing),
-            "filter the picture",
-            layout,
-            damage,
-        )
-    }
 }

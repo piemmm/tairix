@@ -39,6 +39,7 @@ use crate::settings::{SettingKey, Settings};
 use crate::tag::{TagEntry, TagRange};
 use crate::view_disasm::{Decode, DisasmPane, DisasmView};
 use crate::walk::{FlatEntry, WalkPurpose, WalkState, Walker};
+use tairix_appconf::Registry;
 use tairix_procinfo::VolumeBytes;
 
 /// An in-memory filesystem: per-path listings, per-path file bytes,
@@ -3377,7 +3378,7 @@ fn a_save_writes_only_what_the_layers_do_not_already_imply() {
         let mut store = SettingsStore::open(&mut host, OWN_WORD);
         // Both confirmations are already on by default, so publishing the
         // defaults writes nothing at all.
-        Settings::default().save(&mut store).expect("publishes");
+        tairix_appdata::save(&Settings::default(), &mut store).expect("publishes");
     }
     assert_eq!(host.committed().settings().count(), 0);
     {
@@ -3386,7 +3387,7 @@ fn a_save_writes_only_what_the_layers_do_not_already_imply() {
             confirm_delete: false,
             ..Settings::default()
         };
-        settings.save(&mut store).expect("publishes");
+        tairix_appdata::save(&settings, &mut store).expect("publishes");
     }
     assert_eq!(
         host.committed().get("confirm.delete"),

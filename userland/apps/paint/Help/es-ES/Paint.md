@@ -54,18 +54,30 @@ reordena.
 
 El botón principal (izquierdo) pinta con el color principal y el botón
 central con el color secundario; manteniendo Alt se toma un color en su
-lugar, tal como lo muestran las capas. Las herramientas de la caja de
-herramientas de la izquierda son selección, lápiz, pincel, aerógrafo, goma,
-clonar, relleno, degradado, cuentagotas, texto, línea, rectángulo, elipse,
-polígono, recortar, mano y zoom. La barra de arriba nombra la herramienta en
-uso y guarda sus ajustes — el tamaño, la dureza, la opacidad, el flujo y el
-espaciado de un pincel, la tolerancia de un relleno, la forma de un
-degradado, el tamaño del texto, las esquinas de un rectángulo — tecleados o
-ajustados con las flechas, y los botones que amplían y muestran la
-cuadrícula de píxeles; la tira de paleta bajo la imagen guarda la paleta de
-la imagen, o los colores del escritorio. El aerógrafo sigue rociando
-mientras se mantiene quieto. Manteniendo Mayús se dibuja un cuadrado, un
-círculo o una línea en un múltiplo de 45 grados.
+lugar, tal como lo muestran las capas. La caja de herramientas, en el panel
+Herramientas, reúne las herramientas en dos columnas: selección, lápiz,
+pincel, aerógrafo, goma, clonar, relleno, degradado, cuentagotas, texto,
+línea, rectángulo, elipse, polígono, recortar, mano y zoom. La barra de
+arriba nombra la herramienta en uso y guarda sus ajustes — el tamaño, la
+dureza, la opacidad, el flujo y el espaciado de un pincel, la tolerancia de
+un relleno, la forma de un degradado, el tamaño del texto, las esquinas de un
+rectángulo — tecleados o ajustados con las flechas, y los botones que amplían
+y muestran la cuadrícula de píxeles; la tira de paleta bajo la imagen guarda
+la paleta de la imagen, o los colores del escritorio. El aerógrafo sigue
+rociando mientras se mantiene quieto. Manteniendo Mayús se dibuja un
+cuadrado, un círculo o una línea en un múltiplo de 45 grados.
+
+A ambos lados de la ventana corren paneles: de forma predeterminada el panel
+Herramientas a la izquierda y el panel Color a la derecha, con el panel Ajuste
+debajo en cuanto se abre un ajuste. Cada uno lleva arriba una banda fina que
+lo nombra, con un control que lo enrolla sobre su banda y una marca que lo
+cierra; Ver ▸ Paneles vuelve a mostrar un panel cerrado, y Restablecer paneles
+devuelve cada panel a como lo tiene una ventana nueva. Arrastrar una banda
+mueve su panel en su lado o al otro, marcando por el camino dónde caerá;
+soltado lejos de ambos lados, o arrastrado fuera de la ventana, el panel flota
+en una ventanita propia, que se mueve por su banda, se mantiene sobre la
+imagen y se cierra con su marca; arrastrado de nuevo sobre un lado, vuelve a
+acoplarse allí.
 
 La herramienta de selección marca un rectángulo, una elipse, un lazo a mano
 alzada, un polígono pulsado esquina a esquina o, con la varita mágica, los
@@ -89,20 +101,53 @@ recorta. La mano arrastra la imagen por la ventana, como Espacio con
 cualquier herramienta; el zoom amplía con un clic, o con Alt reduce, y un
 recuadro arrastrado llena la ventana.
 
-El menú Ajustes cambia el brillo y el contraste, el tono y la saturación y
-los niveles, posteriza, aplica un umbral, desatura, desenfoca, enfoca,
-pixela, añade ruido y busca bordes; cada ajuste se ve en la imagen mientras
-se mueven sus valores y solo se conserva al aplicarlo. En una imagen con
-paleta, un ajuste cambia su paleta, y no se ofrecen los que necesitan
-colores vecinos.
+El menú Ajustes abre un ajuste en el panel Ajuste, donde cualquier otra
+herramienta, panel y menú sigue a mano: brillo y contraste, tono y saturación,
+equilibrio de color, niveles, curvas, balance de blancos, posterizar, umbral,
+desenfocar, enfocar, pixelar y añadir ruido; desaturar y buscar bordes, que no
+tienen ajustes, se aplican al momento. La imagen muestra el ajuste a medida
+que se mueven sus valores, Vista previa lo apaga y lo enciende para comparar,
+Restablecer devuelve sus valores y Aplicar lo conserva como un solo cambio que
+se puede deshacer; pintar, rellenar o elegir otro ajuste lo aplica antes. Los
+niveles fijan los puntos negro, gris y blanco sobre un histograma de la capa,
+para todos los canales juntos o cada uno por separado, con cuentagotas que los
+toman de la imagen y Auto; las curvas doblan los tonos de un canal mediante
+puntos arrastrados sobre su histograma; el balance de blancos fija la
+temperatura y el matiz de la luz, a partir de un píxel neutro elegido o con
+Auto; tono y saturación giran, refuerzan y aclaran todos los colores o una
+gama de ellos; el equilibrio de color lleva las sombras, los medios tonos y
+las luces hacia el rojo, el verde o el azul, conservando su luminosidad si se
+pide. Todo queda limitado a la selección. En una imagen con paleta, un ajuste
+cambia su paleta, y los que necesitan colores vecinos no se ofrecen.
 
-El panel de color a la derecha guarda los colores principal y secundario y
-un selector de color para el que esté elegido: un clic en un color lo
-elige, y luego se ajusta por tono, saturación y valor, por rojo, verde y
-azul, por su notación hexadecimal y, donde la imagen admite transparencia,
-por su opacidad. El color que tenía está a su lado, y un clic lo recupera.
-En una imagen con paleta los colores son sus entradas, así que el selector
-edita la paleta, y cada edición es un solo cambio que deshacer.
+El panel Color guarda los colores principal y secundario y un selector de
+color para el que esté elegido: un clic en un color lo elige, y luego se toma
+en un cuadrado de saturación y valor junto a una tira de tonos, en una rueda
+de tonos alrededor de un triángulo, o en un deslizador por canal, y se teclea
+en RGB, HSV, HSL, CMYK, Lab, LCh o como gris, o por su escritura hexadecimal
+y, donde la imagen admite transparencia, su opacidad. Un color Lab o LCh que
+la pantalla no puede mostrar se muestra lo más cerca posible, y se marca.
+Intercambiar cambia entre sí los dos colores, Restablecer los vuelve negro y
+blanco, y Tomar coge el siguiente color en el que se haga clic en la imagen.
+El color que tenía queda al lado, un clic lo recupera, y los últimos colores
+elegidos esperan debajo para elegirse de nuevo. En una imagen con paleta, los
+colores son sus entradas, así que el selector edita la paleta, y cada edición
+es un solo cambio que se puede deshacer.
+
+Ajustes, en el menú de la barra de iconos, abre la ventana de ajustes de
+Paint: la herramienta con la que empieza una ventana nueva y si una imagen se
+abre ajustada a la ventana o a tamaño real; el tamaño, el formato, los colores
+y el fondo que ofrece Imagen nueva; el espaciado, el desplazamiento, el color,
+la opacidad y el estilo de la cuadrícula — líneas, guiones, puntos o cruces —,
+si una ventana nueva la muestra, el ajuste a ella y el zoom desde el que se
+muestra la cuadrícula entre píxeles; el tamaño y los tonos del damero y lo que
+rodea la imagen; y los paneles con los que se abre una ventana nueva. Un cambio
+se aplica al momento a cada ventana y se guarda para la próxima vez;
+Restablecer valores predeterminados los devuelve todos. Ver ▸ Cuadrícula
+muestra la cuadrícula de una ventana. Mientras se ve y el ajuste está activo,
+las formas, las selecciones y los marcos de recorte cubren celdas enteras, los
+extremos de una línea y de un degradado y las esquinas de un polígono caen en
+sus cruces, y una selección arrastrada cae con su esquina en uno.
 
 El programa no tiene ningún permiso sobre el sistema de archivos. Solo
 edita el archivo que se le entregó. Un archivo que el usuario puede cambiar
@@ -142,6 +187,7 @@ guardar pregunta primero.
 * `Ctrl` + rueda — acercar o alejar en torno al puntero
 * Pellizcar con dos dedos — acercar o alejar con suavidad; en una pantalla táctil la imagen sigue a los dedos
 * `G` — mostrar u ocultar la cuadrícula entre píxeles
+* `Ctrl+'` — mostrar u ocultar la cuadrícula
 * `Page Up` / `Page Down` — el sprite o la página anterior o siguiente
 * teclas de flecha — mover una selección flotante un píxel; con `Shift`, diez; en la tira de paleta, recorrer sus colores
 

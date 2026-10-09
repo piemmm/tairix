@@ -41,7 +41,7 @@ use crate::paint::{
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
-    WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
+    WindowActivationState, WindowControlKind, WindowFurnitureState,
 };
 
 // --- command glyphs -------------------------------------------------------
@@ -418,7 +418,7 @@ impl WindowControl {
     /// Set the size action a [`WindowControlKind::SizeToggle`] should show.
     ///
     /// Ignored by the other kinds. The window manager sets this from the
-    /// window's [`WindowSizeState`] so the glyph and
+    /// window's [`WindowSizeState`](crate::state::WindowSizeState) so the glyph and
     /// accessible name describe the *next* action (spec §11.22).
     pub fn set_size_action(&mut self, next: SizeAction) {
         self.next_size = next;
@@ -670,12 +670,6 @@ pub(crate) const CONTROL_ORDER: [WindowControlKind; 4] = [
     WindowControlKind::SizeToggle,
 ];
 
-/// How many of [`CONTROL_ORDER`] each corner cluster seats.
-///
-/// Both clusters hold this many equally sized controls, so the span they leave
-/// between them is the same whichever end of the bar it is measured from.
-const CLUSTER_COUNT: u32 = 2;
-
 /// Which commands a title band seats.
 ///
 /// A window's band seats the four window commands; a menu plate's seats
@@ -683,6 +677,10 @@ const CLUSTER_COUNT: u32 = 2;
 /// properties of a plate's band follow from that emptiness rather than from
 /// knobs of their own: with no clusters the drag span is the whole band, and
 /// with no leading cluster to justify against the title centres.
+///
+/// The two mini sets sit on the shallower `tool_title_bar_height` band and set
+/// their title in the caption face: a tool window's, which closes, and a
+/// docked pane's that matches it, which closes and rolls up to its band.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum TitleBarCommands {
     /// The four window commands, in their two corner clusters.
@@ -690,23 +688,48 @@ pub enum TitleBarCommands {
     Window,
     /// None: a handle and an identification, nothing to press.
     Empty,
+    /// A tool window's mini band: Close alone, in the leading corner.
+    Tool,
+    /// A docked pane's mini band: Close in the leading corner, and Minimize —
+    /// rolling the pane up to its band and back — in the trailing one.
+    Pane,
 }
 
 impl TitleBarCommands {
-    /// How many of the stored controls this set actually seats.
-    const fn seated(self) -> usize {
+    /// The commands this set seats, in seating order: the leading cluster's,
+    /// then the trailing cluster's.
+    const fn kinds(self) -> &'static [WindowControlKind] {
         match self {
-            Self::Window => CONTROL_ORDER.len(),
-            Self::Empty => 0,
+            Self::Window => &CONTROL_ORDER,
+            Self::Empty => &[],
+            Self::Tool => &[WindowControlKind::Close],
+            Self::Pane => &[WindowControlKind::Close, WindowControlKind::Minimize],
         }
     }
 
-    /// How many controls each corner cluster holds.
-    const fn per_cluster(self) -> u32 {
+    /// How many of [`kinds`](Self::kinds) the leading cluster seats; the rest
+    /// are the trailing cluster's.
+    const fn leading(self) -> usize {
         match self {
-            Self::Window => CLUSTER_COUNT,
+            Self::Window => 2,
             Self::Empty => 0,
+            Self::Tool | Self::Pane => 1,
         }
+    }
+
+    /// How many controls this set seats.
+    const fn seated(self) -> usize {
+        self.kinds().len()
+    }
+
+    /// Whether this set sits on the mini band.
+    const fn mini(self) -> bool {
+        matches!(self, Self::Tool | Self::Pane)
+    }
+
+    /// Whether this set seats `kind`.
+    fn seats(self, kind: WindowControlKind) -> bool {
+        self.kinds().contains(&kind)
     }
 }
 
@@ -730,8 +753,10 @@ struct ClusterMetrics {
     span_gap: u32,
     /// The gap inside the identity group, between the icon slot and the title.
     identity_gap: u32,
-    /// One cluster's total width: [`CLUSTER_COUNT`] cells, butted together.
-    cluster_w: u32,
+    /// The leading and the trailing cluster's total widths: their cells,
+    /// butted together.
+    leading_w: u32,
+    trailing_w: u32,
 }
 
 impl ClusterMetrics {
@@ -742,12 +767,19 @@ impl ClusterMetrics {
     fn of(scale: Scale, theme: &Theme, side: u32, commands: TitleBarCommands) -> Self {
         let metrics = theme.metrics();
         let extent = side.max(1);
+        let cells = |count: usize| extent.saturating_mul(u32::try_from(count).unwrap_or(u32::MAX));
         Self {
             extent,
             span_gap: scale.scale_length(metrics.control_gap),
             identity_gap: scale.scale_length(metrics.control_inset),
-            cluster_w: extent.saturating_mul(commands.per_cluster()),
+            leading_w: cells(commands.leading()),
+            trailing_w: cells(commands.seated() - commands.leading()),
         }
+    }
+
+    /// Both clusters' widths together.
+    fn clusters_w(&self) -> u32 {
+        self.leading_w.saturating_add(self.trailing_w)
     }
 }
 
@@ -762,17 +794,22 @@ const fn band_text_role(commands: TitleBarCommands) -> TextRole {
     match commands {
         TitleBarCommands::Empty => TextRole::SectionHeader,
         TitleBarCommands::Window => TextRole::WindowTitle,
+        TitleBarCommands::Tool | TitleBarCommands::Pane => TextRole::Caption,
     }
 }
 
-/// The corner the command in layout `slot` rounds: the first cell is hard
-/// against the band's leading end and the last against its trailing one, both
-/// following the window's own `radius`; the two between them are square.
-fn band_corner(slot: usize, radius: u32) -> BandCorner {
-    match slot {
-        0 => BandCorner::Leading(radius),
-        s if s == CONTROL_ORDER.len() - 1 => BandCorner::Trailing(radius),
-        _ => BandCorner::Square,
+/// The corner the command in layout `slot` of a band seating `commands`
+/// rounds: a leading cluster's first cell is hard against the band's leading
+/// end and a trailing cluster's last against its trailing one, both following
+/// the window's own `radius`; every cell between is square.
+fn band_corner(slot: usize, commands: TitleBarCommands, radius: u32) -> BandCorner {
+    let (seated, leading) = (commands.seated(), commands.leading());
+    if slot == 0 && leading > 0 {
+        BandCorner::Leading(radius)
+    } else if slot + 1 == seated && seated > leading {
+        BandCorner::Trailing(radius)
+    } else {
+        BandCorner::Square
     }
 }
 
@@ -847,7 +884,7 @@ pub(crate) const HUE_SATURATION_INACTIVE: u8 = 150;
 /// testing over one shared geometry (so they cannot diverge).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TitleBarLayout {
-    /// Storage for the control rects; only the first
+    /// Storage for the control rects, in seating order; only the first
     /// [`seated`](Self::seated) of them are laid out.
     slots: [(WindowControlKind, Rect); CONTROL_ORDER.len()],
     /// How many of `slots` this band seats.
@@ -957,6 +994,20 @@ impl TitleBar {
         Self::seating(furniture, TitleBarCommands::Window)
     }
 
+    /// A tool window's mini band: Close alone, the title in the caption face,
+    /// on the `tool_title_bar_height` band.
+    #[must_use]
+    pub fn tool() -> Self {
+        Self::seating(WindowFurnitureState::active_fixed(), TitleBarCommands::Tool)
+    }
+
+    /// A docked pane's mini band, matching a tool window's: Close, and
+    /// Minimize to roll the pane up to its band and back.
+    #[must_use]
+    pub fn pane() -> Self {
+        Self::seating(WindowFurnitureState::active_fixed(), TitleBarCommands::Pane)
+    }
+
     /// A title band that seats no commands: a centred title over a band that
     /// drags end to end.
     ///
@@ -967,12 +1018,7 @@ impl TitleBar {
     #[must_use]
     pub fn plate() -> Self {
         Self::seating(
-            WindowFurnitureState {
-                activation: WindowActivationState::Active,
-                size: WindowSizeState::Restored,
-                movable: true,
-                resizable: false,
-            },
+            WindowFurnitureState::active_fixed(),
             TitleBarCommands::Empty,
         )
     }
@@ -1012,8 +1058,8 @@ impl TitleBar {
     fn apply_furniture(&mut self) {
         let active = self.furniture.activation != WindowActivationState::Inactive;
         let next = self.furniture.size_action();
-        let seated = self.commands.seated();
-        for control in &mut self.controls[..seated] {
+        for &kind in self.commands.kinds() {
+            let control = &mut self.controls[control_index(kind)];
             control.set_active_frame(active);
             if control.kind() == WindowControlKind::SizeToggle {
                 control.set_size_action(next);
@@ -1125,6 +1171,17 @@ impl TitleBar {
         scale.scale_length(theme.metrics().title_bar_height)
     }
 
+    /// The height of a band seating `commands`, in physical pixels: the mini
+    /// band's for a tool window's or a pane's, a window's otherwise.
+    #[must_use]
+    pub fn height_of(commands: TitleBarCommands, scale: Scale, theme: &Theme) -> u32 {
+        if commands.mini() {
+            scale.scale_length(theme.metrics().tool_title_bar_height)
+        } else {
+            Self::band_height(scale, theme)
+        }
+    }
+
     /// The narrowest band that seats both command clusters and still leaves a
     /// drag surface between them, in physical pixels.
     ///
@@ -1140,10 +1197,9 @@ impl TitleBar {
     /// re-scaled here, so the floor and the layout at it cannot disagree.
     #[must_use]
     pub fn min_band_width(commands: TitleBarCommands, scale: Scale, theme: &Theme) -> u32 {
-        let (_, band_h, _) = WindowFrame::edges(scale, theme);
+        let band_h = Self::height_of(commands, scale, theme);
         let m = ClusterMetrics::of(scale, theme, band_h, commands);
-        m.cluster_w
-            .saturating_mul(2)
+        m.clusters_w()
             .saturating_add(m.span_gap.saturating_mul(2))
             .saturating_add(m.extent)
     }
@@ -1161,7 +1217,7 @@ impl TitleBar {
     /// no cluster is the title's margin from the plate edge.
     #[must_use]
     pub fn preferred_band_width(&self, scale: Scale, theme: &Theme) -> u32 {
-        let (_, band_h, _) = WindowFrame::edges(scale, theme);
+        let band_h = Self::height_of(self.commands, scale, theme);
         let m = ClusterMetrics::of(scale, theme, band_h, self.commands);
         let font = role_font(theme, scale, self.text_role());
         let side = icon_slot_side(font, band_h);
@@ -1173,8 +1229,7 @@ impl TitleBar {
         let group = reserved
             .saturating_add(font.text_width(&self.display_text()))
             .saturating_add(m.span_gap.saturating_mul(2));
-        Self::min_band_width(self.commands, scale, theme)
-            .max(m.cluster_w.saturating_mul(2).saturating_add(group))
+        Self::min_band_width(self.commands, scale, theme).max(m.clusters_w().saturating_add(group))
     }
 
     /// The ladder rung this band sets its title in.
@@ -1189,24 +1244,30 @@ impl TitleBar {
     }
 
     /// A shared reference to the control for `kind`, or `None` on a band that
-    /// seats no commands — where there is no such control to report a state
+    /// does not seat it — where there is no such control to report a state
     /// for, and answering with an unseated one would be a lie.
     #[must_use]
     pub fn control(&self, kind: WindowControlKind) -> Option<&WindowControl> {
-        self.seated().get(control_index(kind))
+        self.commands
+            .seats(kind)
+            .then(|| &self.controls[control_index(kind)])
     }
 
     /// A mutable reference to the control for `kind`, so the window manager can
-    /// set its authority/enabled/recovery state. `None` on a band that seats
-    /// no commands.
+    /// set its authority/enabled/recovery state. `None` on a band that does
+    /// not seat it.
     pub fn control_mut(&mut self, kind: WindowControlKind) -> Option<&mut WindowControl> {
-        let seated = self.commands.seated();
-        self.controls[..seated].get_mut(control_index(kind))
+        self.commands
+            .seats(kind)
+            .then(|| &mut self.controls[control_index(kind)])
     }
 
-    /// The controls this band actually seats, in canonical command order.
-    fn seated(&self) -> &[WindowControl] {
-        &self.controls[..self.commands.seated()]
+    /// The controls this band actually seats, in seating order.
+    fn seated(&self) -> impl Iterator<Item = &WindowControl> {
+        self.commands
+            .kinds()
+            .iter()
+            .map(|&kind| &self.controls[control_index(kind)])
     }
 
     /// The stored control for `kind`, seated or not.
@@ -1225,7 +1286,8 @@ impl TitleBar {
             extent: e,
             span_gap: g,
             identity_gap,
-            cluster_w,
+            leading_w,
+            trailing_w,
         } = ClusterMetrics::of(scale, theme, bounds.height, self.commands);
 
         let leading_left = bounds.left();
@@ -1233,7 +1295,7 @@ impl TitleBar {
         // one over the other: a control drawn under another cannot be hit
         // where it is seen.
         let trailing_left =
-            (bounds.right() - to_i32(cluster_w)).max(leading_left + to_i32(cluster_w));
+            (bounds.right() - to_i32(trailing_w)).max(leading_left + to_i32(leading_w));
 
         let cell = Rect::new(0, 0, e, bounds.height);
         let mut slots = [
@@ -1242,22 +1304,23 @@ impl TitleBar {
             (CONTROL_ORDER[2], cell),
             (CONTROL_ORDER[3], cell),
         ];
-        for (i, slot) in slots.iter_mut().enumerate() {
-            let i = u32::try_from(i).unwrap_or(0);
-            let (cluster_left, within) = if i < CLUSTER_COUNT {
+        let leading = self.commands.leading();
+        for (i, (slot, &kind)) in slots.iter_mut().zip(self.commands.kinds()).enumerate() {
+            let (cluster_left, within) = if i < leading {
                 (leading_left, i)
             } else {
-                (trailing_left, i - CLUSTER_COUNT)
+                (trailing_left, i - leading)
             };
+            let within = u32::try_from(within).unwrap_or(0);
             let x = cluster_left + to_i32(within.saturating_mul(e));
-            slot.1 = Rect::new(x, bounds.top(), e, bounds.height);
+            *slot = (kind, Rect::new(x, bounds.top(), e, bounds.height));
         }
 
         // With no clusters there is nothing to hold the span off, so it is the
         // whole band and the identity group centres in it.
-        let bare = cluster_w == 0;
+        let bare = leading_w == 0 && trailing_w == 0;
         let inset = if bare { 0 } else { to_i32(g) };
-        let span_left = leading_left + to_i32(cluster_w) + inset;
+        let span_left = leading_left + to_i32(leading_w) + inset;
         let span = Rect::new(
             span_left,
             bounds.top(),
@@ -1421,7 +1484,7 @@ impl TitleBar {
                 rect,
                 scale,
                 theme,
-                band_corner(slot, plate_radius),
+                band_corner(slot, self.commands, plate_radius),
             );
         }
     }
@@ -1580,7 +1643,7 @@ impl TitleBar {
             .controls()
             .iter()
             .any(|(_, r)| r.contains(*self.pointer));
-        let any_armed = self.seated().iter().any(WindowControl::armed);
+        let any_armed = self.seated().any(WindowControl::armed);
 
         match event {
             InputEvent::PointerPressed {
@@ -1690,11 +1753,12 @@ impl TitleBar {
     /// invariant predicts costs a comparison each and cannot under-report if a
     /// caller had lit two of them.
     fn move_focus(&mut self, forward: bool, layout: &TitleBarLayout, damage: &mut Region) {
-        let count = self.commands.seated();
+        let kinds = self.commands.kinds();
+        let count = kinds.len();
         if count == 0 {
             return;
         }
-        let current = self.seated().iter().position(|c| c.state().focus.focused);
+        let current = self.seated().position(|c| c.state().focus.focused);
         let mut idx = match current {
             Some(i) => i,
             None if forward => count - 1,
@@ -1707,31 +1771,22 @@ impl TitleBar {
             } else {
                 (idx + count - 1) % count
             };
-            if self.controls[idx].state().is_actionable() {
+            if self.controls[control_index(kinds[idx])]
+                .state()
+                .is_actionable()
+            {
                 landed = Some(idx);
                 break;
             }
         }
-        for slot in 0..count {
-            let rect = Self::control_rect(layout, slot);
+        for (slot, &(kind, rect)) in layout.controls().iter().enumerate() {
             damage::set(
-                &mut self.controls[slot].state.focus.focused,
+                &mut self.controls[control_index(kind)].state.focus.focused,
                 landed == Some(slot),
                 rect,
                 damage,
             );
         }
-    }
-
-    /// The laid-out rect of the control stored at `slot`, or [`Rect::EMPTY`]
-    /// when the layout has no entry for it (fail closed: an empty rectangle
-    /// covers nothing).
-    fn control_rect(layout: &TitleBarLayout, slot: usize) -> Rect {
-        layout
-            .controls()
-            .iter()
-            .find(|(kind, _)| control_index(*kind) == slot)
-            .map_or(Rect::EMPTY, |(_, rect)| *rect)
     }
 }
 
@@ -1953,7 +2008,7 @@ impl FrameRim {
     /// re-deriving the radius from the metrics and drifting from it.
     #[must_use]
     pub fn of(scale: Scale, theme: &Theme) -> Self {
-        let (thickness, _, _) = WindowFrame::edges(scale, theme);
+        let (thickness, _) = WindowFrame::edges(scale, theme);
         Self {
             radius: scale.scale_length(theme.metrics().window_corner_radius),
             thickness,
@@ -1999,6 +2054,18 @@ impl WindowFrame {
         }
     }
 
+    /// A tool window's frame: the window's rim, plate and hit map around a
+    /// mini title band seating Close alone, its title in the caption face —
+    /// what a floating palette is moved and closed by. It is never resized.
+    #[must_use]
+    pub fn tool() -> Self {
+        let title_bar = TitleBar::tool();
+        Self {
+            furniture: title_bar.furniture(),
+            title_bar,
+        }
+    }
+
     /// The window's furniture state.
     #[must_use]
     pub fn furniture(&self) -> WindowFurnitureState {
@@ -2032,25 +2099,29 @@ impl WindowFrame {
     /// screen and one not yet created cannot disagree about it.
     #[must_use]
     pub fn identity_icon_side(scale: Scale, theme: &Theme) -> u32 {
-        let (_, title_h, _) = Self::edges(scale, theme);
         TitleBar::icon_side(
             TitleBarCommands::Window,
-            Rect::new(0, 0, 0, title_h),
+            Rect::new(0, 0, 0, TitleBar::band_height(scale, theme)),
             scale,
             theme,
         )
     }
 
-    /// The three scaled frame metrics —
-    /// `(border, title_bar_height, frame_inset)` in physical pixels — every
-    /// frame rectangle is built from. The border is at least one physical pixel
-    /// and the side inset is never thinner than the border, so a rim always
-    /// draws.
-    fn edges(scale: Scale, theme: &Theme) -> (u32, u32, u32) {
+    /// The two scaled rim metrics — `(border, frame_inset)` in physical pixels
+    /// — every frame rectangle is built from beside its band. The border is at
+    /// least one physical pixel and the side inset is never thinner than the
+    /// border, so a rim always draws.
+    fn edges(scale: Scale, theme: &Theme) -> (u32, u32) {
         let metrics = theme.metrics();
         let border = scale.scale_length(metrics.border_thickness).max(1);
         let inset_amt = scale.scale_length(metrics.frame_inset).max(border);
-        (border, TitleBar::band_height(scale, theme), inset_amt)
+        (border, inset_amt)
+    }
+
+    /// This frame's title band height: a window's, or the mini band a tool
+    /// window's commands sit on.
+    fn band_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        TitleBar::height_of(self.title_bar.commands(), scale, theme)
     }
 
     /// The left/right/bottom furniture-band thickness around the client.
@@ -2061,7 +2132,7 @@ impl WindowFrame {
     /// outer pixels instead — see [`GrabReach`]). Never thinner than the
     /// frame border, so a rim always draws.
     fn band_inset(scale: Scale, theme: &Theme) -> u32 {
-        let (_, _, inset_amt) = Self::edges(scale, theme);
+        let (_, inset_amt) = Self::edges(scale, theme);
         inset_amt
     }
 
@@ -2086,10 +2157,10 @@ impl WindowFrame {
     /// never restate the metric math).
     #[must_use]
     pub fn insets(&self, scale: Scale, theme: &Theme) -> FrameInsets {
-        let (border, title_h, _) = Self::edges(scale, theme);
+        let (border, _) = Self::edges(scale, theme);
         let band = Self::band_inset(scale, theme);
         FrameInsets {
-            top: border.saturating_add(title_h),
+            top: border.saturating_add(self.band_height(scale, theme)),
             left: band,
             right: band,
             bottom: band,
@@ -2111,11 +2182,11 @@ impl WindowFrame {
     /// manager honours whichever is greater.
     #[must_use]
     pub fn min_outer_size(&self, scale: Scale, theme: &Theme) -> (u32, u32) {
-        let (border, _, _) = Self::edges(scale, theme);
+        let (border, _) = Self::edges(scale, theme);
         let insets = self.insets(scale, theme);
         let client = scale.scale_length(theme.metrics().control_height).max(1);
         let sides = insets.left.saturating_add(insets.right);
-        let band = TitleBar::min_band_width(TitleBarCommands::Window, scale, theme)
+        let band = TitleBar::min_band_width(self.title_bar.commands(), scale, theme)
             .saturating_add(border.saturating_mul(2));
         (
             band.max(sides.saturating_add(client)),
@@ -2156,7 +2227,8 @@ impl WindowFrame {
     /// window never shifts its client when it gains or loses focus.
     #[must_use]
     pub fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> FrameLayout {
-        let (b, title_h, _) = Self::edges(scale, theme);
+        let (b, _) = Self::edges(scale, theme);
+        let title_h = self.band_height(scale, theme);
         let band = Self::band_inset(scale, theme);
 
         let title_bar = Rect::new(

@@ -3122,6 +3122,8 @@ name = "tairix-paint"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-browse",
  "tairix-colour",
  "tairix-controls",
@@ -3131,6 +3133,7 @@ dependencies = [
  "tairix-help",
  "tairix-icon",
  "tairix-image",
+ "tairix-inline",
  "tairix-input",
  "tairix-raster",
  "tairix-reclaim",
@@ -3439,7 +3442,6 @@ dependencies = [
  "tairix-rng",
  "tairix-rt",
  "tairix-theme",
- "tairix-util",
  "tairix-window",
 ]
 
@@ -3488,6 +3490,7 @@ name = "tairix-settings"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
  "tairix-appdata",
  "tairix-browse",
  "tairix-colour",

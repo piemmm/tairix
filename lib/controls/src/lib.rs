@@ -315,6 +315,7 @@ pub mod button;
 pub mod chart;
 pub mod checker;
 pub mod collection;
+pub mod colour_model;
 pub mod colour_picker;
 pub mod combo;
 pub mod credential;
@@ -352,6 +353,7 @@ pub use collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
     PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
 };
+pub use colour_model::{ChannelSpec, ColourModel, PickerView, MOST_CHANNELS};
 pub use colour_picker::{ColourPicker, PickerOutcome};
 pub use combo::{ComboAction, ComboBox};
 pub use credential::{
@@ -372,7 +374,7 @@ pub use metric::{
     MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
-pub use number::{NumberAction, NumberField};
+pub use number::{NumberAction, NumberField, MOST_PLACES};
 pub use paint::{
     blend_area, fill_area, ground_fill, inset, paint_framed_surface_plate, paint_icon_slot,
     paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, withheld,

@@ -79,6 +79,8 @@ tairix-binfmt = { path = "../../../lib/binfmt", version = "=0.0.0" }
 # launches can read or rewrite them — and no path, user, or bundle identifier
 # is spelled here.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
+# The shared closed-registry engine the preferences are kept by.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The shared mount-record view model: `VolumeBytes` is what the volume list
 # and the header's space figure are, so this application derives no byte
 # count of its own from a mount record.
@@ -118,6 +120,3 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
     "test-util",
 ] }
-# The store's own key grammar, so the preference registry is checked against
-# the one definition rather than a restatement of it.
-tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }

@@ -727,16 +727,6 @@ impl InputRouter {
         let Some(origin) = compositor.window(window).map(Window::origin) else {
             return false;
         };
-        let drag = compositor
-            .window_drag_surface(window)
-            .map_or(Rect::EMPTY, |rect| {
-                Rect::new(
-                    rect.left().saturating_sub(origin.x),
-                    rect.top().saturating_sub(origin.y),
-                    rect.width,
-                    rect.height,
-                )
-            });
         // Starting a move supersedes the implicit client pointer grab: this
         // press moves the window, so its motion and release drive the move,
         // never leak to the client as an in-content drag.
@@ -747,9 +737,51 @@ impl InputRouter {
                 self.pointer.x.saturating_sub(origin.x),
                 self.pointer.y.saturating_sub(origin.y),
             ),
-            drag,
+            drag: local_drag_surface(window, origin, compositor),
             button,
         });
+        true
+    }
+
+    /// Carry the primary press `parent`'s client holds on as a move of
+    /// `window`, held at `offset` from its top-left and placed there under
+    /// the pointer now: a palette torn out of a window follows the press that
+    /// tore it out. The client's grab ends without a release reaching it, and
+    /// the keyboard stays where it was.
+    ///
+    /// Answers `false`, changing nothing, unless `parent` holds that press
+    /// and `window` is known — so a carry never moves a window the user is
+    /// not holding.
+    pub fn carry(
+        &mut self,
+        parent: WindowId,
+        window: WindowId,
+        offset: Point,
+        compositor: &mut Compositor,
+    ) -> bool {
+        if self.client_grab != Some(parent) || self.grab.is_some() {
+            return false;
+        }
+        let Some(origin) = compositor.window(window).map(Window::origin) else {
+            return false;
+        };
+        let drag = local_drag_surface(window, origin, compositor);
+        self.client_grab = None;
+        self.grab = Some(MoveGrab {
+            window,
+            offset,
+            drag,
+            button: PointerButton::Primary,
+        });
+        let placed = clamp_move_origin(
+            Point::new(
+                self.pointer.x.saturating_sub(offset.x),
+                self.pointer.y.saturating_sub(offset.y),
+            ),
+            drag,
+            compositor.screen_rect(),
+        );
+        compositor.move_window(window, placed);
         true
     }
 
@@ -1480,6 +1512,22 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point, bounds: ResizeBounds) -> 
         start.left()
     };
     Rect::new(left, start.top(), width, height)
+}
+
+/// `window`'s title-bar drag surface in window-local coordinates, whose
+/// top-left is `origin` on screen: what a move keeps reachable on screen.
+/// [`Rect::EMPTY`] for an undecorated window, which is not clamped at all.
+fn local_drag_surface(window: WindowId, origin: Point, compositor: &Compositor) -> Rect {
+    compositor
+        .window_drag_surface(window)
+        .map_or(Rect::EMPTY, |rect| {
+            Rect::new(
+                rect.left().saturating_sub(origin.x),
+                rect.top().saturating_sub(origin.y),
+                rect.width,
+                rect.height,
+            )
+        })
 }
 
 /// `origin` clamped so `drag` — the title bar's move surface in window-local

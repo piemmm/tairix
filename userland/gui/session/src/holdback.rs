@@ -41,7 +41,10 @@
 //! * A **position sample** (`Pointer`/`Moved`) is level-triggered: the
 //!   newest supersedes an unbroken run of its predecessors. So is a pinch's
 //!   `Update`, whose scale is relative to where the pinch began, while the
-//!   modifiers stay the same.
+//!   modifiers stay the same, and a tool window's move sample (`ToolMoved`).
+//! * The **end of a tool window's move** is where it was let go, which is
+//!   all its owner still needs of every move before it: it withdraws the
+//!   window's earlier move reports and is never shed.
 //! * A **wheel delta** (`Scrolled`) is additive: a run in one direction
 //!   made with the same modifiers held sums, at the newest place. A reversal
 //!   is a distinct gesture — a turn that clamped at a range end is not undone
@@ -60,11 +63,12 @@
 //! which costs a mapped frame region orders of magnitude larger than its
 //! queue.
 //!
-//! Overflow evicts the oldest *input* event, never a state edge and never a
-//! pick conclusion — and that is total, not a preference: folding leaves a
-//! window owing at most six state edges and at most one pick conclusion (a
-//! second is refused before it reaches the sink), so a queue at capacity
-//! always holds an input event to shed. Oldest-first is also the safe
+//! Overflow evicts the oldest *input* event, never a state edge, a pick
+//! conclusion or a move's end — and that is total, not a preference: folding
+//! leaves a window owing at most six state edges, at most one pick
+//! conclusion (a second is refused before it reaches the sink) and at most
+//! one move's end, so a queue at capacity always holds an input event to
+//! shed. Oldest-first is also the safe
 //! direction for a button: a press is shed before its release, so the app
 //! can be left with an unmatched release, never an unmatched press it would
 //! hold as a latched grab.
@@ -83,7 +87,7 @@ use crate::shell::continues;
 ///
 /// A security bound rather than a scalable capacity: it is the ceiling on
 /// what a client that stops draining can make the session hold. Comfortably
-/// above the seven slots folding can leave un-shed, and above the input a
+/// above the eight slots folding can leave un-shed, and above the input a
 /// user produces in the seconds before the owner is declared unresponsive.
 pub const HOLD_BACK_CAPACITY: usize = 64;
 
@@ -326,6 +330,10 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
         *held = *next;
         return true;
     }
+    if matches!(next, WindowEvent::ToolMoved { ended: true, .. }) {
+        queue.retain(|held| !matches!(held, WindowEvent::ToolMoved { .. }));
+        return false;
+    }
     // A sample or a delta folds only into an unbroken run at the tail:
     // anything queued behind it is an occurrence the app must see in order.
     match (queue.back_mut(), *next) {
@@ -378,6 +386,19 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
             *downward = downward.saturating_add(down);
             *x = newest_x;
             *y = newest_y;
+            true
+        }
+        (
+            Some(WindowEvent::ToolMoved {
+                over, ended: false, ..
+            }),
+            WindowEvent::ToolMoved {
+                over: newest,
+                ended: false,
+                ..
+            },
+        ) => {
+            *over = newest;
             true
         }
         (
@@ -451,13 +472,14 @@ const fn is_input(event: &WindowEvent) -> bool {
             | WindowEvent::Pointer { .. }
             | WindowEvent::Scrolled { .. }
             | WindowEvent::Pinch { .. }
+            | WindowEvent::ToolMoved { ended: false, .. }
     )
 }
 
 /// Make room in a queue at capacity by shedding its oldest input event.
 ///
-/// Folding leaves at most six state edges and one pick conclusion owed per
-/// window, so a full queue always holds one; the `None` arm cannot be
+/// Folding leaves at most six state edges, one pick conclusion and one move's
+/// end owed per window, so a full queue always holds one; the `None` arm cannot be
 /// reached from a queue this module built, and shedding nothing is the
 /// fail-safe answer if it ever were.
 fn shed_oldest_input(queue: &mut VecDeque<WindowEvent>) {

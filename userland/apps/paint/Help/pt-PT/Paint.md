@@ -54,18 +54,29 @@ copia-as, elimina-as e reordena-as.
 
 O botão principal (esquerdo) pinta com a cor principal e o botão do meio
 com a cor secundária; mantendo Alt premido apanha-se antes uma cor, tal como
-as camadas a mostram. As ferramentas da caixa de ferramentas à esquerda são
-seleção, lápis, pincel, aerógrafo, borracha, clonar, preenchimento,
-gradiente, conta-gotas, texto, linha, retângulo, elipse, polígono, recorte,
-mão e zoom. A barra no topo nomeia a ferramenta em uso e guarda as suas
-definições — o tamanho, a dureza, a opacidade, o fluxo e o espaçamento de um
-pincel, a tolerância de um preenchimento, a forma de um gradiente, o tamanho
-do texto, os cantos de um retângulo — escritas ou ajustadas com as setas, e
-os botões que ampliam e mostram a grelha de píxeis; a faixa da paleta sob a
-imagem guarda a paleta da imagem, ou as cores do ambiente de trabalho. O
-aerógrafo continua a pulverizar enquanto é mantido parado. Mantendo Shift
-premido desenha-se um quadrado, um círculo ou uma linha num múltiplo de 45
-graus.
+as camadas a mostram. A caixa de ferramentas, no painel Ferramentas, dispõe
+as ferramentas em duas colunas: seleção, lápis, pincel, aerógrafo, borracha,
+clonar, preenchimento, gradiente, conta-gotas, texto, linha, retângulo,
+elipse, polígono, recorte, mão e zoom. A barra no topo nomeia a ferramenta em
+uso e guarda as suas definições — o tamanho, a dureza, a opacidade, o fluxo e
+o espaçamento de um pincel, a tolerância de um preenchimento, a forma de um
+gradiente, o tamanho do texto, os cantos de um retângulo — escritas ou
+ajustadas com as setas, e os botões que ampliam e mostram a grelha de píxeis;
+a faixa da paleta sob a imagem guarda a paleta da imagem, ou as cores do
+ambiente de trabalho. O aerógrafo continua a pulverizar enquanto é mantido
+parado. Mantendo Shift premido desenha-se um quadrado, um círculo ou uma
+linha num múltiplo de 45 graus.
+
+Ao longo dos dois lados da janela correm painéis: por omissão o painel
+Ferramentas à esquerda e o painel Cor à direita, com o painel Ajuste por baixo
+logo que se abre um ajuste. Cada um tem no topo uma faixa fina que o nomeia,
+com um controlo que o enrola na sua faixa e uma marca que o fecha; Ver ▸
+Painéis volta a mostrar um painel fechado, e Repor painéis põe cada painel
+como uma janela nova o tem. Arrastar uma faixa move o seu painel no seu lado
+ou para o outro, marcando pelo caminho onde vai pousar; largado longe de ambos
+os lados, ou arrastado para fora da janela, o painel flutua numa pequena
+janela sua, movida pela sua faixa, mantida sobre a imagem e fechada pela sua
+marca; arrastado de novo sobre um lado, volta a acoplar-se ali.
 
 A ferramenta de seleção marca um retângulo, uma elipse, um laço à mão
 livre, um polígono clicado canto a canto ou, com a varinha mágica, os píxeis
@@ -88,20 +99,52 @@ as suas pegas movem as suas margens, e Enter recorta. A mão arrasta a imagem
 pela janela, tal como Espaço com qualquer ferramenta; o zoom amplia com um
 clique, ou com Alt reduz, e uma caixa arrastada enche a janela.
 
-O menu Ajustes muda o brilho e o contraste, o matiz e a saturação e os
-níveis, posteriza, aplica um limiar, dessatura, desfoca, aumenta a nitidez,
-pixeliza, acrescenta ruído e encontra arestas; cada ajuste vê-se na imagem
-enquanto as suas definições se movem e só fica quando é aplicado. Numa
-imagem com paleta, um ajuste muda a sua paleta, e os que precisam das cores
-vizinhas não são oferecidos.
+O menu Ajustes abre um ajuste no painel Ajuste, onde todas as outras
+ferramentas, painéis e menus continuam à mão: brilho e contraste, tonalidade e
+saturação, equilíbrio de cor, níveis, curvas, equilíbrio de brancos,
+posterizar, limiar, desfocar, nitidez, pixelizar e adicionar ruído;
+dessaturar e encontrar contornos, que não têm definições, aplicam-se de
+imediato. A imagem mostra o ajuste à medida que as suas definições se movem,
+Pré-visualizar desliga-o e liga-o para comparar, Repor volta a pôr as suas
+definições e Aplicar guarda-o como uma só alteração a anular; pintar, preencher
+ou escolher outro ajuste aplica-o primeiro. Os níveis fixam os pontos preto,
+cinzento e branco sobre um histograma da camada, para todos os canais juntos
+ou cada um sozinho, com conta-gotas que os tiram da imagem e Auto; as curvas
+dobram os tons de um canal por pontos arrastados sobre o seu histograma; o
+equilíbrio de brancos fixa a temperatura e o matiz da luz, a partir de um
+píxel neutro escolhido ou por Auto; tonalidade e saturação rodam, reforçam e
+aclaram todas as cores ou uma gama delas; o equilíbrio de cor leva as sombras,
+os meios-tons e as altas luzes para o vermelho, o verde ou o azul, mantendo a
+sua luminosidade se pedido. Tudo fica limitado à seleção. Numa imagem com
+paleta, um ajuste muda a sua paleta, e os que precisam de cores vizinhas não
+são oferecidos.
 
-O painel de cor à direita guarda as cores principal e secundária e um
-seletor de cor para a que estiver escolhida: um clique numa cor escolhe-a, e
-depois ajusta-se por matiz, saturação e valor, por vermelho, verde e azul,
-pela sua escrita hexadecimal e, onde a imagem admite transparência, pela sua
-opacidade. A cor que tinha está ao lado, e um clique recupera-a. Numa imagem
-com paleta as cores são as suas entradas, por isso o seletor edita a
-paleta, e cada edição é uma só alteração a desfazer.
+O painel Cor guarda as cores principal e secundária e um seletor de cor para
+a que estiver escolhida: um clique numa cor escolhe-a, e depois apanha-se num
+quadrado de saturação e valor ao lado de uma faixa de tonalidades, numa roda
+de tonalidades em volta de um triângulo, ou num cursor por canal, e escreve-se
+em RGB, HSV, HSL, CMYK, Lab, LCh ou como cinzento, ou pela sua escrita
+hexadecimal e, onde a imagem guarda transparência, a sua opacidade. Uma cor
+Lab ou LCh que o ecrã não consegue mostrar é mostrada o mais perto possível, e
+assinalada. Trocar troca as duas cores, Repor torna-as preta e branca, e
+Apanhar tira a próxima cor clicada na imagem. A cor que tinha fica ao lado, um
+clique recupera-a, e as últimas cores escolhidas esperam por baixo para serem
+escolhidas de novo. Numa imagem com paleta as cores são as suas entradas,
+pelo que o seletor edita a paleta, e cada edição é uma só alteração a anular.
+
+Definições, no menu da barra de ícones, abre a janela de definições do Paint:
+a ferramenta com que começa uma janela nova e se uma imagem abre ajustada à
+janela ou em tamanho real; o tamanho, o formato, as cores e o fundo que Nova
+imagem oferece; o espaçamento, o desvio, a cor, a opacidade e o estilo da
+grelha — linhas, traços, pontos ou cruzamentos —, se uma janela nova a mostra,
+o ajuste a ela e o zoom a partir do qual aparece a grelha entre píxeis; o
+tamanho e os tons do xadrez e o que rodeia a imagem; e os painéis com que abre
+uma janela nova. Uma alteração aplica-se logo a todas as janelas e fica para a
+próxima vez; Repor predefinições volta a pô-las todas. Ver ▸ Grelha mostra a
+grelha de uma janela. Enquanto está visível e o ajuste está ligado, as formas,
+as seleções e as molduras de recorte cobrem células inteiras, as pontas de uma
+linha e de um gradiente e os cantos de um polígono pousam nos seus
+cruzamentos, e uma seleção arrastada pousa com o canto num deles.
 
 O programa não tem nenhuma permissão sobre o sistema de ficheiros. Só edita
 o ficheiro que lhe foi entregue. Um ficheiro que o utilizador pode alterar é
@@ -141,6 +184,7 @@ primeiro.
 * `Ctrl` + roda — ampliar ou reduzir em torno do ponteiro
 * Beliscar com dois dedos — ampliar ou reduzir suavemente; num ecrã tátil a imagem segue os dedos
 * `G` — mostrar ou ocultar a grelha entre píxeis
+* `Ctrl+'` — mostrar ou ocultar a grelha
 * `Page Up` / `Page Down` — o sprite ou a página anterior ou seguinte
 * teclas de seta — mover uma seleção flutuante um píxel; com `Shift`, dez; na faixa da paleta, percorrer as suas cores
 

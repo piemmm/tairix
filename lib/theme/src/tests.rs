@@ -13,10 +13,10 @@ use tairix_colour::Rgba;
 use crate::motion::{ease_out, smoothstep, MotionInteraction};
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
-    lifted, Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
-    FamilyKey, FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, SignalRole, SurfaceGround,
-    SyntaxPalette, SyntaxRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline,
-    CURSOR_KINDS, TEXT_WEIGHT_LIFT,
+    lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind, CursorSet,
+    CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Metrics, Motion,
+    MotionTheme, Palette, SignalRole, SurfaceGround, SyntaxPalette, SyntaxRole, TextRole, Theme,
+    ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
 };
 
 #[test]
@@ -1034,10 +1034,9 @@ fn the_ladder_derives_every_role_from_one_base_size() {
     assert!(fonts.spec(TextRole::Heading).size_px > fonts.spec(TextRole::ItemTitle).size_px);
     assert!(fonts.spec(TextRole::ItemTitle).size_px > fonts.spec(TextRole::Body).size_px);
     assert!(fonts.spec(TextRole::Body).size_px > fonts.spec(TextRole::Caption).size_px);
-    // Item names and window titles sit a point below body: two pixels of line
-    // box at this base, since a point is about 1.6 px of the shipped face's.
+    // Item names and window titles are set at the body's size.
     for role in [TextRole::ItemLabel, TextRole::WindowTitle] {
-        assert_eq!(fonts.spec(role).size_px, 16, "{role:?}");
+        assert_eq!(fonts.spec(role).size_px, 18, "{role:?}");
     }
     // A header is the interface size and carries its hierarchy on weight
     // alone: a group header set smaller than the rows it heads reads as a
@@ -1112,15 +1111,17 @@ fn the_lift_sets_every_role_heavier_and_keeps_the_hierarchy() {
 }
 
 #[test]
-fn a_chosen_ui_family_replaces_every_role_but_the_fixed_width_one() {
+fn a_chosen_text_replaces_every_role_but_the_fixed_width_one() {
     let chosen = key("noto-serif");
     let dark = Theme::dark();
     let shipped = *dark.fonts();
-    let fonts = shipped.with_ui_family(chosen);
+    let size = shipped.base_size_px();
+    let text = DesktopText::new(chosen, size).expect("a non-zero size");
+    let fonts = shipped.with_text(text);
 
     assert_eq!(fonts.ui_family(), chosen);
     assert_eq!(fonts.monospace_family(), shipped.monospace_family());
-    assert_eq!(fonts.base_size_px(), shipped.base_size_px());
+    assert_eq!(fonts.base_size_px(), size);
     for role in TextRole::ALL {
         let expected = if role == TextRole::Monospace {
             shipped.monospace_family()
@@ -1128,10 +1129,74 @@ fn a_chosen_ui_family_replaces_every_role_but_the_fixed_width_one() {
             chosen
         };
         assert_eq!(fonts.spec(role).family, expected, "{role:?}");
-        // Choosing a family retunes nothing else about the ladder.
+        // A family at the shipped size retunes nothing else about the ladder.
         assert_eq!(fonts.spec(role).size_px, shipped.spec(role).size_px);
         assert_eq!(fonts.spec(role).weight, shipped.spec(role).weight);
     }
+    // A size rebuilds every rung in proportion, the fixed-width one too.
+    let larger = shipped.with_text(DesktopText::new(chosen, 24).expect("non-zero"));
+    assert_eq!(larger.spec(TextRole::Body).size_px, 24);
+    assert_eq!(larger.spec(TextRole::Monospace).size_px, 24);
+    assert_eq!(larger.spec(TextRole::Heading).size_px, 32);
+}
+
+#[test]
+fn the_shipped_base_is_ten_points_of_inter() {
+    let fonts = *Theme::dark().fonts();
+    // Inter's `hhea` puts 1984 units above and 494 below a 2048-unit em.
+    let inter = 1210;
+    assert_eq!(fonts.base_size_px(), 16);
+    assert_eq!(points_of(fonts.base_size_px(), inter), 10);
+    assert_eq!(line_box_px(10, inter), 16);
+    // Item names and window titles keep the 16 px they had beside an 18 px
+    // body, which is eleven points.
+    assert_eq!(fonts.spec(TextRole::ItemLabel).size_px, 16);
+    assert_eq!(fonts.spec(TextRole::WindowTitle).size_px, 16);
+    assert_eq!(line_box_px(11, inter), 18);
+}
+
+#[test]
+fn a_point_size_draws_one_em_whatever_the_family() {
+    // Noto's line is 1.362 of its em, Inter's 1.210: the same point size is
+    // a taller line box in Noto, so its glyphs are not a tenth smaller.
+    assert_eq!(line_box_px(10, 1362), 18);
+    assert_eq!(line_box_px(10, 1210), 16);
+    for points in [6u16, 9, 12, 18, 24, 36] {
+        for line_box in [1000u16, 1110, 1210, 1362] {
+            let px = line_box_px(points, line_box);
+            if (Fonts::MIN_BASE_SIZE_PX + 1..Fonts::MAX_BASE_SIZE_PX).contains(&px) {
+                assert!(
+                    points_of(px, line_box).abs_diff(points) <= 1,
+                    "{points} pt at {line_box} reads back as {}",
+                    points_of(px, line_box)
+                );
+            }
+        }
+    }
+    // A size the ladder cannot author is held to its bounds.
+    assert_eq!(line_box_px(1, 1210), Fonts::MIN_BASE_SIZE_PX);
+    assert_eq!(line_box_px(u16::MAX, 3000), Fonts::MAX_BASE_SIZE_PX);
+}
+
+#[test]
+fn the_registry_lays_the_text_over_every_theme_and_keeps_it_across_a_switch() {
+    let mut themes = ThemeRegistry::with_builtins();
+    let shipped = *themes.active().fonts();
+    let text = DesktopText::new(key("noto-sans"), 20).expect("non-zero");
+    assert!(themes.set_text(Some(text)));
+    assert!(
+        !themes.set_text(Some(text)),
+        "an unchanged choice is no change"
+    );
+    assert_eq!(themes.text(), Some(text));
+    assert_eq!(themes.active().fonts().ui_family(), key("noto-sans"));
+    assert_eq!(themes.active().fonts().base_size_px(), 20);
+    // What a theme registered is unchanged: the choice is the desktop's.
+    assert_eq!(*themes.selected().fonts(), shipped);
+    themes.toggle_appearance();
+    assert_eq!(themes.active().fonts().base_size_px(), 20);
+    assert!(themes.set_text(None));
+    assert_eq!(*themes.active().fonts(), shipped);
 }
 
 #[test]
@@ -1521,6 +1586,7 @@ fn sample_metrics() -> Metrics {
         sidebar_icon_extent: 20,
         picture_width: 120,
         title_bar_height: 24,
+        tool_title_bar_height: 18,
         frame_inset: 1,
         resize_grabber_extent: 14,
         resize_edge_grab: 7,
@@ -1587,6 +1653,7 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
         assert_eq!(derived.bead_size, normal.bead_size);
         assert_eq!(derived.slider_knob, normal.slider_knob);
         assert_eq!(derived.title_bar_height, normal.title_bar_height);
+        assert_eq!(derived.tool_title_bar_height, normal.tool_title_bar_height);
         assert_eq!(derived.scrollbar_breadth, normal.scrollbar_breadth);
         assert_eq!(derived.drop_shadow_reach, normal.drop_shadow_reach);
         assert_eq!(derived.icon_shadow_reach, normal.icon_shadow_reach);
@@ -1812,5 +1879,15 @@ mod scene_clock {
         let mut clock = SceneClock::new(10 * SceneClock::FRAME_NS, false);
         let moved = clock.advance(SceneClock::FRAME_NS);
         assert!(moved.abs() < f64::EPSILON, "{moved} s moved");
+    }
+}
+
+#[test]
+fn a_mini_title_band_is_shallower_than_a_windows_and_holds_its_caption() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let metrics = theme.metrics();
+        assert!(metrics.tool_title_bar_height < metrics.title_bar_height);
+        let caption = theme.fonts().spec(TextRole::Caption).size_px;
+        assert!(u32::from(caption) < metrics.tool_title_bar_height);
     }
 }

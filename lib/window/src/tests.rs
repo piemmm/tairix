@@ -38,8 +38,8 @@ use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, CallerIdentity, ClientRegion, CursorSetName,
     DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry, PickedFile,
-    PopupSpec, PreviewSize, WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing,
-    WINDOW_REPLY_MAX,
+    PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -205,6 +205,8 @@ impl CallerIdentity for MockIdentity {
 struct RecordingHost {
     opened: Vec<(ProcId, u64, DisplayMode, String, WindowSizing)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
+    /// Every tool window opened: its id, parent, carry and title.
+    tools: Vec<(u64, u64, Option<u32>, String)>,
     layers: Vec<(ProcId, u64, DisplayMode, i32, i32, LayerDepth)>,
     layer_places: Vec<(u64, i32, i32, LayerDepth)>,
     refuse_layer: Option<Errno>,
@@ -275,6 +277,7 @@ impl Default for RecordingHost {
         Self {
             opened: Vec::new(),
             popups: Vec::new(),
+            tools: Vec::new(),
             layers: Vec::new(),
             layer_places: Vec::new(),
             refuse_layer: None,
@@ -404,6 +407,19 @@ impl WindowHost for RecordingHost {
         }
         self.popups
             .push((window_id, parent_window_id, offset_x, offset_y, *surface));
+        Ok(())
+    }
+
+    fn tool_opened(&mut self, window_id: u64, spec: &ToolSpec) -> Result<(), Errno> {
+        if self.refuse_popup {
+            return Err(Errno::WouldBlock);
+        }
+        self.tools.push((
+            window_id,
+            spec.transient.parent_window_id,
+            spec.carry,
+            String::from(spec.title.as_str()),
+        ));
         Ok(())
     }
 
@@ -967,8 +983,8 @@ fn popup_spec(
     events: u64,
     offset_x: i32,
     offset_y: i32,
-) -> PopupSpec {
-    PopupSpec {
+) -> TransientSpec {
+    TransientSpec {
         parent_window_id,
         shm_handle: shm,
         event_endpoint: events,
@@ -1851,6 +1867,94 @@ fn a_dead_clients_parent_and_popups_are_all_torn_down() {
     assert_eq!(inner.server.window_count(), 0);
     assert!(inner.host.closed.contains(&parent));
     assert!(inner.host.closed.contains(&popup));
+}
+
+/// A tool window of `parent` granted as `shm`, carried at `carry`.
+fn tool_spec(parent_window_id: u64, shm: u64, carry: Option<u32>) -> ToolSpec {
+    ToolSpec {
+        transient: popup_spec(parent_window_id, shm, EVENTS_A, -3, 9),
+        carry,
+        title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
+    }
+}
+
+#[test]
+fn a_tool_window_opens_through_its_own_path_and_closes_alone() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
+    let (tool, server) = client
+        .create_tool(&tool_spec(parent, 8, Some(2)))
+        .expect("tool window opens");
+    assert_eq!(server, SERVER);
+    {
+        let inner = loopback.borrow();
+        assert_eq!(
+            inner.host.tools,
+            alloc::vec![(tool, parent, Some(2), String::from("Tools"))]
+        );
+        assert!(inner.host.popups.is_empty(), "never the popup path");
+        assert_eq!(inner.host.opened.len(), 1, "nor the top-level one");
+    }
+    client
+        .present(tool, 0, full_damage())
+        .expect("present into it");
+    client.close(tool).expect("close it alone");
+    assert_eq!(loopback.borrow().server.window_count(), 1);
+    client
+        .present(parent, 0, full_damage())
+        .expect("the parent lives");
+}
+
+#[test]
+fn a_transient_hangs_only_from_a_top_level_window_of_the_callers_own() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
+    let (tool, _) = client
+        .create_tool(&tool_spec(parent, 8, None))
+        .expect("tool window");
+    let (popup, _) = client
+        .create_popup(&popup_spec(parent, 9, EVENTS_A, 0, 0))
+        .expect("popup");
+    // One level only: neither a tool window nor a popup hangs a transient.
+    for transient in [tool, popup] {
+        assert_eq!(
+            client.create_tool(&tool_spec(transient, 9, None)),
+            Err(Errno::NotSupported)
+        );
+        assert_eq!(
+            client.create_popup(&popup_spec(transient, 9, EVENTS_A, 0, 0)),
+            Err(Errno::NotSupported)
+        );
+    }
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.create_tool(&tool_spec(parent, 9, None)),
+        Err(Errno::NotFound),
+        "a foreign parent reads as none"
+    );
+    assert_eq!(loopback.borrow().server.window_count(), 3);
+}
+
+#[test]
+fn a_tool_window_shares_the_budget_and_goes_with_its_parent() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let parent = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("parent");
+    let (tool, _) = client
+        .create_tool(&tool_spec(parent, 8, None))
+        .expect("tool window");
+    for _ in 2..FRAMES_PER_CLIENT {
+        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
+    }
+    assert_eq!(
+        client.create_tool(&tool_spec(parent, 8, None)),
+        Err(Errno::NoSpace)
+    );
+    client.close(parent).expect("close the parent");
+    let inner = loopback.borrow();
+    assert!(inner.host.closed.contains(&parent) && inner.host.closed.contains(&tool));
 }
 
 #[test]

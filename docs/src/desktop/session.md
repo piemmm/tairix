@@ -759,12 +759,13 @@ screen.
 
 ## Telling applications about their desktop
 
-An application draws into its own frames, so it needs three facts the session
+An application draws into its own frames, so it needs the facts the session
 owns before it can draw them honestly: how large the screen is, what density
-the desktop is at, and which way round the theme's colours run. All three
-belong to the compositor — it owns the output it scans out to, that output's
-`Scale`, and the active `Theme` — and `windows::desktop_info` reads them
-straight from it into one `tairix_abi::desktop::DesktopInfo`. That single
+the desktop is at, which way round the theme's colours run, and what text it is
+set in. All of them belong to the compositor — it owns the output it scans out
+to, that output's `Scale`, and the active `Theme`, the user's text laid over it
+— and `windows::desktop_info` reads them straight from it into one
+`tairix_abi::desktop::DesktopInfo`. That single
 definition serves both directions, so an answer and an announcement can never
 disagree:
 

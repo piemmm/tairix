@@ -4887,10 +4887,11 @@ mod program {
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
-            // The layer-surface feeds address a desktop surface this
-            // application never opens, so neither can arrive here.
+            // The layer-surface feeds and a tool window's moves address
+            // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::ToolMoved { .. }
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }

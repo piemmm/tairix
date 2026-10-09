@@ -1,5 +1,6 @@
 //! Unit tests for the terminal profile document.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
@@ -10,10 +11,18 @@ use crate::effects::{Effects, FULL, MIN_OPACITY};
 use crate::scheme::{Scheme, ANSI_COLORS};
 use tairix_colour::Rgb;
 
+use tairix_appconf::{Keys, Live, Registry};
+
 use super::{
-    field_value, Invalidation, Profile, ProfileKey, ProfileKeys, DEFAULT_FONT_SIZE_PX,
-    MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX,
+    Invalidation, Profile, ProfileKey, DEFAULT_FONT_SIZE_PX, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX,
 };
+
+/// `key`'s setting on `profile`, as the store spells it.
+fn spelled(profile: &Profile, key: ProfileKey) -> String {
+    let mut text = String::new();
+    assert!(profile.spell(key, &mut text), "every profile key is stored");
+    text
+}
 
 /// The command word the terminal's bundle is installed under.
 const OWN_WORD: &str = "terminal";
@@ -105,7 +114,7 @@ fn a_saved_profile_loads_back_identically() {
     let edited = edited_profile();
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        edited.save(&mut settings).expect("publishes");
+        tairix_appdata::save(&edited, &mut settings).expect("publishes");
     }
     let settings = Settings::open(&mut host, OWN_WORD);
     let (loaded, refused) = Profile::load(&settings);
@@ -124,7 +133,7 @@ fn a_save_writes_only_what_the_layers_do_not_already_imply() {
     };
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        profile.save(&mut settings).expect("publishes");
+        tairix_appdata::save(&profile, &mut settings).expect("publishes");
     }
     assert_eq!(stored_len(&host), 1, "one key changed, one key written");
     assert_eq!(stored(&host, ProfileKey::FontSize.name()), Some("17"));
@@ -139,7 +148,7 @@ fn saving_an_unchanged_profile_writes_nothing_at_all() {
     drop(settings);
 
     let mut settings = Settings::open(&mut host, OWN_WORD);
-    loaded.save(&mut settings).expect("a no-op save");
+    tairix_appdata::save(&loaded, &mut settings).expect("a no-op save");
     assert!(!settings.is_dirty());
     drop(settings);
     assert_eq!(
@@ -208,13 +217,13 @@ fn clear_removes_the_users_opinions_so_the_layers_beneath_apply() {
     let mut host = service();
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        edited_profile().save(&mut settings).expect("publishes");
+        tairix_appdata::save(&edited_profile(), &mut settings).expect("publishes");
     }
     assert!(stored_len(&host) > 1);
 
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        Profile::clear(&mut settings).expect("clears");
+        tairix_appdata::clear::<Profile>(&mut settings).expect("clears");
     }
     assert_eq!(stored_len(&host), 0, "the user's document holds nothing");
     let settings = Settings::open(&mut host, OWN_WORD);
@@ -251,7 +260,7 @@ fn clearing_falls_back_to_the_shipped_defaults_not_this_apps_compiled_ones() {
         .with_store("font.size = 30\n");
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        Profile::clear(&mut settings).expect("clears");
+        tairix_appdata::clear::<Profile>(&mut settings).expect("clears");
     }
     assert_eq!(stored_len(&host), 0, "the user's document holds nothing");
     let settings = Settings::open(&mut host, OWN_WORD);
@@ -268,7 +277,7 @@ fn a_save_never_writes_a_value_the_shipped_defaults_already_give() {
     };
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        profile.save(&mut settings).expect("nothing to publish");
+        tairix_appdata::save(&profile, &mut settings).expect("nothing to publish");
     }
     assert_eq!(
         stored_len(&host),
@@ -284,7 +293,7 @@ fn a_key_outside_the_registry_is_left_alone_by_a_save() {
     let mut host = holding("scheme = contrast\nsomething.else = kept\n");
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        edited_profile().save(&mut settings).expect("publishes");
+        tairix_appdata::save(&edited_profile(), &mut settings).expect("publishes");
     }
     assert_eq!(
         stored(&host, "something.else"),
@@ -293,7 +302,7 @@ fn a_key_outside_the_registry_is_left_alone_by_a_save() {
     );
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        Profile::clear(&mut settings).expect("clears");
+        tairix_appdata::clear::<Profile>(&mut settings).expect("clears");
     }
     assert_eq!(
         stored(&host, "something.else"),
@@ -311,7 +320,7 @@ fn an_unreachable_store_loads_the_defaults_and_refuses_the_save() {
     assert_eq!(profile, Profile::default(), "the app still runs");
     assert!(refused.is_empty());
     assert_eq!(
-        edited_profile().save(&mut settings),
+        tairix_appdata::save(&edited_profile(), &mut settings),
         Err(Errno::DeviceOffline),
         "and is never told a save landed that did not"
     );
@@ -326,7 +335,7 @@ fn every_registry_key_round_trips_through_the_store() {
     let edited = edited_profile();
     {
         let mut settings = Settings::open(&mut host, OWN_WORD);
-        edited.save(&mut settings).expect("publishes");
+        tairix_appdata::save(&edited, &mut settings).expect("publishes");
     }
     assert_eq!(
         stored_len(&host),
@@ -603,9 +612,9 @@ fn an_unchanged_profile_stales_nothing() {
 #[test]
 fn taking_every_setting_reproduces_the_source() {
     let mut profile = Profile::default();
-    let changed = profile.set_from(&edited_profile(), ProfileKeys::ALL);
+    let changed = profile.set_from(&edited_profile(), Keys::ALL);
     assert_eq!(profile, edited_profile());
-    assert_eq!(changed, ProfileKeys::ALL, "every setting differed");
+    assert_eq!(changed, Keys::ALL, "every setting differed");
 }
 
 /// Each key takes its own setting and no other, measured through the store
@@ -613,7 +622,7 @@ fn taking_every_setting_reproduces_the_source() {
 #[test]
 fn each_key_takes_exactly_its_own_setting() {
     for key in ProfileKey::ALL {
-        let only = ProfileKeys::EMPTY.with(key);
+        let only = Keys::of(key);
         let mut profile = Profile::default();
         assert_eq!(
             profile.set_from(&edited_profile(), only),
@@ -628,8 +637,8 @@ fn each_key_takes_exactly_its_own_setting() {
                 Profile::default()
             };
             assert_eq!(
-                field_value(&profile, other),
-                field_value(&source, other),
+                spelled(&profile, other),
+                spelled(&source, other),
                 "taking {} moved {}",
                 key.name(),
                 other.name()
@@ -643,7 +652,7 @@ fn differing_names_exactly_the_settings_that_differ() {
     assert!(Profile::default().differing(&Profile::default()).is_empty());
     for key in ProfileKey::ALL {
         let mut one = Profile::default();
-        one.set_from(&edited_profile(), ProfileKeys::EMPTY.with(key));
+        one.set_from(&edited_profile(), Keys::of(key));
         let differing = Profile::default().differing(&one);
         for other in ProfileKey::ALL {
             assert_eq!(
@@ -660,8 +669,6 @@ fn differing_names_exactly_the_settings_that_differ() {
 #[test]
 fn taking_a_setting_that_already_matches_reports_no_change() {
     let mut profile = edited_profile();
-    assert!(profile
-        .set_from(&edited_profile(), ProfileKeys::ALL)
-        .is_empty());
+    assert!(profile.set_from(&edited_profile(), Keys::ALL).is_empty());
     assert_eq!(profile, edited_profile());
 }

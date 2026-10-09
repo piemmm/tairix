@@ -15,6 +15,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::elevate::ElevateArgv;
+use tairix_abi::font_ipc::FamilyEntry;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::BundleId;
@@ -30,7 +31,7 @@ use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_sysconfig::SystemConfig;
-use tairix_theme::{CursorSetId, Grounds, Theme};
+use tairix_theme::{CursorSetId, Fonts, Grounds, Theme};
 use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
@@ -38,7 +39,9 @@ use crate::accounts::{AccountFacts, Roster};
 use crate::body::{self, Body};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
-use crate::form::{Action, Composition, Form, FormOutcome, FormPlace, Posture, Setting};
+use crate::form::{
+    Action, Composition, Form, FormOutcome, FormPlace, Posture, Setting, TextChoices,
+};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::network::{Addressing, NetworkFacts};
 use crate::pictures::{Chooser, PictureWanted};
@@ -391,6 +394,8 @@ pub struct Shell {
     /// The cursor sets the desktop offers besides the built-in one, empty
     /// until it has answered.
     cursor_sets: Vec<CursorSetId>,
+    /// The font store's families and the theme's own text, once listed.
+    text: Option<TextChoices>,
     /// The mounted volumes the caller last read for the Storage pane, empty
     /// until it has.
     volumes: Vec<VolumeReading>,
@@ -479,6 +484,7 @@ impl Shell {
             body: Body::Statement,
             catalog: Vec::new(),
             cursor_sets: Vec::new(),
+            text: None,
             volumes: Vec::new(),
             wanted: Wanted::default(),
             config: None,
@@ -508,6 +514,16 @@ impl Shell {
     /// document already names.
     pub fn adopt_cursor_sets(&mut self, sets: Vec<CursorSetId>) {
         self.cursor_sets = sets;
+        self.restate_body();
+    }
+
+    /// Adopt the families the font store lists, and `theme`, the fonts the
+    /// theme was registered with, which the Text rows' defaults name.
+    ///
+    /// Until they arrive the Font row offers its default and whatever the
+    /// document already names.
+    pub fn adopt_text_choices(&mut self, families: Vec<FamilyEntry>, theme: Fonts) {
+        self.text = Some(TextChoices { families, theme });
         self.restate_body();
     }
 
@@ -1043,6 +1059,7 @@ impl Shell {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
+            text: self.text.as_ref(),
             volumes: &self.volumes,
             config: self.config.as_ref(),
             machine: &self.machine,

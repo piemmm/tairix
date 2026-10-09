@@ -1,17 +1,17 @@
 //! Adjustments and filters.
 //!
 //! An adjustment maps each colour on its own — brightness and contrast, hue
-//! and saturation, levels, posterising, a threshold, grey — so on a palette
-//! picture it maps the palette. A filter makes each pixel from its
-//! neighbours — a blur, sharpening, pixelation, noise, edges — which only a
-//! colour picture's pixels can take. Both are held to the selection, as much
-//! of each pixel as it chooses, and run on a worker; the window previews
-//! them as their settings move.
+//! and saturation by range, colour balance, levels, curves, white balance,
+//! posterising, a threshold, grey — so on a palette picture it maps the
+//! palette. A filter makes each pixel from its neighbours — a blur,
+//! sharpening, pixelation, noise, edges — which only a colour picture's pixels
+//! can take. Both are held to the selection, as much of each pixel as it
+//! chooses, and run on a worker.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_colour::{Fraction, Hsl, Hue, Rgb};
+use tairix_colour::Rgb;
 use tairix_hash::FastHash;
 use tairix_image::Rgba8;
 use tairix_raster::{box_blur, Color, SOFTEN_PASSES};
@@ -22,6 +22,7 @@ use crate::compose::between;
 use crate::mask::Mask;
 use crate::shape::Bounds;
 use crate::stroke::Change;
+use crate::tone::{to_level, ColourBalance, Curves, HueRanges, Levels, Table, WhiteBalance};
 
 /// One adjustment or filter and what it is set to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -33,24 +34,16 @@ pub enum Filter {
         /// Further from or nearer to mid grey.
         contrast: i32,
     },
-    /// Hue turned `-180..=180` degrees, saturation and lightness `-100..=100`.
-    HueSaturation {
-        /// How far round the colour circle.
-        hue: i32,
-        /// Toward the pure hue, or toward grey.
-        saturation: i32,
-        /// Toward white, or toward black.
-        lightness: i32,
-    },
-    /// The levels taken as black and white, and a gamma in hundredths.
-    Levels {
-        /// The level that becomes black.
-        black: i32,
-        /// The level that becomes white.
-        white: i32,
-        /// How the levels between are bent, in hundredths: above 100 lifts.
-        gamma: i32,
-    },
+    /// Hue, saturation and lightness for every colour and for each range.
+    HueSaturation(HueRanges),
+    /// Colours moved toward red, green or blue in each band of tones.
+    ColourBalance(ColourBalance),
+    /// Each channel's input and output levels.
+    Levels(Levels),
+    /// Each channel's tone curve.
+    Curves(Curves),
+    /// The light the picture was lit by, corrected to daylight.
+    WhiteBalance(WhiteBalance),
     /// Each channel held to so many levels.
     Posterize {
         /// The levels each channel keeps.
@@ -105,23 +98,60 @@ pub struct Parameter {
     pub most: i32,
 }
 
+impl Parameter {
+    /// Where `value` lies along the slider, in thousandths.
+    #[must_use]
+    pub fn permille_of(&self, value: i32) -> u16 {
+        let span = i64::from(self.most - self.least).max(1);
+        let along = i64::from(value.clamp(self.least, self.most) - self.least);
+        u16::try_from(along * 1000 / span).unwrap_or(1000)
+    }
+
+    /// The value `permille` thousandths along the slider, to the nearest.
+    #[must_use]
+    pub fn value_of(&self, permille: u16) -> i32 {
+        let span = i64::from(self.most - self.least);
+        let along = (i64::from(permille.min(1000)) * span + 500) / 1000;
+        i32::try_from(i64::from(self.least) + along).unwrap_or(self.least)
+    }
+
+    /// The slider's steps, in thousandths: a line moves one, a page ten.
+    #[must_use]
+    pub fn steps(&self) -> (u16, u16) {
+        let span = u16::try_from(self.most - self.least).unwrap_or(1).max(1);
+        let line = 1000u16.div_ceil(span);
+        (line, line.saturating_mul(10).min(1000))
+    }
+}
+
+/// What an adjustment maps colours through, worked out once for a whole
+/// picture or palette.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one lives on the stack for the length of a filter's run; boxing the tables would allocate for nothing"
+)]
+enum Prepared {
+    /// Each channel through its own table.
+    Tables([Table; 3]),
+    /// Colour balance's moves, by lightness.
+    Shifts([[i16; 256]; 3]),
+    /// Worked out a colour at a time.
+    Direct,
+}
+
 impl Filter {
-    /// Every filter as the menu offers it, at its starting settings.
-    pub const ALL: [Self; 11] = [
+    /// Every filter as the menu offers it, at its starting settings: the
+    /// adjustments, then the filters.
+    pub const ALL: [Self; 14] = [
         Self::Brightness {
             brightness: 0,
             contrast: 0,
         },
-        Self::HueSaturation {
-            hue: 0,
-            saturation: 0,
-            lightness: 0,
-        },
-        Self::Levels {
-            black: 0,
-            white: 255,
-            gamma: 100,
-        },
+        Self::HueSaturation(HueRanges::IDENTITY),
+        Self::ColourBalance(ColourBalance::NEUTRAL),
+        Self::Levels(Levels::IDENTITY),
+        Self::Curves(Curves::IDENTITY),
+        Self::WhiteBalance(WhiteBalance::NEUTRAL),
         Self::Posterize { levels: 4 },
         Self::Threshold { level: 128 },
         Self::Desaturate,
@@ -143,8 +173,11 @@ impl Filter {
     pub const fn label(&self) -> &'static str {
         match self {
             Self::Brightness { .. } => "Brightness and contrast",
-            Self::HueSaturation { .. } => "Hue and saturation",
-            Self::Levels { .. } => "Levels",
+            Self::HueSaturation(_) => "Hue and saturation",
+            Self::ColourBalance(_) => "Colour balance",
+            Self::Levels(_) => "Levels",
+            Self::Curves(_) => "Curves",
+            Self::WhiteBalance(_) => "White balance",
             Self::Posterize { .. } => "Posterise",
             Self::Threshold { .. } => "Threshold",
             Self::Desaturate => "Desaturate",
@@ -155,6 +188,12 @@ impl Filter {
             Self::Edges => "Find edges",
             Self::Invert => "Invert colours",
         }
+    }
+
+    /// Whether `other` is the same adjustment, however each is set.
+    #[must_use]
+    pub fn same_kind(&self, other: &Self) -> bool {
+        core::mem::discriminant(self) == core::mem::discriminant(other)
     }
 
     /// Whether it makes each pixel from its neighbours, which only a colour
@@ -171,20 +210,38 @@ impl Filter {
         )
     }
 
-    /// The numbers it is set by, in its sliders' order.
+    /// Whether it is set before it is applied; one with nothing to set
+    /// applies at once.
+    #[must_use]
+    pub const fn has_settings(&self) -> bool {
+        !matches!(self, Self::Desaturate | Self::Edges | Self::Invert)
+    }
+
+    /// Whether, as set, it changes nothing.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        match self {
+            Self::Brightness {
+                brightness,
+                contrast,
+            } => *brightness == 0 && *contrast == 0,
+            Self::HueSaturation(ranges) => ranges.is_identity(),
+            Self::ColourBalance(balance) => balance.is_identity(),
+            Self::Levels(levels) => *levels == Levels::IDENTITY,
+            Self::Curves(curves) => curves.is_identity(),
+            Self::WhiteBalance(balance) => *balance == WhiteBalance::NEUTRAL,
+            _ => false,
+        }
+    }
+
+    /// The numbers it is set by, in its sliders' order; the adjustments set
+    /// by channel, range or band have settings of their own.
     #[must_use]
     pub const fn parameters(&self) -> &'static [Parameter] {
         const fn p(label: &'static str, least: i32, most: i32) -> Parameter {
             Parameter { label, least, most }
         }
         const BRIGHTNESS: [Parameter; 2] = [p("Brightness", -100, 100), p("Contrast", -100, 100)];
-        const HUE: [Parameter; 3] = [
-            p("Hue", -180, 180),
-            p("Saturation", -100, 100),
-            p("Lightness", -100, 100),
-        ];
-        const LEVELS: [Parameter; 3] =
-            [p("Black", 0, 254), p("White", 1, 255), p("Gamma", 10, 990)];
         const POSTERIZE: [Parameter; 1] = [p("Levels", 2, 64)];
         const THRESHOLD: [Parameter; 1] = [p("Level", 0, 255)];
         const BLUR: [Parameter; 1] = [p("Radius", 1, 64)];
@@ -193,15 +250,20 @@ impl Filter {
         const NOISE: [Parameter; 1] = [p("Amount", 1, 100)];
         match self {
             Self::Brightness { .. } => &BRIGHTNESS,
-            Self::HueSaturation { .. } => &HUE,
-            Self::Levels { .. } => &LEVELS,
             Self::Posterize { .. } => &POSTERIZE,
             Self::Threshold { .. } => &THRESHOLD,
             Self::Blur { .. } => &BLUR,
             Self::Sharpen { .. } => &SHARPEN,
             Self::Pixelate { .. } => &PIXELATE,
             Self::Noise { .. } => &NOISE,
-            Self::Desaturate | Self::Edges | Self::Invert => &[],
+            Self::HueSaturation(_)
+            | Self::ColourBalance(_)
+            | Self::Levels(_)
+            | Self::Curves(_)
+            | Self::WhiteBalance(_)
+            | Self::Desaturate
+            | Self::Edges
+            | Self::Invert => &[],
         }
     }
 
@@ -220,28 +282,17 @@ impl Filter {
                 brightness,
                 contrast,
             } => nth(&[brightness, contrast], index),
-            Self::HueSaturation {
-                hue,
-                saturation,
-                lightness,
-            } => nth(&[hue, saturation, lightness], index),
-            Self::Levels {
-                black,
-                white,
-                gamma,
-            } => nth(&[black, white, gamma], index),
             Self::Posterize { levels: v }
             | Self::Threshold { level: v }
             | Self::Blur { radius: v }
             | Self::Pixelate { cell: v }
             | Self::Noise { amount: v, .. } => nth(&[v], index),
             Self::Sharpen { amount, radius } => nth(&[amount, radius], index),
-            Self::Desaturate | Self::Edges | Self::Invert => 0,
+            _ => 0,
         }
     }
 
-    /// Set number `index` to `value`, held to its bounds; black is kept
-    /// below white.
+    /// Set number `index` to `value`, held to its bounds.
     pub fn set(&mut self, index: usize, value: i32) {
         fn put<const N: usize>(slots: [&mut i32; N], index: usize, value: i32) {
             if let Some(slot) = slots.into_iter().nth(index) {
@@ -257,27 +308,13 @@ impl Filter {
                 brightness,
                 contrast,
             } => put([brightness, contrast], index, v),
-            Self::HueSaturation {
-                hue,
-                saturation,
-                lightness,
-            } => put([hue, saturation, lightness], index, v),
-            Self::Levels {
-                black,
-                white,
-                gamma,
-            } => match index {
-                0 => *black = v.min(*white - 1),
-                1 => *white = v.max(*black + 1),
-                _ => *gamma = v,
-            },
             Self::Posterize { levels: slot }
             | Self::Threshold { level: slot }
             | Self::Blur { radius: slot }
             | Self::Pixelate { cell: slot }
             | Self::Noise { amount: slot, .. } => put([slot], index, v),
             Self::Sharpen { amount, radius } => put([amount, radius], index, v),
-            Self::Desaturate | Self::Edges | Self::Invert => {}
+            _ => {}
         }
     }
 
@@ -297,71 +334,45 @@ impl Filter {
         }
     }
 
-    /// The colour it makes of `colour`, which keeps its alpha: an
-    /// adjustment's, through `table` where it maps each channel alone.
-    fn map(&self, colour: Rgba8, table: Option<&[u8; 256]>) -> Rgba8 {
-        let [r, g, b, a] = colour;
-        match (*self, table) {
-            (_, Some(table)) => [
-                table[usize::from(r)],
-                table[usize::from(g)],
-                table[usize::from(b)],
-                a,
-            ],
-            (Self::Threshold { level }, None) => {
-                let lit = i32::from(luma(colour)) >= level;
-                let level = if lit { u8::MAX } else { 0 };
-                [level, level, level, a]
-            }
-            (Self::Desaturate, None) => {
-                let grey = luma(colour);
-                [grey, grey, grey, a]
-            }
-            (
-                Self::HueSaturation {
-                    hue,
-                    saturation,
-                    lightness,
-                },
-                None,
-            ) => {
-                let hsl = Hsl::from_rgb(Rgb::new(r, g, b), Hsl::default());
-                let turn = i64::from(Hue::TURN);
-                let shift = i64::from(hue) * turn / 360;
-                let steps = (i64::from(hsl.hue.steps()) + shift).rem_euclid(turn);
-                let scaled = |fraction: Fraction, by: i32| {
-                    let raw = i64::from(fraction.raw());
-                    let moved = if by >= 0 {
-                        raw + (65535 - raw) * i64::from(by) / 100
-                    } else {
-                        raw + raw * i64::from(by) / 100
-                    };
-                    Fraction::from_raw(u16::try_from(moved.clamp(0, 65535)).unwrap_or(0))
-                };
-                let saturated = Fraction::from_raw(
-                    u16::try_from(
-                        (i64::from(hsl.saturation.raw()) * i64::from(100 + saturation) / 100)
-                            .clamp(0, 65535),
-                    )
-                    .unwrap_or(0),
-                );
-                let rgb = Hsl::new(
-                    Hue::from_steps(u32::try_from(steps).unwrap_or(0)),
-                    saturated,
-                    scaled(hsl.lightness, lightness),
-                )
-                .to_rgb();
-                [rgb.r, rgb.g, rgb.b, a]
-            }
-            _ => colour,
+    /// What an adjustment maps through, worked out once.
+    fn prepare(&self) -> Prepared {
+        match self {
+            Self::ColourBalance(balance) => Prepared::Shifts(balance.shifts()),
+            Self::Levels(levels) => Prepared::Tables(levels.tables()),
+            Self::Curves(curves) => Prepared::Tables(curves.tables()),
+            Self::WhiteBalance(balance) => Prepared::Tables(balance.tables()),
+            other => other
+                .table()
+                .map_or(Prepared::Direct, |table| Prepared::Tables([table; 3])),
         }
     }
 
-    /// The table an adjustment that maps each channel alone maps through.
-    fn table(&self) -> Option<[u8; 256]> {
+    /// The colour it makes of `colour`, which keeps its alpha.
+    fn map(&self, colour: Rgba8, prepared: &Prepared) -> Rgba8 {
+        let [r, g, b, a] = colour;
+        let mapped = match (self, prepared) {
+            (_, Prepared::Tables(tables)) => [
+                tables[0][usize::from(r)],
+                tables[1][usize::from(g)],
+                tables[2][usize::from(b)],
+            ],
+            (Self::ColourBalance(balance), Prepared::Shifts(shifts)) => {
+                balance.map(Rgb::new(r, g, b), shifts).to_array()
+            }
+            (Self::Threshold { level }, _) => {
+                let lit = i32::from(Color::rgb(r, g, b).luma()) >= *level;
+                [if lit { u8::MAX } else { 0 }; 3]
+            }
+            (Self::Desaturate, _) => [Color::rgb(r, g, b).luma(); 3],
+            (Self::HueSaturation(ranges), _) => ranges.map(Rgb::new(r, g, b)).to_array(),
+            _ => [r, g, b],
+        };
+        [mapped[0], mapped[1], mapped[2], a]
+    }
+
+    /// The table an adjustment that maps each channel alike maps through.
+    fn table(&self) -> Option<Table> {
         let mut table = [0u8; 256];
-        let level =
-            |v: f64| u8::try_from(mathf::round_i32(mathf::clamp(v, 0.0, 255.0))).unwrap_or(0);
         for (input, slot) in (0u8..=255).zip(table.iter_mut()) {
             let v = f64::from(input);
             *slot = match *self {
@@ -375,26 +386,12 @@ impl Filter {
                     } else {
                         (100.0 + contrast) / 100.0
                     };
-                    level((v - 127.5) * factor + 127.5 + f64::from(brightness) * 2.55)
-                }
-                Self::Levels {
-                    black,
-                    white,
-                    gamma,
-                } => {
-                    let span = f64::from((white - black).max(1));
-                    let t = mathf::clamp((v - f64::from(black)) / span, 0.0, 1.0);
-                    let bent = if t <= 0.0 {
-                        0.0
-                    } else {
-                        mathf::exp(mathf::ln(t) * 100.0 / f64::from(gamma.max(1)))
-                    };
-                    level(bent * 255.0)
+                    to_level((v - 127.5) * factor + 127.5 + f64::from(brightness) * 2.55)
                 }
                 Self::Posterize { levels } => {
                     let steps = f64::from(levels.max(2) - 1);
                     let band = f64::from(mathf::round_i32(v * steps / 255.0));
-                    level(band * 255.0 / steps)
+                    to_level(band * 255.0 / steps)
                 }
                 Self::Invert => 255 - input,
                 _ => return None,
@@ -410,12 +407,10 @@ impl Filter {
         if self.neighbourly() {
             return None;
         }
-        let table = self.table();
+        let prepared = self.prepare();
         fallible::collected(
             palette.len(),
-            palette
-                .iter()
-                .map(|&colour| self.map(colour, table.as_ref())),
+            palette.iter().map(|&colour| self.map(colour, &prepared)),
         )
     }
 }
@@ -434,12 +429,6 @@ impl From<OutOfMemory> for FilterError {
     fn from(_: OutOfMemory) -> Self {
         Self::OutOfMemory
     }
-}
-
-/// A colour's grey: its brightness as the eye weighs the channels.
-fn luma([r, g, b, _]: Rgba8) -> u8 {
-    let weighed = u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114;
-    u8::try_from((weighed + 500) / 1000).unwrap_or(u8::MAX)
 }
 
 /// Apply `filter` to colour picture `picture`, within `clip` where a
@@ -468,7 +457,7 @@ pub fn apply(
     } else {
         None
     };
-    let table = filter.table();
+    let prepared = filter.prepare();
     let mut chosen = [u8::MAX; TILE as usize];
     let mut change = Change::new();
     change.repaint(picture, area, |x, y, run| {
@@ -485,7 +474,7 @@ pub fn apply(
             }
             let filtered = match &made {
                 Some(made) => made.at(column, y),
-                None => filter.map(colour, table.as_ref()),
+                None => filter.map(colour, &prepared),
             };
             *sample = Sample::Rgba(match share {
                 u8::MAX => filtered,

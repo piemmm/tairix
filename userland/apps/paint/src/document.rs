@@ -24,6 +24,53 @@ use crate::colour::{nearest, WHITE};
 use crate::history::{Applied, Damage, History, Step, Unapplied};
 use crate::save::{SaveFormat, SaveSettings};
 
+/// A depth a picture may be made or converted to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Colours {
+    /// The depth, `None` for millions of colours.
+    pub depth: Option<IndexDepth>,
+    /// What a choice calls it.
+    pub label: &'static str,
+    /// Its spelling in the settings.
+    pub token: &'static str,
+}
+
+/// Every depth a picture may be made or converted to, deepest first.
+pub const COLOURS: [Colours; 5] = [
+    Colours {
+        depth: None,
+        label: "Millions of colours, and transparency",
+        token: "millions",
+    },
+    Colours {
+        depth: Some(IndexDepth::Eight),
+        label: "256 colours",
+        token: "256",
+    },
+    Colours {
+        depth: Some(IndexDepth::Four),
+        label: "16 colours",
+        token: "16",
+    },
+    Colours {
+        depth: Some(IndexDepth::Two),
+        label: "4 colours",
+        token: "4",
+    },
+    Colours {
+        depth: Some(IndexDepth::One),
+        label: "2 colours",
+        token: "2",
+    },
+];
+
+/// The depths `format` holds, deepest first.
+pub fn colours_for(format: SaveFormat) -> impl Iterator<Item = Colours> {
+    COLOURS
+        .into_iter()
+        .filter(move |colours| format.admits(colours.depth))
+}
+
 /// A picture to begin.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct NewPicture {

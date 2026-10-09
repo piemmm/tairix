@@ -858,6 +858,105 @@ fn the_family_front_is_the_transient_a_raise_leaves_on_top() {
     );
 }
 
+/// A floating transient — a tool window — stacks with its family but never
+/// takes the keyboard because the family rose, and a raise of it brings it
+/// above its floating siblings.
+#[test]
+fn a_floating_transient_is_passed_over_for_the_keyboard_and_raised_within_its_family() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(40, 40, RED));
+    let first = c
+        .add_floating_window(owner, Point::new(4, 4), opaque(10, 10, GREEN))
+        .expect("the owner is a window");
+    let second = c
+        .add_floating_window(owner, Point::new(8, 8), opaque(10, 10, BLUE))
+        .expect("the owner is a window");
+    assert!(c
+        .window(first)
+        .is_some_and(crate::window::Window::is_floating));
+    assert_eq!(
+        c.family_front(owner),
+        Some(owner),
+        "no palette takes the keyboard"
+    );
+    let sheet = c
+        .add_transient_window(owner, Point::new(30, 30), opaque(4, 4, RED))
+        .expect("the owner is a window");
+    assert_eq!(c.family_front(first), Some(sheet), "a sheet still does");
+    assert!(c.remove(sheet));
+
+    assert_eq!(c.window_at(Point::new(9, 9)), Some(second));
+    assert!(c.raise(first));
+    assert_eq!(
+        c.window_at(Point::new(9, 9)),
+        Some(first),
+        "the pressed palette rises"
+    );
+    assert_eq!(c.window_at(Point::new(16, 16)), Some(second));
+    assert_eq!(
+        c.window_at_except(Point::new(9, 9), first),
+        Some(second),
+        "looking past the window being moved"
+    );
+    assert_eq!(c.window_at_except(Point::new(30, 30), first), Some(owner));
+}
+
+/// A tip or a menu over a tool window joins its owner's family, so raising
+/// the family brings it too.
+#[test]
+fn a_transient_of_a_transient_joins_its_owners_family() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(20, 20, RED));
+    let palette = c
+        .add_floating_window(owner, Point::new(22, 0), opaque(10, 10, GREEN))
+        .expect("the owner is a window");
+    let tip = c
+        .add_transient_window(palette, Point::new(24, 12), opaque(6, 4, BLUE))
+        .expect("the palette is a window");
+    assert_eq!(
+        c.window(tip).and_then(crate::window::Window::parent),
+        Some(owner)
+    );
+    let intruder = c.add_window(Point::ORIGIN, opaque(40, 40, GREEN));
+    assert_eq!(c.window_at(Point::new(25, 13)), Some(intruder));
+    assert!(c.raise(owner));
+    assert_eq!(
+        c.window_at(Point::new(25, 13)),
+        Some(tip),
+        "it rose with the family"
+    );
+}
+
+/// Hiding an owner hides the transients that were showing and showing it
+/// shows just those; one opened on a hidden owner waits with it.
+#[test]
+fn a_family_hides_and_shows_with_its_owner() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(40, 40, RED));
+    let shown = c
+        .add_floating_window(owner, Point::new(4, 4), opaque(10, 10, GREEN))
+        .expect("the owner is a window");
+    let kept_hidden = c
+        .add_transient_window(owner, Point::new(20, 20), opaque(10, 10, BLUE))
+        .expect("the owner is a window");
+    assert!(c.set_visible(kept_hidden, false));
+    let visible = |c: &Compositor, id| c.window(id).is_some_and(crate::window::Window::is_visible);
+
+    assert!(c.set_visible(owner, false));
+    assert!(!visible(&c, shown) && !visible(&c, kept_hidden));
+    let late = c
+        .add_floating_window(owner, Point::new(2, 2), opaque(4, 4, GREEN))
+        .expect("the owner is a window");
+    assert!(!visible(&c, late), "opened on a hidden owner, it waits");
+
+    assert!(c.set_visible(owner, true));
+    assert!(visible(&c, shown) && visible(&c, late));
+    assert!(
+        !visible(&c, kept_hidden),
+        "hidden for its own reasons, it stays hidden"
+    );
+}
+
 #[test]
 fn the_family_front_of_a_window_that_is_not_here_is_nothing() {
     let mut c = new_compositor(mode(8, 8), BLUE).expect("compositor");
@@ -1784,6 +1883,48 @@ fn move_grab_drags_focused_window() {
         c.window(win).map(super::window::Window::origin),
         Some(Point::new(30, 18))
     );
+}
+
+/// A press held on a window's content is carried on as a move of a window
+/// it opened, without a release reaching the content; with no such press
+/// held, nothing is carried.
+#[test]
+fn a_held_press_is_carried_on_as_a_move_of_another_window() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let owner = c.add_window(Point::new(0, 0), opaque(40, 40, RED));
+    let tool = c
+        .add_floating_window(owner, Point::new(50, 50), opaque(10, 10, GREEN))
+        .expect("the owner is a window");
+    let mut router = InputRouter::new();
+    assert!(
+        !router.carry(owner, tool, Point::new(2, 3), &mut c),
+        "no press is held"
+    );
+    router.handle(moved(10, 10), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert!(
+        !router.carry(tool, owner, Point::ORIGIN, &mut c),
+        "not held there"
+    );
+    assert!(router.carry(owner, tool, Point::new(2, 3), &mut c));
+    assert_eq!(
+        c.window(tool).map(crate::window::Window::origin),
+        Some(Point::new(8, 7))
+    );
+    assert_eq!(router.focused(), Some(owner), "the keyboard stays");
+    assert_eq!(
+        router.handle(moved(20, 30), &mut c, T0),
+        InputResponse::Moved {
+            window: tool,
+            origin: Point::new(18, 27),
+        }
+    );
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::MoveEnded { window: tool },
+        "the release ends the move and reaches no content"
+    );
+    assert!(router.client_grab().is_none());
 }
 
 #[test]

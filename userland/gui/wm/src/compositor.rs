@@ -1510,11 +1510,49 @@ impl Compositor {
         origin: Point,
         surface: Surface,
     ) -> Option<WindowId> {
+        self.add_transient(parent, origin, surface, false)
+    }
+
+    /// Add `surface` as a *floating* transient of `parent` — a tool window —
+    /// at `origin`: stacked, restacked, hidden and closed with its owner as
+    /// any transient is, but never handed the keyboard because its family was
+    /// raised ([`family_front`](Self::family_front)), and brought above its
+    /// floating siblings when it is itself raised. `None` for an unknown
+    /// `parent`.
+    pub fn add_floating_window(
+        &mut self,
+        parent: WindowId,
+        origin: Point,
+        surface: Surface,
+    ) -> Option<WindowId> {
+        self.add_transient(parent, origin, surface, true)
+    }
+
+    /// Add a transient of `parent`, floating beside it when `floating`.
+    ///
+    /// A transient of a transient — a tooltip or a menu over a tool window —
+    /// joins its owner's family, so every family stays one level deep and
+    /// moves, hides and closes as one.
+    fn add_transient(
+        &mut self,
+        parent: WindowId,
+        origin: Point,
+        surface: Surface,
+        floating: bool,
+    ) -> Option<WindowId> {
+        let parent = self.family_root(parent);
         let above = self.family_top(parent)?;
+        let owner_hidden = !self.window(parent)?.is_visible();
         let id = WindowId(self.next_id);
         self.next_id += 1;
         let mut window = Window::new(id, origin, surface);
         window.set_parent(Some(parent));
+        window.set_floating(floating);
+        // Opened on a hidden owner, it waits with the owner to be shown.
+        if owner_hidden {
+            window.set_visible(false);
+            window.set_hidden_with_owner(true);
+        }
         let footprint = window.footprint(self.shadow.reach());
         self.windows.insert(above, window);
         self.mark_layer(id, footprint);
@@ -1556,10 +1594,21 @@ impl Compositor {
     /// carve holes out of a window's input region.
     #[must_use]
     pub fn window_at(&self, point: Point) -> Option<WindowId> {
+        self.topmost_at(point, None)
+    }
+
+    /// The top-most visible window whose bounds contain `point` other than
+    /// `except`: what a window being moved is over, looking past itself.
+    #[must_use]
+    pub fn window_at_except(&self, point: Point, except: WindowId) -> Option<WindowId> {
+        self.topmost_at(point, Some(except))
+    }
+
+    fn topmost_at(&self, point: Point, except: Option<WindowId>) -> Option<WindowId> {
         self.windows
             .iter()
             .rev()
-            .find(|w| w.catches_pointer() && w.claims_pointer(point))
+            .find(|w| Some(w.id()) != except && w.catches_pointer() && w.claims_pointer(point))
             .map(Window::id)
     }
 
@@ -1700,10 +1749,19 @@ impl Compositor {
     /// released has nothing to draw until its app presents, so the redraw is
     /// asked for now rather than leaving it blank until something else
     /// happens to it.
+    ///
+    /// A window's transients go with it: hiding an owner hides those of its
+    /// menus, sheets and palettes that were showing, and showing it again
+    /// shows exactly those, so a minimised window leaves nothing of its own
+    /// floating over the desktop and one hidden for its own reasons stays
+    /// hidden.
     pub fn set_visible(&mut self, id: WindowId, visible: bool) -> bool {
         let known = self.mutate(id, |w| w.set_visible(visible));
         if !known {
             return false;
+        }
+        if self.window(id).is_some_and(|w| w.parent().is_none()) {
+            self.carry_family_visibility(id, visible);
         }
         if visible {
             // A notice not yet drained is one the embedder has not acted on,
@@ -1723,6 +1781,31 @@ impl Compositor {
             let _ = self.take_content_under_pressure(index, self.pressure.sample(), None);
         }
         true
+    }
+
+    /// Hide `root`'s showing transients with it, or show again those that
+    /// were hidden with it.
+    fn carry_family_visibility(&mut self, root: WindowId, visible: bool) {
+        let family: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|w| w.parent() == Some(root))
+            .filter(|w| {
+                if visible {
+                    w.hidden_with_owner()
+                } else {
+                    w.is_visible()
+                }
+            })
+            .map(Window::id)
+            .collect();
+        for id in family {
+            self.mutate(id, |w| {
+                w.set_hidden_with_owner(!visible);
+                false
+            });
+            self.set_visible(id, visible);
+        }
     }
 
     /// Declare that a client presents the window named by `id` and can be
@@ -1939,7 +2022,40 @@ impl Compositor {
             return false;
         }
         self.restack_family(self.family_root(id), StackTarget::Front);
+        if self.window(id).is_some_and(Window::is_floating) {
+            self.front_of_family(id);
+        }
         true
+    }
+
+    /// Bring transient `id` above every other member of its family — what a
+    /// press on one of two overlapping palettes asks for — marking where it
+    /// and the members it crossed overlap.
+    fn front_of_family(&mut self, id: WindowId) {
+        let Some(at) = self.index_of(id) else {
+            return;
+        };
+        let Some(front) = self.windows[at]
+            .parent()
+            .and_then(|root| self.family_front_index(root))
+        else {
+            return;
+        };
+        if at >= front {
+            return;
+        }
+        let reach = self.shadow.reach();
+        let crossed: Vec<Rect> = self.windows[at + 1..=front]
+            .iter()
+            .filter(|window| window.is_visible())
+            .map(|window| window.footprint(reach))
+            .collect();
+        let window = self.windows.remove(at);
+        let bounds = window.footprint(reach);
+        self.windows.insert(front, window);
+        for over in crossed {
+            self.mark_from(bounds.intersection(&over), at);
+        }
     }
 
     /// Send a window to the bottom of the z-order (put-to-back), keeping it
@@ -2004,20 +2120,27 @@ impl Compositor {
         self.window(id).and_then(Window::parent).unwrap_or(id)
     }
 
-    /// The front-most window of `id`'s family — the top-most transient its
-    /// owner has open, or `id`'s own family root when it has none. `None` for
-    /// a window this compositor does not know.
+    /// The window of `id`'s family a raised family gives the keyboard to: the
+    /// top-most transient its owner has open that hangs from it, or `id`'s own
+    /// family root when it has none. `None` for a window this compositor does
+    /// not know.
     ///
-    /// A family rises as a unit ([`raise`](Self::raise)), so after a raise this
-    /// is the window the pointer and the keyboard actually meet. Anything
-    /// choosing a window to *focus* must ask for it rather than focus the
-    /// owner: a sheet or menu its owner opened sits above that owner, so
+    /// Anything choosing a window to *focus* must ask for it rather than focus
+    /// the owner: a sheet or menu its owner opened sits above that owner, so
     /// focusing the owner would put the keyboard behind a surface the user can
-    /// see and the owner cannot dismiss.
+    /// see and the owner cannot dismiss. A floating tool window is passed
+    /// over: it takes the keyboard only when it is pressed.
     #[must_use]
     pub fn family_front(&self, id: WindowId) -> Option<WindowId> {
-        let front = self.family_front_index(self.family_root(id))?;
-        self.windows.get(front).map(Window::id)
+        let root = self.family_root(id);
+        self.index_of(root)?;
+        Some(
+            self.windows
+                .iter()
+                .rev()
+                .find(|window| window.parent() == Some(root) && !window.is_floating())
+                .map_or(root, Window::id),
+        )
     }
 
     /// How many windows `id` owns as transients.

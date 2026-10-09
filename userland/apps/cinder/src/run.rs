@@ -41,8 +41,8 @@ mod program {
         AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, LayerDepth,
         PointerAction, TerrainPlate, WindowEvent, WindowSizing, DESKTOP_LAYER_MAX_PLATES,
     };
-    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
-    use tairix_appdata::{RtHost, Settings};
+    use tairix_abi::{Errno, ProcId};
+    use tairix_appdata::{PublishJob, RtHost, Settings};
     use tairix_cinder::cinder::{Eyes, Pose};
     use tairix_cinder::gait;
     use tairix_cinder::layout::{self, PenLayout, COMPANION_SIDE};
@@ -57,8 +57,9 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_raster::Surface;
     use tairix_rng::FastRng;
+    use tairix_rt::sync::WorkerWake;
+    use tairix_rt::work::WorkerGuard;
     use tairix_theme::{Theme, ThemeRegistry, Timeline};
-    use tairix_util::defer::JobDesk;
     use tairix_util::mathf;
     use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
@@ -88,150 +89,53 @@ mod program {
     /// The name this program states its refusals under.
     const APP_NAME: &str = "cinder";
 
-    // ---- the saved-mood writer -----------------------------------------
+    /// The saved-mood writer: latest-wins with at most one write in flight, so
+    /// a companion whose mood keeps moving costs one further write rather than
+    /// a backlog, and two writes never race for what the store ends up saying.
+    type Writer = tairix_rt::work::Worker<(), Saved, Result<(), Errno>>;
 
-    /// The desk the loop submits a saved-mood write to and the worker takes it
-    /// from.
-    ///
-    /// Latest-wins with at most one write in flight, so a companion whose mood
-    /// keeps moving costs one further write rather than a backlog, and two
-    /// writes can never race for what the store ends up saying.
-    struct Writer {
-        desk: tairix_rt::sync::Mutex<JobDesk<Saved, Result<(), Errno>>>,
-        signal: tairix_rt::sync::Condvar,
-        wake: tairix_rt::sync::WorkerWake,
+    /// Write `saved` into the companion's own store.
+    fn write_saved(_: &mut (), saved: &mut Saved) -> Result<(), Errno> {
+        let mut host = RtHost;
+        let mut settings = Settings::open_without_defaults(&mut host);
+        tairix_appdata::publish(&mut settings, &PublishJob::Save(*saved)).map(drop)
     }
 
-    impl Writer {
-        fn new() -> Self {
-            Self {
-                desk: tairix_rt::sync::Mutex::new(JobDesk::new()),
-                signal: tairix_rt::sync::Condvar::new(),
-                wake: tairix_rt::sync::WorkerWake::create(),
-            }
-        }
-
-        /// Hand a write to the worker, or — with no worker to take it — do it
-        /// here. Slower under load, never wrong, and never a dropped record.
-        fn submit(&self, saved: Saved, armed: bool) {
-            if !armed {
-                if let Err(err) = Self::write(saved) {
-                    app::report(
-                        APP_NAME,
-                        format_args!("could not save Cinder's mood ({err:?})"),
-                    );
-                }
-                return;
-            }
-            let submitted = self.desk.lock().submit(saved);
-            if submitted.wake {
-                self.signal.notify_one();
-            }
-        }
-
-        /// The worker's whole life: park until a write is wanted, do it, wake
-        /// the loop.
-        fn serve(&self) {
-            loop {
-                let job = {
-                    let mut desk = self.desk.lock();
-                    loop {
-                        if desk.stopping() {
-                            return;
-                        }
-                        if let Some(job) = desk.next_job() {
-                            break job;
-                        }
-                        desk = self.signal.wait(desk);
-                    }
-                };
-                // The round trip itself, with no lock held: this is the call
-                // that would otherwise have stalled the frame.
-                let outcome = Self::write(job);
-                if self.desk.lock().deliver(outcome) {
-                    self.wake.nudge();
-                }
-            }
-        }
-
-        /// Open the store and write `saved` into it.
-        fn write(saved: Saved) -> Result<(), Errno> {
-            let document = saved.to_document().map_err(|_| Errno::OutOfRange)?;
-            let mut host = RtHost;
-            let mut settings = Settings::open_without_defaults(&mut host);
-            settings.replace(&document).map_err(|_| Errno::NoSpace)
-        }
-
-        /// Take a landed answer, if one has.
-        fn collect(&self) -> Option<Result<(), Errno>> {
-            self.desk.lock().collect()
-        }
-
-        /// Ask the worker to leave and wake it.
-        fn stop(&self) {
-            self.desk.lock().stop();
-            self.signal.notify_all();
+    /// Say why a mood could not be kept.
+    fn report_write(written: Option<Result<(), Errno>>) {
+        if let Some(Err(err)) = written {
+            app::report(APP_NAME, tairix_appdata::Refusal::NotSaved(err));
         }
     }
 
-    /// Stop the worker's desk when the program ends, so the thread is not left
-    /// parked on a condition nothing will signal.
-    struct WriterGuard(Arc<Writer>);
-
-    impl Drop for WriterGuard {
-        fn drop(&mut self) {
-            self.0.stop();
-        }
-    }
-
-    /// Start the worker, answering whether one is actually running.
-    fn start_writer(writer: &Arc<Writer>, set: u64) -> bool {
-        let Some(read) = writer.wake.read_end() else {
+    /// Start the writer and join its wake to the loop's wait-set. A kernel
+    /// that grants neither leaves the write on the frame loop, which is slower
+    /// under load but never loses a mood.
+    fn start_writer(writer: &Arc<Writer>, set: u64) {
+        if let Err(reason) = Writer::start(writer) {
             app::report(
                 APP_NAME,
-                "no writer wake pipe; Cinder's mood is saved on the frame loop",
+                format_args!("no writer ({reason:?}); Cinder's mood is saved on the frame loop"),
             );
-            return false;
-        };
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Stream,
-            u64::from(read),
-            WRITER_TOKEN,
-        ) != 0
-        {
+            return;
+        }
+        if let Err(err) = app::watch_wake(set, writer.wake(), WRITER_TOKEN) {
             app::report(
                 APP_NAME,
-                "writer wake refused; Cinder's mood is saved on the frame loop",
+                format_args!("writer wake refused ({err}); a failed save is said late"),
             );
-            return false;
-        }
-        let served = Arc::clone(writer);
-        match tairix_rt::thread::Thread::spawn(move || served.serve()) {
-            Ok(_) => true,
-            Err(err) => {
-                app::report(
-                    APP_NAME,
-                    format_args!(
-                        "no writer thread ({err:?}); Cinder's mood is saved on the frame loop"
-                    ),
-                );
-                false
-            }
         }
     }
 
-    /// Read the saved mood, falling back on a fresh companion.
+    /// Read the saved mood, falling back on a fresh companion, saying what of
+    /// it could not be read.
     fn load_saved() -> Saved {
         let mut host = RtHost;
-        let settings = Settings::open_without_defaults(&mut host);
-        match settings.document() {
-            Ok(document) => Saved::from_document(&document),
-            // A store the service could not serve leaves a fresh companion,
-            // which is the ordinary first run rather than a fault.
-            Err(_) => Saved::default(),
+        let (saved, refusals) = tairix_appdata::loaded(&Settings::open_without_defaults(&mut host));
+        for refusal in refusals {
+            app::report(APP_NAME, refusal);
         }
+        saved
     }
 
     /// A generator seeded from the kernel, so two companions on one desktop do
@@ -502,9 +406,9 @@ mod program {
         };
         let event_endpoint = binding.endpoint();
 
-        let writer = Arc::new(Writer::new());
-        let armed = start_writer(&writer, binding.set());
-        let _guard = WriterGuard(Arc::clone(&writer));
+        let writer = Arc::new(Writer::new(write_saved, (), WorkerWake::create()));
+        start_writer(&writer, binding.set());
+        let _guard = WorkerGuard::new(&writer);
 
         let saved = load_saved();
         let mut companion = Companion {
@@ -554,7 +458,6 @@ mod program {
             &mut themes,
             &mut pen_layout,
             &writer,
-            armed,
             binding.set(),
             event_endpoint,
             server,
@@ -653,7 +556,6 @@ mod program {
         themes: &mut ThemeRegistry,
         pen_layout: &mut PenLayout,
         writer: &Arc<Writer>,
-        armed: bool,
         set: u64,
         event_endpoint: u64,
         server: ProcId,
@@ -697,12 +599,8 @@ mod program {
                     continue;
                 }
                 Some(Wake::App(WRITER_TOKEN)) => {
-                    if let Some(Err(err)) = writer.collect() {
-                        app::report(
-                            APP_NAME,
-                            format_args!("could not save Cinder's mood ({err:?})"),
-                        );
-                    }
+                    writer.wake().drain();
+                    report_write(writer.collect());
                     continue;
                 }
                 Some(Wake::PressureChanged | Wake::PressureUnchanged | Wake::App(_)) => continue,
@@ -766,7 +664,12 @@ mod program {
                             // *Quit* ends him, and takes him off the desktop
                             // on the way out.
                             put_away(companion, window, pen_layout);
-                            writer.submit(companion.saved(), armed);
+                            let _ = writer.submit(companion.saved());
+                            // The mood he leaves in is seen out, not dropped
+                            // with the worker.
+                            while let Some(written) = writer.wait() {
+                                report_write(Some(written));
+                            }
                             return 0;
                         }
                         if item.get() == ROW_OUT {

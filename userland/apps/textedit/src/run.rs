@@ -56,7 +56,7 @@ mod program {
     use tairix_textedit::view::{Own, View};
     use tairix_theme::{TextRole, Theme};
     use tairix_window::docapp::{
-        self, AnswerWake, DocWindow, DocumentApp, Handle, Host, Stamp, APP_TOKEN,
+        self, AnswerWake, DocWindow, DocumentApp, Handle, Host, NoAppView, Stamp, APP_TOKEN,
     };
     use tairix_window::document::{Access, ReadFailure, SaveJob, SavedDocument, UNTITLED};
     use tairix_window::{clipboard, Desktop};
@@ -270,6 +270,7 @@ mod program {
 
     impl DocumentApp for TextEdit {
         type View = View;
+        type AppView = NoAppView<Faces>;
         type Snapshot = Snapshot;
         type Extra = Detect;
         type Work = Work;
@@ -435,6 +436,17 @@ mod program {
             focused: bool,
         ) {
             render_into(surface, view, layout, theme, scale, faces, focused);
+        }
+
+        fn render_app(
+            &mut self,
+            _: &mut Surface,
+            view: &NoAppView<Faces>,
+            (): &(),
+            _: (&Theme, Scale, Faces),
+            _: bool,
+        ) {
+            let () = view.never();
         }
     }
 

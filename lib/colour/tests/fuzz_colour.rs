@@ -10,13 +10,16 @@
 //!    either names comes back unchanged through its own coordinates.
 //! 3. [`Hue::from_degrees_f64`] and [`Fraction::from_f64`] are total over
 //!    every `f64`, `NaN` and the infinities included.
+//! 4. [`Cmyk`] brings every ink back as a colour that comes back through its
+//!    own inks, and the measured spaces — [`Lab`], [`Lch`], [`Illuminant`] —
+//!    are total over every `f64`, a value outside sRGB answering clipped.
 //!
 //! The fixed sweep runs under plain `cargo test`; under `cargo xtask fuzz`
 //! the same seeded stream keeps being drawn until the budget elapses.
 
 use std::string::{String, ToString};
 
-use tairix_colour::{parse_hex, Fraction, HexForm, Hsl, Hsv, Hue};
+use tairix_colour::{parse_hex, Cmyk, Fraction, HexForm, Hsl, Hsv, Hue, Illuminant, Lab, Lch};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run when no budget is set.
@@ -101,5 +104,37 @@ fn every_css_number_is_held_to_the_circle_and_the_unit() {
         if number >= 1.0 {
             assert_eq!(fraction, Fraction::ALL, "{number}");
         }
+    });
+}
+
+#[test]
+fn every_ink_names_a_colour_that_comes_back_through_its_own_inks() {
+    fuzz("fuzz_colour::cmyk", |rng| {
+        let mut ink = || Fraction::from_raw(rng.next_u16());
+        let inks = Cmyk::new(ink(), ink(), ink(), ink());
+        let rgb = inks.to_rgb();
+        assert_eq!(Cmyk::from_rgb(rgb).to_rgb(), rgb, "{inks:?}");
+    });
+}
+
+#[test]
+fn every_measured_number_lands_in_srgb_or_is_refused() {
+    fuzz("fuzz_colour::measured", |rng| {
+        let mut number = || f64::from_bits(rng.next_u64());
+        let lab = Lab {
+            l: number(),
+            a: number(),
+            b: number(),
+        };
+        let _ = lab.to_rgb();
+        let lch = Lch {
+            l: number(),
+            c: number(),
+            h: number(),
+        };
+        let _ = lch.to_rgb();
+        let light = Illuminant::new(number(), number());
+        let _ = light.white();
+        let _ = Illuminant::of_linear([number(), number(), number()]);
     });
 }

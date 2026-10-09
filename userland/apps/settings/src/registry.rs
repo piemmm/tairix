@@ -578,6 +578,8 @@ const CACHING_SETTINGS: &[&str] = &[
 /// The Appearance pane's setting labels.
 const APPEARANCE_SETTINGS: &[&str] = &[
     Setting::Appearance.label(),
+    Setting::Font.label(),
+    Setting::TextSize.label(),
     Setting::Contrast.label(),
     Setting::Density.label(),
     Setting::Motion.label(),

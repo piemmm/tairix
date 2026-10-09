@@ -169,29 +169,6 @@ impl Difficulty {
         }
     }
 
-    /// The locale-neutral identifier the best-times store spells this
-    /// difficulty with.
-    ///
-    /// A custom size keeps no best time — no two custom boards are the same
-    /// game — so only the presets have one.
-    #[must_use]
-    pub const fn preset_id(self) -> Option<&'static str> {
-        match self {
-            Self::Beginner => Some("beginner"),
-            Self::Intermediate => Some("intermediate"),
-            Self::Expert => Some("expert"),
-            Self::Custom(_) => None,
-        }
-    }
-
-    /// The preset a stored identifier names; `None` for anything else.
-    #[must_use]
-    pub fn from_preset_id(id: &str) -> Option<Self> {
-        Self::PRESETS
-            .into_iter()
-            .find(|preset| preset.preset_id() == Some(id))
-    }
-
     /// The name shown in the menu and the best-times list.
     #[must_use]
     pub const fn title(self) -> &'static str {

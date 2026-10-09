@@ -16,11 +16,10 @@
 //! which reports it. One corrupt entry therefore costs only itself and can
 //! never become a time nobody played.
 
-use alloc::vec::Vec;
+use alloc::string::String;
+use core::fmt::Write as _;
 
-use tairix_abi::Errno;
-use tairix_appconf::ConfError;
-use tairix_appdata::Settings;
+use tairix_appconf::{as_u32, Registry};
 
 use crate::board::Difficulty;
 
@@ -31,52 +30,39 @@ use crate::board::Difficulty;
 /// from a hand-edited document, not a capacity.
 pub const MAX_TIME_SECS: u32 = 999;
 
-/// The store key a preset's best time is kept under.
-fn key(difficulty: Difficulty) -> Option<&'static str> {
-    match difficulty {
-        Difficulty::Beginner => Some("best.beginner"),
-        Difficulty::Intermediate => Some("best.intermediate"),
-        Difficulty::Expert => Some("best.expert"),
-        Difficulty::Custom(_) => None,
+/// A board a best time is kept for: a preset, never a custom size.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Preset {
+    /// [`Difficulty::Beginner`].
+    Beginner,
+    /// [`Difficulty::Intermediate`].
+    Intermediate,
+    /// [`Difficulty::Expert`].
+    Expert,
+}
+
+impl Preset {
+    /// Every preset, in the order [`Difficulty::PRESETS`] lists them.
+    pub const ALL: [Self; 3] = [Self::Beginner, Self::Intermediate, Self::Expert];
+
+    /// The preset `difficulty` is, if it is one.
+    #[must_use]
+    pub const fn of(difficulty: Difficulty) -> Option<Self> {
+        match difficulty {
+            Difficulty::Beginner => Some(Self::Beginner),
+            Difficulty::Intermediate => Some(Self::Intermediate),
+            Difficulty::Expert => Some(Self::Expert),
+            Difficulty::Custom(_) => None,
+        }
     }
-}
 
-/// A stored entry that could not be read, so the caller can say which.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Refused {
-    /// The key whose value was refused.
-    pub key: &'static str,
-    /// Why.
-    pub reason: Reason,
-}
-
-/// Why a stored best time was refused.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Reason {
-    /// The value is not a number the store's format admits.
-    Malformed,
-    /// The value is a number, but outside the bounds a time may take.
-    OutOfRange,
-}
-
-/// Why writing the best times failed.
-///
-/// Two distinct refusals rather than one, because they mean different things to
-/// a player: a value the document's own format would not hold, and a service
-/// that would not commit.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SaveError {
-    /// The store's format refused a value.
-    Staging(ConfError),
-    /// The service refused the commit.
-    Commit(Errno),
-}
-
-impl core::fmt::Display for SaveError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    /// The store key its best time is kept under.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::Staging(err) => write!(f, "the settings store refused the time: {err}"),
-            Self::Commit(err) => write!(f, "the settings service refused the write: {err:?}"),
+            Self::Beginner => "best.beginner",
+            Self::Intermediate => "best.intermediate",
+            Self::Expert => "best.expert",
         }
     }
 }
@@ -90,44 +76,28 @@ pub struct BestTimes {
 }
 
 impl BestTimes {
-    /// Read the best times out of `settings`, naming every entry it refused.
-    ///
-    /// Never fails: an unreadable store simply has no best times in it, which
-    /// is the same thing a new user has.
-    #[must_use]
-    pub fn load(settings: &Settings<'_>) -> (Self, Vec<Refused>) {
-        let mut times = Self::default();
-        let mut refused = Vec::new();
-        for difficulty in Difficulty::PRESETS {
-            let Some(key) = key(difficulty) else {
-                continue;
-            };
-            match settings.u32(key) {
-                Ok(None) => {}
-                Ok(Some(secs)) if secs > 0 && secs <= MAX_TIME_SECS => {
-                    times.set(difficulty, Some(secs));
-                }
-                Ok(Some(_)) => refused.push(Refused {
-                    key,
-                    reason: Reason::OutOfRange,
-                }),
-                Err(_) => refused.push(Refused {
-                    key,
-                    reason: Reason::Malformed,
-                }),
-            }
-        }
-        (times, refused)
-    }
-
     /// The best time on `difficulty`, in seconds.
     #[must_use]
     pub const fn best(&self, difficulty: Difficulty) -> Option<u32> {
-        match difficulty {
-            Difficulty::Beginner => self.beginner,
-            Difficulty::Intermediate => self.intermediate,
-            Difficulty::Expert => self.expert,
-            Difficulty::Custom(_) => None,
+        match Preset::of(difficulty) {
+            Some(preset) => self.of(preset),
+            None => None,
+        }
+    }
+
+    const fn of(&self, preset: Preset) -> Option<u32> {
+        match preset {
+            Preset::Beginner => self.beginner,
+            Preset::Intermediate => self.intermediate,
+            Preset::Expert => self.expert,
+        }
+    }
+
+    const fn slot(&mut self, preset: Preset) -> &mut Option<u32> {
+        match preset {
+            Preset::Beginner => &mut self.beginner,
+            Preset::Intermediate => &mut self.intermediate,
+            Preset::Expert => &mut self.expert,
         }
     }
 
@@ -136,13 +106,13 @@ impl BestTimes {
     /// A custom board keeps no time, and a time past the bound is not a record
     /// — a game nobody could read the clock on is not one to beat.
     pub fn record(&mut self, difficulty: Difficulty, secs: u32) -> bool {
-        if key(difficulty).is_none() || secs == 0 || secs > MAX_TIME_SECS {
+        let Some(preset) = Preset::of(difficulty) else {
+            return false;
+        };
+        if secs == 0 || secs > MAX_TIME_SECS || self.of(preset).is_some_and(|best| best <= secs) {
             return false;
         }
-        if self.best(difficulty).is_some_and(|best| best <= secs) {
-            return false;
-        }
-        self.set(difficulty, Some(secs));
+        *self.slot(preset) = Some(secs);
         true
     }
 
@@ -156,44 +126,29 @@ impl BestTimes {
     pub const fn is_empty(&self) -> bool {
         self.beginner.is_none() && self.intermediate.is_none() && self.expert.is_none()
     }
+}
 
-    /// Write these times into `settings` and commit.
-    ///
-    /// Only keys whose value differs from what the store already implies are
-    /// touched, so the user's own document holds what they actually achieved
-    /// and nothing else; a forgotten time is removed rather than written as a
-    /// zero the loader would then have to interpret.
-    ///
-    /// # Errors
-    ///
-    /// Whichever refusal stopped the write — the caller reports it.
-    pub fn save(&self, settings: &mut Settings<'_>) -> Result<(), SaveError> {
-        for difficulty in Difficulty::PRESETS {
-            let Some(key) = key(difficulty) else {
-                continue;
-            };
-            let stored = settings.u32(key).ok().flatten();
-            match self.best(difficulty) {
-                Some(secs) if stored != Some(secs) => {
-                    settings.set_u32(key, secs).map_err(SaveError::Staging)?;
-                }
-                None if stored.is_some() => settings.unset(key),
-                _ => {}
-            }
-        }
-        if !settings.is_dirty() {
-            return Ok(());
-        }
-        settings.commit().map_err(SaveError::Commit)
+impl Registry for BestTimes {
+    type Key = Preset;
+    const KEYS: &'static [Preset] = &Preset::ALL;
+
+    fn name(preset: Preset) -> &'static str {
+        preset.name()
     }
 
-    fn set(&mut self, difficulty: Difficulty, secs: Option<u32>) {
-        match difficulty {
-            Difficulty::Beginner => self.beginner = secs,
-            Difficulty::Intermediate => self.intermediate = secs,
-            Difficulty::Expert => self.expert = secs,
-            Difficulty::Custom(_) => {}
+    fn read(&mut self, preset: Preset, text: &str) -> bool {
+        match as_u32(text) {
+            Ok(secs) if secs > 0 && secs <= MAX_TIME_SECS => {
+                *self.slot(preset) = Some(secs);
+                true
+            }
+            _ => false,
         }
+    }
+
+    fn spell(&self, preset: Preset, out: &mut String) -> bool {
+        self.of(preset)
+            .is_some_and(|secs| write!(out, "{secs}").is_ok())
     }
 }
 

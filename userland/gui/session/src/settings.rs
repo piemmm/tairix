@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use tairix_abi::pinboard_ipc::PinboardRequest;
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
+use tairix_appconf::Registry;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
 use tairix_geometry::Scale;
 use tairix_touch::TouchSettings;
@@ -261,6 +262,7 @@ mod tests {
 
     use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
     use tairix_abi::Errno;
+    use tairix_appconf::Registry;
     use tairix_appdata::fake::FakeService;
     use tairix_wallpaper::{
         DesktopSettings, DocumentRefusal, IconFlow, IconSort, SettingsKey, WallpaperChoice,

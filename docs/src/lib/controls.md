@@ -51,8 +51,9 @@ under the floor and are unchanged.
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A |
-| `number` | `NumberField`: an integer between two bounds, live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, settled by a step, Enter or the owner's commit as the focus leaves |
-| `colour_picker` | `ColourPicker`: one colour by its hue, saturation and value plane and hue strip, an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and H/S/V/R/G/B/A number fields, laid beside the plane in wide bounds and beneath it in narrow ones |
+| `number` | `NumberField`: an integer between two bounds — or a whole number of hundredths and the like, spelled with a point (`with_decimals`) — live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, settled by a step, Enter or the owner's commit as the focus leaves |
+| `colour_picker` | `ColourPicker`: one colour picked on a square (saturation and value plane and hue strip), a wheel (hue ring round a saturation and value triangle) or sliders (a swept track per channel), an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and number fields for one model's channels and A, its values held as typed, laid beside the view in wide bounds and beneath it in narrow ones |
+| `colour_model` | `PickerView` and `ColourModel` — RGB, HSV, HSL, CMYK, Lab, `LCh` or grey — with each model's channels (`ChannelSpec`) and its conversions to and from a colour, a CIE value past sRGB reported clipped |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar` (across a window or down it), `Tab`/`Tabs`, `ComboBox` |
 | `disclosure` | `DisclosureSet`, which sections of a list are showing their pages, and `tree_step`, what Right and Left do there |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
@@ -725,6 +726,13 @@ after the marks, the foot runs unbroken under a lit command, and both are
 washes, so the rim's neutral and a hue-washed band are lit alike. Under heavy
 contrast the active frame's inner rim line is a solid ring on the plate's own
 corners.
+
+`WindowFrame::tool()` is a tool window's frame: the same rim, plate and hit
+map around a mini band (`TitleBarCommands::Tool`, Close alone, its title in
+the caption face) on `tool_title_bar_height`. The frame's insets, layout,
+floor and hit map read the band height of the commands its title bar seats
+(`TitleBar::height_of`), so one frame type serves both kinds of window and the
+inverse `outer_for_client` round-trips for each. It offers no resize edge.
 
 ## Surface ground: opaque, floating chrome, or a frosted window
 

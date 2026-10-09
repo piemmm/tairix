@@ -102,7 +102,7 @@ fn enter_accepts_and_escape_turns_down() {
 
 #[test]
 fn a_new_picture_reads_its_size_and_refuses_one_out_of_bounds() {
-    let mut form = Form::new_picture((640, 480));
+    let mut form = Form::new_picture(crate::document::NewPicture::DEFAULT, SaveFormat::Png);
     assert_eq!(
         form.new_picture_answer(),
         Ok((
@@ -134,7 +134,11 @@ fn a_new_picture_reads_its_size_and_refuses_one_out_of_bounds() {
 
 #[test]
 fn a_new_picture_offers_the_colours_and_background_its_format_holds() {
-    let mut form = Form::new_picture((64, 48));
+    let sized = crate::document::NewPicture {
+        size: (64, 48),
+        ..crate::document::NewPicture::DEFAULT
+    };
+    let mut form = Form::new_picture(sized, SaveFormat::Png);
     form.follow_new_picture(&choose(0, format_index(SaveFormat::Gif)));
     let (picture, format) = form.new_picture_answer().expect("good");
     assert_eq!(format, SaveFormat::Gif);
@@ -154,6 +158,17 @@ fn a_new_picture_offers_the_colours_and_background_its_format_holds() {
     assert_eq!(form.group.rows().len(), 4, "a JPEG is never clear");
     form.follow_new_picture(&choose(0, format_index(SaveFormat::Tiff)));
     assert_eq!(form.new_picture_answer().expect("good").1, SaveFormat::Tiff);
+}
+
+#[test]
+fn a_new_picture_starts_at_what_the_settings_name() {
+    let settled = crate::document::NewPicture {
+        size: (32, 16),
+        depth: Some(IndexDepth::Four),
+        transparent: true,
+    };
+    let form = Form::new_picture(settled, SaveFormat::Gif);
+    assert_eq!(form.new_picture_answer(), Ok((settled, SaveFormat::Gif)));
 }
 
 #[test]
@@ -300,35 +315,6 @@ fn clicking_the_confirm_button_accepts() {
         &mut damage,
     );
     assert_eq!(answer, Some(Answer::Confirmed));
-}
-
-#[test]
-fn a_filter_form_holds_a_slider_a_number_and_follows_them() {
-    use crate::filter::Filter;
-    let start = Filter::Sharpen {
-        amount: 100,
-        radius: 2,
-    };
-    let mut form = Form::filter(start);
-    assert_eq!(form.purpose(), Purpose::Filter);
-    assert_eq!(form.group.rows().len(), 2, "amount and radius");
-    assert_eq!(form.filter_answer(), Some(start));
-    form.follow_filter(&FieldGroupAction {
-        row: 1,
-        action: FieldAction::Settled { permille: 1000 },
-    });
-    assert_eq!(
-        form.filter_answer(),
-        Some(Filter::Sharpen {
-            amount: 100,
-            radius: 32
-        }),
-        "the far end of the slider is the most it holds"
-    );
-    assert!(
-        Form::filter(Filter::Edges).group.rows().is_empty(),
-        "nothing to set"
-    );
 }
 
 #[test]

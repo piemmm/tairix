@@ -1,8 +1,8 @@
 use tairix_controls::ScrollOrientation;
 
 use super::{
-    mark_grid, tool_box, view_strip, Options, Setting, Style, Tool, ViewCommand, MAX_SIZE,
-    MOST_SETTINGS, VIEW_COMMANDS,
+    mark_pixel_grid, tool_box, view_strip, Options, Setting, Style, Tool, ViewCommand, MAX_SIZE,
+    MOST_SETTINGS, TOOL_BOX_LANES, VIEW_COMMANDS,
 };
 
 #[test]
@@ -19,13 +19,30 @@ fn each_key_chooses_its_tool_and_names_itself_in_its_label() {
 }
 
 #[test]
-fn the_tool_box_is_every_tool_down_a_column_the_one_in_use_marked() {
+fn the_tool_box_is_every_tool_two_to_a_line_the_one_in_use_marked() {
     let tools = tool_box(Tool::Brush);
     assert_eq!(tools.len(), Tool::ALL.len());
     assert_eq!(
         tools,
-        tool_box(Tool::Brush).with_orientation(ScrollOrientation::Vertical),
-        "already a column"
+        tool_box(Tool::Brush)
+            .with_orientation(ScrollOrientation::Vertical)
+            .with_lanes(TOOL_BOX_LANES),
+        "already a column of two lanes"
+    );
+    let (scale, theme) = (tairix_geometry::Scale::ONE, tairix_theme::Theme::dark());
+    let bounds = tairix_geometry::Rect::new(0, 0, tools.breadth(scale, &theme), 2000);
+    let rect = |at| tools.tool_rect(at, bounds, scale, &theme).expect("seated");
+    assert_eq!(
+        rect(0).top(),
+        rect(1).top(),
+        "Select and Pencil share a line"
+    );
+    assert!(rect(1).left() > rect(0).left());
+    let gap = scale.scale_length(theme.metrics().control_gap);
+    assert_eq!(
+        rect(2).top(),
+        rect(0).top() + tairix_geometry::to_i32(rect(0).height + gap),
+        "the third tool begins the next line"
     );
     assert!(tools.is_active(2));
     assert_eq!(
@@ -39,14 +56,14 @@ fn the_view_strip_marks_the_grid_while_it_shows() {
     let mut strip = view_strip(false);
     assert_eq!(strip.len(), VIEW_COMMANDS.len());
     assert!((0..strip.len()).all(|at| !strip.is_active(at)));
-    mark_grid(&mut strip, true);
+    mark_pixel_grid(&mut strip, true);
     let grid = VIEW_COMMANDS
         .iter()
-        .position(|&(_, command, _)| command == ViewCommand::Grid)
+        .position(|&(_, command, _)| command == ViewCommand::PixelGrid)
         .expect("a grid command");
     assert!(strip.is_active(grid));
     assert_eq!(strip, view_strip(true));
-    mark_grid(&mut strip, false);
+    mark_pixel_grid(&mut strip, false);
     assert_eq!(strip, view_strip(false));
 }
 

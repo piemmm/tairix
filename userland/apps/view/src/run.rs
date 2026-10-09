@@ -1386,8 +1386,8 @@ mod program {
             // A released key or a modifier change runs no command, and focus
             // or minimizing changes nothing drawn. The application-scoped
             // events carry no window, so they were routed before this; the
-            // layer feeds and the wallpaper answer reply to requests this
-            // viewer never makes.
+            // layer feeds, a tool window's moves and the wallpaper answer
+            // reply to requests this viewer never makes.
             WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
@@ -1396,6 +1396,7 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::ToolMoved { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. } => Acted::Idle,

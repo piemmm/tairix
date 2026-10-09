@@ -14,7 +14,7 @@ use crate::metrics::Metrics;
 use crate::motion::{Contrast, Density, Motion, MotionTheme};
 use crate::palette::Palette;
 use crate::syntax::SyntaxPalette;
-use crate::typography::{FamilyKey, Fonts};
+use crate::typography::{DesktopText, FamilyKey, Fonts};
 use tairix_abi::desktop::DesktopInfo;
 use tairix_colour::Rgba;
 
@@ -281,6 +281,20 @@ impl Theme {
         }
     }
 
+    /// The same theme with its text drawn as the user chose, or as it stands
+    /// where `text` is `None`: the one place a desktop text choice reaches a
+    /// face.
+    #[must_use]
+    pub fn with_text(self, text: Option<DesktopText>) -> Self {
+        match text {
+            Some(text) => Self {
+                fonts: self.fonts.with_text(text),
+                ..self
+            },
+            None => self,
+        }
+    }
+
     /// The built-in **dark** theme.
     ///
     /// The tokens are the Reactive Alloy design boards (`plans/desktop1.png`,
@@ -536,6 +550,7 @@ fn common_metrics() -> Metrics {
         sidebar_icon_extent: 22,
         picture_width: 144,
         title_bar_height: 28,
+        tool_title_bar_height: 20,
         frame_inset: 1,
         resize_grabber_extent: 16,
         resize_edge_grab: 8,
@@ -575,19 +590,19 @@ fn common_motion() -> MotionTheme {
 ///
 /// One authored base size drives the whole role ladder, and both appearances
 /// use the same type — the boards change colour between light and dark, never
-/// the type scale. The base is measured from the reference boards, where body
-/// text fills a little under two thirds of a control's height.
+/// the type scale.
 fn common_fonts() -> Fonts {
     Fonts::ladder(UI_FAMILY, MONOSPACE_FAMILY, BASE_TEXT_SIZE_PX)
 }
 
-/// The logical-pixel body size both built-in themes author their ladder at.
-const BASE_TEXT_SIZE_PX: u16 = 18;
+/// The logical-pixel body size both built-in themes author their ladder at:
+/// ten points of Inter, whose line box is 1.21 of its em.
+const BASE_TEXT_SIZE_PX: u16 = 16;
 
 /// The proportional family the shipped themes draw interface text in: the
 /// humanist sans the design boards are set in, installed as `/System/Fonts`
 /// `inter`. A user's own choice replaces it through
-/// [`Fonts::with_ui_family`](crate::Fonts::with_ui_family).
+/// [`Theme::with_text`].
 ///
 /// A spelling the key grammar refuses would leave the desktop with no UI
 /// family at all, so the fallback is the fixed-pitch family every image

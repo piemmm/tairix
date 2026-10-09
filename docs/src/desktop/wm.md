@@ -1763,7 +1763,7 @@ parent, which any app can open for any transient overlay
 - **One new request.** `WindowRequest::CreatePopup { parent_window_id,
   shm_handle, event_endpoint, frame_count, width_px, height_px,
   stride_bytes, format, offset_x, offset_y }`, reached from
-  `WindowClient::create_popup` with one `tairix_window::PopupSpec`. It
+  `WindowClient::create_popup` with one `tairix_window::TransientSpec`. It
   carries no title (a popup is not a taskbar entry) and no `resizable`
   flag (the app sizes it, the user does not drag it). A popup's semantics
   differ from a top-level window's, so it is its own variant rather than
@@ -1836,6 +1836,57 @@ The first consumer is the graphical terminal, whose settings sheet is a popup
 (`plans/GUI-TERMINAL.md` §9). Its window menu is not: a menu is the desktop's
 one chain, opened through `OpenMenu` rather than drawn by the application
 ([Menus](menus.md)).
+
+- **One level only.** A transient hangs from a top-level window of the
+  caller's own: a popup or a tool window named as a parent, or a layer
+  surface, is refused `NotSupported`, because the stacking that keeps a family
+  together is one level deep.
+- **A family hides and shows with its owner.** Hiding a window — minimising
+  it, or any other path through `Compositor::set_visible` — hides those of
+  its transients that were showing, and showing it again shows exactly those
+  (`Window::hidden_with_owner`); one opened on a hidden owner waits with it.
+
+## Tool windows
+
+A floating palette — a pane torn out of a document window — is a **tool
+window**: the decorated sibling of a popup (`plans/APPWIN.md` AW7).
+
+- **Its own request.** `WindowRequest::CreateTool { parent_window_id,
+  shm_handle, event_endpoint, frame_count, width_px, height_px, stride_bytes,
+  format, offset_x, offset_y, carry, title }`, reached from
+  `WindowClient::create_tool` with a `tairix_window::ToolSpec` — a
+  `TransientSpec` plus the carry and the title. It is validated, owned and
+  budgeted exactly as a popup is, and its offset places its *client* from the
+  parent's client origin.
+- **Framed by the window manager.** `ShellWindowHost::tool_opened` opens it
+  through `DesktopShell::open_tool_window` as a *floating* transient
+  (`Compositor::add_floating_window`) wearing `WindowFrame::tool()` — the
+  window's rim, plate and hit map around a mini band on
+  `tool_title_bar_height`, its title in the caption face, Close alone — kept
+  wholly on screen, off the taskbar and the window picker, never resized.
+  `SetTitle` retitles its band.
+- **The keyboard only when pressed.** It opens without focus, and
+  `Compositor::family_front` passes floating transients over, so raising its
+  owner — from the bar or the window picker — gives the keyboard to the
+  owner, not to a palette above it. A press on one raises it above its
+  floating siblings and focuses it like any press.
+- **Carried open.** `carry` is a place along the band, from the client's left
+  edge. When the parent still holds the seat's primary press
+  (`SessionInputRouter::pressed_in`), `DesktopShell::carry_tool_window`
+  hands that press to `InputRouter::carry`: the parent's client grab ends with
+  no release reaching it, the tool window is placed with that place of its
+  band, halfway down, under the pointer, and the press goes on as the window
+  manager's move of it. With no such press the offset places it; a carry
+  never moves a window the user is not holding.
+- **Its moves are reported to its owner, relative to the owner.** Each
+  `Moved` sample and the `MoveEnded` of a tool window becomes
+  `WindowEvent::ToolMoved { window_id, over, ended }`
+  (`windows::tool_move_event`): `ToolOver::Parent { x, y }` while the pointer
+  is over the parent's client area with nothing but the palette itself above
+  it there (`Compositor::window_at_except`), `ToolOver::Elsewhere` otherwise —
+  nothing about the screen. The hold-back folds a run of samples to the
+  newest and sheds them as input; a move's end withdraws the window's earlier
+  move reports and is never shed.
 
 ## Desktop layer surfaces (`CAP_DESKTOP_LAYER`)
 

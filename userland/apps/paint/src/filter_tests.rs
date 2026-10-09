@@ -6,6 +6,7 @@ use super::{apply, Filter, FilterError};
 use crate::canvas::{Canvas, CanvasBuilder, Kind, Sample};
 use crate::mask::Mask;
 use crate::shape::Bounds;
+use crate::tone::{Channel, ColourBalance, Curves, HueRange, HueRanges, Levels, WhiteBalance};
 
 fn flat(width: u32, height: u32, colour: [u8; 4]) -> Canvas {
     Canvas::new(width, height, Kind::Rgba, Sample::Rgba(colour)).expect("fits")
@@ -19,19 +20,7 @@ fn rgba(canvas: &Canvas, x: u32, y: u32) -> [u8; 4] {
 }
 
 #[test]
-fn a_setting_is_held_to_its_bounds_and_black_stays_below_white() {
-    let mut levels = Filter::Levels {
-        black: 0,
-        white: 255,
-        gamma: 100,
-    };
-    levels.set(1, 40);
-    levels.set(0, 200);
-    assert_eq!(
-        (levels.value(0), levels.value(1)),
-        (39, 40),
-        "black held below white"
-    );
+fn a_setting_is_held_to_its_bounds() {
     let mut blur = Filter::Blur { radius: 2 };
     blur.set(0, 1000);
     assert_eq!(blur.value(0), 64);
@@ -44,8 +33,62 @@ fn a_setting_is_held_to_its_bounds_and_black_stays_below_white() {
                 (parameter.least..=parameter.most).contains(&value),
                 "{filter:?} starts in bounds"
             );
+            assert_eq!(parameter.value_of(parameter.permille_of(value)), value);
         }
     }
+}
+
+#[test]
+fn the_adjustments_start_changing_nothing_and_the_filters_do_not() {
+    for filter in Filter::ALL {
+        let adjustment = matches!(
+            filter,
+            Filter::Brightness { .. }
+                | Filter::HueSaturation(_)
+                | Filter::ColourBalance(_)
+                | Filter::Levels(_)
+                | Filter::Curves(_)
+                | Filter::WhiteBalance(_)
+        );
+        assert_eq!(filter.is_identity(), adjustment, "{filter:?}");
+        assert!(filter.same_kind(&filter));
+    }
+    assert!(!Filter::Blur { radius: 2 }.same_kind(&Filter::Sharpen {
+        amount: 1,
+        radius: 2
+    }));
+    assert!(Filter::Blur { radius: 2 }.same_kind(&Filter::Blur { radius: 9 }));
+    assert!(!Filter::Edges.has_settings());
+    assert!(Filter::Levels(Levels::IDENTITY).has_settings());
+}
+
+#[test]
+fn levels_curves_white_balance_and_colour_balance_map_through_the_worker() {
+    let mut levels = Levels::IDENTITY;
+    levels.of_mut(Channel::Composite).white = 128;
+    let mut canvas = flat(2, 2, [64, 128, 200, 255]);
+    apply(&mut canvas, &Filter::Levels(levels), None).expect("room");
+    assert_eq!(rgba(&canvas, 0, 0), [128, 255, 255, 255]);
+    let mut curves = Curves::IDENTITY;
+    curves.of_mut(Channel::Red).set(1, (255, 0));
+    let mut canvas = flat(2, 2, [255, 10, 10, 200]);
+    apply(&mut canvas, &Filter::Curves(curves), None).expect("room");
+    assert_eq!(rgba(&canvas, 1, 1), [0, 10, 10, 200]);
+    let mut canvas = flat(2, 2, [128, 128, 128, 255]);
+    let warm = WhiteBalance {
+        kelvin: 9000,
+        tint: 0,
+    };
+    apply(&mut canvas, &Filter::WhiteBalance(warm), None).expect("room");
+    let [r, _, b, _] = rgba(&canvas, 0, 0);
+    assert!(r > b, "warmed");
+    let mut balance = ColourBalance::NEUTRAL;
+    balance.keep_luminosity = false;
+    balance.tones[1][1] = 100;
+    let mut canvas = flat(2, 2, [128, 128, 128, 255]);
+    apply(&mut canvas, &Filter::ColourBalance(balance), None).expect("room");
+    let [r, g, _, _] = rgba(&canvas, 0, 0);
+    assert!(g > r, "the midtones greened");
 }
 
 #[test]
@@ -62,16 +105,9 @@ fn adjustments_map_each_colour() {
     .expect("room");
     assert_eq!(rgba(&canvas, 1, 1)[0], 228, "lighter by half the range");
     let mut canvas = flat(2, 2, [200, 10, 10, 255]);
-    apply(
-        &mut canvas,
-        &Filter::HueSaturation {
-            hue: 120,
-            saturation: 0,
-            lightness: 0,
-        },
-        None,
-    )
-    .expect("room");
+    let mut turned = HueRanges::IDENTITY;
+    turned.of_mut(HueRange::Master).hue = 120;
+    apply(&mut canvas, &Filter::HueSaturation(turned), None).expect("room");
     let [r, g, b, a] = rgba(&canvas, 0, 0);
     assert!(
         g > r && g > b && a == 255,

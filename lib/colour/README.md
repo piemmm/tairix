@@ -25,13 +25,28 @@ colour conversion and spelling in the tree has one definition.
   lowercase, alpha last where translucent; `Rgb::from_hex` is the six-digit
   form alone. The `#` is the surrounding grammar's: CSS and a colour field
   write one, a settings document cannot.
-- `srgb_to_linear`, `linear_to_srgb` — the IEC 61966-2-1 transfer.
+- `srgb_to_linear`, `linear_to_srgb` — the IEC 61966-2-1 transfer, and
+  `linear_of`, `encode_linear` — an 8-bit colour as linear light and back,
+  clipped to the gamut and saying so (`InGamut`).
+- `Cmyk` — device CMYK, uncalibrated: the complement of sRGB with the black
+  drawn out, in 65535ths, exact for every 8-bit colour.
+- `Xyz`, `Lab`, `Lch` — CIE 1931 XYZ, L\*a\*b\* and its polar LCh(ab) under
+  D65, in `f64`; a colour outside sRGB comes back clipped and marked.
+- `Illuminant`, `KELVIN_MIN`, `KELVIN_MAX` — a light's white by its correlated
+  colour temperature and its Duv off the Planckian locus (Krystek's rational
+  fit, 1000–15000 K), and the temperature and Duv a colour, or a point of the
+  CIE 1960 uv plane, lies at.
+- `uv_of`, `chromaticity_of`, `white_of` — chromaticity to the uv plane and
+  back, and a chromaticity's white as linear sRGB.
 - `legibility` (feature `test-util`, host tests only) — the WCAG 2.1 contrast
   ratio a test holds a colour pair to.
 
 `no_std`, allocation-free and with no `unsafe`; it depends only on `lib/util`
-for the transfer's exponent and the floor that wraps a CSS angle. Tests check
-the round trip through `Hsv` and `Hsl` for every one of the 2^24 colours, the
+for the transfer's exponent, the cube root and angles of the CIE spaces, and
+the floor that wraps a CSS angle. Tests check the round trip through `Hsv`,
+`Hsl` and `Cmyk` for every one of the 2^24 colours and through `Lab` and `Lch`
+for a sample of them, the CIE values of the primaries, D65 and illuminant A's
+temperatures, the
 CSS reference conversions, and a hex spelling's refusal of anything but its
 digits, a sign included; a fuzz harness (`fuzz_colour`) holds the readers total
 over any text and any number.

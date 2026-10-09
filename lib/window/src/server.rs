@@ -340,6 +340,21 @@ pub trait WindowHost {
         Ok(())
     }
 
+    /// A validated `CreateTool` opened tool window `window_id`, a transient
+    /// of the caller's own top-level window `spec.transient.parent_window_id`
+    /// that the host frames with a mini title band reading `spec.title` and
+    /// the user moves. The host places it as it places a popup — or, when
+    /// `spec.carry` is set and the parent holds the seat's primary press,
+    /// under the pointer, that press carried on as a move of the new window —
+    /// and stacks it with its parent, off the taskbar, without the keyboard.
+    ///
+    /// An error refuses it exactly as [`popup_opened`](Self::popup_opened)'s
+    /// does, and the default accepts it without drawing anything.
+    fn tool_opened(&mut self, window_id: u64, spec: &ToolSpec) -> Result<(), Errno> {
+        let _ = (window_id, spec);
+        Ok(())
+    }
+
     /// A validated, capability-gated `OpenLayer` opened desktop layer
     /// surface `window_id` of `surface` geometry for the attested `owner`,
     /// at screen point `x`/`y` in stacking layer `depth`.
@@ -981,20 +996,21 @@ struct ResizeSpec {
     surface: DisplayMode,
 }
 
-/// Everything one `CreatePopup` asks for, in one place: the app half
-/// fills it in for [`WindowClient::create_popup`], the engine's popup
-/// path receives the decoded request as the same unit, so both halves
-/// describe a popup once.
+/// Everything a transient — a popup or a tool window — opens with, in one
+/// place: the app half fills it in for [`WindowClient::create_popup`] and
+/// [`WindowClient::create_tool`], the engine's transient path receives the
+/// decoded request as the same unit, so both halves describe one once.
 ///
 /// [`WindowClient::create_popup`]: crate::client::WindowClient::create_popup
+/// [`WindowClient::create_tool`]: crate::client::WindowClient::create_tool
 #[derive(Copy, Clone)]
-pub struct PopupSpec {
-    /// The caller's own top-level window the popup is anchored to and
-    /// stacked above; a foreign or unknown parent is refused.
+pub struct TransientSpec {
+    /// The caller's own top-level window the transient belongs to and is
+    /// stacked above; a foreign, unknown, or transient parent is refused.
     pub parent_window_id: u64,
-    /// The `shm_grant`ed region holding the popup's frames, mapped once.
+    /// The `shm_grant`ed region holding the transient's frames, mapped once.
     pub shm_handle: u64,
-    /// The endpoint the popup's own events are delivered to.
+    /// The endpoint the transient's own events are delivered to.
     pub event_endpoint: u64,
     /// How many frames the region holds, back to back.
     pub frame_count: u32,
@@ -1004,6 +1020,19 @@ pub struct PopupSpec {
     pub offset_x: i32,
     /// Physical pixels below the parent window's client origin.
     pub offset_y: i32,
+}
+
+/// Everything one `CreateTool` asks for: what any transient opens with, then
+/// how a tool window opens and what its band reads.
+#[derive(Copy, Clone)]
+pub struct ToolSpec {
+    /// The parent, region, event route, geometry and offset.
+    pub transient: TransientSpec,
+    /// Where along its band, from the client's left edge, the press its
+    /// parent holds carries it, if any; less than the client's width.
+    pub carry: Option<u32>,
+    /// What its mini title bar reads.
+    pub title: WindowTitle,
 }
 
 /// Everything a validated [`WindowRequest::OpenLayer`] carries.
@@ -1424,6 +1453,7 @@ impl<M: ShmMapper> WindowServer<M> {
                     // carries it, so an attestation failure must too.
                     WindowRequest::Create { .. }
                     | WindowRequest::CreatePopup { .. }
+                    | WindowRequest::CreateTool { .. }
                     | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), self.server),
                     WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(err)),
                     _ => status(reply, Err(err)),
@@ -1503,29 +1533,11 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
                 create_reply(reply, self.create(host, caller, spec), self.server)
             }
-            WindowRequest::CreatePopup {
-                parent_window_id,
-                shm_handle,
-                event_endpoint,
-                frame_count,
-                width_px,
-                height_px,
-                stride_bytes,
-                format,
-                offset_x,
-                offset_y,
-            } => {
-                let spec = PopupSpec {
-                    parent_window_id,
-                    shm_handle,
-                    event_endpoint,
-                    frame_count,
-                    surface: surface_of(width_px, height_px, stride_bytes, format),
-                    offset_x,
-                    offset_y,
-                };
-                create_reply(reply, self.create_popup(host, caller, spec), self.server)
-            }
+            WindowRequest::CreatePopup { .. } | WindowRequest::CreateTool { .. } => create_reply(
+                reply,
+                self.create_transient(host, caller, decoded),
+                self.server,
+            ),
             WindowRequest::OpenLayer { .. } => {
                 let opened = match layer_spec(decoded) {
                     Some(spec) => self.open_layer(host, caller, &spec),
@@ -1807,6 +1819,7 @@ impl<M: ShmMapper> WindowServer<M> {
             // opening a window down a route that never validated one.
             WindowRequest::Create { .. }
             | WindowRequest::CreatePopup { .. }
+            | WindowRequest::CreateTool { .. }
             | WindowRequest::OpenLayer { .. } => {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
@@ -1916,52 +1929,118 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(window_id)
     }
 
-    /// Open an undecorated popup for `caller`, stacked directly above the
-    /// caller's own window `spec.parent_window_id`.
-    ///
-    /// A popup is validated exactly like a top-level [`Self::create`] —
-    /// no kernel caller, the geometry holds every frame — and additionally
-    /// requires that the parent window is one the caller owns (a foreign
-    /// or unknown parent answers `NotFound`, leaking nothing). Its frames
-    /// are charged against the **same** per-client budget as a top-level
-    /// window's, so a popup can never be used to hold more than the client
-    /// is allowed ([`client_frame_budget_bytes`]). The
-    /// host is told before committing, so a refused popup leaves no record
-    /// and drops the mapping (fail closed).
-    fn create_popup(
+    /// Open the popup or tool window `decoded` asks for, for `caller`.
+    fn create_transient(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
-        spec: PopupSpec,
+        decoded: &WindowRequest,
+    ) -> Result<u64, Errno> {
+        match *decoded {
+            WindowRequest::CreatePopup {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                offset_x,
+                offset_y,
+            } => {
+                let spec = TransientSpec {
+                    parent_window_id,
+                    shm_handle,
+                    event_endpoint,
+                    frame_count,
+                    surface: surface_of(width_px, height_px, stride_bytes, format),
+                    offset_x,
+                    offset_y,
+                };
+                self.open_transient(host, caller, &spec, |host, window_id| {
+                    host.popup_opened(
+                        window_id,
+                        parent_window_id,
+                        offset_x,
+                        offset_y,
+                        &spec.surface,
+                    )
+                })
+            }
+            WindowRequest::CreateTool {
+                parent_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                offset_x,
+                offset_y,
+                carry,
+                title,
+            } => {
+                let spec = ToolSpec {
+                    transient: TransientSpec {
+                        parent_window_id,
+                        shm_handle,
+                        event_endpoint,
+                        frame_count,
+                        surface: surface_of(width_px, height_px, stride_bytes, format),
+                        offset_x,
+                        offset_y,
+                    },
+                    carry,
+                    title,
+                };
+                self.open_transient(host, caller, &spec.transient, |host, window_id| {
+                    host.tool_opened(window_id, &spec)
+                })
+            }
+            _ => Err(Errno::NotSupported),
+        }
+    }
+
+    /// Open a transient — a popup or a tool window — for `caller`, hung
+    /// from the caller's own top-level window `spec.parent_window_id`,
+    /// telling the host through `opened` before anything is committed.
+    ///
+    /// A transient is validated exactly like a top-level [`Self::create`] —
+    /// no kernel caller, the geometry holds every frame — and its parent must
+    /// be a window the caller owns that hangs from nothing itself and is not
+    /// a layer surface: a foreign or unknown parent answers `NotFound`,
+    /// leaking nothing, and a transient's transient is refused `NotSupported`,
+    /// because the stacking that keeps a family together is one level deep. Its frames
+    /// are charged against the **same** per-client budget as a top-level
+    /// window's ([`client_frame_budget_bytes`]). A refused transient leaves
+    /// no record and drops the mapping (fail closed).
+    fn open_transient(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        spec: &TransientSpec,
+        opened: impl FnOnce(&mut dyn WindowHost, u64) -> Result<(), Errno>,
     ) -> Result<u64, Errno> {
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
-        // The parent must be a live window the caller owns; a foreign or
-        // unknown parent is refused before anything is mapped.
-        owned_window(&self.windows, caller, spec.parent_window_id)?;
+        let parent = owned_window(&self.windows, caller, spec.parent_window_id)?;
+        if parent.parent.is_some() || parent.layer.is_some() {
+            return Err(Errno::NotSupported);
+        }
         let frame_len = frame_bytes(&spec.surface)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
-        // A popup's frames are charged against the same per-client budget as
-        // a top-level window's, so "popup" cannot be used to hold more than
-        // the client is allowed.
         if !self.client_frames_fit(caller, total as u64, None) {
             return Err(Errno::NoSpace);
         }
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
         let window_id = self.next_id;
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
-        // Tell the host before committing: a refused popup leaves no record
-        // and drops the mapping (the mapper's cue to unmap).
-        host.popup_opened(
-            window_id,
-            spec.parent_window_id,
-            spec.offset_x,
-            spec.offset_y,
-            &spec.surface,
-        )?;
+        opened(host, window_id)?;
         self.next_id = next;
         self.windows.insert(
             window_id,

@@ -95,6 +95,15 @@ and in the app-data client for its handle — and every registry is written once
 against it. A loader per surface would be one more chance for two of them to
 disagree about what a missing key means.
 
+The registry itself is written once too. A record declares its keys
+(`Registry::KEYS`, read in order, so a key read in the light of another follows
+it), each key's spelling, and the two bridges between a stored text and its
+field; `Registry::load` and `Registry::document_of` are the engine's, so a
+missing key keeps its default, a refused value costs only itself and is named,
+and a setting a store says by its absence is left out. A record edited live
+(`Live`) adds one bridge, taking a setting from another record, from which the
+engine derives which settings two records disagree on as a `Keys` set.
+
 The grammar is also *inside* the one `lib/abi` store-name grammar's shape:
 every bundle identifier and bulk-store name `validate_store_name` admits is a
 legal key, which is what lets a registry key on an identifier

@@ -824,7 +824,7 @@ impl Control {
 }
 
 /// The checkbox mark for `on`.
-const fn selection(on: bool) -> SelectionState {
+pub(crate) const fn selection(on: bool) -> SelectionState {
     if on {
         SelectionState::Selected
     } else {
@@ -833,7 +833,7 @@ const fn selection(on: bool) -> SelectionState {
 }
 
 /// The gap between settings, and the nearer one between a setting's parts.
-fn spacing(scale: Scale, theme: &Theme) -> (u32, u32) {
+pub(crate) fn spacing(scale: Scale, theme: &Theme) -> (u32, u32) {
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     (gap, (gap / 2).max(1))
 }
@@ -879,7 +879,13 @@ fn switch(
 
 /// Draw `text` at the start of `rect`, centred down it, cut short with the
 /// shared mark where it is wider.
-fn words(surface: &mut Surface, font: BitmapFont, text: &str, rect: Rect, colour: Color) {
+pub(crate) fn words(
+    surface: &mut Surface,
+    font: BitmapFont,
+    text: &str,
+    rect: Rect,
+    colour: Color,
+) {
     if text.is_empty() || rect.is_empty() {
         return;
     }

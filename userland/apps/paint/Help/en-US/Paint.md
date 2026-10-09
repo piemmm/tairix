@@ -50,16 +50,27 @@ for one the Pages menu goes to, adds, copies, deletes and reorders them.
 
 The primary (left) button paints with the primary colour and the middle
 button with the secondary colour; holding Alt picks a colour instead, as
-the layers show it. The tools down the tool box on the left are select,
-pencil, brush, airbrush, eraser, clone, fill, gradient, eyedropper, text,
-line, rectangle, ellipse, polygon, crop, hand and zoom. The bar across the
-top names the tool in use and holds its settings — a brush's size, hardness,
-opacity, flow and spacing, a fill's tolerance, a gradient's shape, the
-text's size, a rectangle's corners — typed or stepped with the arrow keys,
-and the buttons that zoom and show the pixel grid; the palette strip beneath
-the picture holds the picture's palette, or the desktop colours. The
-airbrush keeps spraying while it is held still. Holding Shift draws a square, a circle or a
-line at a multiple of 45 degrees.
+the layers show it. The tool box, in the Tools pane, holds the tools in two
+columns: select, pencil, brush, airbrush, eraser, clone, fill, gradient,
+eyedropper, text, line, rectangle, ellipse, polygon, crop, hand and zoom. The
+bar across the top names the tool in use and holds its settings — a brush's
+size, hardness, opacity, flow and spacing, a fill's tolerance, a gradient's
+shape, the text's size, a rectangle's corners — typed or stepped with the
+arrow keys, and the buttons that zoom and show the pixel grid; the palette
+strip beneath the picture holds the picture's palette, or the desktop
+colours. The airbrush keeps spraying while it is held still. Holding Shift
+draws a square, a circle or a line at a multiple of 45 degrees.
+
+Panes run down both sides of the window: by default the Tools pane on the left
+and the Colour pane on the right, with the Adjustment pane beneath it once an
+adjustment is opened. Each is headed by a slim band naming it, with a control
+that rolls it up to its band and a mark that closes it; View ▸ Panes shows a
+closed pane again, and Reset panes puts every pane back as a new window has
+them. Dragging a band moves its pane within its side or to the other, the
+place it will land marked as it goes; let go away from both sides, or dragged
+out of the window, the pane floats in a small window of its own, moved by its
+band and kept above the picture, its mark closing it; dragged back over a
+side, it docks there again.
 
 The select tool marks out a rectangle, an ellipse, a freehand lasso, a
 polygon clicked corner by corner, or with the magic wand the pixels joined
@@ -81,19 +92,49 @@ hand drags the picture across the window, as Space does with any tool; the
 zoom tool magnifies a click, or with Alt shrinks it, and a box dragged fills
 the window.
 
-The Adjust menu changes brightness and contrast, hue and saturation, levels,
-posterises, thresholds, desaturates, blurs, sharpens, pixelates, adds noise
-and finds edges, each shown on the picture as its settings move and kept
-only when applied. On a palette picture an adjustment changes its palette,
-and those that need neighbouring colours are not offered.
+The Adjust menu opens an adjustment in the Adjustment pane, where every other
+tool, pane and menu stays to hand: brightness and contrast, hue and
+saturation, colour balance, levels, curves, white balance, posterise,
+threshold, blur, sharpen, pixelate and add noise; desaturate and find edges,
+which have no settings, apply at once. The picture shows the adjustment as its
+settings move, Preview turns that off and on to compare, Reset puts its
+settings back and Apply keeps it as one change to undo; painting, filling or
+choosing another adjustment applies it first. Levels sets black, grey and
+white points over a histogram of the layer, for every channel together or
+each alone, with pickers that take them from the picture and Auto; Curves
+bends a channel's tones through points dragged over its histogram; white
+balance sets the light's temperature and tint, from a neutral pixel picked or
+by Auto; hue and saturation turns, strengthens and lightens all colours or one
+range of them; colour balance moves the shadows, midtones and highlights
+towards red, green or blue, keeping their lightness when asked. Everything is
+held to the selection. On a palette picture an adjustment changes its
+palette, and those that need neighbouring colours are not offered.
 
-The colour dock on the right holds the primary and secondary colours and a
-colour picker for whichever of them is chosen: click a colour to choose it,
-then set it by hue, saturation and value, by red, green and blue, by its
-hexadecimal spelling and, where the picture holds transparency, by its
-opacity. The colour it had stands beside it, and a click takes it back. On a
+The Colour pane holds the primary and secondary colours and a colour picker
+for whichever of them is chosen: click a colour to choose it, then pick it on
+a square of saturation and value beside a strip of hues, on a wheel of hues
+round a triangle, or on a slider for each channel, and type it in RGB, HSV,
+HSL, CMYK, Lab, LCh or as a grey, or by its hexadecimal spelling and, where the
+picture holds transparency, its opacity. A Lab or LCh colour outside what the
+screen can show is shown as near as it can be, and marked. Swap exchanges the
+two colours, Reset makes them black and white, and Pick takes the next colour
+clicked in the picture. The colour it had stands beside it, a click takes it
+back, and the colours last chosen wait beneath to be chosen again. On a
 picture with a palette the colours are its entries, so the picker edits the
 palette, and each edit is one change to undo.
+
+Settings in the icon bar's menu opens Paint's settings window: the tool a new
+window starts with and whether a picture opens fitted to the window or at
+actual size; the size, format, colours and background New picture offers; the
+grid's spacing, offset, colour, opacity and style — lines, dashes, dots or
+crossings — whether a new window shows it, snapping to it, and the zoom from
+which the grid between pixels shows; the checkerboard's size and shades and
+what surrounds the picture; and the panes a new window opens with. A change
+applies to every window at once and is kept for the next time; Restore
+defaults puts them all back. View ▸ Grid shows a window's grid. While it
+shows and snapping is on, shapes, selections and crop boxes cover whole
+cells, a line's ends, a gradient's ends and a polygon's corners land on its
+crossings, and a selection dragged lands with its corner on one.
 
 The painter holds no filesystem capability. It edits only the file it was
 handed. A file the user may change is handed over writable, and Save writes
@@ -131,6 +172,7 @@ changes not saved asks first.
 * `Ctrl` + wheel — zoom in or out about the pointer
 * Pinch with two fingers — zoom smoothly; on a touchscreen the picture follows the fingers
 * `G` — show or hide the grid between pixels
+* `Ctrl+'` — show or hide the grid
 * `Page Up` / `Page Down` — the sprite or page before or after
 * arrow keys — move a floating selection a pixel; with `Shift`, ten; in the palette strip, step through its colours
 

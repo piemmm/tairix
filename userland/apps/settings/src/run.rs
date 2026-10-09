@@ -55,6 +55,7 @@ mod program {
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PreviewOutcome, PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId};
+    use tairix_appconf::Registry;
     use tairix_appdata::RtHost;
     use tairix_controls::Keystroke;
     use tairix_geometry::{Rect, Region, Scale};
@@ -1344,9 +1345,9 @@ mod program {
             // A redraw needs nothing here: the client library re-presents the
             // last frame and the shell it drew has not changed. The rest are
             // events this surface does not act on — it opens no chain of the
-            // desktop's, declares no file association, and owns no desktop
-            // layer — and `ContentReleased` is the caller's, which owns the
-            // region it lets go of.
+            // desktop's, declares no file association, owns no desktop layer
+            // and no tool window — and `ContentReleased` is the caller's,
+            // which owns the region it lets go of.
             // Settings is part of the desktop rather than an application
             // the user manages: its signed manifest presents no icon-bar
             // slot and it declares none, so neither icon-bar event can
@@ -1358,6 +1359,7 @@ mod program {
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::ToolMoved { .. }
             | WindowEvent::Pinch { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
@@ -1943,6 +1945,8 @@ mod program {
         shell.adopt_catalog(fetch_catalog(surface.window.client()));
         // And the pointer rows their choice space, for the same reason.
         shell.adopt_cursor_sets(fetch_cursor_sets(surface.window.client()));
+        // The font store is read once per boot, so its families are too.
+        shell.adopt_text_choices(tairix_font::families(), *themes.selected().fonts());
         // A pane the launch named, if it named one: a fresh process is
         // given it as its one operand, exactly as a running instance is
         // handed it over the channel. `args` has already dropped the

@@ -74,10 +74,6 @@ impl Zoom {
 /// The rung of [`ZOOMS`] showing a picture pixel as a screen pixel.
 pub const ACTUAL: usize = 4;
 
-/// Screen pixels a picture pixel spans from which a grid between pixels is
-/// worth drawing.
-pub const GRID_FROM: u64 = 8;
-
 /// How the picture is shown.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Viewport {

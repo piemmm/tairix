@@ -126,6 +126,13 @@ impl<Req, Ans> JobDesk<Req, Ans> {
         !self.stopping && self.pending.is_some() && !self.in_flight
     }
 
+    /// Whether a request is waiting or a worker holds one it has not yet
+    /// answered: what a program ending waits out, so its last write lands.
+    #[must_use]
+    pub const fn outstanding(&self) -> bool {
+        self.in_flight || self.pending.is_some()
+    }
+
     /// Stop handing out work, so a parked worker leaves its loop.
     ///
     /// A job already in flight is still deliverable, so a worker mid-write

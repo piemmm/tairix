@@ -4,23 +4,24 @@
 //! ```text
 //! +----------------------------------------------------------------------+
 //! | Brush  Size [ 4 ] px  [x] Smooth edges                 [-][+][F][1]|#|
-//! +----+-------------------------------------------+---+---------------+
-//! | S  |                                           | ^ | [#][#] which  |
-//! | P  |               the picture                 | | | [plane  ]|H|  |
-//! |=B  |                                           |   | [#] #ff00aa   |
-//! | :  |                                           |   | H S V  R G B  |
-//! |    +-------------------------------------------+---+               |
-//! |    |===========================================|   |               |
-//! |    +-----------------------------------------------+               |
-//! |    | [][][][][][][][][][][][][][][][][]            |               |
-//! +----+-----------------------------------------------+---------------+
+//! +-------+----------------------------------------+---+---------------+
+//! |x Tools_|                                        | ^ |x Colour______-|
+//! | S  P  |               the picture              | | | [#][#] which  |
+//! |=B  A  |                                        |   | [plane  ]|H|  |
+//! | E  C  |                                        |   | H S V  R G B  |
+//! | :  :  +----------------------------------------+---+               |
+//! |       |========================================|   |x Adjustment__-|
+//! |       +--------------------------------------------+ :             |
+//! |       | [][][][][][][][][][][][][][][][][]         |               |
+//! +-------+--------------------------------------------+---------------+
 //! | (12, 34) #ff00aa   640 × 480, 256 colours         1 of 3: sprite  100% |
 //! +----------------------------------------------------------------------+
 //! ```
 //!
 //! The tool-controls bar runs across the top, the view's commands at its
-//! end; the tool box runs down the left and the colour dock down the right;
-//! the palette strip lies beneath the canvas and its bars.
+//! end; a dock runs down each side holding the panes the arrangement puts
+//! there, each a mini title band above its body; the palette strip lies
+//! beneath the canvas and its bars.
 //!
 //! Every extent comes from the theme's metrics at the desktop scale and the
 //! faces' own measures. Bands are claimed from the edges inward, so however
@@ -28,14 +29,17 @@
 //! an empty rectangle, which every painter and hit-test treats as absent.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
+use tairix_controls::{TitleBar, TitleBarCommands};
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_image::SpriteName;
 use tairix_theme::{TextRole, Theme};
 
 use crate::canvas::MAX_SIDE;
 use crate::document::MAX_ENTRIES;
+use crate::pane::{Arrangement, Docked, PaneKind, Side};
 use crate::render::{write_position, write_sprite, write_zoom};
 use crate::tool_controls::Placement;
 use crate::viewport::{Zoom, ZOOMS};
@@ -90,11 +94,19 @@ impl Faces {
 pub struct Needs {
     /// The wells the palette strip holds.
     pub wells: usize,
-    /// The colour picker's height across the dock's inner width
+    /// The colour picker's height across the colour pane's inner width
     /// ([`Layout::dock_inner_width`]).
     pub picker: u32,
+    /// How tall the colour pane's buttons and choices stand.
+    pub colour_controls: u32,
+    /// How tall the recent colours stand.
+    pub recents: u32,
     /// How broad the tool box's tools are.
     pub tool_box: u32,
+    /// How long the tool box is with every tool seated.
+    pub tool_box_length: u32,
+    /// How tall the adjustment pane's settings stand.
+    pub adjustment: u32,
     /// How long the view strip's commands are.
     pub view_strip: u32,
     /// The rows the top band holds for the tool-controls bar across
@@ -116,6 +128,30 @@ pub struct Floor {
     pub wells: usize,
 }
 
+/// One pane as laid out: the plate it is drawn on, its band, and its body.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PaneSlot {
+    /// Which pane.
+    pub kind: PaneKind,
+    /// The plate the pane is drawn on: its band and its body.
+    pub frame: Rect,
+    /// The mini title band across the plate's top; empty for a floating
+    /// pane, whose tool window's band is the window manager's.
+    pub header: Rect,
+    /// What the pane holds, beneath the band; empty when it is rolled up or
+    /// the dock had no room left for it.
+    pub body: Rect,
+}
+
+/// A dock as laid out: its band down one edge, and its panes top down.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DockLayout {
+    /// The band down the window's edge; empty when the dock holds nothing.
+    pub rect: Rect,
+    /// Its panes, top down.
+    pub panes: Vec<PaneSlot>,
+}
+
 /// The window's resolved geometry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Layout {
@@ -123,11 +159,17 @@ pub struct Layout {
     top: Rect,
     controls: Rect,
     view_strip: Rect,
+    docks: [DockLayout; 2],
+    floating: Vec<PaneSlot>,
     tool_box: Rect,
     tools: Rect,
     dock: Rect,
     wells: Rect,
+    colour_controls: Rect,
     picker: Rect,
+    recents: Rect,
+    adjustment: Rect,
+    adjustment_settings: Rect,
     canvas: Rect,
     vertical_bar: Rect,
     horizontal_bar: Rect,
@@ -154,7 +196,7 @@ impl Layout {
         theme: &Theme,
         scale: Scale,
         faces: Faces,
-        needs: Needs,
+        (needs, panes): (Needs, &Arrangement),
     ) -> Self {
         let gap = gap(theme, scale);
         let bar = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
@@ -175,52 +217,68 @@ impl Layout {
         let controls = across;
         let status = rest.take_bottom(status_height(faces, gap));
         let (position, message, sprite, zoom) = status_slots(status, faces.status, gap);
-        let tool_box = rest.take_left((needs.tool_box + gap * 2).min(rest.width / 2));
-        let dock = rest.take_right(scale.scale_length(DOCK_WIDTH).min(rest.width / 2));
-        let (wells, picker) = dock_slots(dock, gap, scale, needs);
-        let grid = palette_grid(needs.wells, rest.width.saturating_sub(gap * 2), scale);
-        let palette = rest.take_bottom(if grid.height == 0 {
-            0
-        } else {
-            grid.height + gap * 2
-        });
-        let swatches = Rect::new(
-            palette.left().saturating_add_unsigned(gap),
-            palette.top().saturating_add_unsigned(gap),
-            grid.width,
-            grid.height,
-        )
-        .intersection(&palette.inset(gap));
-        let under = rest.take_bottom(bar);
-        let vertical_bar = rest.take_right(bar);
-        let corner = if under.is_empty() || vertical_bar.is_empty() {
-            Rect::EMPTY
-        } else {
-            Rect::new(
-                vertical_bar.left(),
-                under.top(),
-                vertical_bar.width,
-                under.height,
-            )
+        let header = TitleBar::height_of(TitleBarCommands::Pane, scale, theme);
+        let measures = PaneMeasures {
+            gap,
+            header,
+            dock: scale.scale_length(DOCK_WIDTH),
+            wells: scale.scale_length(WELLS_HEIGHT),
         };
-        let horizontal_bar = Rect::new(rest.left(), under.top(), rest.width, under.height);
+        let left = rest.take_left(
+            measures
+                .dock_width(panes.docked(Side::Left), needs)
+                .min(rest.width / 2),
+        );
+        let right = rest.take_right(
+            measures
+                .dock_width(panes.docked(Side::Right), needs)
+                .min(rest.width / 2),
+        );
+        let docks = [
+            measures.stack(left, panes.docked(Side::Left), needs),
+            measures.stack(right, panes.docked(Side::Right), needs),
+        ];
+        let floating = measures.float(window, panes, needs);
+        let body = |kind| {
+            docks
+                .iter()
+                .flat_map(|dock| &dock.panes)
+                .chain(&floating)
+                .find(|slot| slot.kind == kind)
+                .map_or(Rect::EMPTY, |slot| slot.body)
+        };
+        let tool_box = body(PaneKind::Tools);
+        let dock = body(PaneKind::Colour);
+        let adjustment = body(PaneKind::Adjustment);
+        let colour = ColourSlots::of(dock, gap, measures.wells, needs);
+        let around = CanvasBands::claim(&mut rest, needs.wells, (gap, bar), scale);
         Self {
             window,
             top,
             controls,
             view_strip,
+            docks,
+            floating,
             tool_box,
-            tools: tool_box.inset(gap),
+            tools: tool_box.inset(gap / 2),
             dock,
-            wells,
-            picker,
+            wells: colour.wells,
+            colour_controls: colour.controls,
+            picker: colour.picker,
+            recents: colour.recents,
+            adjustment,
+            adjustment_settings: if adjustment.is_empty() {
+                Rect::EMPTY
+            } else {
+                adjustment.inset(gap / 2)
+            },
             canvas: rest,
-            vertical_bar,
-            horizontal_bar,
-            corner,
-            palette,
-            swatches,
-            columns: grid.columns,
+            vertical_bar: around.vertical_bar,
+            horizontal_bar: around.horizontal_bar,
+            corner: around.corner,
+            palette: around.palette,
+            swatches: around.swatches,
+            columns: around.columns,
             status,
             position,
             message,
@@ -243,7 +301,7 @@ impl Layout {
         width.saturating_sub(gap(theme, scale) * 3 + view_strip)
     }
 
-    /// The width the dock's content is laid out across.
+    /// The width a dock-wide pane's content is laid out across.
     #[must_use]
     pub fn dock_inner_width(theme: &Theme, scale: Scale) -> u32 {
         scale
@@ -268,6 +326,7 @@ impl Layout {
         let bar = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
         let canvas = scale.scale_length(MIN_CANVAS);
         let dock = scale.scale_length(DOCK_WIDTH);
+        let header = TitleBar::height_of(TitleBarCommands::Pane, scale, theme);
         let (tool_box, tool_box_least) = floor.tool_box;
         let left = tool_box + gap * 2;
         // The dock is never wider than the canvas's side of the window.
@@ -279,8 +338,8 @@ impl Layout {
         let height = top_height(rows, strip_height(theme, scale), gap)
             + status_height(faces, gap)
             + (canvas + bar + palette + gap * 2)
-                .max(tool_box_least + gap * 2)
-                .max(scale.scale_length(WELLS_HEIGHT) * 2);
+                .max(header + tool_box_least + gap * 2)
+                .max(header + scale.scale_length(WELLS_HEIGHT) * 2 + gap);
         (width, height)
     }
 
@@ -288,6 +347,31 @@ impl Layout {
     #[must_use]
     pub const fn window(&self) -> Rect {
         self.window
+    }
+
+    /// Report every pixel the window and its floating panes draw.
+    pub fn damage_all(&self, damage: &mut Region) {
+        damage.add(self.window);
+        for slot in &self.floating {
+            damage.add(slot.frame);
+        }
+    }
+
+    /// The floating panes, each in the rectangle of the drawing its tool
+    /// window shows.
+    #[must_use]
+    pub fn floating(&self) -> &[PaneSlot] {
+        &self.floating
+    }
+
+    /// The window pane `kind`'s open lists are held within: its own tool
+    /// window's rectangle when it floats, the client area otherwise.
+    #[must_use]
+    pub fn pane_window(&self, kind: PaneKind) -> Rect {
+        self.floating
+            .iter()
+            .find(|slot| slot.kind == kind)
+            .map_or(self.window, |slot| slot.frame)
     }
 
     /// The band across the top: the tool-controls bar and the view strip.
@@ -314,7 +398,27 @@ impl Layout {
         self.view_strip
     }
 
-    /// The tool box's band down the left.
+    /// The dock down `side`.
+    #[must_use]
+    pub const fn dock_on(&self, side: Side) -> &DockLayout {
+        &self.docks[side.index()]
+    }
+
+    /// Where pane `kind` is laid out, docked or floating, if it is shown.
+    #[must_use]
+    pub fn pane(&self, kind: PaneKind) -> Option<&PaneSlot> {
+        self.panes()
+            .chain(&self.floating)
+            .find(|slot| slot.kind == kind)
+    }
+
+    /// Every docked pane laid out, the left dock's first, each dock's top
+    /// down.
+    pub fn panes(&self) -> impl Iterator<Item = &PaneSlot> {
+        self.docks.iter().flat_map(|dock| &dock.panes)
+    }
+
+    /// The tool pane's body; empty where it is hidden or rolled up.
     #[must_use]
     pub const fn tool_box(&self) -> Rect {
         self.tool_box
@@ -326,10 +430,22 @@ impl Layout {
         self.tools
     }
 
-    /// The colour dock on the canvas's other side.
+    /// The colour pane's body; empty where it is hidden or rolled up.
     #[must_use]
     pub const fn dock(&self) -> Rect {
         self.dock
+    }
+
+    /// The adjustment pane's body; empty where it is hidden or rolled up.
+    #[must_use]
+    pub const fn adjustment(&self) -> Rect {
+        self.adjustment
+    }
+
+    /// Where the adjustment pane's settings are laid out, within its body.
+    #[must_use]
+    pub const fn adjustment_settings(&self) -> Rect {
+        self.adjustment_settings
     }
 
     /// The current-colour wells, atop the dock.
@@ -338,10 +454,22 @@ impl Layout {
         self.wells
     }
 
-    /// The colour picker, beneath the wells.
+    /// The colour pane's buttons and choices, beneath the wells.
+    #[must_use]
+    pub const fn colour_controls(&self) -> Rect {
+        self.colour_controls
+    }
+
+    /// The colour picker, beneath the colour pane's choices.
     #[must_use]
     pub const fn picker(&self) -> Rect {
         self.picker
+    }
+
+    /// The recent colours, beneath the picker.
+    #[must_use]
+    pub const fn recents(&self) -> Rect {
+        self.recents
     }
 
     /// The primary colour's well, overlapping the secondary's.
@@ -508,15 +636,228 @@ fn palette_grid(wells: usize, width: u32, scale: Scale) -> PaletteGrid {
     }
 }
 
-/// The dock's wells and picker, top to bottom, a gap between: a dock too
-/// short for the whole picker gives it what is left, which it lays out by
-/// giving up its fields before its plane.
-fn dock_slots(dock: Rect, gap: u32, scale: Scale, needs: Needs) -> (Rect, Rect) {
-    let mut rest = dock.inset(gap);
-    let wells = rest.take_top(scale.scale_length(WELLS_HEIGHT));
-    let _ = rest.take_top(gap);
-    let picker = rest.take_top(needs.picker);
-    (wells, picker)
+/// The bands claimed about the canvas: the palette strip beneath, and the
+/// scroll bars and their corner.
+struct CanvasBands {
+    palette: Rect,
+    swatches: Rect,
+    columns: usize,
+    vertical_bar: Rect,
+    horizontal_bar: Rect,
+    corner: Rect,
+}
+
+impl CanvasBands {
+    /// Claim the palette strip of `wells` and the scroll bars `bar` broad
+    /// from `rest`, leaving it the canvas.
+    fn claim(rest: &mut Rect, wells: usize, (gap, bar): (u32, u32), scale: Scale) -> Self {
+        let grid = palette_grid(wells, rest.width.saturating_sub(gap * 2), scale);
+        let palette = rest.take_bottom(if grid.height == 0 {
+            0
+        } else {
+            grid.height + gap * 2
+        });
+        let swatches = Rect::new(
+            palette.left().saturating_add_unsigned(gap),
+            palette.top().saturating_add_unsigned(gap),
+            grid.width,
+            grid.height,
+        )
+        .intersection(&palette.inset(gap));
+        let under = rest.take_bottom(bar);
+        let vertical_bar = rest.take_right(bar);
+        let corner = if under.is_empty() || vertical_bar.is_empty() {
+            Rect::EMPTY
+        } else {
+            Rect::new(
+                vertical_bar.left(),
+                under.top(),
+                vertical_bar.width,
+                under.height,
+            )
+        };
+        Self {
+            palette,
+            swatches,
+            columns: grid.columns,
+            vertical_bar,
+            horizontal_bar: Rect::new(rest.left(), under.top(), rest.width, under.height),
+            corner,
+        }
+    }
+}
+
+/// The colour pane's parts, top to bottom a gap apart: the wells, the
+/// buttons and choices, the picker and the recent colours.
+struct ColourSlots {
+    wells: Rect,
+    controls: Rect,
+    picker: Rect,
+    recents: Rect,
+}
+
+impl ColourSlots {
+    /// The parts laid down `body`: one too short for them all gives the
+    /// picker what is left before the recent colours, which it lays out by
+    /// giving up its fields before its plane.
+    fn of(body: Rect, gap: u32, wells: u32, needs: Needs) -> Self {
+        if body.is_empty() {
+            return Self {
+                wells: Rect::EMPTY,
+                controls: Rect::EMPTY,
+                picker: Rect::EMPTY,
+                recents: Rect::EMPTY,
+            };
+        }
+        let mut rest = body.inset(gap / 2);
+        let wells = rest.take_top(wells);
+        let _ = rest.take_top(gap);
+        let controls = rest.take_top(needs.colour_controls);
+        let _ = rest.take_top(gap);
+        // Whole, or not at all: a part of a row of wells is no row.
+        let fits = rest.height >= needs.picker + gap + needs.recents;
+        let recents = rest.take_bottom(if fits { needs.recents } else { 0 });
+        let _ = rest.take_bottom(if recents.is_empty() { 0 } else { gap });
+        let picker = rest.take_top(needs.picker);
+        Self {
+            wells,
+            controls,
+            picker,
+            recents,
+        }
+    }
+}
+
+/// The lengths panes are laid out by, at one scale and theme.
+#[derive(Copy, Clone, Debug)]
+struct PaneMeasures {
+    gap: u32,
+    header: u32,
+    dock: u32,
+    wells: u32,
+}
+
+impl PaneMeasures {
+    /// How broad pane `kind`'s plate stands, with the margin about it.
+    fn width(self, kind: PaneKind, needs: Needs) -> u32 {
+        match kind {
+            PaneKind::Tools => needs.tool_box + self.gap * 2,
+            PaneKind::Colour | PaneKind::Adjustment => self.dock,
+        }
+    }
+
+    /// How tall pane `kind`'s body stands open, its content and the margin
+    /// about it.
+    fn body(self, kind: PaneKind, needs: Needs) -> u32 {
+        let gap = self.gap;
+        match kind {
+            PaneKind::Tools => needs.tool_box_length + gap * 2,
+            PaneKind::Colour => {
+                self.wells + needs.colour_controls + needs.picker + needs.recents + gap * 4
+            }
+            PaneKind::Adjustment => needs.adjustment + gap,
+        }
+    }
+
+    /// The panes `panes` floats, each at its own breadth and open height, in
+    /// rectangles of the drawing right of `window`, one below the next: what
+    /// each tool window shows, overlapping neither the window nor another.
+    fn float(self, window: Rect, panes: &Arrangement, needs: Needs) -> Vec<PaneSlot> {
+        let left = tairix_geometry::to_i32(window.width);
+        let mut top = 0;
+        panes
+            .floating()
+            .map(|kind| {
+                let frame = Rect::new(
+                    left,
+                    top,
+                    self.width(kind, needs),
+                    self.body(kind, needs).max(1),
+                );
+                top = top.saturating_add(tairix_geometry::to_i32(frame.height));
+                PaneSlot {
+                    kind,
+                    frame,
+                    header: Rect::new(frame.left(), frame.top(), frame.width, 0),
+                    body: frame,
+                }
+            })
+            .collect()
+    }
+
+    /// A dock's width: its broadest pane's, or none for a dock of none.
+    fn dock_width(self, panes: &[Docked], needs: Needs) -> u32 {
+        panes
+            .iter()
+            .map(|docked| self.width(docked.kind, needs))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `panes` stacked down `dock` top first, half a gap about each plate:
+    /// every band seated before any body, then each body given what it needs
+    /// in the panes' order of claim, so what the room cannot hold is taken
+    /// from the pane that copes with least best — the colour picker gives up
+    /// its fields, the tool box scrolls — and a pane left no room shows its
+    /// band alone.
+    fn stack(self, dock: Rect, panes: &[Docked], needs: Needs) -> DockLayout {
+        if dock.is_empty() || panes.is_empty() {
+            return DockLayout {
+                rect: dock,
+                panes: Vec::new(),
+            };
+        }
+        let margin = self.gap / 2;
+        let mut rest = dock.inset(margin);
+        let count = u32::try_from(panes.len()).unwrap_or(u32::MAX);
+        let bands = self
+            .header
+            .saturating_mul(count)
+            .saturating_add(margin.saturating_mul(count - 1));
+        let mut room = rest.height.saturating_sub(bands);
+        let mut given = [0u32; PaneKind::ALL.len()];
+        for kind in PaneKind::BY_CLAIM {
+            let Some(docked) = panes.iter().find(|docked| docked.kind == kind) else {
+                continue;
+            };
+            let wanted = if docked.collapsed {
+                0
+            } else {
+                self.body(docked.kind, needs)
+            };
+            let share = wanted.min(room);
+            room -= share;
+            given[docked.kind.index()] = share;
+        }
+        let mut slots = Vec::with_capacity(panes.len());
+        for docked in panes {
+            let given = given[docked.kind.index()];
+            let frame = rest.take_top(self.header.saturating_add(given));
+            let header = Rect::new(
+                frame.left(),
+                frame.top(),
+                frame.width,
+                self.header.min(frame.height),
+            );
+            let body = Rect::new(
+                frame.left(),
+                header.bottom(),
+                frame.width,
+                frame.height.saturating_sub(header.height),
+            );
+            slots.push(PaneSlot {
+                kind: docked.kind,
+                frame,
+                header,
+                body: if body.height == 0 { Rect::EMPTY } else { body },
+            });
+            let _ = rest.take_top(margin);
+        }
+        DockLayout {
+            rect: dock,
+            panes: slots,
+        }
+    }
 }
 
 /// The status band's position slot, message slot, sprite slot and zoom

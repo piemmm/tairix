@@ -199,3 +199,14 @@ fn a_reduced_motion_desktop_draws_the_board_on_its_own_axes() {
     assert!(theme.motion().reduced_motion());
     assert_eq!(theme.appearance(), Theme::dark().appearance());
 }
+
+#[test]
+fn the_board_is_set_in_the_text_the_desktop_is_drawn_in() {
+    let family = tairix_theme::FamilyKey::new("noto-serif").expect("a family key");
+    let chosen = tairix_theme::DesktopText::new(family, 22).ok();
+    let light = Theme::light().with_text(chosen);
+    let board = super::board_theme(&light);
+    assert_eq!(board.appearance(), Theme::dark().appearance());
+    assert_eq!(board.fonts().ui_family(), family);
+    assert_eq!(board.fonts().base_size_px(), 22);
+}

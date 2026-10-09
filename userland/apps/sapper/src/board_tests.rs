@@ -106,17 +106,6 @@ fn presets_are_valid() {
     }
 }
 
-#[test]
-fn preset_identifiers_round_trip_and_custom_has_none() {
-    for preset in Difficulty::PRESETS {
-        let id = preset.preset_id().expect("a preset has an identifier");
-        assert_eq!(Difficulty::from_preset_id(id), Some(preset));
-    }
-    let custom = Difficulty::Custom(Dimensions::new(10, 10, 12).expect("legal"));
-    assert_eq!(custom.preset_id(), None);
-    assert_eq!(Difficulty::from_preset_id("nonesuch"), None);
-}
-
 // --- Laying the mines ---------------------------------------------------
 
 #[test]

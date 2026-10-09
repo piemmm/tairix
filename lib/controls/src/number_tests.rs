@@ -318,3 +318,80 @@ fn the_wheel_carry_is_not_drawn() {
         render(&resting, &theme).pixels()
     );
 }
+
+/// A field given decimal places holds whole hundredths, spells them with a
+/// point, and takes a point only where it may stand.
+#[test]
+fn decimals_are_spelled_typed_and_stepped_in_the_smallest_place() {
+    let mut gamma = NumberField::new(100, 10, 999).with_decimals(2);
+    gamma.set_focused(true);
+    assert_eq!(gamma.text(), "1.00");
+    for _ in 0..4 {
+        named(&mut gamma, NamedKey::Backspace);
+    }
+    assert_eq!(
+        typed(&mut gamma, "2.5"),
+        [
+            Some(NumberAction::Edited { value: 200 }),
+            None,
+            Some(NumberAction::Edited { value: 250 }),
+        ]
+    );
+    assert_eq!(
+        key(&mut gamma, Key::Char('7')),
+        Some(NumberAction::Edited { value: 257 })
+    );
+    assert_eq!(
+        key(&mut gamma, Key::Char('1')),
+        None,
+        "no room past the longest spelling"
+    );
+    assert_eq!(gamma.value(), 257);
+    assert_eq!(
+        named(&mut gamma, NamedKey::Backspace),
+        Some(NumberAction::Edited { value: 250 })
+    );
+    assert_eq!(
+        named(&mut gamma, NamedKey::Up),
+        Some(NumberAction::Settled { value: 251 })
+    );
+    assert_eq!(gamma.text(), "2.51");
+    gamma.set_value(10);
+    assert_eq!(gamma.text(), "0.10");
+    let mut whole = field(5);
+    assert_eq!(
+        key(&mut whole, Key::Char('.')),
+        None,
+        "no point in a whole number"
+    );
+    let signed = NumberField::new(-5, -999, 999).with_decimals(2);
+    assert_eq!(signed.text(), "-0.05");
+    let theme = Theme::dark();
+    assert!(
+        gamma.preferred_width(Scale::ONE, &theme)
+            > NumberField::new(100, 10, 999).preferred_width(Scale::ONE, &theme),
+        "room for the point"
+    );
+}
+
+#[test]
+fn a_fixed_point_spelling_reads_back_exactly() {
+    use crate::number::{parse_fixed, spell};
+    let mut spelt = [0; 16];
+    for (value, places, text) in [
+        (0, 2, "0.00"),
+        (7, 3, "0.007"),
+        (-1234, 2, "-12.34"),
+        (i32::MIN, 0, "-2147483648"),
+        (i32::MAX, 4, "214748.3647"),
+    ] {
+        assert_eq!(spell(value, places, &mut spelt), text);
+        assert_eq!(parse_fixed(text, places), Some(i64::from(value)), "{text}");
+    }
+    assert_eq!(parse_fixed(".5", 2), Some(50));
+    assert_eq!(parse_fixed("3.", 1), Some(30));
+    for refused in ["", "-", ".", "1.2.3", "1e3", "1.234"] {
+        assert_eq!(parse_fixed(refused, 2), None, "{refused}");
+    }
+    assert_eq!(parse_fixed("1.0", 0), None);
+}

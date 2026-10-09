@@ -16,8 +16,8 @@ use tairix_abi::switchboard_ipc::{
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuRow, ClipboardKind, CursorShape, MenuRefusal, PointerAction, WindowEvent,
-    WindowRegion,
+    AppMenuLabel, AppMenuRow, ClipboardKind, CursorShape, MenuRefusal, PointerAction, ToolOver,
+    WindowEvent, WindowRegion,
 };
 use tairix_abi::{
     manifest_header, AppIdentity as AttestedApp, AppInfoHeader, DriverError, Errno, ProcId,
@@ -60,15 +60,16 @@ use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
-    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, DesktopSession,
-    DesktopShell, DocumentAuthority, DocumentRelay, FrameContent, FramePacer, FrameReportGate,
-    Handover, IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget,
-    LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, SaverIdentity,
-    SaverSetup, ScreenFade, ScreenLock, Screensaver, SessionFileReader, SessionInputResponse,
-    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
-    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
+    tool_move_event, AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex,
+    DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay, FrameContent, FramePacer,
+    FrameReportGate, Handover, IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable,
+    LaunchTarget, LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners,
+    SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, SessionFileReader,
+    SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost,
+    Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    TaskBridge, TaskbarPresenter, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
+    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
@@ -2225,6 +2226,59 @@ fn set_appearance_re_themes_the_compositor() {
         comp.background(),
         shell.session().active_theme().palette().desktop.into()
     );
+}
+
+/// A text choice is resolved against the store's families, drawn by the
+/// compositor and published to every application; a family the store does
+/// not hold falls back to the theme's own and is named.
+#[test]
+fn a_text_choice_reaches_the_compositor_and_the_published_desktop() {
+    use tairix_abi::font_ipc::{FamilyEntry, FamilyKind};
+    use tairix_wallpaper::{TextFamily, TextSize};
+
+    let (mut shell, mut comp) = desktop_over(
+        TaskbarConfig::bottom_bar(1024, 768),
+        DisplayMode {
+            width_px: 1024,
+            height_px: 768,
+            stride_bytes: 1024 * 4,
+            format: DisplayFormat::Rgba8888,
+        },
+        test_pressure(),
+    );
+    let inter = tairix_theme::FamilyKey::new("inter").expect("a family key");
+    let serif = tairix_theme::FamilyKey::new("noto-serif").expect("a family key");
+    shell.session_mut().set_font_families(alloc::vec![
+        FamilyEntry::new(inter, "Inter", FamilyKind::Proportional, 1210).expect("entry"),
+        FamilyEntry::new(serif, "Noto Serif", FamilyKind::Proportional, 1362).expect("entry"),
+    ]);
+    let shipped = desktop_info(&comp).expect("described").text();
+    assert_eq!(
+        shipped.map(|text| (text.family(), text.size_px())),
+        Some((inter, 16))
+    );
+
+    let gone = shell
+        .session_mut()
+        .set_text(TextFamily::Named(serif), TextSize::Points(12));
+    assert_eq!(gone, None);
+    assert!(shell.sync_theme(&mut comp));
+    let published = desktop_info(&comp).expect("described").text();
+    // Twelve points in Noto's taller line box.
+    assert_eq!(
+        published.map(|text| (text.family(), text.size_px())),
+        Some((serif, 22))
+    );
+    assert_eq!(comp.theme().fonts().ui_family(), serif);
+
+    let missing = tairix_theme::FamilyKey::new("gone-family").expect("a family key");
+    let gone = shell
+        .session_mut()
+        .set_text(TextFamily::Named(missing), TextSize::Theme);
+    assert_eq!(gone, Some(missing), "a family the store lacks is named");
+    assert!(shell.sync_theme(&mut comp));
+    assert_eq!(comp.theme().fonts().ui_family(), inter);
+    assert_eq!(comp.theme().fonts().base_size_px(), 16);
 }
 
 /// A change of look moves the generation a retaining surface follows, and is
@@ -13386,6 +13440,236 @@ fn open_parent_and_popup(
     let parent = windows.wm_id(1).expect("the parent window is live");
     let popup = windows.wm_id(2).expect("the popup window is live");
     (parent, popup)
+}
+
+/// A served parent window (channel id 1) and its tool window (channel id 2)
+/// of a `size` client at `offset` from the parent's client origin, carried at
+/// `carry`, opened as the serve loop opens them.
+fn open_parent_and_tool(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    windows: &mut SessionWindows,
+    (offset, size): ((i32, i32), (u32, u32)),
+    carry: Option<u32>,
+) -> (WindowId, Result<WindowId, Errno>) {
+    with_window_host(shell, comp, windows, |host| {
+        assert_eq!(
+            host.window_opened(
+                window_owner(1),
+                1,
+                &served_mode(320, 240),
+                "Paint",
+                resizable_sizing()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            host.window_presented(
+                1,
+                &served_mode(320, 240),
+                &vec![0u8; 320 * 240 * 4],
+                &whole(&served_mode(320, 240)),
+            ),
+            Ok(())
+        );
+        let spec = tairix_window::ToolSpec {
+            transient: tairix_window::TransientSpec {
+                parent_window_id: 1,
+                shm_handle: 0,
+                event_endpoint: 0,
+                frame_count: 1,
+                surface: served_mode(size.0, size.1),
+                offset_x: offset.0,
+                offset_y: offset.1,
+            },
+            carry,
+            title: tairix_abi::window_ipc::WindowTitle::new("Colour").expect("a title"),
+        };
+        let opened = host.tool_opened(2, &spec);
+        (
+            host.windows.wm_id(1).expect("the parent is live"),
+            opened.map(|()| host.windows.wm_id(2).expect("the tool window is live")),
+        )
+    })
+}
+
+#[test]
+fn a_tool_window_is_framed_off_the_taskbar_and_leaves_the_keyboard_alone() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, tool) = open_parent_and_tool(
+        &mut shell,
+        &mut comp,
+        &mut windows,
+        ((10, 20), (80, 60)),
+        None,
+    );
+    let tool = tool.expect("opens");
+    let parent_client = comp.window_client_rect(parent).expect("decorated");
+    let client = comp.window_client_rect(tool).expect("framed");
+    assert_eq!(
+        (client.left(), client.top(), client.width, client.height),
+        (parent_client.left() + 10, parent_client.top() + 20, 80, 60),
+        "its client lands at the offset from the parent's"
+    );
+    let frame = comp
+        .window_frame(tool)
+        .expect("framed by the window manager");
+    assert_eq!(frame.title_bar().title(), "Colour");
+    assert_eq!(
+        frame.title_bar().commands(),
+        tairix_controls::TitleBarCommands::Tool
+    );
+    assert_eq!(
+        shell.session().taskbar().tasks().len(),
+        1,
+        "off the taskbar"
+    );
+    assert_eq!(shell.router().focused(), Some(parent), "the keyboard stays");
+    assert!(!shell.router().is_moving(), "no press to carry");
+    assert_eq!(comp.family_front(parent), Some(parent));
+
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.window_retitled(2, "Tools"), Ok(()));
+    });
+    assert_eq!(
+        comp.window_frame(tool)
+            .map(|frame| frame.title_bar().title()),
+        Some("Tools")
+    );
+
+    // A palette the user pressed takes the keyboard, and does not keep it
+    // once hidden with its owner.
+    let on_tool = client.center();
+    let _ = shell.handle(moved(on_tool.x, on_tool.y), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let _ = shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    assert_eq!(shell.router().focused(), Some(tool));
+    assert!(shell.minimize_window(&mut comp, parent));
+    assert!(
+        !comp.window(tool).is_some_and(tairix_wm::Window::is_visible),
+        "hidden with it"
+    );
+    assert_eq!(shell.router().focused(), None, "and the keyboard with it");
+    assert!(comp.set_visible(parent, true));
+    assert!(
+        comp.window(tool).is_some_and(tairix_wm::Window::is_visible),
+        "and shown with it"
+    );
+}
+
+#[test]
+fn a_tool_window_torn_out_under_a_held_press_follows_it_and_reports_its_moves() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) = open_parent_and_popup(&mut shell, &mut comp, &mut windows, (0, 0), (8, 8));
+    let client = comp.window_client_rect(parent).expect("decorated");
+    let held = Point::new(client.left() + 30, client.top() + 40);
+    let _ = shell.handle(moved(held.x, held.y), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let spec = tairix_window::ToolSpec {
+        transient: tairix_window::TransientSpec {
+            parent_window_id: 1,
+            shm_handle: 0,
+            event_endpoint: 0,
+            frame_count: 1,
+            surface: served_mode(80, 60),
+            offset_x: 400,
+            offset_y: 400,
+        },
+        carry: Some(40),
+        title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
+    };
+    let tool = with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.tool_opened(3, &spec), Ok(()));
+        host.windows.wm_id(3).expect("live")
+    });
+    assert!(shell.router().is_moving(), "the press carries it");
+    assert_eq!(
+        shell.router().pressed_in(),
+        None,
+        "and the parent holds it no more"
+    );
+    let span = comp.window_drag_surface(tool).expect("a band");
+    let tool_client = comp.window_client_rect(tool).expect("framed");
+    assert_eq!(
+        held.x,
+        tool_client.left() + 40,
+        "held where it asked along the band"
+    );
+    assert!(span.contains(held), "by its band, halfway down");
+
+    // Over the parent's own content the owner is told where; off it, not.
+    let over = Point::new(client.left() + 200, client.top() + 150);
+    let _ = shell.handle(moved(over.x, over.y), &mut comp, 0);
+    assert_eq!(
+        tool_move_event(tool, false, over, &comp, &windows),
+        Some(WindowEvent::ToolMoved {
+            window_id: 3,
+            over: ToolOver::Parent { x: 200, y: 150 },
+            ended: false,
+        })
+    );
+    let off = Point::new(client.right() + 20, client.top() + 10);
+    let _ = shell.handle(moved(off.x, off.y), &mut comp, 0);
+    assert_eq!(
+        tool_move_event(tool, true, off, &comp, &windows),
+        Some(WindowEvent::ToolMoved {
+            window_id: 3,
+            over: ToolOver::Elsewhere,
+            ended: true,
+        })
+    );
+    assert_eq!(
+        shell.handle(PRIMARY_RELEASE, &mut comp, 0),
+        crate::ShellOutcome::WindowManager(InputResponse::MoveEnded { window: tool })
+    );
+    assert_eq!(
+        tool_move_event(parent, true, off, &comp, &windows),
+        None,
+        "only a tool window"
+    );
+}
+
+#[test]
+fn no_tool_window_opens_while_the_seat_is_held() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    open_parent_and_popup(&mut shell, &mut comp, &mut windows, (0, 0), (8, 8));
+    let spec = tairix_window::ToolSpec {
+        transient: tairix_window::TransientSpec {
+            parent_window_id: 1,
+            shm_handle: 0,
+            event_endpoint: 0,
+            frame_count: 1,
+            surface: served_mode(80, 60),
+            offset_x: 0,
+            offset_y: 0,
+        },
+        carry: None,
+        title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
+    };
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut apps = AppBarService::new();
+    let mut host = ShellWindowHost {
+        shell: &mut shell,
+        compositor: &mut comp,
+        windows: &mut windows,
+        picker: &mut picker,
+        apps: &mut apps,
+        menu: &mut MenuChain::new(),
+        seat_held: true,
+        screensaver: None,
+        relay: &mut RefusingRelay,
+        wallpapers: &mut NoGallery,
+        cursor_sets: &[],
+        clipboard: &mut crate::clipboard::NoClipboard,
+    };
+    assert_eq!(host.tool_opened(3, &spec), Err(Errno::SeatBusy));
+    assert_eq!(host.windows.wm_id(3), None);
 }
 
 /// The clipboard answers only the window the user is working in: the one

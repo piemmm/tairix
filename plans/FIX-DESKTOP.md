@@ -788,7 +788,7 @@ Each stage is independently reviewable and must leave the whole-project
     Durable work belongs on the settle; acting on every value change is acting
     once per pointer sample.
   - **The terminal** separates the profile the windows *render* from the one the
-    store *holds* (`tairix_terminal::publish::Publication`). A drag previews
+    store *holds* (`tairix_appdata::Publication`). A drag previews
     every sample and writes nothing; the settle asks the settings worker for one
     write; the answer — what the store then implies, so a machine policy still
     wins — becomes the profile in force. A refused write reverts the preview and
@@ -804,7 +804,7 @@ Each stage is independently reviewable and must leave the whole-project
   and `clicking_the_text_size_track_settles_the_value_it_jumped_to`
   (`userland/apps/terminal/src/settings_tests.rs`),
   `a_drag_reports_one_settle_however_many_samples_it_took`
-  (`lib/controls/src/value_tests.rs`), the `publish` suite (the live/adopted
+  (`lib/controls/src/value_tests.rs`), `tairix_appdata`'s `publish` suite (the live/adopted
   pair, the store's answer winning, a refusal reverting), and the `defer` suite
   (`lib/util/src/defer_tests.rs`).
 

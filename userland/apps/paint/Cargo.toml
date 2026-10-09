@@ -22,6 +22,11 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The colour the dock's picker edits and the hex the status band spells it in.
 tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
+# The closed-registry engine Paint's settings are kept by, and the app-data
+# client that keeps them in Paint's own store, which no other application can
+# read.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
 # Shared text rasterisation: the status band and the tool-controls bar.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The shared integer screen geometry the layout and every hit-test use.
@@ -51,6 +56,9 @@ tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # Fallible buffers for everything sized by a picture.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The inline bounded vector a dock's panes are held in, so an arrangement
+# copies without an allocation.
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # A window's document file: its saves and file choosers. The engine needs
 # none of the runtime.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
@@ -70,6 +78,8 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the allocator, the file calls and
 # the worker desks the decoder and the writer run on.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The app-data client's runtime transport, so the settings reach the service.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 # The glyph service the status band and panels are set through.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
 # The bundle's own `Help/` tree, read for the short `-h` surface.
@@ -83,3 +93,6 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 # test transport rather than reaching a running `fontd`.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = ["test-support"] }
+# The shared fake app-data service the settings' host tests drive the client
+# over, speaking the real `appdata-v1` codec.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["test-util"] }

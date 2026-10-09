@@ -36,7 +36,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_taskbar::{TaskId, Taskbar};
-use tairix_wm::{Compositor, Point, Surface, WindowId};
+use tairix_wm::{Compositor, Point, Surface, Window, WindowId};
 
 use crate::input::SessionInputRouter;
 
@@ -279,7 +279,11 @@ impl TaskBridge {
         };
         taskbar.tasks_mut().minimise(task);
         compositor.set_visible(window, false);
-        if router.focused() == Some(window) {
+        // Its transients hide with it, so none of them may keep the keyboard.
+        let in_family = |focused: WindowId| {
+            focused == window || compositor.window(focused).and_then(Window::parent) == Some(window)
+        };
+        if router.focused().is_some_and(in_family) {
             router.unfocus();
         }
         true

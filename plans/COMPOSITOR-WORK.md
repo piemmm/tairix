@@ -26,6 +26,7 @@ without exception.
 | J | Exclusive fullscreen, the third size state (`plans/WINTERSUN.md` P3) | done |
 | K | A translucent client's plate takes that client's own ground | planned |
 | L | Drop shadows under floating surfaces, and bevelled window furniture | done |
+| M | The tool frame: a mini title bar — caption-face title, close alone, on `tool_title_bar_height` — for `plans/APPWIN.md` AW7 tool windows, its move reported to the owner | done |
 
 Input-transparent overlays (`set_input_transparent`) landed alongside these
 and are recorded below rather than as a stage of their own.
@@ -742,6 +743,27 @@ One light, stated as theme data (`Palette::bevel_light`, `bevel_shade`,
   title bar's marks, then the band's shaded foot, then the attention bead. The
   rim's bevel is the band's top and sides too, so every bevel line is one
   border wide.
+
+### Stage M — The tool frame
+
+The furniture of a `plans/APPWIN.md` AW7 tool window, so a floating palette is
+the window manager's to draw and to move like any other window.
+
+- **A mini title bar, one more command set.** `TitleBarCommands::Tool` seats
+  Close alone, its title in the caption face, on a band
+  `Metrics::tool_title_bar_height` deep. `WindowFrame::tool()` composes it
+  over the window's rim, bevel, plate and hit map: the frame's insets, layout,
+  floor and hit map read the band height of the commands it seats
+  (`TitleBar::height_of`), so the band drags the window exactly as a full
+  title bar does and the client never reaches it. It offers no resize edge.
+- **Its move is reported to its owner**, relative to the owner's client area:
+  the session turns a tool window's `Moved` and `MoveEnded` into
+  `WindowEvent::ToolMoved`, the pointer over the owner or elsewhere.
+- **A move can begin from another window's press.** `InputRouter::carry`
+  hands the client grab the owner holds to a move-grab of the new tool window
+  at the carry point, so the press that tore the pane out goes on moving it.
+- **A transient family minimises together**: hiding an owner hides those of
+  its transients that were showing, and showing it shows exactly those.
 
 ## 2.x Input-transparent overlays (landed)
 

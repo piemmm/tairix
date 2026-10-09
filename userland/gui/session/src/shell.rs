@@ -64,8 +64,8 @@ use tairix_wallpaper::{
 };
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
-    Modifiers, PinchPhase, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState,
-    WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
+    Modifiers, PinchPhase, Point, PointerCatch, Rect, Scale, Surface, Window,
+    WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
 };
 
 use crate::aids::{AidPolicy, PointerAids};
@@ -796,6 +796,59 @@ impl DesktopShell {
         }
         self.sync_active_frame(compositor);
         true
+    }
+
+    /// Open `surface` as a tool window of `parent` whose client lands at
+    /// `client` on screen, framed with the mini title band reading `title`
+    /// and kept wholly on screen — *without* the keyboard and off the
+    /// taskbar. A floating palette is part of the window that opened it: it
+    /// stacks, hides and closes with it, and takes the keyboard only when the
+    /// user presses it. Returns `None`, opening nothing, for a parent the
+    /// compositor does not know.
+    pub fn open_tool_window(
+        &mut self,
+        compositor: &mut Compositor,
+        parent: WindowId,
+        client: Point,
+        surface: Surface,
+        title: &str,
+    ) -> Option<WindowId> {
+        let frame = WindowFrame::tool();
+        let (scale, theme) = (compositor.scale(), compositor.theme());
+        let client = Rect::new(client.x, client.y, surface.width(), surface.height());
+        let outer = frame
+            .outer_for_client(client, scale, theme)
+            .clamped_onto(compositor.screen_rect());
+        let window = compositor.add_floating_window(parent, outer.origin, surface)?;
+        compositor.set_window_frame(window, frame);
+        compositor.set_window_title(window, title);
+        Some(window)
+    }
+
+    /// Carry the primary press `parent`'s content holds on as a move of its
+    /// tool window `tool`, the pointer holding its band `along` pixels from
+    /// the client's left edge, halfway down. Returns `false`, changing
+    /// nothing, unless `parent` holds that press.
+    pub fn carry_tool_window(
+        &mut self,
+        compositor: &mut Compositor,
+        parent: WindowId,
+        tool: WindowId,
+        along: u32,
+    ) -> bool {
+        let (Some(origin), Some(client), Some(band)) = (
+            compositor.window(tool).map(Window::origin),
+            compositor.window_client_rect(tool),
+            compositor.window_drag_surface(tool),
+        ) else {
+            return false;
+        };
+        let held = Point::new(
+            client.left() - origin.x
+                + tairix_geometry::to_i32(along.min(client.width.saturating_sub(1))),
+            band.top() - origin.y + tairix_geometry::to_i32(band.height / 2),
+        );
+        self.router.carry(parent, tool, held, compositor)
     }
 
     /// Decorate the already-open window `window` with the window-manager frame

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-colour"
-description = "TAIRiX sRGB colour: the 8-bit opaque and straight-alpha colour value, the sRGB transfer, the HSV and HSL coordinates, and the hexadecimal notation every colour field, settings document and SVG asset spells colours in."
+description = "TAIRiX sRGB colour: the 8-bit opaque and straight-alpha colour value, the sRGB transfer, the HSV and HSL coordinates, device CMYK, CIE XYZ, L*a*b* and LCh under D65, correlated colour temperature, and the hexadecimal notation every colour field, settings document and SVG asset spells colours in."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

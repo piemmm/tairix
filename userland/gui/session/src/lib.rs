@@ -321,7 +321,7 @@ pub use wallpaper::{
 };
 pub use windows::{
     chain_geometry, desktop_info, focus_reports, resize_drag_event, resolve_window_identities,
-    seat_held, seat_menu_refusal, size_state_name, window_control_alternate_event,
+    seat_held, seat_menu_refusal, size_state_name, tool_move_event, window_control_alternate_event,
     window_control_event, ScreensaverServe, SessionWindows, ShellWindowHost, SizedRecord,
     CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, HAND_OVER_WITHHELD, HAND_OVER_WITHHELD_MESSAGE,
     MENU_SHOWN, MENU_SHOWN_MESSAGE, RAISE_REFUSED, RAISE_REFUSED_MESSAGE, WINDOW_RAISED,

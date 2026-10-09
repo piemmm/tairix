@@ -34,7 +34,7 @@
 //!
 //! # Two readings, deliberately different
 //!
-//! [`DesktopSettings::load`] is the **tolerant** one, for a document held
+//! The [`Registry`] reading is the **tolerant** one, for a document held
 //! in a store: a value the registry refuses leaves that one field at its
 //! documented default and is *named* to the caller, so one stale setting
 //! costs only itself and never blanks a user's desktop.
@@ -54,7 +54,6 @@
 
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::desktop::{
@@ -62,7 +61,7 @@ use tairix_abi::desktop::{
     DOUBLE_CLICK_MIN,
 };
 use tairix_abi::time::Duration64;
-use tairix_appconf::{ConfError, Document, Lookup};
+use tairix_appconf::{ConfError, Document, Registry};
 use tairix_colour::Rgb;
 use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
@@ -78,6 +77,7 @@ use crate::saver::{
     CellSize, CpuUse, Pace, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource,
     SlideshowOptions, StarDensity,
 };
+use crate::text::{TextFamily, TextSize};
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
 /// key.
@@ -512,6 +512,10 @@ pub enum SettingsKey {
     Motion,
     /// `scale` — the UI scale, as a percentage of the reference density.
     Scale,
+    /// `font.family` — the family interface text is drawn in.
+    FontFamily,
+    /// `font.size` — the body size in points.
+    FontSize,
     /// `cursor.set` — which cursor set the pointer is drawn from.
     CursorSet,
     /// `cursor.size` — how large the pointer is drawn.
@@ -603,7 +607,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 47] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -614,6 +618,8 @@ impl SettingsKey {
         Self::Density,
         Self::Motion,
         Self::Scale,
+        Self::FontFamily,
+        Self::FontSize,
         Self::CursorSet,
         Self::CursorSize,
         Self::CursorShake,
@@ -664,12 +670,14 @@ impl SettingsKey {
 
     /// The keys describing how every surface of the desktop is drawn: what
     /// the Settings application's Appearance and Accessibility panes edit.
-    pub const APPEARANCE: [Self; 11] = [
+    pub const APPEARANCE: [Self; 13] = [
         Self::Appearance,
         Self::Contrast,
         Self::Density,
         Self::Motion,
         Self::Scale,
+        Self::FontFamily,
+        Self::FontSize,
         Self::CursorSet,
         Self::CursorSize,
         Self::CursorShake,
@@ -740,6 +748,8 @@ impl SettingsKey {
             Self::Density => "density",
             Self::Motion => "motion",
             Self::Scale => "scale",
+            Self::FontFamily => "font.family",
+            Self::FontSize => "font.size",
             Self::CursorSet => "cursor.set",
             Self::CursorSize => "cursor.size",
             Self::CursorShake => "cursor.shake",
@@ -804,7 +814,7 @@ impl fmt::Display for SettingsKey {
 /// Why a pinboard settings document that arrived over a channel was refused.
 ///
 /// Only [`merge`] raises these: a document held in the store is read
-/// tolerantly, key by key, by [`DesktopSettings::load`].
+/// tolerantly, key by key, by [`Registry::load`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DocumentRefusal {
     /// The document is outside the format engine's own bounds or grammar.
@@ -863,6 +873,10 @@ pub struct DesktopSettings {
     pub motion: Motion,
     /// The UI scale every logical length is resolved through.
     pub scale: Scale,
+    /// The family interface text is drawn in.
+    pub text_family: TextFamily,
+    /// The body size every text role derives from.
+    pub text_size: TextSize,
     /// Which cursor set the pointer is drawn from.
     pub cursor_set: CursorSetId,
     /// How large the pointer is drawn.
@@ -914,6 +928,8 @@ impl Default for DesktopSettings {
             density: Density::Normal,
             motion: Motion::Full,
             scale: Scale::ONE,
+            text_family: TextFamily::Theme,
+            text_size: TextSize::Theme,
             cursor_set: CursorSetId::builtin(),
             cursor_size: CursorSize::default(),
             cursor_shake: true,
@@ -936,37 +952,32 @@ impl Default for DesktopSettings {
     }
 }
 
-impl DesktopSettings {
-    /// The settings `source` holds, and every key whose stored value the
-    /// registry refused.
-    ///
-    /// This is the **tolerant** reading, for a document held in a store: a
-    /// key the source does not set keeps its documented default, so an
-    /// absent document and a fresh account are the same thing, and a value
-    /// outside a key's closed set leaves that one field at its default and
-    /// is named in the returned list. One stale setting therefore costs only
-    /// itself — a desktop is never blanked because a single value predates
-    /// this build — and the caller still reports what it could not use
-    /// rather than running on a value the user cannot account for.
-    ///
-    /// `source` is anything the format engine can be read through: the
-    /// desktop session's own published-scope handle, or the [`Document`]
-    /// another application's foreign read answered with.
-    #[must_use]
-    pub fn load<L: Lookup + ?Sized>(source: &L) -> (Self, Vec<SettingsKey>) {
-        let mut settings = Self::default();
-        let mut refused = Vec::new();
-        for key in SettingsKey::ALL {
-            let Some(value) = source.get(key.name()) else {
-                continue;
-            };
-            if !set_field(&mut settings, key, value) {
-                refused.push(key);
-            }
-        }
-        (settings, refused)
+/// The **tolerant** reading, for a document held in a store: a key the
+/// source does not set keeps its documented default, so an absent document
+/// and a fresh account are the same thing, and a value outside a key's closed
+/// set leaves that one field at its default and is named. One stale setting
+/// therefore costs only itself — a desktop is never blanked because a single
+/// value predates this build. A document that arrived over a channel is read
+/// strictly instead ([`merge`]).
+impl Registry for DesktopSettings {
+    type Key = SettingsKey;
+    const KEYS: &'static [SettingsKey] = &SettingsKey::ALL;
+
+    fn name(key: SettingsKey) -> &'static str {
+        key.name()
     }
 
+    fn read(&mut self, key: SettingsKey, text: &str) -> bool {
+        set_field(self, key, text)
+    }
+
+    fn spell(&self, key: SettingsKey, out: &mut String) -> bool {
+        out.push_str(&field_value(self, key));
+        true
+    }
+}
+
+impl DesktopSettings {
     /// These settings as the canonical document: every registry key, in
     /// registry order.
     ///
@@ -974,32 +985,11 @@ impl DesktopSettings {
     /// document is self-describing and a render/[`merge`] round trip is
     /// exact. It is what the session persists, because the store holds the
     /// whole desktop; a surface *asking* for a change renders only the keys
-    /// it edits ([`document_of`](Self::document_of)).
+    /// it edits ([`Registry::document_of`]), as an apply is merged over what
+    /// the desktop holds and must not reset a setting it never showed.
     #[must_use]
     pub fn document(&self) -> Document {
         self.document_of(&SettingsKey::ALL)
-    }
-
-    /// Just `keys` of these settings, as a document.
-    ///
-    /// What a surface posts to the session: an apply is *merged* over what
-    /// the desktop currently holds ([`merge`]), so a surface that renders
-    /// only the keys it edits cannot reset a setting it never showed. The
-    /// Wallpaper pane rendering the whole document is exactly how a
-    /// picture change would otherwise undo an appearance change made on
-    /// another pane.
-    #[must_use]
-    pub fn document_of(&self, keys: &[SettingsKey]) -> Document {
-        let mut document = Document::new();
-        for key in keys.iter().copied() {
-            // Every registry key is inside the format's key grammar and every
-            // rendered value inside its value grammar, which
-            // `the_canonical_document_holds_every_registry_key` pins; a
-            // refusal here would be a defect in this registry, and dropping
-            // the key is the only answer that cannot publish a wrong one.
-            let _ = document.set(key.name(), &key.value_of(self));
-        }
-        document
     }
 }
 
@@ -1023,6 +1013,10 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::Density => put(&mut settings.density, Density::from_value(value)),
         SettingsKey::Motion => put(&mut settings.motion, Motion::from_value(value)),
         SettingsKey::Scale => put(&mut settings.scale, parse_scale(value)),
+        // Whether the store holds the family is asked where it is resolved:
+        // a choice outlives the image that shipped it.
+        SettingsKey::FontFamily => put(&mut settings.text_family, TextFamily::from_value(value)),
+        SettingsKey::FontSize => put(&mut settings.text_size, TextSize::from_value(value)),
         // Refused here rather than spliced into a store path; whether a set
         // answers to it is the desktop's question, since a choice outlives its image.
         SettingsKey::CursorSet => put(&mut settings.cursor_set, CursorSetId::new(value)),
@@ -1146,6 +1140,8 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::Density => settings.density.as_str().to_string(),
         SettingsKey::Motion => settings.motion.as_str().to_string(),
         SettingsKey::Scale => format!("{}", settings.scale.percent()),
+        SettingsKey::FontFamily => settings.text_family.render_value(),
+        SettingsKey::FontSize => settings.text_size.render_value(),
         SettingsKey::CursorSet => settings.cursor_set.name().to_string(),
         SettingsKey::CursorSize => settings.cursor_size.as_str().to_string(),
         SettingsKey::CursorShake => tairix_appconf::bool_text(settings.cursor_shake).to_string(),

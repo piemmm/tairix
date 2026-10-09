@@ -16,18 +16,15 @@
 //!
 //! # Live, then durable
 //!
-//! A control that moves changes [`Choice::live`] and nothing else; the frame
-//! follows it at once. Where the interaction settles, the choice is written
-//! off the frame loop, and what the store then says is adopted — unless the
-//! player has moved on since, in which case their newer choice stands and its
-//! own write is on the way. A refused write says why and puts the store's
-//! choice back.
+//! It is kept by the shared closed-registry engine ([`Registry`], [`Live`]):
+//! a control that moves changes the live choice and nothing else, and where
+//! the interaction settles the choice is written off the frame loop and what
+//! the store then says is adopted wherever the player has not moved on.
 
-use alloc::vec::Vec;
+use alloc::string::String;
+use core::fmt::Write as _;
 
-use tairix_abi::Errno;
-use tairix_appconf::{as_u32, ConfError, Lookup};
-use tairix_appdata::{AppDataHost, Settings};
+use tairix_appconf::{as_u32, overwrite, Live, Registry};
 use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
 
 use crate::quality::{Detail, Lighting, Resolution, Shadows};
@@ -47,9 +44,6 @@ pub const GROUND_KEY: &str = "graphics.ground";
 
 /// The key a custom choice's render scale is stored under.
 pub const RESOLUTION_KEY: &str = "graphics.resolution";
-
-/// The four knobs' keys, which a non-custom choice leaves unset.
-const KNOB_KEYS: [&str; 4] = [LIGHTING_KEY, SHADOWS_KEY, GROUND_KEY, RESOLUTION_KEY];
 
 /// Every knob at its plainest, at the window's own resolution: the least a
 /// frame can be drawn with without being drawn smaller.
@@ -161,182 +155,108 @@ impl Graphics {
     }
 }
 
-/// A stored choice, and every key whose value was refused on the way.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Stored {
-    /// The choice the store implies.
-    pub graphics: Graphics,
-    /// Each key whose stored value meant nothing here. It is read as unset,
-    /// so one broken line costs only itself.
-    pub refused: Vec<&'static str>,
-}
-
-/// Read the choice `store` holds.
-///
-/// A missing mode is the default. A custom choice missing a knob takes that
-/// knob's finest setting, which is what the choice started from.
-#[must_use]
-pub fn read(store: &impl Lookup) -> Stored {
-    let mut refused = Vec::new();
-    let mode = take(
-        store,
-        MODE_KEY,
-        |text| spelled(Mode::ALL, Mode::token, text),
-        &mut refused,
-    );
-    let graphics = match mode {
-        Some(Mode::Custom) => {
-            let finest = Detail::FINEST;
-            Graphics::Custom(Detail {
-                lighting: take(
-                    store,
-                    LIGHTING_KEY,
-                    |text| spelled(Lighting::ALL, lighting_token, text),
-                    &mut refused,
-                )
-                .unwrap_or(finest.lighting),
-                shadows: take(
-                    store,
-                    SHADOWS_KEY,
-                    |text| spelled(Shadows::ALL, shadows_token, text),
-                    &mut refused,
-                )
-                .unwrap_or(finest.shadows),
-                ground: take(store, GROUND_KEY, ground_of, &mut refused).unwrap_or(finest.ground),
-                resolution: take(
-                    store,
-                    RESOLUTION_KEY,
-                    |text| spelled(Resolution::ALL, resolution_token, text),
-                    &mut refused,
-                )
-                .unwrap_or(finest.resolution),
-            })
-        }
-        Some(mode) => Graphics::chosen(mode, Detail::FINEST),
-        None => Graphics::DEFAULT,
-    };
-    Stored { graphics, refused }
-}
-
-/// The value `store` holds for `key`, read through `parse`, noting the key
-/// in `refused` when the text is there and means nothing.
-fn take<T>(
-    store: &impl Lookup,
-    key: &'static str,
-    parse: fn(&str) -> Option<T>,
-    refused: &mut Vec<&'static str>,
-) -> Option<T> {
-    let value = parse(store.get(key)?);
-    if value.is_none() {
-        refused.push(key);
+impl Default for Graphics {
+    fn default() -> Self {
+        Self::DEFAULT
     }
-    value
 }
 
-/// Stage `graphics` in `settings`: the mode, and the knobs only for a custom
-/// choice.
-///
-/// # Errors
-///
-/// Whatever the document engine refuses, which for these fixed keys and
-/// tokens would mean its bounds changed under them.
-pub fn stage(graphics: Graphics, settings: &mut Settings<'_>) -> Result<(), ConfError> {
-    settings.set(MODE_KEY, graphics.mode().token())?;
-    match graphics {
-        Graphics::Custom(detail) => {
-            settings.set(LIGHTING_KEY, lighting_token(detail.lighting))?;
-            settings.set(SHADOWS_KEY, shadows_token(detail.shadows))?;
-            settings.set_u32(GROUND_KEY, detail.ground.octaves())?;
-            settings.set(RESOLUTION_KEY, resolution_token(detail.resolution))?;
+/// One key the choice is kept under: the mode, then the four knobs, which
+/// count only while the choice is custom.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum GraphicsKey {
+    /// [`MODE_KEY`].
+    Mode,
+    /// [`LIGHTING_KEY`].
+    Lighting,
+    /// [`SHADOWS_KEY`].
+    Shadows,
+    /// [`GROUND_KEY`].
+    Ground,
+    /// [`RESOLUTION_KEY`].
+    Resolution,
+}
+
+/// A missing mode is the default, and a custom choice missing a knob takes
+/// that knob's finest setting, which is what the choice started from.
+impl Registry for Graphics {
+    type Key = GraphicsKey;
+    const KEYS: &'static [GraphicsKey] = &[
+        GraphicsKey::Mode,
+        GraphicsKey::Lighting,
+        GraphicsKey::Shadows,
+        GraphicsKey::Ground,
+        GraphicsKey::Resolution,
+    ];
+
+    fn name(key: GraphicsKey) -> &'static str {
+        match key {
+            GraphicsKey::Mode => MODE_KEY,
+            GraphicsKey::Lighting => LIGHTING_KEY,
+            GraphicsKey::Shadows => SHADOWS_KEY,
+            GraphicsKey::Ground => GROUND_KEY,
+            GraphicsKey::Resolution => RESOLUTION_KEY,
         }
-        Graphics::Auto | Graphics::Ultra | Graphics::Basic => {
-            for key in KNOB_KEYS {
-                settings.unset(key);
+    }
+
+    fn read(&mut self, key: GraphicsKey, text: &str) -> bool {
+        if key == GraphicsKey::Mode {
+            let Some(mode) = spelled(Mode::ALL, Mode::token, text) else {
+                return false;
+            };
+            *self = Self::chosen(mode, Detail::FINEST);
+            return true;
+        }
+        let Self::Custom(detail) = self else {
+            return true;
+        };
+        match key {
+            GraphicsKey::Lighting => spelled(Lighting::ALL, lighting_token, text)
+                .map(|lighting| detail.lighting = lighting),
+            GraphicsKey::Shadows => {
+                spelled(Shadows::ALL, shadows_token, text).map(|shadows| detail.shadows = shadows)
             }
+            GraphicsKey::Ground => ground_of(text).map(|ground| detail.ground = ground),
+            GraphicsKey::Resolution => spelled(Resolution::ALL, resolution_token, text)
+                .map(|resolution| detail.resolution = resolution),
+            GraphicsKey::Mode => None,
         }
+        .is_some()
     }
-    Ok(())
-}
 
-/// Open the application's own store over `host` and read the choice it holds.
-///
-/// Opening never fails: a store the service cannot serve reads as the
-/// default, and the reason comes back beside it for the caller to state.
-pub fn load(host: &mut dyn AppDataHost) -> (Stored, Option<Errno>) {
-    let settings = Settings::open_without_defaults(host);
-    (read(&settings), settings.store_refusal())
-}
-
-/// Write `graphics` to the application's own store over `host`, answering
-/// what the store holds afterwards.
-///
-/// # Errors
-///
-/// The service's refusal of the write, or [`Errno::OutOfRange`] where the
-/// document engine would not stage it.
-pub fn publish(host: &mut dyn AppDataHost, graphics: Graphics) -> Result<Stored, Errno> {
-    let mut settings = Settings::open_without_defaults(host);
-    if let Some(refusal) = settings.store_refusal() {
-        return Err(refusal);
+    fn spell(&self, key: GraphicsKey, out: &mut String) -> bool {
+        let token = match (key, *self) {
+            (GraphicsKey::Mode, graphics) => graphics.mode().token(),
+            (_, Self::Auto | Self::Ultra | Self::Basic) => return false,
+            (GraphicsKey::Lighting, Self::Custom(detail)) => lighting_token(detail.lighting),
+            (GraphicsKey::Shadows, Self::Custom(detail)) => shadows_token(detail.shadows),
+            (GraphicsKey::Ground, Self::Custom(detail)) => {
+                return write!(out, "{}", detail.ground.octaves()).is_ok();
+            }
+            (GraphicsKey::Resolution, Self::Custom(detail)) => resolution_token(detail.resolution),
+        };
+        out.push_str(token);
+        true
     }
-    stage(graphics, &mut settings).map_err(|_| Errno::OutOfRange)?;
-    settings.commit()?;
-    Ok(read(&settings))
 }
 
-/// The choice frames are drawn with, and the one the store last said.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Choice {
-    adopted: Graphics,
-    live: Graphics,
-}
-
-/// What an answered write did to the choice.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Adopted {
-    /// The live choice is unchanged.
-    Standing,
-    /// The live choice became the one the store holds.
-    Moved,
-}
-
-impl Choice {
-    /// The choice the store held at start-up, in force.
-    #[must_use]
-    pub const fn new(stored: Graphics) -> Self {
-        Self {
-            adopted: stored,
-            live: stored,
+/// A new mode is taken whole; a knob is taken only between two custom
+/// choices, the one place it means anything.
+impl Live for Graphics {
+    fn take(&mut self, other: &Self, key: GraphicsKey) -> bool {
+        if key == GraphicsKey::Mode {
+            return self.mode() != other.mode() && overwrite(self, *other);
         }
-    }
-
-    /// What frames are drawn with.
-    #[must_use]
-    pub const fn live(&self) -> Graphics {
-        self.live
-    }
-
-    /// Draw with `graphics` from the next frame on, and write nothing,
-    /// answering whether anything changed.
-    pub fn preview(&mut self, graphics: Graphics) -> bool {
-        core::mem::replace(&mut self.live, graphics) != graphics
-    }
-
-    /// The store answered the write of `wrote` with `answer`.
-    ///
-    /// What it holds is adopted as what the store says; it becomes the live
-    /// choice only when the player has not moved on since `wrote` was asked
-    /// for, since otherwise a newer write is on its way and a control the
-    /// player is using would jump back under them.
-    pub fn answered(&mut self, wrote: Graphics, answer: Result<Graphics, Errno>) -> Adopted {
-        if let Ok(stored) = answer {
-            self.adopted = stored;
+        let (Self::Custom(mine), Self::Custom(theirs)) = (self, other) else {
+            return false;
+        };
+        match key {
+            GraphicsKey::Lighting => overwrite(&mut mine.lighting, theirs.lighting),
+            GraphicsKey::Shadows => overwrite(&mut mine.shadows, theirs.shadows),
+            GraphicsKey::Ground => overwrite(&mut mine.ground, theirs.ground),
+            GraphicsKey::Resolution => overwrite(&mut mine.resolution, theirs.resolution),
+            GraphicsKey::Mode => false,
         }
-        if self.live != wrote || self.live == self.adopted {
-            return Adopted::Standing;
-        }
-        self.live = self.adopted;
-        Adopted::Moved
     }
 }
 

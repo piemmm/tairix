@@ -190,6 +190,9 @@ pub struct Metrics {
     // --- Window-furniture metrics ---------------------------------------
     /// The height of a window title bar, in logical pixels.
     pub title_bar_height: u32,
+    /// The height of a mini title band — a tool window's, or a docked pane's
+    /// that matches it — in logical pixels.
+    pub tool_title_bar_height: u32,
     /// The inset of the client viewport from the outer frame edge, in logical
     /// pixels.
     pub frame_inset: u32,

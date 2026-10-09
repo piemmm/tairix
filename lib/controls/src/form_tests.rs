@@ -2083,6 +2083,20 @@ fn a_groups_natural_width_is_the_narrowest_that_seats_its_controls() {
     );
 }
 
+/// Whether two sampled boxes are one drawing: equal but for the one level the
+/// surface's ordered dither, tiled on surface coordinates, rounds an edge by
+/// at another phase.
+fn same_drawing(a: &[Option<Pixel>], b: &[Option<Pixel>]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|pair| match pair {
+            (Some(a), Some(b)) => [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
+                .iter()
+                .all(|(x, y)| x.abs_diff(*y) <= 1),
+            (None, None) => true,
+            _ => false,
+        })
+}
+
 /// Every appearance and contrast policy draws the flags, and each flag's box
 /// carries its own state, so a set read in monochrome still says which flags
 /// are on.
@@ -2110,13 +2124,16 @@ fn every_appearance_and_contrast_draws_each_flags_own_state() {
                 .map(|(dx, dy)| surface.get(x0 + dx, (H - side) / 2 + dy))
                 .collect::<Vec<_>>()
         };
-        assert_ne!(
-            block(0),
-            block(1),
+        assert!(
+            !same_drawing(&block(0), &block(1)),
             "an on flag and an off one drew the same box under {}",
             theme.name()
         );
-        assert_eq!(block(1), block(2), "two off flags draw the same box");
+        assert!(
+            same_drawing(&block(1), &block(2)),
+            "two off flags draw the same box under {}",
+            theme.name()
+        );
         drawn.push(surface.pixels().to_vec());
     }
     assert_ne!(

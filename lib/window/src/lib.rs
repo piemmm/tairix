@@ -93,7 +93,7 @@ pub use mailbox::EventMailbox;
 pub use server::{
     client_frame_budget_bytes, Activation, CallerIdentity, ClientRegion, CursorSetName,
     DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry, PickedFile,
-    PopupSpec, PreviewSize, WallpaperName, WindowHost, WindowServer, WindowSizing,
+    PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizing,
     WINDOW_REPLY_MAX,
 };
 
