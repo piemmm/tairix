@@ -20,9 +20,9 @@
 //! [`UrbEngine`]; the live wait-set loop that drives it is in `main.rs` and is
 //! the on-metal acceptance item (QEMU models no Pi USB).
 
+use tairix_abi::reply::encode_status_reply;
 use tairix_abi::usb_urb::{
-    decode_completion, UrbRequest, UsbDirection, UsbTransferType, URB_COMPLETION_LEN,
-    URB_REQUEST_LEN,
+    decode_completion, IsoGrant, UrbRequest, UsbDirection, UsbTransferType, USB_REPLY_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwNode, HwResource};
 use tairix_usb::transport::{drive_urb, frame_completion, UrbEngine};
@@ -39,32 +39,48 @@ pub enum Reach {
     Retracted,
 }
 
-/// A framed URB completion ready for `call_reply`: the in-band completion
-/// bytes and their length, paired with the ticket the reply answers.
+/// A framed reply ready for `call_reply`: a URB completion, a status, or a
+/// stream's grant, paired with the ticket it answers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct UrbReply {
     /// The in-service call ticket this reply answers.
     pub ticket: u64,
-    /// The framed completion bytes.
-    pub bytes: [u8; URB_COMPLETION_LEN],
+    /// The framed bytes.
+    pub bytes: [u8; USB_REPLY_MAX_LEN],
     /// The number of valid bytes in [`Self::bytes`].
     pub len: usize,
 }
 
 impl UrbReply {
-    /// `result` framed for `ticket`.
+    /// A URB's completion, `result`, framed for `ticket`.
     ///
-    /// Framing into a [`URB_COMPLETION_LEN`] buffer cannot fail, since the
-    /// buffer is exactly the sized destination; a failure would frame an
-    /// empty reply, which the caller decodes as malformed rather than as a
-    /// success.
+    /// Framing into a [`USB_REPLY_MAX_LEN`] buffer cannot fail, since the
+    /// buffer outsizes every completion; a failure would frame an empty
+    /// reply, which the caller decodes as malformed rather than as a success.
     pub(crate) fn new(ticket: u64, result: Result<u32, Errno>) -> Self {
-        let mut bytes = [0u8; URB_COMPLETION_LEN];
+        let mut bytes = [0u8; USB_REPLY_MAX_LEN];
         let len = frame_completion(&mut bytes, result).unwrap_or(0);
         Self { ticket, bytes, len }
     }
 
-    /// The error the reply carries, if it carries one.
+    /// An interface or stream operation's outcome, framed for `ticket`.
+    pub(crate) fn status(ticket: u64, result: Result<(), Errno>) -> Self {
+        Self::framed(ticket, &encode_status_reply(result))
+    }
+
+    /// A started stream's grant, framed for `ticket`.
+    pub(crate) fn grant(ticket: u64, grant: &IsoGrant) -> Self {
+        Self::framed(ticket, &grant.encode())
+    }
+
+    fn framed(ticket: u64, frame: &[u8]) -> Self {
+        let mut bytes = [0u8; USB_REPLY_MAX_LEN];
+        let len = frame.len().min(USB_REPLY_MAX_LEN);
+        bytes[..len].copy_from_slice(&frame[..len]);
+        Self { ticket, bytes, len }
+    }
+
+    /// The error a URB completion carries, if it carries one.
     pub(crate) fn errno(&self) -> Option<Errno> {
         decode_completion(self.bytes.get(..self.len).unwrap_or_default()).err()
     }
@@ -92,9 +108,9 @@ pub enum UrbOutcome {
 /// the URB in flight (a hostile class driver cannot steal another submit's
 /// completion).
 pub struct UrbService {
-    /// The in-flight URB: its `call_recv` ticket and the fixed-size request
-    /// frame, re-driven on each controller event. `None` when idle.
-    outstanding: Option<(u64, [u8; URB_REQUEST_LEN], usize)>,
+    /// The in-flight URB and its `call_recv` ticket, re-driven on each
+    /// controller event. `None` when idle.
+    outstanding: Option<(u64, UrbRequest)>,
 }
 
 impl Default for UrbService {
@@ -117,7 +133,7 @@ impl UrbService {
         self.outstanding.is_some()
     }
 
-    /// Service a freshly received URB (`ticket` + its `request` frame) over the
+    /// Service a freshly received URB (`ticket` + its decoded `urb`) over the
     /// shared `shm` buffer and the controller `engine`.
     ///
     /// A [`Reach::Served`] URB is driven once: replied at once when it
@@ -131,7 +147,7 @@ impl UrbService {
         &mut self,
         reach: Reach,
         ticket: u64,
-        request: &[u8],
+        urb: &UrbRequest,
         shm: &mut [u8],
         engine: &mut E,
     ) -> UrbOutcome {
@@ -142,36 +158,23 @@ impl UrbService {
             return UrbOutcome::Reply(UrbReply::new(ticket, Err(Errno::AlreadyExists)));
         }
         if reach == Reach::Recovering {
-            return match is_report_poll(request) {
-                // Answering a report poll would have its class driver submit
-                // again at once, a busy loop across the two processes for as
-                // long as the recovery lasts.
-                Ok(true) => {
-                    self.latch(ticket, request);
-                    UrbOutcome::Held
-                }
-                Ok(false) => UrbOutcome::Reply(UrbReply::new(ticket, Err(Errno::WouldBlock))),
-                Err(err) => UrbOutcome::Reply(UrbReply::new(ticket, Err(err))),
-            };
+            // Answering a report poll would have its class driver submit
+            // again at once, a busy loop across the two processes for as long
+            // as the recovery lasts.
+            if is_report_poll(urb) {
+                self.outstanding = Some((ticket, *urb));
+                return UrbOutcome::Held;
+            }
+            return UrbOutcome::Reply(UrbReply::new(ticket, Err(Errno::WouldBlock)));
         }
-        match drive_urb(request, shm, engine) {
+        match drive_urb(urb, shm, engine) {
             Ok(Some(transferred)) => UrbOutcome::Reply(UrbReply::new(ticket, Ok(transferred))),
             Ok(None) => {
-                self.latch(ticket, request);
+                self.outstanding = Some((ticket, *urb));
                 UrbOutcome::Held
             }
             Err(err) => UrbOutcome::Reply(UrbReply::new(ticket, Err(err))),
         }
-    }
-
-    /// Keep `request` outstanding under `ticket`. A frame longer than
-    /// [`URB_REQUEST_LEN`] cannot have decoded, but is clamped rather than
-    /// trusted.
-    fn latch(&mut self, ticket: u64, request: &[u8]) {
-        let mut frame = [0u8; URB_REQUEST_LEN];
-        let n = request.len().min(URB_REQUEST_LEN);
-        frame[..n].copy_from_slice(&request[..n]);
-        self.outstanding = Some((ticket, frame, n));
     }
 
     /// Service a controller event over the shared `shm` buffer and `engine`.
@@ -183,14 +186,14 @@ impl UrbService {
     /// [`UrbOutcome::Idle`] (e.g. a PORTSC change the caller handles
     /// separately).
     pub fn on_event<E: UrbEngine>(&mut self, shm: &mut [u8], engine: &mut E) -> UrbOutcome {
-        let Some((ticket, frame, len)) = self.outstanding.take() else {
+        let Some((ticket, urb)) = self.outstanding.take() else {
             return UrbOutcome::Idle;
         };
-        match drive_urb(&frame[..len], shm, engine) {
+        match drive_urb(&urb, shm, engine) {
             Ok(Some(transferred)) => UrbOutcome::Reply(UrbReply::new(ticket, Ok(transferred))),
             Ok(None) => {
                 // Still no report — keep the URB outstanding for the next event.
-                self.outstanding = Some((ticket, frame, len));
+                self.outstanding = Some((ticket, urb));
                 UrbOutcome::Held
             }
             Err(err) => UrbOutcome::Reply(UrbReply::new(ticket, Err(err))),
@@ -206,7 +209,7 @@ impl UrbService {
     /// the reset discarded whatever transfer the URB had armed.
     #[must_use]
     pub fn abort_outstanding(&mut self, errno: Errno) -> UrbOutcome {
-        let Some((ticket, _, _)) = self.outstanding.take() else {
+        let Some((ticket, _)) = self.outstanding.take() else {
             return UrbOutcome::Idle;
         };
         UrbOutcome::Reply(UrbReply::new(ticket, Err(errno)))
@@ -221,21 +224,16 @@ impl UrbService {
     pub fn reissue_held_transfer(&mut self) -> UrbOutcome {
         match &self.outstanding {
             None => UrbOutcome::Idle,
-            Some((_, frame, len)) if is_report_poll(&frame[..*len]) == Ok(true) => UrbOutcome::Held,
+            Some((_, urb)) if is_report_poll(urb) => UrbOutcome::Held,
             Some(_) => self.abort_outstanding(Errno::WouldBlock),
         }
     }
 }
 
-/// Whether `request` polls for the device's next report — an interrupt-IN
-/// URB, which the device answers whenever it next has one.
-///
-/// # Errors
-///
-/// The [`UrbRequest::decode`] refusal of a malformed frame.
-fn is_report_poll(request: &[u8]) -> Result<bool, Errno> {
-    let urb = UrbRequest::decode(request)?;
-    Ok(urb.transfer_type == UsbTransferType::Interrupt && urb.direction == UsbDirection::In)
+/// Whether `urb` polls for the device's next report — an interrupt-IN URB,
+/// which the device answers whenever it next has one.
+fn is_report_poll(urb: &UrbRequest) -> bool {
+    urb.transfer_type == UsbTransferType::Interrupt && urb.direction == UsbDirection::In
 }
 
 /// Extend the enumerated device's interface [`HwNode`] (from

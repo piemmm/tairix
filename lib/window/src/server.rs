@@ -47,16 +47,17 @@ use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
     encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
-    encode_open_target_reply, encode_picked_name_reply, encode_terrain_reply,
-    encode_wallpapers_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
-    DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget, HandOverDocument,
-    HandOverOutcome, LayerDepth, OpenTarget, PickPurpose, PreviewSubject, TerrainPlate,
-    WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX,
-    DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
-    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    encode_open_target_reply, encode_picked_file_reply, encode_picked_name_reply,
+    encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind,
+    CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
+    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PickPurpose, PreviewSubject,
+    TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
+    DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
+    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX,
     WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
@@ -99,7 +100,10 @@ pub const WINDOW_REPLY_MAX: usize = {
                             wider(
                                 WINDOW_NOTIFY_SOURCES_REPLY_MAX,
                                 wider(
-                                    WINDOW_PICKED_NAME_REPLY_MAX,
+                                    wider(
+                                        WINDOW_PICKED_NAME_REPLY_MAX,
+                                        WINDOW_PICKED_FILE_REPLY_MAX,
+                                    ),
                                     wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
                                 ),
                             ),
@@ -1257,15 +1261,20 @@ struct WindowRecord<R> {
     /// pages can actually go, which needs both sides to let go. The geometry
     /// stays, so the window still lays out, hit-tests, and re-attaches.
     region: Option<R>,
-    /// A `PickFile` was accepted and neither conclusion
-    /// (`FilePicked`/`PickCancelled`) has been delivered yet. At most one
-    /// pick is pending per window; the engine sets it on acceptance and
+    /// A `PickFile` was accepted for this purpose and its conclusion
+    /// (`FilePicked`, `FolderPicked` or `PickCancelled`) has not been
+    /// delivered yet. At most one pick is pending per window; the engine sets
+    /// it on acceptance and
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
-    pick_pending: bool,
+    pick_pending: Option<PickPurpose>,
     /// The name of the file the last pick chose, until the owner takes it
     /// or asks for another pick.
     picked_name: Option<DocumentName>,
+    /// The files the last folder pick delegated that the owner has not
+    /// taken. Never dropped untaken: a delegation cannot be withdrawn, so a
+    /// further pick waits until they are taken.
+    picked_files: VecDeque<tairix_abi::window_ipc::PickedFile>,
     /// A `BeginDrag` was accepted and its `DragEnded` is still owed.
     drag_pending: bool,
     /// The desktop folder the host last named for this window's drag, and
@@ -1581,6 +1590,7 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             WindowRequest::PickFile { .. }
             | WindowRequest::TakePickedName { .. }
+            | WindowRequest::TakePickedFile { .. }
             | WindowRequest::BeginDrag { .. }
             | WindowRequest::TakeDropTarget { .. }
             | WindowRequest::DragVerdict { .. }
@@ -1610,6 +1620,11 @@ impl<M: ShmMapper> WindowServer<M> {
                 let taken = owned_window_mut(&mut self.windows, caller, window_id)
                     .and_then(|record| record.picked_name.take().ok_or(Errno::NotFound));
                 picked_name_reply(reply, taken.as_ref().map_err(|&err| err))
+            }
+            WindowRequest::TakePickedFile { window_id } => {
+                let taken = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|record| record.picked_files.pop_front().ok_or(Errno::NotFound));
+                picked_file_reply(reply, taken.as_ref().map_err(|&err| err))
             }
             WindowRequest::BeginDrag {
                 window_id,
@@ -1848,6 +1863,9 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::TakePickedName { .. } => {
                 picked_name_reply(reply, Err(Errno::NotSupported))
             }
+            WindowRequest::TakePickedFile { .. } => {
+                picked_file_reply(reply, Err(Errno::NotSupported))
+            }
 
             // ...and a hand-over, likewise.
             WindowRequest::HandOverLaunch { .. } => {
@@ -1914,8 +1932,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region: Some(region),
-                pick_pending: false,
+                pick_pending: None,
                 picked_name: None,
+                picked_files: VecDeque::new(),
                 drag_pending: false,
                 drag_spot: None,
                 drop_target: None,
@@ -2051,8 +2070,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region: Some(region),
-                pick_pending: false,
+                pick_pending: None,
                 picked_name: None,
+                picked_files: VecDeque::new(),
                 drag_pending: false,
                 drag_spot: None,
                 drop_target: None,
@@ -2110,8 +2130,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_count: spec.frame_count,
                 frame_len,
                 region: Some(region),
-                pick_pending: false,
+                pick_pending: None,
                 picked_name: None,
+                picked_files: VecDeque::new(),
                 drag_pending: false,
                 drag_spot: None,
                 drop_target: None,
@@ -2297,13 +2318,13 @@ impl<M: ShmMapper> WindowServer<M> {
         // Owned-window check first: a window the caller does not own
         // answers exactly like one that never existed.
         let record = owned_window_mut(&mut self.windows, caller, window_id)?;
-        if record.pick_pending {
+        if record.pick_pending.is_some() || !record.picked_files.is_empty() {
             return Err(Errno::AlreadyExists);
         }
         // Tell the host before committing: a refused picker (slot taken,
         // no filesystem authority) leaves no pending pick behind.
         host.pick_requested(window_id, purpose)?;
-        record.pick_pending = true;
+        record.pick_pending = Some(*purpose);
         record.picked_name = None;
         Ok(())
     }
@@ -2797,7 +2818,8 @@ impl<M: ShmMapper> WindowServer<M> {
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such window.
-    /// * [`Errno::OutOfRange`] — no pick is pending on it, or a zero handle.
+    /// * [`Errno::OutOfRange`] — no pick is pending on it, a zero handle, or a
+    ///   file for a pick that asked for a folder.
     /// * Any [`Errno`] the sink surfaces; the pick is still owed.
     pub fn conclude_pick(
         &mut self,
@@ -2806,7 +2828,12 @@ impl<M: ShmMapper> WindowServer<M> {
         chosen: Option<PickedFile<'_>>,
     ) -> Result<(), Errno> {
         let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
-        if !record.pick_pending || chosen.is_some_and(|file| file.handle == 0) {
+        let owed = match record.pick_pending {
+            None => false,
+            Some(PickPurpose::Folder) => chosen.is_none(),
+            Some(PickPurpose::Open | PickPurpose::Save { .. }) => true,
+        };
+        if !owed || chosen.is_some_and(|file| file.handle == 0) {
             return Err(Errno::OutOfRange);
         }
         let event = match chosen {
@@ -2818,8 +2845,45 @@ impl<M: ShmMapper> WindowServer<M> {
             None => WindowEvent::PickCancelled { window_id },
         };
         sink.deliver(record.event_endpoint, &event)?;
-        record.pick_pending = false;
+        record.pick_pending = None;
         record.picked_name = chosen.map(|file| *file.name);
+        Ok(())
+    }
+
+    /// Conclude window `window_id`'s pending folder pick with the `files` the
+    /// session delegated and the number `left_out` past the pick's bound.
+    ///
+    /// Delivers `FolderPicked` and, once the sink accepted it, holds the files
+    /// for the owner to take one at a time (`TakePickedFile`).
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window.
+    /// * [`Errno::OutOfRange`] — no folder pick is pending on it, more files
+    ///   than [`WINDOW_FOLDER_PICK_MAX`], or a zero handle.
+    /// * Any [`Errno`] the sink surfaces; the pick is still owed.
+    pub fn conclude_folder_pick(
+        &mut self,
+        sink: &mut dyn EventSink,
+        window_id: u64,
+        files: VecDeque<tairix_abi::window_ipc::PickedFile>,
+        left_out: u32,
+    ) -> Result<(), Errno> {
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        if record.pick_pending != Some(PickPurpose::Folder)
+            || files.len() > WINDOW_FOLDER_PICK_MAX
+            || files.iter().any(|file| file.handle == 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let event = WindowEvent::FolderPicked {
+            window_id,
+            files: u32::try_from(files.len()).map_err(|_| Errno::OutOfRange)?,
+            left_out,
+        };
+        sink.deliver(record.event_endpoint, &event)?;
+        record.pick_pending = None;
+        record.picked_files = files;
         Ok(())
     }
 
@@ -2992,6 +3056,7 @@ impl<M: ShmMapper> WindowServer<M> {
             event,
             WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
+                | WindowEvent::FolderPicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
         ) {
@@ -3242,6 +3307,17 @@ fn menu_text_reply(
 ) -> usize {
     let mut frame = [0u8; WINDOW_MENU_TEXT_REPLY_MAX];
     let len = encode_menu_text_reply(&mut frame, result);
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write a `TakePickedFile` outcome into `reply`, answering its length.
+fn picked_file_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<&tairix_abi::window_ipc::PickedFile, Errno>,
+) -> usize {
+    let mut frame = [0u8; WINDOW_PICKED_FILE_REPLY_MAX];
+    let len = encode_picked_file_reply(&mut frame, result);
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }

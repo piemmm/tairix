@@ -1,121 +1,14 @@
-//! In-memory flattened-device-tree builder for tests.
+//! Device trees for tests, built with the crate's own writer.
 //!
 //! Exposed behind the `test-fixtures` feature so this crate's own parser
-//! tests **and** the architecture ports' discovery tests drive one DTB
-//! builder rather than re-rolling the byte layout in each crate. It mirrors
-//! the on-disk layout QEMU's `virt` boards produce closely enough to
-//! exercise every branch the boot pipeline relies on.
+//! tests **and** the architecture ports' discovery tests build their trees
+//! one way rather than re-rolling the byte layout in each crate. The trees
+//! mirror the ones QEMU's `virt` boards produce closely enough to exercise
+//! every branch the boot pipeline relies on.
 
 use alloc::vec::Vec;
 
-use crate::{FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, FDT_MAGIC, FDT_PROP};
-
-/// Builder for a minimal flattened device tree.
-pub struct DtbBuilder {
-    strings: Vec<u8>,
-    structure: Vec<u8>,
-}
-
-impl Default for DtbBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DtbBuilder {
-    /// Start an empty builder.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            strings: Vec::new(),
-            structure: Vec::new(),
-        }
-    }
-
-    /// Intern `name` into the strings block, returning its offset.
-    fn intern(&mut self, name: &str) -> u32 {
-        let off = u32::try_from(self.strings.len()).expect("offset fits u32");
-        self.strings.extend_from_slice(name.as_bytes());
-        self.strings.push(0);
-        off
-    }
-
-    fn token(&mut self, tok: u32) {
-        self.structure.extend_from_slice(&tok.to_be_bytes());
-    }
-
-    fn pad4(&mut self) {
-        while !self.structure.len().is_multiple_of(4) {
-            self.structure.push(0);
-        }
-    }
-
-    /// Open a node with unit name `name`.
-    pub fn begin_node(&mut self, name: &str) {
-        self.token(FDT_BEGIN_NODE);
-        self.structure.extend_from_slice(name.as_bytes());
-        self.structure.push(0);
-        self.pad4();
-    }
-
-    /// Close the most recently opened node.
-    pub fn end_node(&mut self) {
-        self.token(FDT_END_NODE);
-    }
-
-    /// Emit a property with raw `value` bytes.
-    pub fn prop(&mut self, name: &str, value: &[u8]) {
-        let nameoff = self.intern(name);
-        self.token(FDT_PROP);
-        let len = u32::try_from(value.len()).expect("prop value fits u32");
-        self.structure.extend_from_slice(&len.to_be_bytes());
-        self.structure.extend_from_slice(&nameoff.to_be_bytes());
-        self.structure.extend_from_slice(value);
-        self.pad4();
-    }
-
-    /// Emit a property holding a single big-endian `u32` cell.
-    pub fn prop_u32(&mut self, name: &str, v: u32) {
-        self.prop(name, &v.to_be_bytes());
-    }
-
-    /// Emit a property holding a NUL-terminated string.
-    pub fn prop_str(&mut self, name: &str, v: &str) {
-        let mut bytes = Vec::from(v.as_bytes());
-        bytes.push(0);
-        self.prop(name, &bytes);
-    }
-
-    /// Finalise the blob: header, structure block (with a trailing
-    /// `FDT_END`), and strings block.
-    #[must_use]
-    pub fn build(mut self) -> Vec<u8> {
-        self.token(FDT_END);
-        let header_len = 40usize;
-        let struct_off = header_len;
-        let struct_size = self.structure.len();
-        let strings_off = struct_off + struct_size;
-        let strings_size = self.strings.len();
-        let total = strings_off + strings_size;
-
-        let mut blob = Vec::with_capacity(total);
-        let mut push = |v: u32| blob.extend_from_slice(&v.to_be_bytes());
-        let u32_of = |v: usize| u32::try_from(v).expect("fits u32");
-        push(FDT_MAGIC);
-        push(u32_of(total));
-        push(u32_of(struct_off));
-        push(u32_of(strings_off));
-        push(0); // off_mem_rsvmap (unused by this parser)
-        push(17); // version
-        push(16); // last_comp_version
-        push(0); // boot_cpuid_phys
-        push(u32_of(strings_size));
-        push(u32_of(struct_size));
-        blob.extend_from_slice(&self.structure);
-        blob.extend_from_slice(&self.strings);
-        blob
-    }
-}
+use crate::write::FdtWriter;
 
 /// Exclusive top of the DMA window [`raspi_like_arm`]'s `/scb` bus declares
 /// its devices may reach, matching the real BCM2711 tree. The GENET node
@@ -147,7 +40,7 @@ pub const GENET_BOARD_MAC: [u8; 6] = [0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33];
 /// DMA-mastering peripherals off `/scb`, which declares two-cell child
 /// addresses, one-cell sizes, the real tree's three `ranges` windows, and the
 /// `dma-ranges` giving the reach of every device on it.
-fn push_scb_bus(b: &mut DtbBuilder) {
+fn push_scb_bus(b: &mut FdtWriter) {
     b.begin_node("scb");
     b.prop_str("compatible", "simple-bus");
     b.prop_u32("#address-cells", 2);
@@ -205,7 +98,7 @@ fn push_scb_bus(b: &mut DtbBuilder) {
 /// a `timebase-frequency`, and a `/memory@80000000` node.
 #[must_use]
 pub fn virt_like(base: u64, size: u64, timebase: u32) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -249,7 +142,7 @@ pub fn virt_like_with_virtio(
     ndev: u32,
     slots: &[(u64, u32)],
 ) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -349,7 +242,7 @@ fn aia_tree(harts: u32, slots: &[(u64, u32, u32)], guest_index_bits: u32) -> Vec
         reg.extend_from_slice(&len.to_be_bytes());
         reg
     };
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -440,7 +333,7 @@ fn aia_tree(harts: u32, slots: &[(u64, u32, u32)], guest_index_bits: u32) -> Vec
 /// aarch64 heterogeneous-core classifier.
 #[must_use]
 pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -487,7 +380,7 @@ pub fn arm_with_cpus(base: u64, size: u64, cpus: &[(u64, Option<u32>)]) -> Vec<u
 /// bring-up discovery.
 #[must_use]
 pub fn arm_with_spin_table_cpus(base: u64, size: u64, cpus: &[(u64, Option<u64>)]) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -553,7 +446,7 @@ pub const RASPI_GIC_PHANDLE: u32 = 1;
 /// one-cell regions (GICD/GICC/GICH/GICV).
 #[must_use]
 pub fn raspi_like_arm(pl011_base: u64, miniuart_base: u64) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 1);
@@ -672,7 +565,7 @@ pub const VIRT_GIC_PHANDLE: u32 = 0x8002;
 /// `interrupts` cell list (the per-CPU PPI the generic timer raises).
 #[must_use]
 pub fn virt_like_arm(base: u64, size: u64, psci_method: &str, timer_ppi: u32) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -731,7 +624,7 @@ pub fn virt_like_arm(base: u64, size: u64, psci_method: &str, timer_ppi: u32) ->
 pub fn ecam_host_arm(external: bool) -> Vec<u8> {
     let cells =
         |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);

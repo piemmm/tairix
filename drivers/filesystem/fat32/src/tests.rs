@@ -1396,7 +1396,13 @@ mod format {
         };
         let name = |slot: u64| short_name(std::format!("F{slot:07X}").as_bytes(), b"BIN");
         while pos.slot < u64::from(MAX_DIR_SLOTS) {
-            let entry = Fat32::<VecBlock>::build_short_entry(&name(pos.slot), 0x20, 0, 0);
+            let entry = Fat32::<VecBlock>::build_short_entry(
+                &name(pos.slot),
+                0x20,
+                0,
+                0,
+                EntryStamps::NONE,
+            );
             fs.put_slot(&mut pos, &entry).expect("fill");
         }
         assert_eq!(
@@ -1424,6 +1430,88 @@ mod format {
         let mut buf = [0u8; 8];
         let n = fs.read_at(node, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"hello");
+    }
+
+    /// FAT matches names ignoring case, so `foo.txt` names `Foo.txt`'s own
+    /// entry: the rename re-spells it rather than reporting success while
+    /// changing nothing, and the data stays put.
+    #[test]
+    fn a_case_only_rename_respells_the_entry_and_keeps_its_data() {
+        let dev = {
+            let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+            let root = fs.root();
+            fs.create(root, b"Foo.txt", NodeKind::RegularFile).unwrap();
+            fs.write_at(root, b"Foo.txt", 0, b"hello").unwrap();
+            fs.rename(root, b"Foo.txt", root, b"foo.txt")
+                .expect("re-spell");
+            fs.into_block()
+        };
+        let mut fs = Fat32::open(dev).expect("reopen");
+        let root = fs.root();
+        let names: Vec<Vec<u8>> = listed(&mut fs, root, 0, &[])
+            .expect("lists")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(names, [b"foo.txt".to_vec()]);
+        let node = fs.lookup(root, b"foo.txt").expect("found");
+        let mut buf = [0u8; 8];
+        let n = fs.read_at(node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+    }
+
+    #[test]
+    fn a_rename_to_the_name_already_stored_changes_nothing() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        fs.create(root, b"Same.txt", NodeKind::RegularFile).unwrap();
+        let before = fs
+            .find_child(node_cluster(root), b"Same.txt")
+            .unwrap()
+            .unwrap();
+        fs.rename(root, b"Same.txt", root, b"Same.txt")
+            .expect("no-op");
+        let after = fs
+            .find_child(node_cluster(root), b"Same.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.short_offset, after.short_offset);
+    }
+
+    /// A rename rewrites the entry, which is where FAT keeps a file's stamps:
+    /// they travel with it rather than resetting to "no stamp".
+    #[test]
+    fn a_rename_keeps_the_entry_s_stamps() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        let sub = fs.create(root, b"SUB", NodeKind::Directory).unwrap();
+        fs.create(root, b"old.txt", NodeKind::RegularFile).unwrap();
+        let entry = fs
+            .find_child(node_cluster(root), b"old.txt")
+            .unwrap()
+            .unwrap();
+        // 2024-03-15 10:20:30 created, accessed 2024-03-16, written 2025-01-02 03:04:06.
+        let created = [0x64, 0x8F, 0x52, 0x6F, 0x58, 0x70, 0x58];
+        let written = [0x83, 0x18, 0x22, 0x5A];
+        fs.write_bytes(entry.short_offset + 13, &created).unwrap();
+        fs.write_bytes(entry.short_offset + 22, &written).unwrap();
+
+        fs.rename(root, b"old.txt", root, b"new.txt")
+            .expect("rename");
+        let moved = fs
+            .find_child(node_cluster(root), b"new.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.stamps.created, created);
+        assert_eq!(moved.stamps.written, written);
+        fs.rename(root, b"new.txt", sub, b"New.TXT").expect("move");
+        let moved = fs
+            .find_child(node_cluster(sub), b"New.TXT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.stamps.created, created);
+        assert_eq!(moved.stamps.written, written);
+        assert_ne!(moved.times.modified, Time64::UNIX_EPOCH);
     }
 
     #[test]

@@ -76,6 +76,9 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `DMA_UNITS`             | `CAP_SYSINFO_HW`       | yes     |
 | `DMA_GROUPS`            | `CAP_SYSINFO_HW`       | yes     |
 | `DMA_NODES`             | `CAP_SYSINFO_HW`       | yes     |
+| `AUDIO_DEVICES`         | none                   | no      |
+| `SELF_AUDIO_STREAMS`    | none (self-scoped)     | no      |
+| `GLOBAL_AUDIO_STREAMS`  | `CAP_SYSINFO_GLOBAL`   | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -408,6 +411,15 @@ node a unit translates for an owner, ascending by node: its unit and group,
 its owner's generation and standing, how many streams it masters through,
 and the carves its domain maps and their bytes. A machine with no unit
 answers empty lists.
+
+`AUDIO_DEVICES` answers one `AudioDeviceDescriptor` per sink and then per
+source the audio service lists, ascending by id: which sound devices exist is
+the machine's, so it is ungated, and its `access` is cleared to `Shown`,
+because what the *caller* may do with a device's controls is the audio
+service's answer to the caller, not to the broker. `SELF_AUDIO_STREAMS` answers
+one `StreamDescriptor` per stream the caller owns and `GLOBAL_AUDIO_STREAMS`
+every principal's, gated and audited as `GLOBAL_PROCESS_LIST` is, since a
+stream names its owner and what it is doing.
 
 `IRQ_LIST` is gated like `SEAT_LIST` and `HARDWARE_TREE` — on
 `CAP_SYSINFO_HW`, and audited — because each `IrqRecord` names which

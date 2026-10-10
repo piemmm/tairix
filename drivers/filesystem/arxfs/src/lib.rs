@@ -100,6 +100,7 @@ use crypto::{
 };
 pub use crypto::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
 pub use discard::{TrimReport, TRIM_BATCH_RANGES};
+use health::ObservedFaults;
 pub use health::{HealthReport, HealthState, HealthThresholds};
 use integrity::{
     logical_hash, physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
@@ -871,8 +872,9 @@ pub struct ARXFS<B: Block> {
     schedule: CommitScheduler,
     clock: fn() -> Time64,
     /// When `true`, the handle never mutates the backing device: the
-    /// repair-on-read paths (`read_meta`, `read_sb_slot`, `read_txn_root`) skip
-    /// writing a good companion back over a bad primary, and every write seam
+    /// repair-on-read paths (`read_meta`, and the mount's repair of the slot
+    /// and root it chose) skip writing a good companion back over a bad
+    /// primary, and every write seam
     /// refuses. Three things set it — a read-only mount, the offline
     /// [`ARXFS::rescue`] on a damaged volume
     /// (`docs/src/filesystem/arxfs-spec.md` §12), and [`ARXFS::commit`] freezing
@@ -904,6 +906,9 @@ pub struct ARXFS<B: Block> {
     /// shortened by and the bytes the set may hold before the transaction is
     /// published. Read once per operation, in [`Self::begin`].
     reading: Option<WritebackReading>,
+    /// Bad mirror copies the read paths met since the last stored health
+    /// baseline, which the next [`ARXFS::health`] pass makes durable.
+    observed: ObservedFaults,
 }
 
 /// Where a mount stands with its stride past the committed content-generation
@@ -917,6 +922,14 @@ enum ContentGens {
     Pending,
     /// The stride is committed.
     Committed,
+}
+
+/// Which physical copy of a mirrored metadata block served a read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ServedBy {
+    Primary,
+    /// The primary failed and its companion authenticated.
+    Companion,
 }
 
 /// What a prepared commit will publish once its superblock slot is written.
@@ -1391,7 +1404,9 @@ impl<B: Block> ARXFS<B> {
             BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)?;
         // The companion is good: repair the primary from its still-encrypted
         // bytes, then decrypt the caller's copy.
-        self.repair_meta_copy(phys, buf)?;
+        let repair = self.repair_meta_copy(phys, buf);
+        self.observed.note_repair(repair);
+        repair?;
         self.decrypt_meta_payload(expect_type, buf, phys)?;
         Ok(header)
     }
@@ -2402,6 +2417,7 @@ impl<B: Block> ARXFS<B> {
             dirty: DirtySet::new(block_size),
             bound: None,
             reading: None,
+            observed: ObservedFaults::default(),
         };
         Ok(fs)
     }
@@ -2498,6 +2514,9 @@ impl<B: Block> ARXFS<B> {
     ///
     /// A crash during a previous commit leaves an earlier committed root
     /// selected rather than a torn one (`docs/src/filesystem/arxfs-spec.md` §14).
+    /// The scan writes nothing until it has chosen; a bad primary of the
+    /// chosen slot or root is then rewritten from its companion, and every bad
+    /// copy met is recorded for the next [`Self::health`] pass.
     ///
     /// The volume is encrypted: `volume_key` must be the key material the
     /// volume was formatted with. `open` recovers the key hierarchy by
@@ -2557,8 +2576,8 @@ impl<B: Block> ARXFS<B> {
     /// `read_only` is set the handle never writes the device (one open path for both modes).
     fn open_inner(block: B, volume_key: &VolumeKey, read_only: bool) -> Result<Self, DriverError> {
         let mut fs = Self::bootstrap(block)?;
-        // Set the read-only flag before the ring scan so the mount-time
-        // companion-mirror repairs are suppressed on a read-only handle.
+        // Set before anything is read, so a read-only handle's mount repairs
+        // nothing.
         fs.read_only = read_only;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         // Establish the volume keys before reading any authenticated metadata:
@@ -2567,11 +2586,11 @@ impl<B: Block> ARXFS<B> {
         // or fails closed on a wrong key.
         fs.establish_keys(volume_key, &mut buf)?;
 
-        let mut best: Option<(Superblock, u128, u64)> = None;
+        let mut best: Option<(Superblock, u64, ServedBy)> = None;
         let uuid_pin: Option<u128> = Some(fs.fs_uuid);
         for slot in 0..RING_SLOTS {
             let primary = slot_block(slot);
-            let Some((sb, uuid)) = fs.read_sb_slot(primary, uuid_pin, &mut buf)? else {
+            let Some((sb, uuid, copy)) = fs.read_sb_slot(primary, uuid_pin, &mut buf)? else {
                 continue;
             };
             // The superblock pins the *filesystem's* committed block count,
@@ -2596,10 +2615,18 @@ impl<B: Block> ARXFS<B> {
                 continue;
             }
             if best.is_none_or(|(b, _, _)| sb.generation > b.generation) {
-                best = Some((sb, uuid, slot));
+                best = Some((sb, slot, copy));
             }
         }
-        let (sb, _uuid, best_slot) = best.ok_or(DriverError::BadMagic)?;
+        let (sb, best_slot, slot_copy) = best.ok_or(DriverError::BadMagic)?;
+        if slot_copy == ServedBy::Companion {
+            let primary = slot_block(best_slot);
+            if let Some((_, _, ServedBy::Companion)) =
+                fs.read_sb_slot(primary, uuid_pin, &mut buf)?
+            {
+                fs.repair_chosen(primary, &buf);
+            }
+        }
 
         fs.inode_hint = sb.inode_count;
         fs.generation = sb.generation;
@@ -2610,7 +2637,11 @@ impl<B: Block> ARXFS<B> {
         // than the backing device (the surplus tail is unused until a grow).
         fs.adopt_total_blocks(sb.total_blocks);
 
-        let root = fs.read_txn_root(fs.fs_uuid, sb.root_phys, sb.generation, &mut buf)?;
+        let (root, root_copy) =
+            fs.read_txn_root(fs.fs_uuid, sb.root_phys, sb.generation, &mut buf)?;
+        if root_copy == ServedBy::Companion {
+            fs.repair_chosen(sb.root_phys, &buf);
+        }
         fs.inode_tree_root = root.inode_tree_root;
         fs.next_ino = root.next_ino;
         fs.next_content_gen = root.next_content_gen;
@@ -2888,15 +2919,16 @@ impl<B: Block> ARXFS<B> {
     }
 
     /// Read a superblock-ring slot at primary block `primary`, falling back to
-    /// its companion mirror and repairing the primary from a good companion
-    /// (`docs/src/filesystem/arxfs-spec.md` §8). Returns the decoded slot and
-    /// its UUID, or `Ok(None)` when neither copy is usable (the ring scan then
-    /// skips the slot). Authenticated under the volume's metadata-authentication
-    /// key, recovered in [`Self::establish_keys`].
+    /// its companion mirror (`docs/src/filesystem/arxfs-spec.md` §8). Returns
+    /// the decoded slot, its UUID and the copy that served it, or `Ok(None)`
+    /// when neither copy is usable (the ring scan then skips the slot).
+    /// Authenticated under the volume's metadata-authentication key, recovered
+    /// in [`Self::establish_keys`].
     ///
     /// A copy that cannot be **read** is as absent as one that fails to
     /// authenticate — a media error on a single sector is exactly what the
-    /// mirror is for — so the fallback covers both.
+    /// mirror is for — so the fallback covers both. Nothing is written: the
+    /// scan reads every slot before it knows which one is live.
     ///
     /// # Errors
     ///
@@ -2908,32 +2940,32 @@ impl<B: Block> ARXFS<B> {
         primary: u64,
         uuid_pin: Option<u128>,
         buf: &mut [u8],
-    ) -> Result<Option<(Superblock, u128)>, DriverError> {
+    ) -> Result<Option<(Superblock, u128, ServedBy)>, DriverError> {
         let bs = self.block_size;
         if self.read_block(primary, buf).is_ok() {
-            if let Some(found) =
+            if let Some((sb, uuid)) =
                 Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
             {
-                return Ok(Some(found));
+                return Ok(Some((sb, uuid, ServedBy::Primary)));
             }
         }
         if self.read_block(Self::companion(primary), buf).is_err() {
             return Ok(None);
         }
-        let Some(found) = Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
-        else {
-            return Ok(None);
-        };
-        // The ring scan tries every slot and keeps the best, so a repair the
-        // device refuses must not make a slot that decoded cleanly invisible.
-        let _ = self.repair_meta_copy(primary, buf);
-        Ok(Some(found))
+        Ok(
+            Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
+                .map(|(sb, uuid)| (sb, uuid, ServedBy::Companion)),
+        )
     }
 
     /// Read the transaction root at `root_phys`, falling back to its companion
-    /// mirror and repairing the primary from a good companion
-    /// (`docs/src/filesystem/arxfs-spec.md` §8). On success `buf` holds the
-    /// good root's bytes.
+    /// mirror (`docs/src/filesystem/arxfs-spec.md` §8). On success `buf` holds
+    /// the good root's bytes and the answer names the copy that served it.
+    ///
+    /// Nothing is written. A superseded generation's root blocks were freed by
+    /// the commit after it and may since hold live data, so a primary that no
+    /// longer authenticates beside a companion that still does is exactly what
+    /// reuse looks like — only the root the mount stands on is ever repaired.
     ///
     /// # Errors
     ///
@@ -2946,7 +2978,7 @@ impl<B: Block> ARXFS<B> {
         root_phys: u64,
         expect_generation: u64,
         buf: &mut [u8],
-    ) -> Result<TxnRoot, DriverError> {
+    ) -> Result<(TxnRoot, ServedBy), DriverError> {
         let bs = self.block_size;
         let key = self.mac_key;
         // A copy that cannot be read is as absent as one that fails to
@@ -2955,15 +2987,21 @@ impl<B: Block> ARXFS<B> {
             if let Ok(root) =
                 TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)
             {
-                return Ok(root);
+                return Ok((root, ServedBy::Primary));
             }
         }
         self.read_block(Self::companion(root_phys), buf)?;
         let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
-        // A refused repair is not a root that failed to commit: the ring scan
-        // must not pass over the newest committed root for it.
-        let _ = self.repair_meta_copy(root_phys, buf);
-        Ok(root)
+        Ok((root, ServedBy::Companion))
+    }
+
+    /// Rewrite the bad primary of a mirrored block the mount stands on — the
+    /// slot it chose or that slot's root — from the good companion in `good`.
+    fn repair_chosen(&mut self, phys: u64, good: &[u8]) {
+        let repair = self.repair_meta_copy(phys, good);
+        // The companion has already served the mount, so a refusal does not
+        // fail it; the health record is where the bad copy stays visible.
+        self.observed.note_repair(repair);
     }
 
     /// Mark every block reachable from the committed trees used while the

@@ -5,10 +5,10 @@
 //! memory. The controller's driver is therefore the only process that maps
 //! its registers or writes its control blocks. It serves one endpoint per
 //! controller node ([`DMA_CONTROLLER_ENDPOINTS`]), bound under the node's
-//! [`DmaControllerDuty`], and a consumer driver calls it naming only claims
-//! the kernel attests: the [`DmaRequestLine`] discovery granted it and a
-//! FIFO inside its own register windows. The buffer comes back as a
-//! shared-memory grant the controller carved, never as an address.
+//! [`LinkDuty`](crate::hwlink::LinkDuty), and a consumer driver calls it
+//! naming only claims the kernel attests: the [`LinkRequest`] discovery
+//! granted it and a FIFO inside its own register windows. The buffer comes
+//! back as a shared-memory grant the controller carved, never as an address.
 //!
 //! A transfer is periodic and cyclic: [`DmaEngineRequest::Prepare`] builds a
 //! chain of one interrupting block per period that loops until stopped, and
@@ -25,6 +25,7 @@
 
 use core::num::NonZeroU32;
 
+use crate::hwlink::{LinkRequest, LinkRole};
 use crate::hwtree::{HwResource, NodeEndpointBlock};
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::origin::ProcId;
@@ -32,146 +33,12 @@ use crate::time::Duration64;
 use crate::{DriverError, Errno};
 
 /// The endpoints DMA controllers serve, indexed by the controller's node id.
-/// Binding one takes the node's [`HwResourceKind::DmaController`] duty.
-///
-/// [`HwResourceKind::DmaController`]: crate::hwtree::HwResourceKind::DmaController
+/// Binding one takes the node's DMA [`LinkDuty`](crate::hwlink::LinkDuty).
 pub const DMA_CONTROLLER_ENDPOINTS: NodeEndpointBlock = NodeEndpointBlock::tagged(*b"DM");
 
 /// The most channels one controller node describes: its channel mask is a
 /// `u64`.
 pub const DMA_MAX_CHANNELS: u8 = 64;
-
-/// The most specifier cells a request line carries; discovery drops a wider
-/// binding's entry rather than truncating it.
-pub const DMA_SPECIFIER_MAX_CELLS: usize = 2;
-
-/// The longest `dma-names` entry a request line carries; a longer one leaves
-/// the line unnamed.
-pub const DMA_REQUEST_NAME_MAX: usize = 8;
-
-/// A DMA controller node's duty: the endpoint it serves and, when the tree
-/// stated them, the channels this system may use, numbered from the node's
-/// own first channel.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct DmaControllerDuty {
-    endpoint: u64,
-    channels: Option<u64>,
-}
-
-impl DmaControllerDuty {
-    /// A duty to serve `endpoint`.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfRange`] if `endpoint` is outside
-    /// [`DMA_CONTROLLER_ENDPOINTS`].
-    pub fn new(endpoint: u64, channels: Option<u64>) -> Result<Self, Errno> {
-        if !DMA_CONTROLLER_ENDPOINTS.contains(endpoint) {
-            return Err(Errno::OutOfRange);
-        }
-        Ok(Self { endpoint, channels })
-    }
-
-    /// The endpoint the controller serves.
-    #[must_use]
-    pub const fn endpoint(&self) -> u64 {
-        self.endpoint
-    }
-
-    /// The usable channels, bit `n` for the node's channel `n`, or [`None`]
-    /// when the tree stated no mask.
-    #[must_use]
-    pub const fn channels(&self) -> Option<u64> {
-        self.channels
-    }
-}
-
-/// One entry of a consumer's `dmas`: the controller endpoint serving it, the
-/// request line's specifier in that controller's own binding, the entry's
-/// position in the list, and its `dma-names` string.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct DmaRequestLine {
-    endpoint: u64,
-    index: u8,
-    cells: u8,
-    specifier: [u32; DMA_SPECIFIER_MAX_CELLS],
-    name: [u8; DMA_REQUEST_NAME_MAX],
-}
-
-impl DmaRequestLine {
-    /// The request line `specifier` on the controller serving `endpoint`,
-    /// entry `index` of its consumer's list, named `name`.
-    ///
-    /// # Errors
-    ///
-    /// * [`Errno::OutOfRange`] — `endpoint` outside
-    ///   [`DMA_CONTROLLER_ENDPOINTS`], or a NUL in `name`, which would make
-    ///   its padding ambiguous.
-    /// * [`Errno::LengthOutOfRange`] — more than [`DMA_SPECIFIER_MAX_CELLS`]
-    ///   cells, or a name longer than [`DMA_REQUEST_NAME_MAX`].
-    pub fn new(endpoint: u64, index: u8, specifier: &[u32], name: &[u8]) -> Result<Self, Errno> {
-        if !DMA_CONTROLLER_ENDPOINTS.contains(endpoint) || name.contains(&0) {
-            return Err(Errno::OutOfRange);
-        }
-        let cells = u8::try_from(specifier.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        if usize::from(cells) > DMA_SPECIFIER_MAX_CELLS || name.len() > DMA_REQUEST_NAME_MAX {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let mut padded_specifier = [0u32; DMA_SPECIFIER_MAX_CELLS];
-        padded_specifier[..specifier.len()].copy_from_slice(specifier);
-        let mut padded_name = [0u8; DMA_REQUEST_NAME_MAX];
-        padded_name[..name.len()].copy_from_slice(name);
-        Ok(Self {
-            endpoint,
-            index,
-            cells,
-            specifier: padded_specifier,
-            name: padded_name,
-        })
-    }
-
-    /// The endpoint of the controller that serves this line.
-    #[must_use]
-    pub const fn endpoint(&self) -> u64 {
-        self.endpoint
-    }
-
-    /// The entry's position in its consumer's `dmas` list.
-    #[must_use]
-    pub const fn index(&self) -> u8 {
-        self.index
-    }
-
-    /// The specifier cells, in the controller's own binding.
-    #[must_use]
-    pub fn specifier(&self) -> &[u32] {
-        &self.specifier[..usize::from(self.cells)]
-    }
-
-    /// The entry's `dma-names` string, empty when it had none or it did not
-    /// fit.
-    #[must_use]
-    pub fn name(&self) -> &[u8] {
-        let len = self
-            .name
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(DMA_REQUEST_NAME_MAX);
-        &self.name[..len]
-    }
-
-    pub(crate) const fn cell_count(&self) -> u8 {
-        self.cells
-    }
-
-    pub(crate) const fn specifier_cells(&self) -> [u32; DMA_SPECIFIER_MAX_CELLS] {
-        self.specifier
-    }
-
-    pub(crate) const fn name_bytes(&self) -> [u8; DMA_REQUEST_NAME_MAX] {
-        self.name
-    }
-}
 
 /// Magic number opening every request frame (`"DMAR"`).
 pub const DMA_ENGINE_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"DMAR");
@@ -358,7 +225,7 @@ impl CyclicParams {
 pub enum DmaEngineRequest {
     /// Claim the lowest free channel able to serve the quoted request line,
     /// which the caller must hold as its own grant.
-    Open(DmaRequestLine),
+    Open(LinkRequest),
     /// Carve `channel`'s buffer and build its cyclic chain.
     Prepare {
         /// The channel [`Open`](Self::Open) returned.
@@ -426,7 +293,7 @@ impl DmaEngineRequest {
         frame[6] = op as u8;
         let body = &mut frame[HEADER_LEN..];
         match self {
-            Self::Open(line) => body.copy_from_slice(&HwResource::dma_request(line).to_le_bytes()),
+            Self::Open(line) => body.copy_from_slice(&HwResource::request(line).to_le_bytes()),
             Self::Prepare { channel, params } => {
                 body[prepare::CHANNEL] = *channel;
                 body[prepare::DIRECTION] = params.direction as u8;
@@ -454,7 +321,7 @@ impl DmaEngineRequest {
     /// * [`Errno::LengthOutOfRange`] — longer than its operation's frame, or
     ///   an empty or oversized buffer.
     /// * [`Errno::BadMagic`] — a wrong magic, a dirty reserved field, or a
-    ///   quoted record that is not a canonical request line.
+    ///   quoted record that is not a canonical DMA request line.
     /// * [`Errno::AbiVersionUnsupported`] — not [`DMA_ENGINE_VERSION_V1`].
     /// * [`Errno::OutOfRange`] — an unknown operation or direction, or a
     ///   channel past [`DMA_MAX_CHANNELS`].
@@ -473,7 +340,11 @@ impl DmaEngineRequest {
         Ok(match op {
             DmaEngineOp::Open => {
                 let record = HwResource::from_bytes(body).map_err(|_| Errno::BadMagic)?;
-                Self::Open(record.dma_request_line()?)
+                let line = record.link_request()?;
+                if line.role() != LinkRole::Dma {
+                    return Err(Errno::BadMagic);
+                }
+                Self::Open(line)
             }
             DmaEngineOp::Prepare => decode_prepare(body)?,
             DmaEngineOp::Start => Self::Start {
@@ -830,11 +701,8 @@ pub trait DmaChannel {
     ///   [`DriverError::OutOfRange`] for an address the channel cannot name.
     /// * [`DriverError::LengthOutOfRange`] if the chain's memory could not be
     ///   carved.
-    fn prepare(
-        &mut self,
-        line: &DmaRequestLine,
-        transfer: &CyclicTransfer,
-    ) -> Result<(), DriverError>;
+    fn prepare(&mut self, line: &LinkRequest, transfer: &CyclicTransfer)
+        -> Result<(), DriverError>;
 
     /// Start the prepared chain at its first period.
     ///
@@ -896,7 +764,7 @@ pub trait DmaEngine {
     ///
     /// [`DriverError::Unsupported`] for a specifier the binding does not
     /// define or that cannot pace a cyclic transfer.
-    fn accept(&self, line: &DmaRequestLine) -> Result<(), DriverError>;
+    fn accept(&self, line: &LinkRequest) -> Result<(), DriverError>;
 
     /// Validate a transfer shaped `params` for `line`, answering the bytes one
     /// access to the device FIFO moves — the span the caller's register window
@@ -908,7 +776,7 @@ pub trait DmaEngine {
     /// * [`DriverError::LengthOutOfRange`] for a shape no chain of this
     ///   controller can hold.
     /// * [`DriverError::OutOfRange`] for a FIFO off its access alignment.
-    fn admit(&self, line: &DmaRequestLine, params: &CyclicParams) -> Result<u32, DriverError>;
+    fn admit(&self, line: &LinkRequest, params: &CyclicParams) -> Result<u32, DriverError>;
 }
 
 #[cfg(test)]

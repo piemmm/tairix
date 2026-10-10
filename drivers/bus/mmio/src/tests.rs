@@ -516,7 +516,7 @@ fn virtio_mmio_bus_from_dtb_reports_not_found_without_slots() {
 
 /// Two populated slots, the second's node disabled.
 fn one_slot_disabled() -> Vec<u8> {
-    let mut b = tairix_fdt::fixture::DtbBuilder::new();
+    let mut b = tairix_fdt::write::FdtWriter::new();
     b.begin_node("");
     for (base, status) in [(0x0A00_0000u64, "okay"), (0x0A00_0200, "disabled")] {
         b.begin_node(&alloc::format!("virtio_mmio@{base:x}"));

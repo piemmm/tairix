@@ -1,8 +1,9 @@
 //! Which of the taskbar's rendered surfaces need repainting, and what of each.
 //!
-//! The taskbar presents up to five independent pixel surfaces at once: the
+//! The taskbar presents up to six independent pixel surfaces at once: the
 //! bar strip, the program-library popup, the window picker, the notification
-//! popover, and the Switchboard capsule's expanded readout. A hover moving
+//! popover, the Switchboard capsule's expanded readout, and the volume panel.
+//! A hover moving
 //! within a small popup changes only that one surface's pixels — the others
 //! are untouched. Latching a single flag for all of them (as the bar once
 //! did) forces the embedder to re-render and re-composite every surface for
@@ -39,7 +40,7 @@ use tairix_controls::damage::Repaint;
 
 /// Which of the taskbar's rendered surfaces need repainting, and what of each.
 ///
-/// See the [module docs](self) for why this is five accounts rather than one
+/// See the [module docs](self) for why this is six accounts rather than one
 /// flag, and [`Taskbar::take_repaint`](crate::Taskbar::take_repaint) for the
 /// exact contract each promises.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -54,6 +55,8 @@ pub struct TaskbarRepaint {
     pub notifications: Repaint,
     /// The Switchboard capsule's expanded instrument readout.
     pub readout: Repaint,
+    /// The volume panel.
+    pub sound: Repaint,
 }
 
 impl TaskbarRepaint {
@@ -64,6 +67,7 @@ impl TaskbarRepaint {
         picker: Repaint::clean(),
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
+        sound: Repaint::clean(),
     };
 
     /// The whole bar strip.
@@ -73,6 +77,7 @@ impl TaskbarRepaint {
         picker: Repaint::clean(),
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
+        sound: Repaint::clean(),
     };
 
     /// The whole program-library popup.
@@ -82,6 +87,7 @@ impl TaskbarRepaint {
         picker: Repaint::clean(),
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
+        sound: Repaint::clean(),
     };
 
     /// The whole window picker.
@@ -91,6 +97,7 @@ impl TaskbarRepaint {
         picker: Repaint::Whole,
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
+        sound: Repaint::clean(),
     };
 
     /// The whole notification popover.
@@ -100,6 +107,7 @@ impl TaskbarRepaint {
         picker: Repaint::clean(),
         notifications: Repaint::Whole,
         readout: Repaint::clean(),
+        sound: Repaint::clean(),
     };
 
     /// The whole expanded readout.
@@ -109,6 +117,17 @@ impl TaskbarRepaint {
         picker: Repaint::clean(),
         notifications: Repaint::clean(),
         readout: Repaint::Whole,
+        sound: Repaint::clean(),
+    };
+
+    /// The whole volume panel.
+    pub const SOUND: Self = Self {
+        bar: Repaint::clean(),
+        library: Repaint::clean(),
+        picker: Repaint::clean(),
+        notifications: Repaint::clean(),
+        readout: Repaint::clean(),
+        sound: Repaint::Whole,
     };
 
     /// Every surface, whole — a theme, scale, or edge change alters the
@@ -119,6 +138,7 @@ impl TaskbarRepaint {
         picker: Repaint::Whole,
         notifications: Repaint::Whole,
         readout: Repaint::Whole,
+        sound: Repaint::Whole,
     };
 
     /// Whether any surface owes anything.
@@ -128,7 +148,8 @@ impl TaskbarRepaint {
             && self.library.is_clean()
             && self.picker.is_clean()
             && self.notifications.is_clean()
-            && self.readout.is_clean())
+            && self.readout.is_clean()
+            && self.sound.is_clean())
     }
 }
 
@@ -148,5 +169,6 @@ impl BitOrAssign for TaskbarRepaint {
         self.picker.merge(rhs.picker);
         self.notifications.merge(rhs.notifications);
         self.readout.merge(rhs.readout);
+        self.sound.merge(rhs.sound);
     }
 }

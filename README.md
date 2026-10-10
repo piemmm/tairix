@@ -97,15 +97,21 @@ for filesystems, the feature section below.
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |
 | DMA-engine drivers (cyclic channels, `dmaengine-v1`) | — | ◐ bcm2835 | — | — |
 | Interrupt controllers, chosen by discovery | ✓ IO-APIC, xAPIC, x2APIC | ✓ GICv2, GICv3 + ITS | ✓ PLIC, APLIC + IMSIC | — |
-| Kernel-owned PCI host (enumeration, resources, interrupts) | ✓ MCFG, MSI-X | ✓ generic ECAM, INTx, MSI-X as ITS LPIs | ✓ generic ECAM, INTx, MSI-X into interrupt files | — |
+| Kernel-owned PCI host (enumeration, resources, interrupts) | ✓ MCFG, MSI-X, MSI | ✓ generic ECAM, INTx, MSI-X and MSI as ITS LPIs | ✓ generic ECAM, INTx, MSI-X and MSI into interrupt files | — |
 | DMA translation units (IOMMU) | ◐ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
 | Scatter-gather DMA carves on translated devices (no 32 MiB bound) | ✓ | ✓ | ✓ | — |
 | Network offloads (RX/TX csum, TSO, mergeable RX, multiqueue RX) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | NIC completion-interrupt masking (no per-frame interrupt storm) | ✓ virtio | ✓ virtio + GENET | ✓ virtio | — |
 | Receive pre-filter (foreign traffic shed before the stack wakes) | ✓ | ✓ | ✓ | — |
+| USB host controller (xHCI: enumeration, hubs, hotplug, isochronous streams) | ✓ qemu-xhci | ✓ qemu-xhci + ◐ VL805 | ✓ qemu-xhci | — |
 | Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + ◐ USB HID | ✓ virtio | ✓ host |
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
-| Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio | ◐ virtio | ◐ virtio | ▢ |
+| Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio | ▢ |
+| Sound files played from the command line (`play`: AU, WAV and FLAC, native or in Ogg, decoded in the sandbox, gapless) | ✓ | ✓ | ✓ | ▢ |
+| Desktop music player (`music.app`: playlist, gapless, album art and tags read in the sandbox, no filesystem capability) | ✓ | ✓ | ✓ | ▢ |
+| Audio follows the seat (held on its frame outside the room, resumed there; recording published as a notice) | ✓ | ✓ | ✓ | ▢ |
+| Sound device controls kept per room tenant (default, level, mute; devices named by location; `audioctl`) | ✓ | ✓ | ✓ | ▢ |
+| Desktop sound: icon-bar volume panel and recording indicator, Settings Sound pane, Switchboard Audio pane; the user's controls remembered and restored per session | ✓ | ✓ | ✓ | ▢ |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 

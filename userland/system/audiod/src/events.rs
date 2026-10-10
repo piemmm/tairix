@@ -43,3 +43,26 @@ pub const AUDIOD_READY: EventId = EventId(4227);
 /// security-relevant record; this one is the diagnosis, and covers playback
 /// too — without it a machine whose sound does not work says nothing at all.
 pub const STREAM_REFUSED: EventId = EventId(4228);
+
+/// The seat's lease moved, so the room the service mixes for did: which
+/// room, and how many streams it now holds.
+pub const ROOM_CHANGED: EventId = EventId(4229);
+
+/// A client broke its own ring's protocol — its positions were corrupt — so
+/// that stream alone was stopped, and by whose stream.
+pub const STREAM_FAULTED: EventId = EventId(4230);
+
+/// The seat's lease could not be read, so no stream plays, or the capture
+/// count could not be published, so the recording indicator may lag.
+pub const NOTICE_UNAVAILABLE: EventId = EventId(4231);
+
+/// A device control took effect: a default, a level or a mute, and whose it
+/// was.
+pub const CONTROL_CHANGED: EventId = EventId(4232);
+
+/// A device control was refused because the room is not the caller's, and
+/// who tried.
+pub const CONTROL_REFUSED: EventId = EventId(4233);
+
+/// The machine's baseline beneath every tenant's controls was adopted.
+pub const BASELINE_ADOPTED: EventId = EventId(4234);

@@ -61,7 +61,10 @@ server and every app's client can never drift apart.
   `EventMailbox` is that drain against the app's own endpoint, dropping
   any frame of the wrong length or from any sender but the session the
   create reply named: the kernel-attested origin is the authentication,
-  and it has one definition rather than one per app. Both paths decode and
+  and it has one definition rather than one per app. The endpoint's id is
+  derived from the app's pid, so `bind_event_mailbox` admits only the
+  session serving windows to it (`port_admit`), and no other process can
+  fill it to starve the session's deliveries. Both paths decode and
   answer a redraw request through one definition, so the polled path
   cannot drift from the parked one. A read that fails says which half
   failed (`EventError::Undecodable` / `EventError::Mailbox`), because the

@@ -38,6 +38,13 @@ Libreria programmi, o per nome da una shell. Richiede una sessione grafica in
 esecuzione: senza di essa il canale della finestra è irraggiungibile e il
 programma segnala il rifiuto sul flusso di errore standard e termina.
 
+Suono mostra ogni uscita e ingresso con la sua scelta predefinita, il livello
+e il silenziamento, e ciò che sta registrando: le proprie registrazioni per
+nome e quante ne fanno gli altri. I controlli cambiano subito il dispositivo,
+e solo finché la propria sessione occupa la stanza che serve; un dispositivo
+della stanza di un'altra sessione è mostrato ma qui non si può cambiare. La
+scrivania ricorda ciò che si imposta.
+
 ## EXIT STATUS
 
 Zero dopo una chiusura pulita; diverso da zero quando il canale della finestra

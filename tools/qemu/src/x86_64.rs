@@ -339,6 +339,7 @@ mod tests {
             interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),

@@ -1,6 +1,7 @@
 use core::num::NonZeroU32;
 
 use super::*;
+use crate::hwlink::{LinkDuty, LinkRequest};
 use crate::hwtree::{HwResource, BUS_CHILD_ENDPOINTS};
 use crate::le::{put_i32, put_u16, put_u32};
 use crate::origin::PROC_ID_LEN;
@@ -11,8 +12,8 @@ fn endpoint() -> u64 {
     DMA_CONTROLLER_ENDPOINTS.endpoint(12)
 }
 
-fn line() -> DmaRequestLine {
-    DmaRequestLine::new(endpoint(), 0, &[2], b"tx").expect("valid line")
+fn line() -> LinkRequest {
+    LinkRequest::new(endpoint(), 0, &[2], b"tx").expect("valid line")
 }
 
 fn params() -> CyclicParams {
@@ -229,28 +230,28 @@ fn an_open_quotes_only_a_canonical_request_line() {
 #[test]
 fn a_request_line_refuses_what_its_record_could_not_carry() {
     assert_eq!(
-        DmaRequestLine::new(BUS_CHILD_ENDPOINTS.endpoint(12), 0, &[2], b"tx"),
+        LinkRequest::new(BUS_CHILD_ENDPOINTS.endpoint(12), 0, &[2], b"tx"),
         Err(Errno::OutOfRange)
     );
     assert_eq!(
-        DmaRequestLine::new(endpoint(), 0, &[2], b"t\0x"),
+        LinkRequest::new(endpoint(), 0, &[2], b"t\0x"),
         Err(Errno::OutOfRange)
     );
     assert_eq!(
-        DmaRequestLine::new(endpoint(), 0, &[1, 2, 3], b"tx"),
+        LinkRequest::new(endpoint(), 0, &[1, 2, 3], b"tx"),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
-        DmaRequestLine::new(endpoint(), 0, &[2], b"audio-out"),
+        LinkRequest::new(endpoint(), 0, &[2], b"audio-out"),
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
-        DmaControllerDuty::new(BUS_CHILD_ENDPOINTS.endpoint(12), None),
+        LinkDuty::new(BUS_CHILD_ENDPOINTS.endpoint(12), None),
         Err(Errno::OutOfRange)
     );
-    let unnamed = DmaRequestLine::new(endpoint(), 4, &[], &[]).expect("valid");
+    let unnamed = LinkRequest::new(endpoint(), 4, &[], &[]).expect("valid");
     assert!(unnamed.name().is_empty());
-    assert!(unnamed.specifier().is_empty());
+    assert!(unnamed.selector().is_empty());
 }
 
 #[test]

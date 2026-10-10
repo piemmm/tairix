@@ -50,6 +50,8 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # session relay, and this model share, so a transient notification's severity
 # is never re-spelled per layer.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The volume taper the panel's slider is read through.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
 # renderer's notification-glyph cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an

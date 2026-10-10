@@ -19,7 +19,7 @@ and are not served here.
 | `CAP_DRV_LOAD` | the load-time gate every driver clears |
 | `CAP_MMIO_MAP` | the node's channel registers |
 | `CAP_IRQ_BIND` | each served channel's interrupt line |
-| `CAP_IPC_BIND_PRIVILEGED` | the node's endpoint, under its `DmaController` duty |
+| `CAP_IPC_BIND_PRIVILEGED` | the node's endpoint, under its DMA `LinkDuty` |
 | `CAP_MEM_DMA` | the control-block chains and the buffers it carves |
 | `CAP_SHM` | the buffers, carved as shared regions and granted to consumers |
 | `CAP_LOG_EMIT` | the record of every decision |

@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::audio::{AudioDeviceDescriptor, ControlAccess, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
@@ -268,6 +269,31 @@ fn inventory_list(
         SysinfoQueryId::SELF_PROCESS_LIST => page.of(
             || source.process_records(caller, ProcessScope::Caller),
             ProcessRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::AUDIO_DEVICES => page.of(
+            || {
+                // Whether a device may be changed, and whether the room is
+                // the asker's, are the audio service's answers to the asker
+                // itself; the broker asked as nobody's session.
+                let mut devices = source.audio_devices(caller)?;
+                for device in &mut devices {
+                    device.access = ControlAccess::Shown;
+                }
+                Ok(devices)
+            },
+            AudioDeviceDescriptor::to_le_bytes,
+        ),
+        SysinfoQueryId::SELF_AUDIO_STREAMS => page.of(
+            || {
+                let mut streams = source.audio_streams(caller)?;
+                streams.retain(|stream| stream.owner_uid == caller.uid());
+                Ok(streams)
+            },
+            StreamDescriptor::to_le_bytes,
+        ),
+        SysinfoQueryId::GLOBAL_AUDIO_STREAMS => page.of(
+            || source.audio_streams(caller),
+            StreamDescriptor::to_le_bytes,
         ),
         SysinfoQueryId::GLOBAL_PROCESS_LIST => page.of(
             || source.process_records(caller, ProcessScope::Global),
@@ -789,6 +815,9 @@ mod tests {
     use crate::source::{Caller, ProcessScope, SysinfoSource};
     use crate::testing::{kernel_caller, user_caller};
     use core::cell::RefCell;
+    use tairix_abi::audio::{
+        AudioDeviceDescriptor, ControlAccess, DefaultChoice, StreamDescriptor,
+    };
     use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters};
     use tairix_abi::display_ipc::DisplayStats;
     use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
@@ -1504,6 +1533,62 @@ mod tests {
                     BlkQueueCounters::default(),
                     BlkDeviceClass::Rotational.budget(),
                 ),
+            ])
+        }
+        fn audio_devices(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<AudioDeviceDescriptor>, Errno> {
+            use tairix_abi::audio::{AudioGain, AudioLocation};
+            use tairix_abi::driver::audio::{
+                AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormat, SampleFormats,
+                StreamDirection,
+            };
+            let sink = AudioDeviceDescriptor {
+                device_id: 1,
+                direction: StreamDirection::Playback,
+                jack: JackState::Present,
+                default: DefaultChoice::Inherited,
+                formats: SampleFormats::EMPTY.with(SampleFormat::S16),
+                channel_map: ChannelMap::STEREO,
+                rates: RateSupport::Continuous {
+                    min: Rate::HZ_48000,
+                    max: Rate::HZ_48000,
+                },
+                gain: None,
+                name: AudioName::new("Speakers").map_err(|_| Errno::OutOfRange)?,
+                location: AudioLocation::new(0x51e7, 0)?,
+                level: AudioGain::new(-600)?,
+                muted: false,
+                own_level: true,
+                access: ControlAccess::Own,
+                clock_millihertz: 48_000_002,
+                lost_frames: 12,
+            };
+            Ok(alloc::vec![sink])
+        }
+        fn audio_streams(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<StreamDescriptor>, Errno> {
+            use tairix_abi::audio::{StreamRole, StreamState};
+            use tairix_abi::driver::audio::{Frames, StreamDirection};
+            let stream = |stream_id, owner_uid, direction| StreamDescriptor {
+                stream_id,
+                device_id: 1,
+                direction,
+                role: StreamRole::Media,
+                state: StreamState::Running,
+                position: Frames::new(4_800),
+                xruns: 0,
+                xrun_frames: 0,
+                owner_uid,
+                owner_pid: 40 + stream_id,
+                owner_app: None,
+            };
+            Ok(alloc::vec![
+                stream(1, crate::testing::FIXTURE_UID, StreamDirection::Playback),
+                stream(2, crate::testing::FIXTURE_UID + 1, StreamDirection::Capture),
             ])
         }
         fn gpu_device_stats(
@@ -3245,6 +3330,88 @@ mod tests {
             serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)
         );
+    }
+
+    /// The devices are open to every principal, and a listing names nobody's
+    /// controls.
+    #[test]
+    fn audio_devices_are_open_and_name_no_callers_controls() {
+        use tairix_abi::audio::AUDIO_DEVICE_RECORD_LEN;
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let page = PageRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        };
+        let req = request_bytes(SysinfoQueryId::AUDIO_DEVICES, &page.to_le_bytes());
+        let mut resp = [0u8; 512];
+        let n = serve_once(&source, &caller(&Caps(&[])), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, AUDIO_DEVICE_RECORD_LEN);
+        let device = AudioDeviceDescriptor::from_le_bytes(&resp[..n]).expect("a device");
+        assert_eq!(device.device_id, 1);
+        assert_eq!(device.level.millibel(), -600);
+        assert_eq!(device.access, ControlAccess::Shown);
+        assert!(
+            device.own_level,
+            "whose setting the level is passes through"
+        );
+    }
+
+    /// A principal sees its own streams ungated; another's need the global
+    /// authority, which is audited.
+    #[test]
+    fn audio_streams_are_a_principals_own_unless_it_reads_globally() {
+        use tairix_abi::audio::AUDIO_STREAM_RECORD_LEN;
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let page = PageRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        };
+        let mut resp = [0u8; 512];
+        let own = request_bytes(SysinfoQueryId::SELF_AUDIO_STREAMS, &page.to_le_bytes());
+        let n = serve_once(
+            &source,
+            &caller(&Caps(&[])),
+            &RecordingSink::new(),
+            &own,
+            &mut resp,
+        )
+        .unwrap();
+        assert_eq!(n, AUDIO_STREAM_RECORD_LEN, "only the caller's own");
+        let stream = StreamDescriptor::from_le_bytes(&resp[..n]).expect("a stream");
+        assert_eq!(stream.owner_uid, crate::testing::FIXTURE_UID);
+
+        let every = request_bytes(SysinfoQueryId::GLOBAL_AUDIO_STREAMS, &page.to_le_bytes());
+        assert_eq!(
+            serve_once(
+                &source,
+                &caller(&Caps(&[])),
+                &RecordingSink::new(),
+                &every,
+                &mut resp,
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        let sink = RecordingSink::new();
+        let n = serve_once(
+            &source,
+            &caller(&Caps(&[CapabilityId::SYSINFO_GLOBAL])),
+            &sink,
+            &every,
+            &mut resp,
+        )
+        .unwrap();
+        assert_eq!(n, 2 * AUDIO_STREAM_RECORD_LEN);
+        assert!(sink
+            .events
+            .borrow()
+            .iter()
+            .any(|(_, id)| *id == events::QUERY_SERVED));
     }
 
     #[test]

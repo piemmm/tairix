@@ -44,7 +44,10 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   reads its own interface's descriptors, sends its own class requests, and
   receives its interrupt-IN reports exactly as the device sent them. Every
   interface with an interrupt-IN endpoint or a bulk pair is served, whatever
-  its class. The interrupt-IN transfer is armed only once the class driver's
+  its class, and so is one driven over the control endpoint alone — one
+  setting that brings no endpoint (`alternate::is_control_only`), a USB Audio
+  1.0 control interface — while an interface with settings to choose between
+  is left for a served sibling to claim. The interrupt-IN transfer is armed only once the class driver's
   first report request names the longest report it expects, to that or to one
   service interval's payload (`PeriodicShape::payload`: the packet times the
   high-speed transactions or `SuperSpeed` burst) if longer, and never more than
@@ -141,10 +144,57 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   gives each interface node the device's bus position as its address, so a
   node kept across a reset still agrees with a sibling published after it, and
   no device published beside it shares its address.
+  The event ring is up to four page-sized segments, as many as the
+  controller's `ERST Max` takes (QEMU takes one, the VL805 eight): an
+  isochronous stream posts an event per service interval, and a page is the
+  most one segment can be and still never cross a 64 KiB boundary.
+- Alternate settings and isochronous streams, on the same engine. A node governs
+  its own interface — when it carries none of the engine's own pipes — and
+  any sibling it claims (`claim_interface`: an interface of the same device
+  no node serves). `set_interface` reserves the setting's isochronous
+  endpoints with the controller first — one Configure Endpoint dropping the
+  old setting's endpoints and adding the new, a Bandwidth Error answered
+  `NoBandwidth` with nothing changed — and only then sends `SET_INTERFACE`;
+  a device that refuses gets its old setting back. A setting bringing a
+  non-isochronous endpoint is `Unsupported`.
+  A stream (`iso_start`) is a fixed set of slots, each spanning a number of
+  service intervals. A queued slot's TDs all go onto the endpoint's one-page
+  ring at once, each placed at the frame it is due in: a fresh stream, or one
+  queued too late, restarts on the first frame — and service interval — it
+  can still make past the controller's scheduling threshold and a frame's
+  lead, and the intervals it jumped are the slot's `skipped`; a controller
+  without CFC runs a busy ring back to back whatever its Frame IDs say, so
+  there a late slot follows on and the controller reports what it misses.
+  Every TD interrupts on completion and all but a slot's last block the
+  interrupt, so each interval is accounted for exactly — moved (an IN
+  interval with its received length), missed (a Missed Service Error, an
+  underrun, or a TD the controller passed without its own event) or failed —
+  while a slot raises one interrupt. A TRB-level error halts the stream. A
+  layout must fit one ring and the controller's 895-frame window. Microframes
+  are counted past `MFINDEX`'s 2.048 s wrap against the monotonic clock. A
+  stopped stream's buffers return once the controller confirms the stop; a
+  departing device's settings and streams go with its slot.
+- `periodic` — what an endpoint descriptor says (`EndpointDescriptor`, every
+  field read, the audio-class nine-byte form included), the `ServiceInterval`
+  and `PeriodicBudget` it means at a bus speed, and the arithmetic a stream
+  runs on: `FeedbackDecoder` reads explicit feedback (10.14 per frame at full
+  speed, 16.16 per microframe above), fixing its format — the specification's
+  or one of a few shifts devices in the field send — on the first report
+  within an eighth of the nominal rate and refusing any later one outside it;
+  `FeedbackDecoder::implicit` reads the rate an implicit-feedback device's own
+  data packets carried, held to the same window;
+  `PacketPacer` spreads a rate over intervals in whole frames with an integer
+  remainder, so an hour of 44.1 kHz ends on exactly the frame it should, and
+  `advance` sums any number of intervals in one step for a gap's accounting.
+- `alternate` — a configuration's alternate settings (`alternate_setting`:
+  every endpoint and `SuperSpeed` companion a setting brings, a forged
+  setting refused), its interface numbers, `is_control_only`, and interface
+  associations.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies; the
   ring state machines (`ProducerRing`, `EventRingCursor`) hold no memory of
   their own, so the owner publishes every write through the `device::DmaBank`
-  seam.
+  seam. A TD that continues past a ring's wrap carries its Chain bit through
+  the Link TRB.
 - `SlabBank` — the production `device::DmaBank`: a growable bank of owned DMA
   chunks minted from the host's `DmaHost` seam. The engine's first chunk holds
   the controller-shared structures, sized exactly to the reported geometry
@@ -164,9 +214,13 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
 
 - `transport` — the **bus-agnostic URB transport seam** the modular USB stack
   (`plans/USB.md`) is built on. The wire contract is `tairix_abi::usb_urb`: a
-  `UrbRequest` (endpoint, transfer type, direction, shared-buffer handle,
-  length, control SETUP) and a status-framed completion (bytes transferred, or
-  an in-band `Errno`). `transport` adds the two ends both sides share:
+  `UsbRequest`, which is a URB (`UrbRequest`: endpoint, transfer type,
+  direction, length, control SETUP — its data always moves through the node's
+  shared buffer), an interface operation (select a setting, claim a sibling),
+  or a stream operation (start, queue a slot, stop); a URB is answered with a
+  status-framed completion (bytes transferred, or an in-band `Errno`), an
+  operation with a status or a stream's grant. `transport` adds the two ends
+  both sides share:
   - `UrbEngine` — the controller-side operation seam the HCD's live engine
     performs (`UsbDevice` implements it: `control_in` over the EP0 control
     transfer — targeting the enumerated *device*, switching a hub-downstream
@@ -175,11 +229,15 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     `plans/DEVICES.md` D2), `control_out` for a class request carrying an
     OUT data stage (the CBI ADSC command channel, `plans/DEVICES.md` D5),
     `interrupt_in` over the report queue — a HID report endpoint or a CBI
-    interface's completion endpoint alike — and
+    interface's completion endpoint alike, read only when the URB names it —
+    and
     `bulk_in` / `bulk_out` over the interface's configured bulk endpoints:
     the IN/OUT pair a BOT/CBI interface carries, or the two pairs a UAS
     interface's four pipes need (`plans/DEVICES.md` D1/D5), addressed by
-    endpoint number and routed to the matching per-pipe ring).
+    endpoint number and routed to the matching per-pipe ring), and the
+    interface and stream operations above (`set_interface`,
+    `claim_interface`, `iso_start` / `iso_queue` / `iso_stop` / `iso_take`),
+    which an engine serving no periodic endpoint refuses `Unsupported`.
   - `drive_urb` — the controller-side server transformation: decode a URB,
     validate it fail-closed against the interface (control ⇒ endpoint 0,
     served as IN, the zero-length no-data OUT, or the data-stage OUT
@@ -187,9 +245,12 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     interface's own endpoints; an oversize length or a malformed frame is
     refused **before** the engine is touched), drive the engine over the
     shared buffer, and frame the completion in band. A control request must
-    stay inside the interface's `UrbScope` (`control_permitted`): a class
+    stay inside the node's `UrbScope` (`control_permitted`) — its own
+    interface and those it claimed, and their endpoints in their current
+    settings, so a class request to a streaming endpoint (UAC1's sampling
+    frequency) is the node's to send: a class
     driver may read the device's descriptors and status and do anything to
-    its own interface and its own endpoints, but never set the
+    its own interfaces and their endpoints, but never set the
     configuration, the address, an alternate setting, a halt or a power
     feature, which reach every interface of the device — those are refused
     `PermissionDenied`, and the HCD logs each refusal. A not-yet-arrived interrupt-IN report — or a bulk
@@ -198,10 +259,12 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     retrying.
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
-    straight to `serve_urb`), and
+    straight to `drive_urb`), and
     `UrbClient::{control_in, control_no_data, control_out, interrupt_in,
     bulk_in, bulk_out}` build the URB,
-    submit it, and decode the completion. A class driver speaks only
+    submit it, and decode the completion;
+    `UrbClient::{set_interface, claim_interface, iso_start, iso_queue,
+    iso_stop}` send the operations. A class driver speaks only
     this ABI, so the same binary works behind any controller that serves it —
     it touches no controller register and no other interface's buffer (§5.4,
     `plans/USB.md` §1.3). An interrupt-IN completion may carry more than the
@@ -215,8 +278,15 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     through it.
   - `descriptor::descriptors` — the one walk over a configuration descriptor
     stream every reader of one shares (this crate's decoder, the
-    mass-storage and HID class drivers): each descriptor its `bLength`
-    bytes, a trailing fragment ending the walk, a malformed one refused.
+    mass-storage, HID and USB Audio class drivers): each descriptor its
+    `bLength` bytes, a trailing fragment ending the walk, a malformed one
+    refused. `ConfigurationHeader` is the one reading of the header that
+    opens it: a `bLength` shorter than the header, or a `wTotalLength`
+    shorter than the header it includes, is malformed.
+  - `transport::read_configuration` — a class driver's read of its device's
+    whole configuration descriptor: the header for the stated total, then
+    exactly that many bytes. A stream longer than one data stage is refused
+    rather than read cut short, since a truncated one ends mid-descriptor.
   - Bulk endpoints are served through per-pipe transfer rings with
     per-slot staging buffers (several TDs may be outstanding per pipe,
     completing in order; a UAS interface's second pair shares the
@@ -261,7 +331,8 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
 - Fail-closed (§2.9): an implausible capability block, an out-of-range port or
   doorbell target, a malformed descriptor, or an exhausted wait budget is a
   typed `DriverError`, never a panic or an unbounded spin (§2.1). The device,
-  configuration, hub, and string descriptor decoders are fuzzed
+  configuration, hub, string, alternate-setting and endpoint descriptor
+  decoders, the isochronous budget and the feedback decoder are fuzzed
   (`fuzz_descriptors`, run by `cargo xtask fuzz`) against a naive model of
   what each may accept.
 - The crate holds **no** capability of its own — authority is the consuming

@@ -1021,6 +1021,32 @@ impl<B: Block> Adfs<B> {
         }
     }
 
+    /// As [`Self::dir_update_at`], also giving the entry `object`'s spelling of
+    /// its name, which matches the stored one ignoring case.
+    fn dir_respell_at(
+        &mut self,
+        dir_addr: u32,
+        index: u32,
+        object: &Object,
+    ) -> Result<(), DriverError> {
+        match self.load_dir(dir_addr)? {
+            DirHandle::Fixed(mut dir) => {
+                dir.update(index as usize, object);
+                self.store_fixed_dir(dir_addr, &dir)
+            }
+            DirHandle::Big(mut dir) => {
+                let mut store = ObjectStore {
+                    adfs: self,
+                    indaddr: dir_addr,
+                    size: u32::MAX,
+                };
+                dir.update_respelt(&mut store, index, object)?;
+                self.validated_as(dir_addr, &dir);
+                Ok(())
+            }
+        }
+    }
+
     /// The parent address recorded inside the directory at `dir_addr`.
     fn dir_parent(&mut self, dir_addr: u32) -> Result<u32, DriverError> {
         match self.load_dir(dir_addr)? {
@@ -1408,7 +1434,13 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         let src_addr = node_addr(src_dir);
         let dst_addr = node_addr(dst_dir);
         if src_addr == dst_addr && dir::name_eq(src_name, dst_name) {
-            return Ok(());
+            // The source's own entry, re-spelled: names sort and match
+            // ignoring case, so it keeps its place and takes the spelling.
+            if object.name() == dst_name {
+                return Ok(());
+            }
+            self.validate_new_name(dst_name)?;
+            return self.dir_respell_at(src_addr, src_index, &object.renamed(dst_name)?);
         }
         self.validate_new_name(dst_name)?;
         // Moving a directory into itself or its own subtree would
@@ -1447,23 +1479,18 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         }
         self.dir_remove_at(src_addr, src_index)?;
         if let Some((_, existing)) = &replaced {
-            // The destination entry already carries the right name:
-            // point it at the moved object and free the replaced
-            // one. (Indices may have shifted when the source entry
-            // left the same directory, so look the name up afresh.)
+            // The destination entry holds the replaced object's place in
+            // the sort order, which the name asked for shares: point it at
+            // the moved object under that spelling and free the replaced
+            // one. (Indices may have shifted when the source entry left the
+            // same directory, so look the name up afresh.)
             let Some((dst_index, _)) = self.dir_lookup(dst_addr, dst_name)? else {
                 return Err(DriverError::BadMagic);
             };
-            let mut updated = object;
-            updated.name = existing.name;
-            updated.name_len = existing.name_len;
-            self.dir_update_at(dst_addr, dst_index, &updated)?;
+            self.dir_respell_at(dst_addr, dst_index, &object.renamed(dst_name)?)?;
             self.release_maybe_shared(existing.indaddr, existing.size, dst_addr)?;
         } else {
-            let mut moved = object;
-            moved.name = [0; dir::MAX_NAME_LEN];
-            moved.name[..dst_name.len()].copy_from_slice(dst_name);
-            moved.name_len = dst_name.len();
+            let moved = object.renamed(dst_name)?;
             if let Err(err) = self.dir_insert(dst_addr, &moved) {
                 // Roll the source entry back so no entry is lost.
                 self.dir_insert(src_addr, &object)?;

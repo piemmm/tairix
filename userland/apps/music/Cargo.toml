@@ -1,0 +1,85 @@
+[package]
+name = "tairix-music"
+description = "TAIRiX `music.app`: the desktop player (plans/SOUND.md SND14). One window and a playlist, played gapless by the shared playback engine on a thread of its own; every file is decoded in the parser sandbox, the album art a track carries is decoded in the image sandbox, and the app holds no filesystem capability — it plays exactly the files the user chose in the session's trusted picker or handed it from the file manager."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-music-run"
+path = "src/run.rs"
+
+[dependencies]
+# The audio-v1 level and the `Errno` the player fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The playback engine: the playlist decoded in the parser sandbox and played
+# gapless into one stream.
+tairix-player = { path = "../../../lib/player", version = "=0.0.0" }
+# The volume taper a slider's travel is read through, and the `audio:` names
+# an output device is chosen and remembered by.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# What a decoded stream is, and the tags a track's row is named from.
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0" }
+# The shared Reactive Alloy controls the window is composed from: the
+# transport's buttons, the seek and volume sliders, the playlist's table and
+# its scroll bar. The player paints no control of its own.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The shared theme, so the player wears the desktop's colours and metrics.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The integer screen geometry every rectangle and hit-test is expressed in.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The retained window surface and the album art drawn into it.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# Text: the titles, the clock and the status line.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The transport's glyphs.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The desktop input vocabulary the one pure input entry point takes.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The predictable generator a shuffle's order is drawn from: a shuffle wants
+# decorrelation, not unpredictability.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# The menu builder the context and icon-bar menus are composed with; the
+# engine needs no runtime half of it.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+
+# Everything only the freestanding `Run` binary links.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The app half of the window channel and the shared windowed-app shell.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The engine's live seams: the files it was handed, the audio service's
+# stream, and the wait-set members its thread parks on.
+tairix-player = { path = "../../../lib/player", version = "=0.0.0", features = ["rt"] }
+# The audio service's transport, which lists the output devices.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+# The sandbox's worker roles and launchers: the audio decoder a track's tags
+# are read through and the image renderer its album art is decoded in.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The bundle's own `Help/` tree, read through the capability-scoped seam for
+# the short `-h` surface.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The player's own settings: the volume, the shuffle and repeat, loudness,
+# and the output device.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The bounded, pressure-aware cache the album art is held in.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The fast hasher the art cache is keyed through, and the seed a shuffle and
+# a decoder's page cache are drawn from.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+# The sink a contained worker's death is logged to.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The bounded queue the worker's jobs wait in.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The engine's host tests draw text, so they inject the shared solid test
+# transport rather than reaching a running `fontd`.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }

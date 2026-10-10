@@ -10,8 +10,14 @@
 //!   immediately and reported as
 //!   [`AllocError::InvariantViolation`].
 //!
-//! - **Buddy free lists.** For every order `0..=MAX_ORDER` we keep a
-//!   [`tairix_inline::IntrusiveList`] of free blocks of exactly that
+//! - **Zones.** The usable span is cut where the DMA windows discovery
+//!   reports stop reaching, and at 4 GiB, so the memory a device that
+//!   reaches less needs is kept for it: ordinary requests take the highest
+//!   zone first and leave each lower zone a reserve. See
+//!   [`FrameAllocator::with_dma_reaches`].
+//!
+//! - **Buddy free lists.** For every zone and order `0..=MAX_ORDER` we keep
+//!   a [`tairix_inline::IntrusiveList`] of free blocks of exactly that
 //!   order, threaded through a per-frame `links` array indexed by starting
 //!   frame. Splits push two half-blocks to `order - 1`; merges pop a buddy
 //!   at `order` and push the parent at `order + 1`. The bitmap is consulted
@@ -245,6 +251,76 @@ const _: () = assert!(MAX_ORDER < NIBBLE_NONE as u32);
 // "uncharged" and its free would find no counter to discharge.
 const _: () = assert!(MEMORY_CLASS_COUNT < NIBBLE_NONE as usize);
 
+/// One physical address zone: the frames from `start` to the next zone's,
+/// and their free blocks.
+///
+/// A device that reaches only part of memory is served from the zones below
+/// its limit, so a zone below the highest keeps back a reserve the requests a
+/// higher zone could serve may not take. No block straddles two zones: every
+/// boundary is aligned to the largest block, and buddies merge within one.
+struct Zone {
+    start: usize,
+    free_lists: [IntrusiveList; MAX_ORDER as usize + 1],
+    free_frames: usize,
+    reserve: usize,
+}
+
+impl Zone {
+    const fn new(start: usize) -> Self {
+        Self {
+            start,
+            free_lists: [const { IntrusiveList::new() }; MAX_ORDER as usize + 1],
+            free_frames: 0,
+            reserve: 0,
+        }
+    }
+}
+
+/// The zone holding `frame`; the lowest for a frame below every zone.
+fn zone_of(zones: &[Zone], frame: usize) -> usize {
+    zones
+        .iter()
+        .rposition(|zone| zone.start <= frame)
+        .unwrap_or(0)
+}
+
+/// The share of the usable RAM above a zone that it keeps back: Linux's
+/// default `lowmem_reserve_ratio`.
+const ZONE_RESERVE_RATIO: usize = 256;
+
+/// The most of its own frames a zone keeps back, as a share, so a small low
+/// zone still serves ordinary requests once the zones above it are drained.
+const ZONE_RESERVE_MAX_SHARE: usize = 4;
+
+/// The limit of a device that can address only 32 bits.
+const DMA32_LIMIT: u64 = 1 << 32;
+
+/// The zone boundaries the usable `runs` are cut at, ascending: each limit a
+/// DMA reach in `reaches` ends at, and 4 GiB, where usable RAM lies both
+/// within the reach below the limit and at or above it. A PCI function a bus
+/// driver finds after boot may reach only 32 bits without the boot tree
+/// saying so, which is why 4 GiB is always a boundary where RAM spans it.
+/// Each limit is aligned down to the largest block.
+fn zone_boundaries(runs: &[(usize, usize)], reaches: &[core::ops::Range<u64>]) -> Vec<usize> {
+    let has_usable = |lo: usize, hi: usize| runs.iter().any(|&(a, b)| a < hi && lo < b);
+    let block = 1usize << MAX_ORDER;
+    let mut boundaries: Vec<usize> = reaches
+        .iter()
+        .cloned()
+        .chain(core::iter::once(0..DMA32_LIMIT))
+        .filter_map(|reach| {
+            let limit = usize::try_from(reach.end >> PAGE_SHIFT).ok()?;
+            let low = usize::try_from(reach.start >> PAGE_SHIFT).ok()?;
+            let boundary = limit / block * block;
+            (boundary > 0 && has_usable(low, boundary) && has_usable(boundary, usize::MAX))
+                .then_some(boundary)
+        })
+        .collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
+}
+
 /// Internal, lock-free state of the frame allocator.
 ///
 /// `FrameAllocatorState` is what the [`SpinLock`] in [`FrameAllocator`]
@@ -286,8 +362,9 @@ struct FrameAllocatorState {
     /// unlinked in O(1) without scanning), or which [`MemoryClass`] an
     /// allocated block's head is charged to.
     tags: Vec<FrameTag>,
-    /// Free blocks of each order, keyed by slot (`frame - base_frame`).
-    free_lists: [IntrusiveList; MAX_ORDER as usize + 1],
+    /// The address zones, ascending and covering the usable span, each with
+    /// its own free blocks of each order keyed by slot (`frame - base_frame`).
+    zones: Vec<Zone>,
     /// Cached count of free frames (sum over the free lists of 2^order).
     free_frames: usize,
     /// Number of whole frames inside `Usable` boot-map regions — the RAM
@@ -414,11 +491,14 @@ impl FrameAllocatorState {
         let slot = start
             .checked_sub(self.base_frame)
             .ok_or(AllocError::InvariantViolation)?;
-        self.free_lists
+        let z = zone_of(&self.zones, start);
+        let zone = &mut self.zones[z];
+        zone.free_lists
             .get_mut(order as usize)
             .ok_or(AllocError::SizeUnsupported)?
             .push_front(&mut self.links[..], slot)
             .map_err(|_| AllocError::InvariantViolation)?;
+        zone.free_frames += 1usize << order;
         self.tags[slot] = FrameTag::free_head(order);
         self.free_frames += 1usize << order;
         Ok(())
@@ -445,11 +525,14 @@ impl FrameAllocatorState {
         if self.tags.get(slot).copied().and_then(FrameTag::free_order) != Some(order) {
             return Ok(false);
         }
-        self.free_lists
+        let z = zone_of(&self.zones, start);
+        let zone = &mut self.zones[z];
+        zone.free_lists
             .get_mut(order as usize)
             .ok_or(AllocError::SizeUnsupported)?
             .unlink(&mut self.links[..], slot)
             .map_err(|_| AllocError::InvariantViolation)?;
+        zone.free_frames -= 1usize << order;
         self.tags[slot] = FrameTag::UNTRACKED;
         self.free_frames -= 1usize << order;
         Ok(true)
@@ -481,40 +564,101 @@ impl FrameAllocatorState {
         Ok(())
     }
 
-    fn alloc_order(&mut self, class: MemoryClass, order: u32) -> Result<usize, AllocError> {
-        if order > MAX_ORDER {
-            return Err(AllocError::SizeUnsupported);
+    /// The lowest order at or above `order` zone `z` holds a free block of,
+    /// where taking `2^order` frames leaves the zone its reserve when
+    /// `guarded`.
+    fn zone_source(&self, z: usize, order: u32, guarded: bool) -> Option<u32> {
+        let zone = &self.zones[z];
+        if guarded && zone.free_frames < zone.reserve.saturating_add(1usize << order) {
+            return None;
         }
-        // Find lowest order ≥ `order` with a non-empty free list.
-        let mut found: Option<u32> = None;
-        for o in order..=MAX_ORDER {
-            if !self.free_lists[o as usize].is_empty() {
-                found = Some(o);
-                break;
-            }
-        }
-        let cur = found.ok_or(AllocError::OutOfMemory)?;
-        // Pop the front block at `cur`. The intrusive list is LIFO, so the
-        // front is the most recently freed/split block of this order —
-        // deterministic, and O(1).
-        let slot = self.free_lists[cur as usize]
+        (order..=MAX_ORDER).find(|&o| !zone.free_lists[o as usize].is_empty())
+    }
+
+    /// The order of zone `z`'s list to split and the order up to `order` of
+    /// the largest block it can give, leaving its reserve when `guarded`.
+    fn zone_largest(&self, z: usize, order: u32, guarded: bool) -> Option<(u32, u32)> {
+        let zone = &self.zones[z];
+        let held = (0..=MAX_ORDER)
+            .rev()
+            .find(|&o| !zone.free_lists[o as usize].is_empty())?;
+        let spare = if guarded {
+            zone.free_frames.checked_sub(zone.reserve)?
+        } else {
+            zone.free_frames
+        };
+        let got = held.min(order).min(spare.checked_ilog2()?);
+        let from = (got..=MAX_ORDER).find(|&o| !zone.free_lists[o as usize].is_empty())?;
+        Some((from, got))
+    }
+
+    /// Take the front block of zone `z`'s order-`from` list, split it down to
+    /// a `2^order` block, and charge that.
+    fn take_front(
+        &mut self,
+        z: usize,
+        from: u32,
+        order: u32,
+        class: MemoryClass,
+    ) -> Result<usize, AllocError> {
+        // The lists are LIFO, so the front is the block most recently freed
+        // or split at this order: deterministic, and O(1).
+        let slot = self.zones[z].free_lists[from as usize]
             .front()
             .ok_or(AllocError::InvariantViolation)?;
         let start = self.base_frame + slot;
-        if !self.remove_free_block(start, cur)? {
+        if !self.remove_free_block(start, from)? {
             return Err(AllocError::InvariantViolation);
         }
-        self.split_around(start, cur, start, order)?;
+        self.split_around(start, from, start, order)?;
         self.charge(start, order, class);
         Ok(start)
     }
 
+    /// Take the highest free `2^order`-or-smaller block below `ceiling` in
+    /// the zone it falls in, of exactly `order` when `exact`.
+    fn take_highest_under(
+        &mut self,
+        order: u32,
+        ceiling: usize,
+        exact: bool,
+        class: MemoryClass,
+    ) -> Result<Option<(usize, u32)>, AllocError> {
+        let floor = self.zones[zone_of(&self.zones, ceiling - 1)].start;
+        let Some((start, got)) = self
+            .largest_free_run_under(order, ceiling, floor)
+            .filter(|&(_, got)| !exact || got == order)
+        else {
+            return Ok(None);
+        };
+        self.claim_free_run(start, got)?;
+        self.charge(start, got, class);
+        Ok(Some((start, got)))
+    }
+
+    /// Serve an ordinary request from the highest zone that has the block,
+    /// a lower zone only while it keeps its reserve for the requests that
+    /// can be served nowhere higher.
+    fn alloc_order(&mut self, class: MemoryClass, order: u32) -> Result<usize, AllocError> {
+        if order > MAX_ORDER {
+            return Err(AllocError::SizeUnsupported);
+        }
+        let top = self.zones.len() - 1;
+        for z in (0..=top).rev() {
+            if let Some(from) = self.zone_source(z, order, z < top) {
+                return self.take_front(z, from, order, class);
+            }
+        }
+        Err(AllocError::OutOfMemory)
+    }
+
     /// Carve a `2^order` block lying wholly below frame `ceiling`.
     ///
-    /// The free lists are LIFO and address-blind, so their front block says
-    /// nothing about where a free block below the ceiling is: this searches
-    /// the bitmap instead, and takes the *highest* such block so memory lower
-    /// still stays for devices that reach less.
+    /// The zone the ceiling falls in is the highest the request can use, so
+    /// its reserve is the request's own: the highest block below the ceiling
+    /// there, found in the bitmap because the lists are address-blind, so
+    /// memory lower still stays for devices that reach less. A lower zone
+    /// gives one only while it keeps its own reserve.
     fn alloc_order_under(
         &mut self,
         class: MemoryClass,
@@ -530,19 +674,22 @@ impl FrameAllocatorState {
         if ceiling <= self.base_frame {
             return Err(AllocError::OutOfRange);
         }
-        let start = self
-            .largest_free_run_under(order, ceiling)
-            .filter(|&(_, got)| got == order)
-            .ok_or(AllocError::OutOfMemory)?
-            .0;
-        self.claim_free_run(start, order)?;
-        self.charge(start, order, class);
-        Ok(start)
+        if let Some((start, _)) = self.take_highest_under(order, ceiling, true, class)? {
+            return Ok(start);
+        }
+        for z in (0..zone_of(&self.zones, ceiling - 1)).rev() {
+            if let Some(from) = self.zone_source(z, order, true) {
+                return self.take_front(z, from, order, class);
+            }
+        }
+        Err(AllocError::OutOfMemory)
     }
 
     /// The largest block of order up to `order` the pool holds, below frame
     /// `ceiling` where one is given, and its order: a fragmented pool steps
-    /// the order down within one search rather than in one per order.
+    /// the order down within one search rather than in one per order. The
+    /// zones are drawn on as [`Self::alloc_order`] and
+    /// [`Self::alloc_order_under`] draw on them.
     fn alloc_largest(
         &mut self,
         class: MemoryClass,
@@ -552,39 +699,51 @@ impl FrameAllocatorState {
         if order > MAX_ORDER {
             return Err(AllocError::SizeUnsupported);
         }
-        let Some(ceiling) = ceiling.filter(|&ceiling| ceiling < self.base_frame + self.span) else {
-            let got = (0..=MAX_ORDER)
-                .rev()
-                .find(|&o| !self.free_lists[o as usize].is_empty())
-                .ok_or(AllocError::OutOfMemory)?
-                .min(order);
-            return self.alloc_order(class, got).map(|start| (start, got));
+        let below = match ceiling.filter(|&ceiling| ceiling < self.base_frame + self.span) {
+            None => self.zones.len(),
+            Some(ceiling) if ceiling <= self.base_frame => return Err(AllocError::OutOfRange),
+            Some(ceiling) => {
+                if let Some(taken) = self.take_highest_under(order, ceiling, false, class)? {
+                    return Ok(taken);
+                }
+                zone_of(&self.zones, ceiling - 1)
+            }
         };
-        if ceiling <= self.base_frame {
-            return Err(AllocError::OutOfRange);
+        let top = self.zones.len() - 1;
+        for z in (0..below).rev() {
+            if let Some((from, got)) = self.zone_largest(z, order, z < top) {
+                return self
+                    .take_front(z, from, got, class)
+                    .map(|start| (start, got));
+            }
         }
-        let (start, got) = self
-            .largest_free_run_under(order, ceiling)
-            .ok_or(AllocError::OutOfMemory)?;
-        self.claim_free_run(start, got)?;
-        self.charge(start, got, class);
-        Ok((start, got))
+        Err(AllocError::OutOfMemory)
     }
 
     /// The start and order of the highest aligned run of free frames lying
-    /// wholly below frame `ceiling` of the largest order up to `order` any
-    /// holds.
+    /// wholly within frames `[floor, ceiling)` of the largest order up to
+    /// `order` any holds.
     ///
     /// Walks maximal free runs downward a bitmap word at a time: one step per
     /// word and per free run it passes below the ceiling, stopping at the
     /// first run holding a block of `order`.
-    fn largest_free_run_under(&self, order: u32, ceiling: usize) -> Option<(usize, u32)> {
+    fn largest_free_run_under(
+        &self,
+        order: u32,
+        ceiling: usize,
+        floor: usize,
+    ) -> Option<(usize, u32)> {
         let mut best: Option<(usize, u32)> = None;
         let mut end = ceiling.checked_sub(self.base_frame)?.min(self.span);
+        let bottom = floor.saturating_sub(self.base_frame);
         while let Some(last) = self.last_slot_before(end, |word| !word) {
+            if last < bottom {
+                break;
+            }
             let first = self
                 .last_slot_before(last, |word| word)
-                .map_or(0, |used| used + 1);
+                .map_or(0, |used| used + 1)
+                .max(bottom);
             let (lowest, past) = (self.base_frame + first, self.base_frame + last + 1);
             // A higher run already gave as large a block as a lower one can.
             let floor = best.map_or(0, |(_, got)| got + 1);
@@ -786,7 +945,20 @@ pub struct FrameAllocator {
 }
 
 impl FrameAllocator {
-    /// Build a frame allocator from `map`.
+    /// Build a frame allocator from `map`, zoned only where RAM spans 4 GiB
+    /// ([`Self::with_dma_reaches`] with no reach).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_dma_reaches`].
+    pub fn new(map: &BootMemoryMap) -> Result<Self, AllocError> {
+        Self::with_dma_reaches(map, &[])
+    }
+
+    /// Build a frame allocator from `map`, its zones cut where the DMA
+    /// `reaches` — the CPU-side ranges each device's DMA can address — stop,
+    /// so memory a device that reaches less needs is kept back from requests
+    /// any other memory serves.
     ///
     /// Validation performed:
     ///
@@ -818,7 +990,10 @@ impl FrameAllocator {
     /// Returns [`AllocError::InvariantViolation`] if the map is
     /// malformed (overflow or overlap) and
     /// [`AllocError::OutOfMemory`] if the map contains no usable frame.
-    pub fn new(map: &BootMemoryMap) -> Result<Self, AllocError> {
+    pub fn with_dma_reaches(
+        map: &BootMemoryMap,
+        reaches: &[core::ops::Range<u64>],
+    ) -> Result<Self, AllocError> {
         // 1. Determine total frame count.
         let hi = map
             .highest_address()
@@ -897,6 +1072,11 @@ impl FrameAllocator {
         }
         let base_frame = lo;
         let span = hi - lo;
+        let boundaries = zone_boundaries(&runs, reaches);
+        let zones: Vec<Zone> = core::iter::once(lo)
+            .chain(boundaries)
+            .map(Zone::new)
+            .collect();
 
         // 4. Allocate the per-frame metadata, all sized to the *usable*
         //    span and indexed from `base_frame`: the bitmap (all "1" — any
@@ -922,7 +1102,7 @@ impl FrameAllocator {
             bitmap,
             links,
             tags,
-            free_lists: [const { IntrusiveList::new() }; MAX_ORDER as usize + 1],
+            zones,
             free_frames: 0,
             usable_frames: 0,
             reserve_frames: 0,
@@ -946,6 +1126,16 @@ impl FrameAllocator {
         //    or below it, so the kernel keeps headroom to make progress on a
         //    machine a greedy userland is starving.
         state.reserve_frames = state.usable_frames / RESERVE_DIVISOR;
+
+        // 7. Each zone below the highest keeps back a share of the RAM above
+        //    it, bounded by its own size; nothing is allocated yet, so a
+        //    zone's free frames are its usable ones.
+        let mut above = 0usize;
+        for zone in state.zones.iter_mut().rev() {
+            zone.reserve =
+                (above / ZONE_RESERVE_RATIO).min(zone.free_frames / ZONE_RESERVE_MAX_SHARE);
+            above += zone.free_frames;
+        }
 
         Ok(Self {
             inner: SpinLock::new(state),
@@ -1710,6 +1900,142 @@ mod tests {
         );
         a.free_chunks(&chunks);
         assert_eq!(a.free_frames(), free, "the refusal took and kept nothing");
+    }
+
+    const MIB: u64 = 1 << 20;
+
+    /// Usable RAM from `start` to `end` MiB, in one region.
+    fn map_between(start: u64, end: u64) -> BootMemoryMap {
+        let mut m = BootMemoryMap::new();
+        m.push(MemoryRegion {
+            start: PhysAddr::new(start * MIB),
+            length: (end - start) * MIB,
+            kind: RegionKind::Usable,
+        });
+        m
+    }
+
+    /// Frames in one 32 MiB largest block, the zone granule.
+    const ZONE_GRANULE: usize = 1 << MAX_ORDER;
+
+    /// A device reaching the lowest 64 MiB.
+    const LOW_REACH: core::ops::Range<u64> = 0..64 * MIB;
+
+    #[test]
+    fn a_busy_pool_keeps_the_memory_below_a_dma_limit_for_the_carve_that_needs_it() {
+        let map = map_between(32, 128);
+        let ceiling = PhysAddr::new(64 * MIB);
+        // Churn leaves freed low memory heading the address-blind lists; then
+        // ordinary requests fill two thirds of the machine.
+        let carve_after_churn = |a: &FrameAllocator| {
+            let mut held = Vec::new();
+            while let Ok(frame) = a.alloc(MemoryClass::Kernel) {
+                held.push(frame);
+            }
+            held.sort_unstable_by_key(|frame| core::cmp::Reverse(frame.0));
+            for frame in held {
+                a.free(frame).unwrap();
+            }
+            for _ in 0..2 * ZONE_GRANULE {
+                a.alloc(MemoryClass::Kernel).unwrap();
+            }
+            a.alloc_order_under_user(MemoryClass::Dma, 0, Some(ceiling))
+        };
+        let unzoned = FrameAllocator::new(&map).unwrap();
+        assert_eq!(
+            carve_after_churn(&unzoned).err(),
+            Some(AllocError::OutOfMemory),
+            "with one zone the low memory goes first"
+        );
+        let zoned = FrameAllocator::with_dma_reaches(&map, &[LOW_REACH]).unwrap();
+        let frame = carve_after_churn(&zoned).expect("the zone below the limit is kept");
+        assert!(frame.start() < ceiling);
+    }
+
+    #[test]
+    fn ordinary_requests_take_the_highest_zone_first_and_a_lower_one_down_to_its_reserve() {
+        let a = FrameAllocator::with_dma_reaches(&map_between(32, 128), &[LOW_REACH]).unwrap();
+        for _ in 0..2 * ZONE_GRANULE {
+            assert!(a.alloc(MemoryClass::Kernel).unwrap().start().as_u64() >= 64 * MIB);
+        }
+        let reserve = 2 * ZONE_GRANULE / ZONE_RESERVE_RATIO;
+        for _ in 0..ZONE_GRANULE - reserve {
+            assert!(a.alloc(MemoryClass::Kernel).unwrap().start().as_u64() < 64 * MIB);
+        }
+        assert_eq!(
+            a.alloc(MemoryClass::Kernel).err(),
+            Some(AllocError::OutOfMemory),
+            "the reserve is not an ordinary request's"
+        );
+        assert_eq!(a.free_frames(), reserve);
+    }
+
+    #[test]
+    fn a_carve_drains_its_own_zone_but_leaves_each_lower_zone_its_reserve() {
+        let a = FrameAllocator::with_dma_reaches(&map_between(32, 160), &[LOW_REACH, 0..96 * MIB])
+            .unwrap();
+        let carve = |limit: u64| {
+            a.alloc_order_under_user(MemoryClass::Dma, 0, Some(PhysAddr::new(limit * MIB)))
+        };
+        let lowest_reserve = 3 * ZONE_GRANULE / ZONE_RESERVE_RATIO;
+        for _ in 0..2 * ZONE_GRANULE - lowest_reserve {
+            assert!(carve(96).unwrap().start().as_u64() < 96 * MIB);
+        }
+        assert_eq!(carve(96).err(), Some(AllocError::OutOfMemory));
+        for _ in 0..lowest_reserve {
+            assert!(carve(64).unwrap().start().as_u64() < 64 * MIB);
+        }
+        assert_eq!(carve(64).err(), Some(AllocError::OutOfMemory));
+    }
+
+    #[test]
+    fn a_zone_boundary_is_drawn_only_where_usable_ram_lies_on_both_sides_of_a_limit() {
+        let bytes = |frames: usize| (frames * PAGE_SIZE) as u64;
+        let runs = [(ZONE_GRANULE, 4 * ZONE_GRANULE)];
+        assert_eq!(
+            zone_boundaries(
+                &runs,
+                &[0..bytes(2 * ZONE_GRANULE + 1), 0..bytes(2 * ZONE_GRANULE),]
+            ),
+            [2 * ZONE_GRANULE],
+            "aligned down to the largest block, and one boundary per limit"
+        );
+        assert!(
+            zone_boundaries(
+                &runs,
+                &[
+                    bytes(5 * ZONE_GRANULE)..bytes(6 * ZONE_GRANULE),
+                    0..bytes(8 * ZONE_GRANULE),
+                ]
+            )
+            .is_empty(),
+            "a window holding no RAM, or a limit above it all, cuts nothing"
+        );
+        let four_gib = usize::try_from(DMA32_LIMIT >> PAGE_SHIFT).unwrap();
+        assert_eq!(
+            zone_boundaries(&[(ZONE_GRANULE, four_gib + ZONE_GRANULE)], &[]),
+            [four_gib]
+        );
+        assert!(zone_boundaries(&runs, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_freed_block_returns_to_its_own_zone() {
+        let a = FrameAllocator::with_dma_reaches(&map_between(32, 128), &[LOW_REACH]).unwrap();
+        let zone_free = |a: &FrameAllocator| {
+            a.inner
+                .lock()
+                .zones
+                .iter()
+                .map(|zone| zone.free_frames)
+                .collect::<Vec<_>>()
+        };
+        let low = a
+            .alloc_order_under_user(MemoryClass::Dma, 3, Some(PhysAddr::new(64 * MIB)))
+            .unwrap();
+        assert_eq!(zone_free(&a), [ZONE_GRANULE - 8, 2 * ZONE_GRANULE]);
+        a.free_order(low, 3).unwrap();
+        assert_eq!(zone_free(&a), [ZONE_GRANULE, 2 * ZONE_GRANULE]);
     }
 
     #[test]

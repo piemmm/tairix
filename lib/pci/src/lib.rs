@@ -283,6 +283,10 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
         Pci::map_bar_window(self, bdf, bar_index, mapper)
     }
 
+    fn driver_window(&self, bdf: u64, bar_index: u8) -> Result<(u64, u64), DriverError> {
+        Pci::driver_window(self, bdf, bar_index)
+    }
+
     fn enable_memory_space(&self, bdf: u64) -> Result<(), DriverError> {
         Pci::enable_memory_space(self, bdf);
         Ok(())

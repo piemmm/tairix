@@ -52,6 +52,7 @@ pub struct TaskbarPresenter {
     picker: Option<WindowId>,
     notifications: Option<WindowId>,
     readout: Option<WindowId>,
+    sound: Option<WindowId>,
     /// The density the surfaces on screen were laid out at, so a runtime
     /// DPI change is caught even though it never touches the taskbar
     /// model that drives the repaint latch.
@@ -72,6 +73,7 @@ impl TaskbarPresenter {
             picker: None,
             notifications: None,
             readout: None,
+            sound: None,
             presented_scale: None,
             owed: TaskbarRepaint::NONE,
         }
@@ -134,6 +136,7 @@ impl TaskbarPresenter {
             self.picker,
             self.notifications,
             self.readout,
+            self.sound,
         ]
         .into_iter()
         .flatten()
@@ -235,6 +238,11 @@ impl TaskbarPresenter {
         {
             self.owed.readout.merge(owed.readout);
         }
+        if due(&owed.sound, self.sound)
+            && !self.present_sound(compositor, renderer, taskbar, scale, &owed.sound)
+        {
+            self.owed.sound.merge(owed.sound);
+        }
     }
 
     /// Remove the bar, popup, picker, and popover windows from `compositor`
@@ -243,6 +251,9 @@ impl TaskbarPresenter {
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presented_scale = None;
         self.owed = TaskbarRepaint::NONE;
+        if let Some(id) = self.sound.take() {
+            compositor.remove(id);
+        }
         if let Some(id) = self.readout.take() {
             compositor.remove(id);
         }
@@ -443,6 +454,39 @@ impl TaskbarPresenter {
         );
         if let Some(id) = placed {
             self.readout = Some(id);
+        }
+        placed.is_some()
+    }
+
+    /// Present the volume panel while it is open beside the volume signal, or
+    /// remove it once closed. Fails closed like the others.
+    fn present_sound(
+        &mut self,
+        compositor: &mut Compositor,
+        renderer: &mut TaskbarRenderer,
+        taskbar: &Taskbar,
+        scale: Scale,
+        owed: &Repaint,
+    ) -> bool {
+        let Some(layout) = taskbar.sound_layout(scale) else {
+            if let Some(id) = self.sound.take() {
+                compositor.remove(id);
+            }
+            return true;
+        };
+        let placed = place(
+            compositor,
+            self.sound,
+            (
+                layout.panel.origin,
+                (layout.panel.width, layout.panel.height),
+            ),
+            owed,
+            Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
+            |surface, rects| renderer.paint_sound(taskbar, scale, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.sound = Some(id);
         }
         placed.is_some()
     }

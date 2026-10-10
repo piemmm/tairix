@@ -1293,8 +1293,9 @@ mod program {
             // The user chose nothing, so there is nothing to display: the
             // window they were choosing into closes rather than appearing to
             // state a refusal they already know about. A window that already
-            // holds a document keeps it.
-            WindowEvent::PickCancelled { .. } => {
+            // holds a document keeps it. The viewer asks for no folder, so a
+            // folder answer is nothing chosen too.
+            WindowEvent::PickCancelled { .. } | WindowEvent::FolderPicked { .. } => {
                 if app.windows[index].view.document().is_some() {
                     Acted::Idle
                 } else {

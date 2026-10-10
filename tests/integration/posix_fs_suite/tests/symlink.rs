@@ -341,8 +341,14 @@ fn rename_moves_the_link_not_what_it_names() {
         .expect("create the target");
     make_link(&vfs, &mut fs, "link", "target");
 
-    vfs.rename_via_secured(&owner, &vol_path("link"), &vol_path("moved"), &mut fs)
-        .expect("rename the link");
+    vfs.rename_via_secured(
+        &owner,
+        &vol_path("link"),
+        &vol_path("moved"),
+        &mut fs,
+        tairix_abi::RenameFlags::empty(),
+    )
+    .expect("rename the link");
 
     // The new name is the link, holding the same target.
     assert_eq!(

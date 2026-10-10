@@ -101,6 +101,10 @@ fn wallpaper_none_is_accepted() {
 
 #[test]
 fn the_render_is_canonical_and_round_trips() {
+    let mut sound = SoundControls::default();
+    assert!(sound.set_output("0000000000000051.0"));
+    assert!(sound.set_levels("0000000000000051.0:-6.5dB"));
+    assert!(sound.set_muted("0000000000000052.0"));
     let settings = DesktopSettings {
         wallpaper: WallpaperChoice::None,
         fit: WallpaperFit::Stretch,
@@ -138,6 +142,7 @@ fn the_render_is_canonical_and_round_trips() {
         display_off_after: DisplayOffAfter::Minutes(0),
         screensaver_options: retuned_scenes(),
         lock_after: IdleAfter::Minutes(15),
+        sound,
     };
     let text = rendered(&settings);
     assert_eq!(
@@ -188,7 +193,11 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.raytrace.detail = maximum\n\
          screensaver.retro_games.speed = slow\n\
          screensaver.system_monitor.tasks = false\n\
-         lock.after_min = 15\n"
+         lock.after_min = 15\n\
+         audio.output = 0000000000000051.0\n\
+         audio.input = \"\"\n\
+         audio.levels = 0000000000000051.0:-6.5dB\n\
+         audio.muted = 0000000000000052.0\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
 }
@@ -916,7 +925,7 @@ fn a_refused_merge_changes_nothing_at_all() {
 fn the_key_groups_partition_the_registry() {
     // Every key belongs to exactly one group, so a surface that renders
     // its group can never leave a key with no owner or post one twice.
-    let groups: [&[SettingsKey]; 8] = [
+    let groups: [&[SettingsKey]; 9] = [
         &SettingsKey::PINBOARD,
         &SettingsKey::APPEARANCE,
         &SettingsKey::NOTIFICATIONS,
@@ -925,6 +934,7 @@ fn the_key_groups_partition_the_registry() {
         &SettingsKey::KEYBOARD,
         &SettingsKey::SCREENSAVER,
         &SettingsKey::LOCK,
+        &SettingsKey::SOUND,
     ];
     for key in SettingsKey::ALL {
         let owners = groups.iter().filter(|group| group.contains(&key)).count();
@@ -1097,4 +1107,20 @@ fn a_group_reading_admits_its_own_keys_and_refuses_any_other_whole() {
         ),
         Err(DocumentRefusal::UnknownKey(_))
     ));
+}
+
+/// The remembered sound controls are the session's alone: an application's
+/// document naming one is refused whole, never half-applied.
+#[test]
+fn an_applied_document_may_not_name_the_sound_controls() {
+    let base = DesktopSettings::default();
+    assert!(merge_applied(&base, "wallpaper = none\n").is_ok());
+    for key in SettingsKey::SOUND {
+        let document = format!("wallpaper = none\n{} = 0000000000000051.0\n", key.name());
+        assert_eq!(
+            merge_applied(&base, &document),
+            Err(DocumentRefusal::OutsideGroup(key)),
+            "{key}"
+        );
+    }
 }

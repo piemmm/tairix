@@ -936,6 +936,15 @@ After power loss, mount selects the highest valid committed root. A partial
 transaction is ignored. Full `arxfs check` is not required for ordinary crash
 recovery.
 
+**The ring scan writes nothing until it has chosen.** Every slot and its root
+are read and authenticated first; only then is a bad primary of the chosen
+slot or of its root rewritten from the companion. A superseded generation's
+root blocks were freed by the commit after it, so the live volume may hold data
+there beside a companion that still authenticates: repairing that root would
+overwrite the data. A repair the device refuses does not fail the mount — the
+companion served it — and, like every bad copy a read path meets, is recorded
+for the next health pass (§11).
+
 **Content generations survive a crash unrepeated.** A transaction root records
 the next content generation the volume hands out. The first data change of a
 mount advances it by a fixed stride (2³²) past the committed value, commits,

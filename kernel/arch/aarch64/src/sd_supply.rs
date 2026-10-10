@@ -160,7 +160,7 @@ mod tests {
     use super::*;
     use core::cell::{Cell, RefCell};
     use std::vec::Vec;
-    use tairix_fdt::fixture::DtbBuilder;
+    use tairix_fdt::write::FdtWriter;
     use tairix_vcmailbox::mock::MockFirmware;
 
     const EXPANDER: u32 = 0xb;
@@ -171,7 +171,7 @@ mod tests {
 
     /// The Pi 4's SD supply wiring, with the power rail's `extra` property.
     fn wiring(controller: &str, card_extra: Option<(&str, u32)>) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("gpio");
         b.prop_str("compatible", controller);

@@ -48,8 +48,8 @@ fn stating() -> Shell {
     let mut shell = shell();
     let mut sink = damage();
     assert!(
-        shell.go_to_pane("sound", WIDE, Scale::ONE, &theme(), &mut sink),
-        "the registry carries the pane that states the absent sound controls"
+        shell.go_to_pane("bluetooth", WIDE, Scale::ONE, &theme(), &mut sink),
+        "the registry carries the pane that states the absent Bluetooth stack"
     );
     shell
 }
@@ -4354,4 +4354,76 @@ fn opening_a_list_reports_every_choice_it_draws() {
             "choice {index} at {choice:?} was drawn but not reported"
         );
     }
+}
+
+/// A sound reading landing while a level is dragged waits for the drag to
+/// settle, so the slider under the pointer is not rebuilt from under it.
+#[test]
+fn a_sound_reading_landing_mid_drag_waits_for_the_settle() {
+    use tairix_abi::audio::{
+        AudioDeviceDescriptor, AudioGain, AudioLocation, ControlAccess, DefaultChoice,
+    };
+    use tairix_abi::driver::audio::{
+        AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormats, StreamDirection,
+    };
+    use tairix_audio::stream::DeviceControl;
+    let at = |millibel: i32| crate::SoundReading {
+        devices: alloc::vec![AudioDeviceDescriptor {
+            device_id: 1,
+            direction: StreamDirection::Playback,
+            jack: JackState::Present,
+            default: DefaultChoice::Inherited,
+            formats: SampleFormats::EMPTY,
+            channel_map: ChannelMap::STEREO,
+            rates: RateSupport::Continuous {
+                min: Rate::HZ_48000,
+                max: Rate::HZ_48000,
+            },
+            gain: None,
+            name: AudioName::new("Speakers").expect("a short name"),
+            location: AudioLocation::new(0x51, 0).expect("a place"),
+            level: AudioGain::new(millibel).expect("attenuation"),
+            own_level: true,
+            muted: false,
+            access: ControlAccess::Own,
+            clock_millihertz: 0,
+            lost_frames: 0,
+        }],
+        captures: Vec::new(),
+        recording: 0,
+    };
+    let level_shown = |shell: &Shell| {
+        let form = shell.form_for_test().expect("a composed form");
+        let tairix_controls::FieldControl::Slider(slider) = form.groups()[0].rows()[1].control()
+        else {
+            panic!("the level is a slider");
+        };
+        slider.value()
+    };
+    let mut shell = shell_at(Location {
+        category: Category::Sound,
+        pane: Pane::Sound,
+    });
+    assert!(shell.sound_wanted(), "coming on show asks for the devices");
+    shell.adopt_sound(Some(at(-1_200)));
+    let before = level_shown(&shell);
+    let level = |millibel| DeviceControl::Level(AudioGain::new(millibel).expect("attenuation"));
+    shell.conclude_for_test(crate::FormOutcome::Sound {
+        device_id: 1,
+        control: level(-300),
+        settled: false,
+    });
+    shell.adopt_sound(Some(at(-300)));
+    assert_eq!(level_shown(&shell), before, "held while the drag goes on");
+    shell.conclude_for_test(crate::FormOutcome::Sound {
+        device_id: 1,
+        control: level(-300),
+        settled: true,
+    });
+    assert_ne!(level_shown(&shell), before, "adopted where it settled");
+    shell.sound_moved();
+    assert!(
+        shell.sound_wanted(),
+        "a change the service announces is read again"
+    );
 }

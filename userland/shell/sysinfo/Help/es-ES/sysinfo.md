@@ -75,6 +75,12 @@ Las consultas:
   unidad y su grupo, la generación y el estado de su propietario, sus
   flujos, y las correspondencias de su dominio y los bytes que abarcan
   (requiere `CAP_SYSINFO_HW`).
+- `audio`, `sound` — los dispositivos de sonido: una fila por salida y por
+  entrada — su identificador, si es la predeterminada de su sentido, su
+  nivel y su silencio, la frecuencia medida de su reloj mientras suena, los
+  fotogramas perdidos, su ubicación y su nombre — y después una fila por
+  cada flujo de sonido propio — su dispositivo, sentido, función y estado,
+  su posición, sus fallos y quién lo tiene.
 - `show <resource-ref>` — lee una referencia de recurso
   `info:`/`state:`/`stats:` e imprime su valor. Esos espacios de nombres
   sirven valores con tipo a través de esta API, nunca flujos de bytes: `cat`
@@ -92,6 +98,8 @@ Sin consulta, se muestra la ayuda corta.
 - `--all, -a` — con `processes`: listar todos los procesos del sistema
   en lugar de solo los suyos; el servicio concede esta vista únicamente
   a un llamante que posea `CAP_SYSINFO_GLOBAL`.
+  Con `audio`, todos los flujos de sonido de la máquina, con la misma
+  capacidad.
 - `-h, -?` — mostrar la ayuda corta de este comando.
 
 ## EXAMPLES

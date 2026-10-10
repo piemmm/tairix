@@ -37,6 +37,13 @@ trabalho, da Biblioteca de programas, ou pelo nome a partir de uma shell.
 Exige uma sessão gráfica em execução: sem ela o canal de janela é inalcançável
 e comunica a recusa no fluxo de erro padrão e termina.
 
+Som mostra cada saída e entrada com a sua escolha predefinida, o seu nível e o
+seu silêncio, e o que está a gravar: as suas próprias gravações pelo nome e
+quantas fazem os outros. Os controlos mudam o dispositivo de imediato, e só
+enquanto a sua sessão ocupa a sala que ele serve; um dispositivo da sala de
+outra sessão é mostrado mas não pode ser alterado aqui. O seu ambiente de
+trabalho recorda o que define.
+
 ## EXIT STATUS
 
 Zero após um fecho limpo; diferente de zero quando o canal de janela ou a

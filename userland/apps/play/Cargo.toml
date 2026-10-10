@@ -1,0 +1,58 @@
+[package]
+name = "tairix-play"
+description = "TAIRiX `play`: the command-line sound player (plans/SOUND.md SND10). Each file is decoded in the parser sandbox and played gapless into one audio-v1 stream while its shape holds; the optional full-screen interface is a view of a playback that runs without it, so the player keeps playing when backgrounded."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional, on-by-default
+# build feature, so host tooling builds only the engine library and never
+# `tairix-rt`'s `_start`, allocator or panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+[[bin]]
+name = "tairix-play-run"
+path = "src/run.rs"
+
+[dependencies]
+# The audio-v1 and PCM vocabulary, `stdinfo` records, and the `Errno` the
+# player fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The sinks a session may play on, and the `audio:` targets naming them.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The playback engine: the list decoded in the parser sandbox and played
+# gapless into one stream.
+tairix-player = { path = "../../../lib/player", version = "=0.0.0" }
+# The decode service the program serves when it is started as its own
+# sandboxed decoder.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# What a decoded stream is.
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0" }
+# The one rule for an option's attached or following value.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The OS terminal library the full-screen interface draws through.
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0" }
+tairix-termcap = { path = "../../../lib/termcap", version = "=0.0.0" }
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The bundle's own help, rendered by the one help engine.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+# The freestanding `Run` binary alone links the runtime and the live halves of
+# the seams: the engine's files, stream and decoder launcher, the audio
+# service's transport, the sandbox's worker channel, the terminal channel and
+# the bundle's own help source.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-player = { path = "../../../lib/player", version = "=0.0.0", features = ["rt"] }
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = ["program"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

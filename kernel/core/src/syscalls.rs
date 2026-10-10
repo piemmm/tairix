@@ -81,6 +81,7 @@ use crate::sched::{
 };
 use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::driver::filesystem::DirVisit;
+use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
@@ -99,11 +100,11 @@ use tairix_abi::{
     DescriptorTable, DirChange, DirChangeBatch, DirWatchStatus, Errno, FdWire, FileId, FileStat,
     InputMode, IntrospectDomain, IrqHandle, LimitKind, LockConflict, LockFlags, LockMode,
     LockRange, MapFlags, OpenFlags, PeerWatchOp, PortName, PortWidth, PowerAction, ProcId,
-    ProcessStart, RandomFlags, ReaddirFrom, ResourceLimit, SchedPriority, Signal, SignalIntakeOp,
-    SpawnAttach, SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags,
-    WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN,
-    CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX,
-    FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
+    ProcessStart, RandomFlags, ReaddirFrom, RenameFlags, ResourceLimit, SchedPriority, Signal,
+    SignalIntakeOp, SpawnAttach, SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64,
+    UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
+    BOOT_ID_LEN, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
     PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
     READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
     TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
@@ -597,6 +598,8 @@ enum StreamReadStep {
     Eof,
     /// The ring is empty but a peer is still live: park and retry.
     Empty,
+    /// The reader may not read the stream now; nothing was taken.
+    Refused(Errno),
 }
 
 /// The outcome of one non-blocking write step over a byte-stream backing,
@@ -3850,6 +3853,15 @@ where
                 crate::notice::may_observe(topic, caller.process().0)
                     && crate::notice::generation(topic, self.seat_registry) != m.observed
             }),
+            // The tree's generation differs from the one this member last
+            // saw, for a caller that may still read the tree.
+            WaitSourceKind::HardwareTree => {
+                caller.caps.has(CapabilityId::SYSINFO_HW)
+                    && self
+                        .hw_tree
+                        .generation()
+                        .is_ok_and(|generation| generation != m.observed)
+            }
             // A send to this port would not be refused *for want of room*.
             // A vanished port and a caller that no longer holds the send
             // authority both report ready rather than parking a sender on a
@@ -3866,6 +3878,13 @@ where
                         || port.has_room()
                 })
             }
+            // The terminal changed hands since this member last looked — an
+            // edge on its ownership generation, consumed when reported. A
+            // descriptor that no longer names a terminal stops reporting.
+            WaitSourceKind::Foreground => u32::try_from(m.id).is_ok_and(|fd| {
+                self.with_terminal_ownership(caller, fd, |fg| fg.generation() != m.observed)
+                    .unwrap_or(false)
+            }),
         };
         if ready {
             crate::fswatch::MemberState::Ready
@@ -3925,8 +3944,61 @@ where
         if self.process_wait.is_live(owner.process) {
             return Err(Errno::NotForeground);
         }
-        fg.clear_dead(owner.process);
+        if fg.clear_dead(owner.process) {
+            crate::waitq::foreground_wake();
+        }
         Ok(())
+    }
+
+    /// Run `with` on the controlling ownership of the terminal `fd` names for
+    /// the caller: a pty slave of the caller, or the console behind one of its
+    /// readable inherited standard streams.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a descriptor naming no terminal of the caller's,
+    /// [`Errno::NotImplemented`] for a console that is not installed.
+    fn with_terminal_ownership<R>(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        with: impl FnOnce(&crate::foreground::ForegroundOwnership) -> R,
+    ) -> Result<R, Errno> {
+        if let Some(pty) = self.aspaces.read().pty_slave(caller.process(), fd) {
+            return Ok(with(pty.foreground()));
+        }
+        let streams = self.aspaces.read().streams(caller.process());
+        if streams.mode(fd) != StreamMode::Read {
+            return Err(Errno::NotFound);
+        }
+        let device = self
+            .consoles
+            .get(usize::from(streams.console(fd)))
+            .ok_or(Errno::NotImplemented)?;
+        Ok(with(device.foreground_ownership()))
+    }
+
+    /// Who `console_foreground`'s `pid` names: nobody (`0`, a release), the
+    /// caller itself (holding its own terminal), or a live child of the
+    /// caller's, bound to the instance that holds it now.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a `pid` that is neither the caller nor a live
+    /// child of it.
+    fn foreground_target(
+        &self,
+        caller: &CallerContext<'_>,
+        pid: i64,
+    ) -> Result<Option<crate::foreground::ForegroundOwner>, Errno> {
+        if pid == 0 {
+            return Ok(None);
+        }
+        if u64::try_from(pid) == Ok(caller.process().0) {
+            return Ok(Some(self.foreground_owner(caller.process())));
+        }
+        let child = self.process_wait.authorise_child(caller.process(), pid)?;
+        Ok(Some(self.foreground_owner(child)))
     }
 
     /// Copy a filesystem path of `len` bytes from the caller's address space
@@ -4179,6 +4251,7 @@ where
                     };
                 }
                 StreamReadStep::Eof => break Ok(0),
+                StreamReadStep::Refused(err) => break Err(err),
                 StreamReadStep::Empty => {
                     // A bounded wait that has elapsed reports `TimedOut`
                     // only after the re-check above found nothing, so a
@@ -4409,18 +4482,19 @@ where
         timeout_ns: u64,
     ) -> SyscallResult {
         use crate::pty::PtyReadStep;
-        self.parked_stream_read(
-            caller,
-            buf,
-            len,
-            timeout_ns,
-            end.read_waits(),
-            |data| match end.read(data) {
+        // Asked before every byte is taken, so a reader parked before the
+        // terminal changed hands takes nothing after: only the foreground
+        // reads a terminal, exactly as on the console.
+        self.parked_stream_read(caller, buf, len, timeout_ns, end.read_waits(), |data| {
+            if let Err(refused) = self.check_terminal_foreground(caller, end.pty().foreground()) {
+                return StreamReadStep::Refused(refused);
+            }
+            match end.read(data) {
                 PtyReadStep::Read(n) => StreamReadStep::Read(n),
                 PtyReadStep::Eof => StreamReadStep::Eof,
                 PtyReadStep::Empty => StreamReadStep::Empty,
-            },
-        )
+            }
+        })
     }
 
     /// Serve a write to a pty **slave** descriptor: cook program output
@@ -6422,11 +6496,13 @@ where
         // non-zero bound parks at most that long and surfaces the
         // backing's `TimedOut` when it elapses with no input.
         let mut payload = alloc::vec![0u8; take];
-        let read = if timeout_ns == 0 {
-            device.read.read(&mut payload)?
-        } else {
-            device.read.read_timeout(&mut payload, timeout_ns)?
-        };
+        // The gate is asked again before every byte is taken, so a reader
+        // parked before the console changed hands takes nothing after.
+        let read = device.read.read_while(
+            &mut payload,
+            (timeout_ns != 0).then_some(timeout_ns),
+            &|| self.check_console_foreground(caller, device),
+        )?;
         // A correct device never reports more than the buffer it was
         // handed; clamp defensively so a buggy source cannot drive an
         // out-of-bounds copy (validate every input,
@@ -6517,10 +6593,11 @@ where
         // and once: an ending session admits nobody, and a join must stay
         // inside the caller's own session. Admission re-checks only that the
         // destination has not begun ending since.
-        let placement = self
-            .caps
-            .read()
-            .resolve_placement(caller.process(), attach.session);
+        let placement = self.caps.read().resolve_placement(
+            caller.process(),
+            attach.session,
+            attach.target_uid != SPAWN_UID_INHERIT,
+        );
         let placement = match placement {
             Ok(placement) => placement,
             Err(refusal) => {
@@ -6959,20 +7036,14 @@ where
             .pty_slave(caller.process(), fd)
             .is_some()
         {
-            let owner = (pid != 0)
-                .then(|| {
-                    self.process_wait
-                        .authorise_child(caller.process(), pid)
-                        .map(|child| self.foreground_owner(child))
-                })
-                .transpose()?;
+            let owner = self.foreground_target(caller, pid)?;
             let aspaces = self.aspaces.read();
             let Some(pty) = aspaces.pty_slave(caller.process(), fd) else {
                 return Err(Errno::NotFound);
             };
             return match owner {
-                Some(owner) => pty.foreground().grant(caller.process(), owner),
-                None => pty.foreground().release(caller.process()),
+                Some(owner) => pty.grant_foreground(caller.process(), owner),
+                None => pty.release_foreground(caller.process()),
             }
             .map(|()| 0);
         }
@@ -6989,25 +7060,27 @@ where
             return Err(Errno::NotImplemented);
         };
         // The dispatcher already checked `CAP_CONSOLE_READ`. A zero `pid`
-        // releases the ownership — the shell back at its prompt. The
-        // release is owner/granter-checked on the device: a background
-        // task cannot open the console by clearing the slot and then
-        // draining it (`plans/DISPLAY.md` D5).
-        if pid == 0 {
-            return device.release_foreground(caller.process()).map(|()| 0);
-        }
-        // A non-zero `pid` must be a live child of the caller: the same
-        // parent/child authority `wait`/`signal` enforce, decided by the
-        // one shared bookkeeping — never a caller-supplied claim. A
-        // negative, unknown, or already-exited pid fails closed. The
-        // grant itself is then slot-checked on the device (unowned, or
-        // the caller is the recorded granter or the current owner), so
-        // the drain right only ever moves down the spawn chain and is
+        // releases the ownership; the release is owner/granter-checked on
+        // the device, so a background task cannot open the console by
+        // clearing the slot and then draining it (`plans/DISPLAY.md` D5).
+        // Any other `pid` is the caller itself, holding its own terminal, or
+        // a live child of it — the parent/child authority `wait`/`signal`
+        // enforce, never a caller-supplied claim. The grant is then
+        // slot-checked on the device (unowned, or the caller is the recorded
+        // granter or the current owner), so the drain right only ever moves
+        // down the spawn chain or back to whoever handed it out, and is
         // never taken from a live foreground job by a bystander.
-        let child = self.process_wait.authorise_child(caller.process(), pid)?;
-        device
-            .grant_foreground(caller.process(), self.foreground_owner(child))
-            .map(|()| 0)
+        match self.foreground_target(caller, pid)? {
+            None => device.release_foreground(caller.process()),
+            Some(owner) => device.grant_foreground(caller.process(), owner),
+        }
+        .map(|()| 0)
+    }
+
+    fn foreground_held(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
+        // The dispatcher already checked `CAP_CONSOLE_READ`; the answer is
+        // the caller's own standing and changes nothing.
+        self.with_terminal_ownership(caller, fd, |fg| u64::from(fg.holds(caller.process())))
     }
 
     fn key_inject(
@@ -8831,7 +8904,9 @@ where
         // A topic nothing has published yet has no value to converge on.
         // `NotFound` rather than a plausible default: adopting a desktop the
         // session never described would lay every window out to a guess.
-        let Some(written) = crate::notice::payload(topic, self.seat_registry, &mut bytes)? else {
+        let Some(written) =
+            crate::notice::payload(topic, self.seat_registry, self.caps, &mut bytes)?
+        else {
             return Err(Errno::NotFound);
         };
         self.copy_out_user(caller, buf, &bytes[..written])?;
@@ -8857,11 +8932,18 @@ where
         // the same fact `WaitSourceKind::SeatInput` and the seat-scoped
         // reserved-endpoint bind are gated on. A background session that has
         // released or lost its lease is refused and re-publishes when it
-        // re-acquires on foreground wake. Every kernel-owned topic refuses
-        // outright inside `notice::publish`.
-        if matches!(topic, NoticeTopic::Desktop)
-            && !self.seat_registry.holds_live_lease(seat_owner(caller))
-        {
+        // re-acquires on foreground wake. What the machine is recording, and
+        // that its sound devices moved, are the audio service's to state, by
+        // its reserved rendezvous. Every kernel-owned topic refuses outright
+        // inside `notice::publish`.
+        let refused = match topic {
+            NoticeTopic::Desktop => !self.seat_registry.holds_live_lease(seat_owner(caller)),
+            NoticeTopic::AudioCapture | NoticeTopic::AudioDevices => {
+                !crate::notice::binds(tairix_abi::audio::AUDIO_ENDPOINT, caller.process().0)
+            }
+            NoticeTopic::Mounts | NoticeTopic::MemoryPressure | NoticeTopic::DisplayLease => false,
+        };
+        if refused {
             return Err(Errno::PermissionDenied);
         }
         let mut bytes = [0u8; NOTICE_PAYLOAD_MAX];
@@ -9222,14 +9304,14 @@ where
             CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
             return Err(Errno::PermissionDenied);
         }
-        // A DMA controller's endpoint is served under its node's duty alone:
-        // every consumer holds a request line naming the same id, and one of
-        // them serving it would answer all the others.
-        if tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS.contains(endpoint_id)
+        // A link supplier's endpoint is served under its node's duty alone:
+        // every consumer holds a request naming the same id, and one of them
+        // serving it would answer all the others.
+        if LinkRole::of_endpoint(endpoint_id).is_some()
             && !self
                 .aspaces
                 .read()
-                .holds_dma_controller_duty(caller.process(), endpoint_id)
+                .holds_link_duty(caller.process(), endpoint_id)
         {
             CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
             return Err(Errno::PermissionDenied);
@@ -9502,14 +9584,14 @@ where
         resource: u64,
     ) -> SyscallResult {
         let ep = served_endpoint(caller, endpoint)?;
-        // Only a DMA controller serving its own endpoint asks, and only about
-        // what it programs a channel from: one of its own request lines, or a
-        // register window. Anything wider would let any server probe the
-        // authority of whoever calls it.
+        // Only a link supplier serving its own endpoint asks, and only about
+        // what it serves: a request naming that endpoint, or — a DMA
+        // controller programming a channel — a register window. Anything
+        // wider would let any server probe the authority of whoever calls it.
         if !self
             .aspaces
             .read()
-            .holds_dma_controller_duty(caller.process(), endpoint)
+            .holds_link_duty(caller.process(), endpoint)
         {
             return Err(Errno::PermissionDenied);
         }
@@ -9518,10 +9600,10 @@ where
         self.copy_in_user(caller, resource, &mut record)?;
         let resource = HwResource::from_bytes(&record)?;
         let asked_about = match resource.kind() {
-            Some(HwResourceKind::DmaRequest) => resource
-                .dma_request_line()
+            Some(HwResourceKind::LinkRequest) => resource
+                .link_request()
                 .is_ok_and(|line| line.endpoint() == endpoint),
-            Some(HwResourceKind::Mmio) => true,
+            Some(HwResourceKind::Mmio) => LinkRole::of_endpoint(endpoint) == Some(LinkRole::Dma),
             _ => false,
         };
         if !asked_about {
@@ -10581,6 +10663,24 @@ where
                         }
                         member_file = stat.id;
                     }
+                    WaitSourceKind::Foreground => {
+                        // A wait-set may watch the ownership only of a
+                        // terminal the caller reads through `id`; anything
+                        // else is the same oracle-free `NotFound`. The
+                        // generation at the add is the baseline, so only a
+                        // later change of hands is reported.
+                        member_observed = u32::try_from(id)
+                            .ok()
+                            .and_then(|fd| {
+                                self.with_terminal_ownership(
+                                    caller,
+                                    fd,
+                                    crate::foreground::ForegroundOwnership::generation,
+                                )
+                                .ok()
+                            })
+                            .ok_or(Errno::NotFound)?;
+                    }
                     WaitSourceKind::DirWatch => {
                         // Only a descriptor of the caller's own table that it
                         // armed; the watch already carries the authority, so
@@ -10625,6 +10725,18 @@ where
                             return Err(Errno::PermissionDenied);
                         }
                     }
+                    // The one tree, observed on the authority reading it
+                    // demands; a build with no store wired has no tree to
+                    // watch.
+                    WaitSourceKind::HardwareTree => {
+                        if id != 0 {
+                            return Err(Errno::NotFound);
+                        }
+                        if !caller.caps.has(CapabilityId::SYSINFO_HW) {
+                            return Err(Errno::PermissionDenied);
+                        }
+                        self.hw_tree.generation()?;
+                    }
                 }
                 // A File member registers with its node first: the node's
                 // current generation is its baseline, so a change after this
@@ -10657,6 +10769,19 @@ where
                     }
                 }
                 added?;
+                if kind == WaitSourceKind::HardwareTree {
+                    // Baselined like a topic: the caller reads the tree once
+                    // at start-up and is then told only about moves.
+                    if let Ok(baseline) = self.hw_tree.generation() {
+                        let _ = crate::waitset::advance_observed(
+                            caller.process().0,
+                            set,
+                            WaitSourceKind::HardwareTree,
+                            id,
+                            baseline,
+                        );
+                    }
+                }
                 if kind == WaitSourceKind::SystemNotice {
                     // Baseline on the generation in force at the add, so a
                     // member added while a topic already holds an unusual
@@ -10790,6 +10915,14 @@ where
         // and a torn-down port wakes them all, so ordinary mailbox traffic
         // never disturbs a waiter that did not ask about room.
         let observes_room = members.iter().any(|m| m.kind == WaitSourceKind::PortRoom);
+        // `FOREGROUND_WAITQ` is joined only by a set holding a `Foreground`
+        // member, and woken only when some terminal changes hands.
+        let observes_foreground = members.iter().any(|m| m.kind == WaitSourceKind::Foreground);
+        // `HW_TREE_WAITQ` is joined only by a set holding a `HardwareTree`
+        // member, and woken by every generation bump of the tree.
+        let observes_tree = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::HardwareTree);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
         if let Some(key) = child_key {
@@ -10809,6 +10942,12 @@ where
         }
         if observes_notice {
             crate::waitq::NOTICE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_foreground {
+            crate::waitq::FOREGROUND_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_tree {
+            crate::waitq::HW_TREE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
         if observes_room {
             crate::waitq::PORT_ROOM_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -11006,6 +11145,12 @@ where
         if observes_notice {
             crate::waitq::NOTICE_WAITQ.deregister(sched_task);
         }
+        if observes_foreground {
+            crate::waitq::FOREGROUND_WAITQ.deregister(sched_task);
+        }
+        if observes_tree {
+            crate::waitq::HW_TREE_WAITQ.deregister(sched_task);
+        }
         if observes_callreply {
             crate::waitq::CALL_WAITQ.deregister(sched_task);
         }
@@ -11125,6 +11270,42 @@ where
                     caller.process().0,
                     set,
                     WaitSourceKind::SystemNotice,
+                    id,
+                    generation,
+                );
+            }
+        }
+        // Consume a Foreground winner's edge the same way: the caller asks
+        // where it stands after this returns, so a change that raced in is
+        // already in its answer.
+        if kind == WaitSourceKind::Foreground {
+            let generation = u32::try_from(id).ok().and_then(|fd| {
+                self.with_terminal_ownership(
+                    caller,
+                    fd,
+                    crate::foreground::ForegroundOwnership::generation,
+                )
+                .ok()
+            });
+            if let Some(generation) = generation {
+                let _ = crate::waitset::advance_observed(
+                    caller.process().0,
+                    set,
+                    WaitSourceKind::Foreground,
+                    id,
+                    generation,
+                );
+            }
+        }
+        // Consume a HardwareTree winner's edge: the caller reads the tree for
+        // itself after this returns, so a bump that raced in is already in
+        // what it reads.
+        if kind == WaitSourceKind::HardwareTree {
+            if let Ok(generation) = self.hw_tree.generation() {
+                let _ = crate::waitset::advance_observed(
+                    caller.process().0,
+                    set,
+                    WaitSourceKind::HardwareTree,
                     id,
                     generation,
                 );
@@ -11934,17 +12115,19 @@ where
         src_len: usize,
         dst: u64,
         dst_len: usize,
+        flags: RenameFlags,
     ) -> SyscallResult {
-        // The dispatcher already checked `CAP_FS_ACCESS` and that both `src`
-        // and `dst` are non-null `UserPtr`s. Both paths are copied in and
-        // validated; resolution and the permission/mount-flag model are the
+        // The dispatcher already checked `CAP_FS_ACCESS`, that both `src`
+        // and `dst` are non-null `UserPtr`s, and rejected any reserved flag
+        // bit. Both paths are copied in and validated; resolution, the
+        // permission/mount-flag model, and the no-replace check are the
         // secured VFS's, under the caller's attested identity.
         let src = self.copy_path_in(caller, src, src_len)?;
         let dst = self.copy_path_in(caller, dst, dst_len)?;
         let uid = caller.caps.owner().0;
         let outcome = self
             .filesystem
-            .rename(uid, caller.caps.effective(), &src, &dst);
+            .rename(uid, caller.caps.effective(), &src, &dst, flags);
         emit_fs_mutation(
             self.audit,
             "rename",
@@ -12340,6 +12523,30 @@ where
             Ok(_) => Ok(0),
             Err((_port, err)) => Err(err),
         }
+    }
+
+    fn port_admit(&self, caller: &CallerContext<'_>, port: u64, server: u64) -> SyscallResult {
+        let ipc = self.ipc.read();
+        let port = ipc.lookup(EndpointId(port)).ok_or(Errno::NotFound)?;
+        // Only the owner narrows its mailbox, the gate `ipc_recv` puts on
+        // draining it.
+        if port.owner() != caller.caps.process().0 {
+            return Err(Errno::PermissionDenied);
+        }
+        let server = crate::callreg::lookup(EndpointId(server)).ok_or(Errno::NotFound)?;
+        // The admitted sender may be parked for room the discarded
+        // messages held; it is woken once the registry guard is dropped,
+        // as a receive wakes it.
+        let woken = if port.admit(server.owner_instance(), self.audit) {
+            port.room_waiters()
+        } else {
+            alloc::vec::Vec::new()
+        };
+        drop(ipc);
+        for task in woken {
+            crate::waitq::port_room_wake_task(task);
+        }
+        Ok(0)
     }
 
     fn fs_chdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
@@ -13878,7 +14085,7 @@ where
         let placed = self
             .placement
             .map_or_else(
-                || caps.resolve_placement(self.parent, SpawnSession::Inherit),
+                || caps.resolve_placement(self.parent, SpawnSession::Inherit, false),
                 Ok,
             )
             .and_then(|placement| caps.admit(placeholder, placement));
@@ -16130,6 +16337,87 @@ mod tests {
         let msg = port.recv().expect("a message was delivered");
         assert_eq!(msg.sender, 2);
         assert_eq!(msg.payload.as_bytes(), payload.as_slice());
+    }
+
+    #[test]
+    fn port_admit_lets_only_the_owner_admit_the_server_of_an_endpoint() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let server = ProcId::from_raw([0x7A; PROC_ID_LEN]);
+        let serving =
+            make_caps_record(crate::test_boot::claim_task(), &[], sink).with_proc_id(server);
+        let call_id = 0x5EAD_AD01;
+        let endpoint = Arc::new(
+            CallEndpoint::create(
+                EndpointId(call_id),
+                &serving,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                CallEndpointLimits {
+                    max_request: 16,
+                    max_reply: 16,
+                    capacity: 1,
+                },
+                sink,
+            )
+            .expect("unrestricted endpoint"),
+        );
+        crate::callreg::register(endpoint, sink).expect("registered");
+        let owner = make_caps_record(0xB1, &[], sink);
+        let owner_ctx = CallerContext {
+            task_id: SecTaskId(0xB1),
+            caps: &owner,
+        };
+        let stranger = make_caps_record(0xC3, &[], sink);
+        let stranger_ctx = CallerContext {
+            task_id: SecTaskId(0xC3),
+            caps: &stranger,
+        };
+        register_port(&ipc, 1, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(h.port_admit(&owner_ctx, 2, call_id), Err(Errno::NotFound));
+        assert_eq!(
+            h.port_admit(&owner_ctx, 1, 0x5EAD_AD02),
+            Err(Errno::NotFound),
+            "no one serves it"
+        );
+        assert_eq!(
+            h.port_admit(&stranger_ctx, 1, call_id),
+            Err(Errno::PermissionDenied),
+            "another process's mailbox"
+        );
+        let other =
+            make_caps_record(0xC3, &[], sink).with_proc_id(ProcId::from_raw([0x9F; PROC_ID_LEN]));
+        ipc.read()
+            .lookup(EndpointId(1))
+            .expect("bound")
+            .send(&other, b"early", sink)
+            .expect("open to anyone before the admission");
+        assert_eq!(h.port_admit(&owner_ctx, 1, call_id), Ok(0));
+        assert!(sink
+            .event_ids()
+            .contains(&tairix_kernel_ipc::AuditEvent::PortSenderAdmitted.id().0));
+        let guard = ipc.read();
+        let port = guard.lookup(EndpointId(1)).expect("port stays bound");
+        assert!(port.is_empty(), "what another sent first is discarded");
+        assert_eq!(
+            port.send(&other, b"junk", sink),
+            Err(Errno::PermissionDenied)
+        );
+        let admitted = make_caps_record(0xD4, &[], sink).with_proc_id(server);
+        assert_eq!(port.send(&admitted, b"notice", sink), Ok(()));
+        drop(guard);
+        crate::callreg::unregister(EndpointId(call_id));
     }
 
     /// `log_emit` copies the encoded record in, decodes it, and emits it to
@@ -19396,7 +19684,7 @@ mod tests {
         let foreign = tairix_abi::ProcId::from_raw([0x5a; 16]);
         let root = table
             .read()
-            .resolve_placement(ProcessId::KERNEL, SpawnSession::New)
+            .resolve_placement(ProcessId::KERNEL, SpawnSession::New, false)
             .expect("the kernel founds a session");
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
             .with_proc_id(tairix_abi::ProcId::from_raw([0x22; 16]));
@@ -20374,8 +20662,9 @@ mod tests {
             caps: &dyn tairix_abi::CapabilityQuery,
             src: &str,
             dst: &str,
+            flags: RenameFlags,
         ) -> Result<(), Errno> {
-            self.inner.rename(uid, caps, src, dst)
+            self.inner.rename(uid, caps, src, dst, flags)
         }
 
         fn set_mode(
@@ -21490,7 +21779,9 @@ mod tests {
         spawner: ProcessId,
         session: SpawnSession,
     ) {
-        let placement = caps.resolve_placement(spawner, session).expect("placeable");
+        let placement = caps
+            .resolve_placement(spawner, session, false)
+            .expect("placeable");
         caps.admit(record, placement).expect("placed");
     }
 
@@ -21524,6 +21815,7 @@ mod tests {
             caps.resolve_placement(
                 ProcessId(1),
                 SpawnSession::Join(tairix_abi::ProcId::from_raw([0x33; 16])),
+                false,
             )
             .expect("the requester lies within the parent's session")
         };
@@ -22737,6 +23029,69 @@ mod tests {
         assert_eq!(
             h.fs_write(&ctx, master_fd, 0, 0x1000, 4),
             Err(Errno::BrokenPipe)
+        );
+    }
+
+    /// A pty slave reads only for its foreground: with the pty handed to a
+    /// child, the parent's own read is refused before a byte is taken, and
+    /// it reads again once it takes the pty back.
+    #[test]
+    fn a_pty_slave_read_is_gated_on_the_pty_foreground() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"ping");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(9),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_process_wait(wait);
+        assert_eq!(h.pty_create(&ctx, 0x1800, 24, 80), Ok(0));
+        let (master_fd, slave_fd) = (4, 5);
+        assert_eq!(
+            h.stream_input_mode(&ctx, slave_fd, InputMode::Raw.as_u32()),
+            Ok(0)
+        );
+        assert_eq!(h.fs_write(&ctx, master_fd, 0, 0x1000, 4), Ok(4));
+        assert_eq!(h.console_foreground(&ctx, slave_fd, 9), Ok(0));
+        assert_eq!(h.foreground_held(&ctx, slave_fd), Ok(0));
+        assert_eq!(
+            h.fs_read(&ctx, slave_fd, 0, 0x1100, 4),
+            Err(Errno::NotForeground),
+            "a background reader takes nothing"
+        );
+        assert_eq!(h.console_foreground(&ctx, slave_fd, 2), Ok(0));
+        assert_eq!(h.foreground_held(&ctx, slave_fd), Ok(1));
+        assert_eq!(
+            h.fs_read(&ctx, slave_fd, 0, 0x1100, 4),
+            Ok(4),
+            "the keystroke waited"
         );
     }
 
@@ -24666,6 +25021,160 @@ mod tests {
         );
         // The one shared teardown ran: the capability record is withdrawn.
         assert!(table.read().caps_for(SecTaskId(9)).is_none());
+    }
+
+    /// Run `test` with a shell and its child job on one console, both reading
+    /// it through their inherited standard streams: the handlers, the shell's
+    /// and the job's contexts, the console's input, and their two pids.
+    fn shell_and_job_on_a_console(
+        test: impl FnOnce(
+            &KernelSyscallHandlers<'_, TestArch>,
+            &CallerContext<'_>,
+            &CallerContext<'_>,
+            &RecordingConsoleRead,
+            (i64, i64),
+        ),
+    ) {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let shell = crate::test_boot::claim_task();
+        let job = crate::test_boot::claim_peer_task();
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(shell), space, physmap)
+            .expect("registration succeeds");
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+        aspaces
+            .write()
+            .register(ProcessId(job), space, physmap)
+            .expect("registration succeeds");
+        let shell_caps = make_caps_record(shell, &[CapabilityId::CONSOLE_READ], sink);
+        let job_caps = make_caps_record(job, &[CapabilityId::CONSOLE_READ], sink);
+        let rx: &'static RecordingConsoleRead =
+            Box::leak(Box::new(RecordingConsoleRead::new(b"typed")));
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            rx,
+        )]));
+        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        for (parent, child) in [(1, shell), (shell, job)] {
+            wait.register_child(
+                ProcessId(parent),
+                ProcessId(child),
+                crate::procwait::ChildListing::Listed,
+            )
+            .expect("registered");
+        }
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        for task in [shell, job] {
+            aspaces
+                .write()
+                .set_streams(ProcessId(task), DescriptorTable::standard());
+        }
+        let pids = (
+            i64::try_from(shell).expect("a pid in range"),
+            i64::try_from(job).expect("a pid in range"),
+        );
+        test(
+            &h,
+            &CallerContext {
+                task_id: SecTaskId(shell),
+                caps: &shell_caps,
+            },
+            &CallerContext {
+                task_id: SecTaskId(job),
+                caps: &job_caps,
+            },
+            rx,
+            pids,
+        );
+        assert_eq!(crate::waitset::release_owned_by(shell), 0);
+    }
+
+    /// A shell may hold its own console: it is told it does, and a job's read
+    /// is refused until the console is handed to it and again once taken back.
+    #[test]
+    fn a_shell_holds_its_own_console_and_a_job_reads_only_once_handed_it() {
+        shell_and_job_on_a_console(|h, shell, job, rx, (own, job_pid)| {
+            assert_eq!(h.foreground_held(shell, STDIN), Ok(0));
+            assert_eq!(h.console_foreground(shell, STDIN, own), Ok(0));
+            assert_eq!(h.foreground_held(shell, STDIN), Ok(1));
+            assert_eq!(
+                h.stream_read(job, STDIN, 0x1000, 16, 0),
+                Err(Errno::NotForeground),
+                "a job reads nothing while the shell holds the console"
+            );
+            assert_eq!(*rx.last_buf_len.lock(), None);
+            assert_eq!(h.console_foreground(shell, STDIN, job_pid), Ok(0));
+            assert_eq!(h.foreground_held(shell, STDIN), Ok(0));
+            assert_eq!(h.foreground_held(job, STDIN), Ok(1));
+            assert_eq!(h.stream_read(job, STDIN, 0x1000, 16, 0), Ok(5));
+            assert_eq!(h.console_foreground(shell, STDIN, own), Ok(0));
+            assert_eq!(
+                h.stream_read(job, STDIN, 0x1000, 16, 0),
+                Err(Errno::NotForeground)
+            );
+            assert_eq!(h.foreground_held(shell, STDOUT), Err(Errno::NotFound));
+        });
+    }
+
+    /// A `Foreground` member is baselined at its add and reports each change
+    /// of hands exactly once; a descriptor naming no terminal is refused.
+    #[test]
+    fn a_foreground_member_reports_each_change_of_hands_once() {
+        shell_and_job_on_a_console(|h, shell, _job, _rx, (own, job_pid)| {
+            let set = h.waitset_create(shell).expect("create");
+            let watch = |fd: u32, token| {
+                h.waitset_ctl(
+                    shell,
+                    set,
+                    WS_OP_ADD,
+                    WS_KIND_FOREGROUND,
+                    u64::from(fd),
+                    token,
+                )
+            };
+            watch(STDIN, 0x46).expect("watch the console");
+            assert_eq!(watch(STDOUT, 0x47), Err(Errno::NotFound));
+            assert_eq!(
+                h.waitset_wait(shell, set, 0, 0x2000),
+                Err(Errno::TimedOut),
+                "baselined at the add"
+            );
+            for pid in [own, job_pid, own] {
+                assert_eq!(h.console_foreground(shell, STDIN, pid), Ok(0));
+                assert_eq!(h.waitset_wait(shell, set, 0, 0x2000), Ok(0));
+                assert_eq!(
+                    h.waitset_wait(shell, set, 0, 0x2000),
+                    Err(Errno::TimedOut),
+                    "each change of hands is reported once"
+                );
+            }
+            assert_eq!(h.console_foreground(shell, STDIN, own), Ok(0));
+            assert_eq!(
+                h.waitset_wait(shell, set, 0, 0x2000),
+                Err(Errno::TimedOut),
+                "the same hands again are no change"
+            );
+            let shell_pid = u64::try_from(own).expect("a pid");
+            assert_eq!(crate::waitset::release_owned_by(shell_pid), 1);
+        });
     }
 
     /// Only the console's controlling (foreground) owner drains its input
@@ -34673,7 +35182,7 @@ mod tests {
     /// [`HwTreeSource::publish`] so a `hw_emit_node` test can assert what
     /// reached the store.
     struct StaticHwTree {
-        generation: u64,
+        generation: core::sync::atomic::AtomicU64,
         blob: alloc::vec::Vec<u8>,
         published: RwLock<alloc::vec::Vec<(u32, tairix_abi::HwNode)>>,
         // Every `(parent_id, node_id)` removed through `HwTreeSource::remove`,
@@ -34699,7 +35208,7 @@ mod tests {
     impl StaticHwTree {
         fn new(generation: u64, blob: alloc::vec::Vec<u8>) -> Self {
             Self {
-                generation,
+                generation: core::sync::atomic::AtomicU64::new(generation),
                 blob,
                 published: RwLock::new(alloc::vec::Vec::new()),
                 removed: RwLock::new(alloc::vec::Vec::new()),
@@ -34729,24 +35238,30 @@ mod tests {
         }
     }
 
-    impl HwTreeSource for StaticHwTree {
-        fn generation(&self) -> Result<u64, Errno> {
-            Ok(self.generation)
-        }
-        fn node(&self, node_id: u32) -> Result<Option<tairix_abi::HwNode>, Errno> {
-            if !crate::hwtree::HwNodeLiveness::is_live(self, node_id) {
-                return Ok(None);
-            }
-            let seeded = self
-                .blob
+    impl StaticHwTree {
+        /// The seeded nodes still in the tree, decoded from the blob.
+        fn seeded(&self) -> impl Iterator<Item = tairix_abi::HwNode> + '_ {
+            self.blob
                 .get(tairix_abi::HwTreeHeader::WIRE_LEN..)
                 .unwrap_or_default()
                 .as_chunks::<{ tairix_abi::HwNode::WIRE_LEN }>()
                 .0
                 .iter()
                 .filter_map(|record| tairix_abi::HwNode::from_bytes(record.as_slice()).ok())
-                .find(|decoded| decoded.id() == node_id);
-            Ok(seeded)
+                .filter(|decoded| crate::hwtree::HwNodeLiveness::is_live(self, decoded.id()))
+        }
+    }
+
+    impl HwTreeSource for StaticHwTree {
+        fn generation(&self) -> Result<u64, Errno> {
+            Ok(self.generation.load(core::sync::atomic::Ordering::Acquire))
+        }
+        fn node(&self, node_id: u32) -> Result<Option<tairix_abi::HwNode>, Errno> {
+            Ok(self.seeded().find(|decoded| decoded.id() == node_id))
+        }
+        fn for_each_node(&self, visit: &mut dyn FnMut(&tairix_abi::HwNode)) -> Result<(), Errno> {
+            self.seeded().for_each(|node| visit(&node));
+            Ok(())
         }
         fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(self.blob.clone())
@@ -41420,10 +41935,11 @@ mod tests {
     }
 
     fn dma_request_record() -> tairix_abi::HwResource {
-        use tairix_abi::driver::dmaengine::{DmaRequestLine, DMA_CONTROLLER_ENDPOINTS};
+        use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+        use tairix_abi::hwlink::LinkRequest;
         let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(31);
-        tairix_abi::HwResource::dma_request(
-            &DmaRequestLine::new(endpoint, 0, &[2], b"tx").expect("valid line"),
+        tairix_abi::HwResource::request(
+            &LinkRequest::new(endpoint, 0, &[2], b"tx").expect("valid line"),
         )
     }
 
@@ -41438,12 +41954,9 @@ mod tests {
         client: u64,
         sink: &'static (dyn Sink + Sync),
     ) -> (u64, CallTicket, tairix_abi::HwResource) {
-        use tairix_abi::driver::dmaengine::DmaControllerDuty;
+        use tairix_abi::hwlink::LinkDuty;
         let request = dma_request_record();
-        let id = request
-            .dma_request_line()
-            .expect("a request line")
-            .endpoint();
+        let id = request.link_request().expect("a request line").endpoint();
         let (_ep, ticket) = in_service_call(table, id, server_caps, client, sink);
         for held in [
             request,
@@ -41452,9 +41965,7 @@ mod tests {
         ] {
             aspaces.write().mint_grant(ProcessId(client), held);
         }
-        let duty = tairix_abi::HwResource::dma_controller(
-            &DmaControllerDuty::new(id, None).expect("a valid duty"),
-        );
+        let duty = tairix_abi::HwResource::duty(&LinkDuty::new(id, None).expect("a valid duty"));
         (id, ticket, duty)
     }
 
@@ -41482,7 +41993,8 @@ mod tests {
     /// request lines or a register window a channel may feed.
     #[test]
     fn call_peer_holds_answers_a_controller_only_about_its_lines_and_windows() {
-        use tairix_abi::driver::dmaengine::{DmaRequestLine, DMA_CONTROLLER_ENDPOINTS};
+        use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+        use tairix_abi::hwlink::LinkRequest;
         let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
@@ -41518,8 +42030,8 @@ mod tests {
         );
         // Another request line on the same controller is a different grant.
         let line = |endpoint, index, cells: &[u32], name: &[u8]| {
-            tairix_abi::HwResource::dma_request(
-                &DmaRequestLine::new(endpoint, index, cells, name).expect("valid line"),
+            tairix_abi::HwResource::request(
+                &LinkRequest::new(endpoint, index, cells, name).expect("valid line"),
             )
             .to_le_bytes()
         };
@@ -42272,11 +42784,11 @@ mod tests {
             .any(|(k, value)| k == "bytes" && value == "16384"));
     }
 
-    /// Only the node's controller duty authorises serving its DMA endpoint;
-    /// a consumer's request line naming the same endpoint never does.
+    /// Only a node's duty authorises serving its endpoint, for every link
+    /// role; a consumer's request naming the same endpoint never does.
     #[test]
-    fn call_create_admits_a_dma_endpoint_only_to_its_controllers_driver() {
-        use tairix_abi::driver::dmaengine::{DmaControllerDuty, DMA_CONTROLLER_ENDPOINTS};
+    fn call_create_admits_a_link_endpoint_only_to_its_suppliers_driver() {
+        use tairix_abi::hwlink::{LinkDuty, LinkRequest};
         let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
@@ -42302,38 +42814,40 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(31);
-
-        assert_eq!(
-            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
-            Err(Errno::PermissionDenied)
-        );
-        // A consumer holding a request line may call the endpoint, never
-        // serve it.
-        aspaces
-            .write()
-            .mint_grant(ProcessId(driver), dma_request_record());
-        assert_eq!(
-            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
-            Err(Errno::PermissionDenied)
-        );
-        assert!(crate::callreg::lookup(EndpointId(endpoint)).is_none());
-        // The controller's duty is the authority.
-        let duty = DmaControllerDuty::new(endpoint, Some(0x7F5)).expect("valid");
-        aspaces.write().mint_grant(
-            ProcessId(driver),
-            tairix_abi::HwResource::dma_controller(&duty),
-        );
-        assert_eq!(
-            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
-            Ok(0)
-        );
-        // The duty names one endpoint and no other.
-        assert_eq!(
-            h.call_create(&ctx, endpoint + 1, 0x1000, 0x2000, 64, 64, 4),
-            Err(Errno::PermissionDenied)
-        );
-        crate::callreg::unregister(EndpointId(endpoint));
+        for (node, &role) in (31..).zip(LinkRole::ALL) {
+            let endpoint = role.endpoints().endpoint(node);
+            assert_eq!(
+                h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+                Err(Errno::PermissionDenied),
+                "{role:?}: no grant"
+            );
+            let request = LinkRequest::new(endpoint, 0, &[2], b"tx").expect("valid request");
+            aspaces
+                .write()
+                .mint_grant(ProcessId(driver), tairix_abi::HwResource::request(&request));
+            assert_eq!(
+                h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+                Err(Errno::PermissionDenied),
+                "{role:?}: a consumer may call the endpoint, never serve it"
+            );
+            assert!(crate::callreg::lookup(EndpointId(endpoint)).is_none());
+            let channels = (role == LinkRole::Dma).then_some(0x7F5);
+            let duty = LinkDuty::new(endpoint, channels).expect("valid duty");
+            aspaces
+                .write()
+                .mint_grant(ProcessId(driver), tairix_abi::HwResource::duty(&duty));
+            assert_eq!(
+                h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+                Ok(0),
+                "{role:?}: the duty is the authority"
+            );
+            assert_eq!(
+                h.call_create(&ctx, endpoint + 1, 0x1000, 0x2000, 64, 64, 4),
+                Err(Errno::PermissionDenied),
+                "{role:?}: the duty names one endpoint and no other"
+            );
+            crate::callreg::unregister(EndpointId(endpoint));
+        }
     }
 
     /// Adding a `SeatInput` wait-set member is owner-checked against the
@@ -42568,6 +43082,7 @@ mod tests {
     const WS_KIND_STREAM_ROOM: u32 = tairix_abi::WaitSourceKind::StreamRoom as u32;
     const WS_KIND_SIGNAL: u32 = tairix_abi::WaitSourceKind::Signal as u32;
     const WS_KIND_NOTICE: u32 = tairix_abi::WaitSourceKind::SystemNotice as u32;
+    const WS_KIND_FOREGROUND: u32 = tairix_abi::WaitSourceKind::Foreground as u32;
     /// The notice topics as wait-set member ids.
     const WS_TOPIC_DESKTOP: u64 = tairix_abi::NoticeTopic::Desktop as u64;
     const WS_TOPIC_MOUNTS: u64 = tairix_abi::NoticeTopic::Mounts as u64;
@@ -42971,7 +43486,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         let set = h.waitset_create(&ctx).expect("create");
-        let past_the_set = WS_TOPIC_LEASE + 1;
+        let past_the_set = tairix_abi::NoticeTopic::ALL.len() as u64;
         assert_eq!(
             h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, past_the_set, 0xAA),
             Err(Errno::NotFound)
@@ -43139,6 +43654,48 @@ mod tests {
         );
     }
 
+    /// The audio service owns the seat's speakers, so it reads the lease as
+    /// the display service does; and it alone may state what the machine is
+    /// recording, which anybody may read.
+    #[test]
+    fn the_audio_service_follows_the_lease_and_alone_states_the_capture_count() {
+        let _calls = crate::callreg::registry_guard();
+        let _registry = crate::notice::registry_guard();
+        let world = LeaseTopicWorld::new();
+        let h = world.handlers();
+        let (service, bystander) = (world.ctx(LEASE_SERVICE), world.ctx(LEASE_BYSTANDER));
+        let lease = tairix_abi::NoticeTopic::DisplayLease;
+        let capture = tairix_abi::NoticeTopic::AudioCapture;
+        let (lease_len, capture_len) = (lease.payload_len(), capture.payload_len());
+        assert_eq!(
+            h.notice_publish(&service, capture.as_u32(), 0x2000, capture_len),
+            Err(Errno::PermissionDenied),
+            "not before it binds the rendezvous"
+        );
+        let audio = tairix_abi::audio::AUDIO_ENDPOINT;
+        assert_eq!(
+            h.call_create(&service, audio, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_read(&service, lease.as_u32(), 0x2000, lease_len),
+            Ok(lease_len as u64)
+        );
+        assert_eq!(
+            h.notice_publish(&service, capture.as_u32(), 0x2000, capture_len),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&bystander, capture.as_u32(), 0x2000, capture_len),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.notice_read(&bystander, capture.as_u32(), 0x2000, capture_len),
+            Ok(capture_len as u64)
+        );
+        crate::callreg::unregister(EndpointId(audio));
+    }
+
     /// The display service is woken once by each lease edge, and a member
     /// whose owner has given the rendezvous up is told nothing more.
     #[test]
@@ -43290,6 +43847,85 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
 
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A wait-set waits on the hardware tree beside anything else: the member
+    /// is refused without the authority reading the tree demands, is
+    /// baselined on the generation at the add, and reports each move once.
+    #[test]
+    fn waitset_hardware_tree_member_reports_each_generation_move_once() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = call_aspace(b"");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let tree: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(4, encode_hw_snapshot(4, &[]))));
+        let kind = tairix_abi::WaitSourceKind::HardwareTree as u32;
+
+        let unprivileged = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &unprivileged,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree);
+        let set = h.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, 0, 0x7731),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+
+        let caps = make_caps_record(owner, &[CapabilityId::SYSINFO_HW], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let set = h.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, 1, 0x7731),
+            Err(Errno::NotFound),
+            "there is one tree"
+        );
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, kind, 0, 0x7731)
+            .expect("add the tree");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        tree.generation
+            .store(5, core::sync::atomic::Ordering::Release);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(owner))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token.try_into().expect("8 bytes")),
+            0x7731
+        );
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "the edge was consumed"
+        );
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
@@ -46240,8 +46876,12 @@ mod tests {
             _caps: &dyn tairix_abi::CapabilityQuery,
             src: &str,
             dst: &str,
+            flags: RenameFlags,
         ) -> Result<(), Errno> {
-            self.record(alloc::format!("rename uid={uid} src={src} dst={dst}"));
+            self.record(alloc::format!(
+                "rename uid={uid} src={src} dst={dst} flags={}",
+                flags.bits()
+            ));
             Ok(())
         }
 
@@ -48047,6 +48687,7 @@ mod tests {
                 &caps,
                 "/Storage/vol/sub",
                 "/Storage/vol/moved",
+                RenameFlags::empty(),
             )
             .expect("rename");
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
@@ -48096,7 +48737,13 @@ mod tests {
         let b = open_watch_dir(&h, &ctx, "/Storage/vol/a/b");
         let set = watched_set(&h, &ctx, b, 0, 0xD5);
         fx.svc
-            .rename(uid, &caps, "/Storage/vol/a", "/Storage/vol/x")
+            .rename(
+                uid,
+                &caps,
+                "/Storage/vol/a",
+                "/Storage/vol/x",
+                RenameFlags::empty(),
+            )
             .expect("rename");
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
         assert_eq!(
@@ -48208,7 +48855,13 @@ mod tests {
         let fd = open_watch_dir(&h, &ctx, "/Storage/vol/watched");
         let set = watched_set(&h, &ctx, fd, 0, 0xD9);
         fx.svc
-            .rename(uid, &caps, "/Storage/vol/a", "/Storage/vol/b")
+            .rename(
+                uid,
+                &caps,
+                "/Storage/vol/a",
+                "/Storage/vol/b",
+                RenameFlags::empty(),
+            )
             .expect("rename");
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
         fx.create("/Storage/vol/watched/later.txt");

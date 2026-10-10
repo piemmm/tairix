@@ -78,7 +78,7 @@ pub use netcfg::{
     NetworkConfigSource, NetworkInterfaceConfigSource,
 };
 #[cfg(feature = "program")]
-pub use service::{run, HwTreeService};
+pub use service::{run, HwTreeService, WAKE_SOURCES};
 pub use store::{fetch_catalogue, load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
 // The deterministic match policy is the shared `lib/devmatch` definition: re-exported here so existing consumers and the
 // crate's public surface are unchanged.

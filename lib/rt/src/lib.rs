@@ -85,6 +85,8 @@ pub mod cachereport;
 
 pub mod io;
 
+pub mod keys;
+
 pub mod net;
 
 pub mod pressure;
@@ -207,6 +209,9 @@ const NUM_SIGNAL: u64 = SyscallNumber::SIGNAL.as_u16() as u64;
 
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
+
+/// `foreground_held` syscall number (as above).
+const NUM_FOREGROUND_HELD: u64 = SyscallNumber::FOREGROUND_HELD.as_u16() as u64;
 
 /// `ipc_send` syscall number (as above).
 const NUM_IPC_SEND: u64 = SyscallNumber::IPC_SEND.as_u16() as u64;
@@ -427,6 +432,8 @@ const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
 const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
 /// `port_bind` syscall number (as above).
 const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
+/// `port_admit` syscall number (as above).
+const NUM_PORT_ADMIT: u64 = SyscallNumber::PORT_ADMIT.as_u16() as u64;
 /// `ipc_recv` syscall number (as above).
 const NUM_IPC_RECV: u64 = SyscallNumber::IPC_RECV.as_u16() as u64;
 
@@ -2693,6 +2700,26 @@ pub fn signal(pid: i64, signal: Signal) -> i64 {
     ret as i64
 }
 
+/// Stop this process, as a terminal's suspend key would; the call returns once
+/// something continues it.
+///
+/// What a full-screen program does on its own suspend key once it has given
+/// its terminal back, since that key reaches it as a byte rather than a
+/// signal while its input is raw.
+///
+/// # Errors
+///
+/// The kernel's refusal of this process's own origin, or of the signal.
+pub fn stop_self() -> Result<(), Errno> {
+    let origin = self_origin().map_err(Errno::from_syscall)?;
+    let pid = i64::try_from(origin.pid()).map_err(|_| Errno::OutOfRange)?;
+    let ret = signal(pid, Signal::Stop);
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
+}
+
 /// Move process `pid` to the time-shared scheduling service level
 /// `priority` (`SyscallNumber::SCHED_SET_PRIORITY`, `plans/NEW-TASKBAR.md`
 /// T12).
@@ -2776,9 +2803,10 @@ pub fn system_power(action: PowerAction) -> i64 {
 ///
 /// `fd` is a readable inherited standard-stream descriptor naming the
 /// console (the shell passes [`tairix_abi::STDIN`]); `pid` is a live child
-/// of the caller to make the owner, or `0` to release. While an owner is
-/// recorded, only it may `stream_read` or `stream_input_mode` that
-/// console — every other task sees `Errno::NotForeground`. The kernel
+/// of the caller to make the owner, the caller's own pid to hold the
+/// terminal itself, or `0` to release. While an owner is recorded, only it
+/// may `stream_read` or `stream_input_mode` that console — every other task
+/// sees `Errno::NotForeground`, a parked reader included. The kernel
 /// authorises the child through the same parent/child bookkeeping
 /// `wait`/`signal` use, owner/granter-checks the transition itself (a
 /// bystander can neither take nor clear the ownership), and fails closed
@@ -2802,6 +2830,36 @@ pub fn console_foreground(fd: u32, pid: i64) -> i64 {
         )
     };
     ret as i64
+}
+
+/// Whether the caller holds the controlling (foreground) ownership of the
+/// terminal `fd` names (`SyscallNumber::FOREGROUND_HELD`, the `tcgetpgrp`
+/// question asked of oneself).
+///
+/// A program that draws on its terminal only while it is in the foreground
+/// asks this once and then watches a `WaitSourceKind::Foreground` member on
+/// the same descriptor for every change of hands.
+///
+/// # Errors
+///
+/// `Errno::NotFound` for a descriptor naming no terminal of the caller's,
+/// `Errno::NotImplemented` for a console that is not installed, and
+/// `Errno::PermissionDenied` without `CAP_CONSOLE_READ`.
+pub fn foreground_held(fd: u32) -> Result<bool, Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel resolves
+    // `fd` against the caller's own descriptor table on the far side of the
+    // trap. `foreground_held` dereferences no user pointer.
+    let ret = unsafe { raw_syscall(NUM_FOREGROUND_HELD, [u64::from(fd), 0, 0, 0, 0, 0]) };
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "the kernel answers in the signed register encoding: 0, 1, else -errno"
+    )]
+    let ret = ret as i64;
+    match ret {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Errno::from_syscall(ret)),
+    }
 }
 
 /// Read the calling process's effective limit for resource `kind`
@@ -3003,6 +3061,28 @@ pub fn port_bind(endpoint: u64, max_payload: usize, capacity: usize) -> i64 {
         )
     };
     ret as i64
+}
+
+/// Admit the process instance serving call endpoint `server` as the only one
+/// whose messages the caller's port `port` takes
+/// (`SyscallNumber::PORT_ADMIT`), replacing any admitted before and
+/// discarding whatever another instance had queued: a port whose id another
+/// process can work out then cannot be filled by it.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for an unbound port or endpoint, and
+/// [`Errno::PermissionDenied`] for a port another process owns.
+pub fn port_admit(port: u64, server: u64) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; both arguments are
+    // plain scalars the kernel validates, and no user memory is named.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the status encoding (0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_PORT_ADMIT, [port, server, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
 }
 
 /// Bind a fresh, process-private message port and return its id.
@@ -5117,10 +5197,12 @@ pub fn fs_unlink(path: &[u8], flags: tairix_abi::UnlinkFlags) -> i64 {
 /// directory-into-its-own-subtree move, a read-only mount, or a permission
 /// denial fails closed; a cross-mount move is refused with the dedicated
 /// `Errno::CrossVolume`, the `EXDEV` equivalent a mover falls back to
-/// copy-then-remove on). Returns `0` on success or `-errno`.
+/// copy-then-remove on). With [`tairix_abi::RenameFlags::NO_REPLACE`] an
+/// occupied destination refuses the move with `Errno::AlreadyExists` instead
+/// of being replaced. Returns `0` on success or `-errno`.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
+pub fn fs_rename(src: &[u8], dst: &[u8], flags: tairix_abi::RenameFlags) -> i64 {
     let src_ptr = src.as_ptr() as usize as u64;
     let dst_ptr = dst.as_ptr() as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -5129,7 +5211,14 @@ pub fn fs_rename(src: &[u8], dst: &[u8]) -> i64 {
     let ret = unsafe {
         raw_syscall(
             NUM_FS_RENAME,
-            [src_ptr, src.len() as u64, dst_ptr, dst.len() as u64, 0, 0],
+            [
+                src_ptr,
+                src.len() as u64,
+                dst_ptr,
+                dst.len() as u64,
+                u64::from(flags.bits()),
+                0,
+            ],
         )
     };
     ret as i64
@@ -7440,6 +7529,22 @@ mod tests {
     }
 
     #[test]
+    fn port_admit_names_the_port_and_the_endpoint_whose_server_it_admits() {
+        let (number, args) = capture(0, || {
+            assert_eq!(
+                port_admit(0x5553_0000_0000_2A01, 0x0055_5242_0000_0000),
+                Ok(())
+            );
+        });
+        assert_eq!(number, NUM_PORT_ADMIT);
+        assert_eq!(&args[..2], &[0x5553_0000_0000_2A01, 0x0055_5242_0000_0000]);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+        let (_, _) = capture(refusal(Errno::PermissionDenied), || {
+            assert_eq!(port_admit(7, 9), Err(Errno::PermissionDenied));
+        });
+    }
+
+    #[test]
     fn signal_intake_marshals_each_op() {
         for op in [
             SignalIntakeOp::Enable,
@@ -7658,6 +7763,21 @@ mod tests {
             assert_eq!(console_foreground(STDIN, 0), 0);
         });
         assert_eq!(args[1], 0);
+    }
+
+    #[test]
+    fn foreground_held_marshals_fd_and_reads_the_two_answers() {
+        for (answer, held) in [(0, false), (1, true)] {
+            let (number, args) = capture(answer, || {
+                assert_eq!(foreground_held(STDIN), Ok(held));
+            });
+            assert_eq!(number, NUM_FOREGROUND_HELD);
+            assert_eq!(args, [u64::from(STDIN), 0, 0, 0, 0, 0]);
+        }
+        let want = -i64::from(tairix_abi::Errno::NotFound.as_i32());
+        let (_, _) = capture(u64::from_ne_bytes(want.to_ne_bytes()), || {
+            assert_eq!(foreground_held(STDIN), Err(tairix_abi::Errno::NotFound));
+        });
     }
 
     #[test]
@@ -8695,14 +8815,17 @@ mod tests {
         let src = b"/System/Logs/old";
         let dst = b"/System/Logs/new";
         let (number, args) = capture(0, || {
-            assert_eq!(fs_rename(src, dst), 0);
+            assert_eq!(fs_rename(src, dst, tairix_abi::RenameFlags::NO_REPLACE), 0);
         });
         assert_eq!(number, NUM_FS_RENAME);
         assert_eq!(args[0], src.as_ptr() as usize as u64);
         assert_eq!(args[1], src.len() as u64);
         assert_eq!(args[2], dst.as_ptr() as usize as u64);
         assert_eq!(args[3], dst.len() as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(
+            &args[4..],
+            &[u64::from(tairix_abi::RenameFlags::NO_REPLACE.bits()), 0]
+        );
     }
 
     #[test]

@@ -46,6 +46,9 @@ tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The fixed-key hash a sound device's place in the hardware tree is named by,
+# so the same hardware in the same place answers the same location each boot.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The boot-time system-configuration store engine: the
 # one definition of the `system.conf` grammar the device manager reads the
 # stack-wide `net.*` policy from post-unlock, to deliver it to `netstack`

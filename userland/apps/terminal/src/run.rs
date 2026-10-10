@@ -2303,6 +2303,7 @@ mod program {
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
+                | WindowEvent::FolderPicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
                 | WindowEvent::PreviewRendered { .. }

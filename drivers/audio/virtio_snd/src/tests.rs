@@ -579,40 +579,39 @@ fn playback_moves_the_rings_frames_and_the_position_follows_them() {
     let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
         .expect("comes up");
     device.configure(0, &params()).expect("configured");
-    device.start(0, Frames::ZERO).expect("started");
 
     let mut ring = Ring::new();
     // A recognisable ramp: every frame distinct, so a reordered or dropped
     // period cannot pass.
-    let mut signal = vec![0u8; PERIOD_FRAMES as usize * 4];
+    let mut signal = vec![0u8; 2 * PERIOD_FRAMES as usize * 4];
     for (index, byte) in signal.iter_mut().enumerate() {
         *byte = u8::try_from(index % 251).expect("in range");
     }
-    {
-        let mut bound = ring.bind();
-        assert_eq!(
-            bound.write(&signal).expect("written"),
-            PERIOD_FRAMES,
-            "the whole period reaches the ring"
-        );
-    }
+    let (first, second) = signal.split_at(PERIOD_FRAMES as usize * 4);
+    assert_eq!(
+        ring.bind().write(first).expect("written"),
+        PERIOD_FRAMES,
+        "the whole period reaches the ring"
+    );
+    // Primed, as the mixer does: the device begins on these frames.
+    let primed = device.service(0, &mut ring.bind()).expect("primed");
+    assert_eq!(primed.transferred, PERIOD_FRAMES);
+    assert!(!primed.running);
+    device.start(0, primed.position).expect("started");
 
-    let report = {
-        let mut bound = ring.bind();
-        device.service(0, &mut bound).expect("serviced")
-    };
+    ring.bind().write(second).expect("written");
+    let report = device.service(0, &mut ring.bind()).expect("serviced");
     assert_eq!(report.transferred, PERIOD_FRAMES);
     assert!(report.running);
     assert_eq!(
         report.xrun_frames, 0,
         "nothing was missing, so nothing was lost"
     );
-    assert_eq!(report.position, Frames::new(u64::from(PERIOD_FRAMES)));
+    assert_eq!(report.position, Frames::new(2 * u64::from(PERIOD_FRAMES)));
 
-    let played = &log.borrow().played;
     assert_eq!(
-        &played[..signal.len()],
-        &signal[..],
+        log.borrow().played,
+        signal,
         "the device received exactly the frames the ring held"
     );
 }
@@ -625,29 +624,28 @@ fn a_short_ring_is_padded_with_silence_and_the_loss_is_counted_exactly() {
     let mut device = VirtioSnd::open(mock_device(&DeviceSpec::qemu(), &log, &host), &host, &clock)
         .expect("comes up");
     device.configure(0, &params()).expect("configured");
-    device.start(0, Frames::ZERO).expect("started");
-
     let mut ring = Ring::new();
+    ring.bind()
+        .write(&vec![0x22u8; PERIOD_FRAMES as usize * 4])
+        .expect("written");
+    let primed = device.service(0, &mut ring.bind()).expect("primed");
+    device.start(0, primed.position).expect("started");
+
     let short = 32u32;
-    {
-        let mut bound = ring.bind();
-        bound
-            .write(&vec![0x11u8; short as usize * 4])
-            .expect("written");
-    }
-    let report = {
-        let mut bound = ring.bind();
-        device.service(0, &mut bound).expect("serviced")
-    };
+    ring.bind()
+        .write(&vec![0x11u8; short as usize * 4])
+        .expect("written");
+    let report = device.service(0, &mut ring.bind()).expect("serviced");
     // A running device must be fed, so the missing frames are silence — and
     // they are *counted*, so the mixer learns exactly what was lost rather
     // than discovering a drift later.
-    assert_eq!(report.transferred, PERIOD_FRAMES);
+    assert_eq!(report.transferred, short, "only what the ring gave");
     assert_eq!(report.xrun_frames, u64::from(PERIOD_FRAMES - short));
-    assert_eq!(report.position, Frames::new(u64::from(PERIOD_FRAMES)));
+    assert_eq!(report.position, Frames::new(2 * u64::from(PERIOD_FRAMES)));
 
     let played = log.borrow();
-    let payload = &played.played[..PERIOD_FRAMES as usize * 4];
+    let payload = &played.played[PERIOD_FRAMES as usize * 4..];
+    assert_eq!(payload.len(), PERIOD_FRAMES as usize * 4);
     assert!(payload[..short as usize * 4].iter().all(|b| *b == 0x11));
     assert!(
         payload[short as usize * 4..].iter().all(|b| *b == 0),
@@ -903,20 +901,6 @@ fn the_bind_table_matches_a_virtio_sound_node_and_nothing_else() {
 }
 
 #[test]
-fn the_conventional_layout_is_only_claimed_where_one_exists() {
-    assert_eq!(conventional_map(1).map(|m| m.channels()), Some(1));
-    assert_eq!(conventional_map(2), Some(ChannelMap::STEREO));
-    assert_eq!(conventional_map(6).map(|m| m.channels()), Some(6));
-    assert_eq!(conventional_map(8).map(|m| m.channels()), Some(8));
-    // Five and seven channels have no conventional reading, so none is
-    // invented.
-    assert_eq!(conventional_map(5), None);
-    assert_eq!(conventional_map(7), None);
-    assert_eq!(conventional_map(0), None);
-    assert_eq!(conventional_map(9), None);
-}
-
-#[test]
 fn a_channel_map_naming_a_position_this_stack_cannot_place_is_left_unpublished() {
     let mut record = [0u8; wire::MAX_INFO_RECORD_LEN];
     record[wire::chmap_info::CHANNELS] = 2;
@@ -1077,12 +1061,10 @@ fn two_streams_of_a_direction_keep_their_periods_in_flight_on_the_one_queue() {
         device
             .configure(endpoint, &stream_params)
             .expect("configured");
-        device.start(endpoint, Frames::ZERO).expect("started");
         ring.bind().write(&every_period()).expect("written");
-        let report = device
-            .service(endpoint, &mut ring.bind())
-            .expect("serviced");
+        let report = device.service(endpoint, &mut ring.bind()).expect("primed");
         assert_eq!(report.transferred, PERIOD_FRAMES * periods_in_flight());
+        device.start(endpoint, report.position).expect("started");
     }
     assert_eq!(
         transport.borrow_mut().drain_queue(wire::TX_QUEUE),
@@ -1152,24 +1134,59 @@ fn a_period_the_ring_has_no_room_for_leaves_its_frames_in_the_ring() {
     let clock = StepClock::new();
     let (mut device, transport) = device_holding_transfers(&spec, &log, &host, &clock);
     device.configure(0, &params()).expect("configured");
-    device.start(0, Frames::ZERO).expect("started");
     let mut ring = Ring::new();
     ring.bind().write(&every_period()).expect("written");
-    device.service(0, &mut ring.bind()).expect("serviced");
+    let primed = device.service(0, &mut ring.bind()).expect("primed");
+    device.start(0, primed.position).expect("started");
     refuse_control_requests(&mut transport.borrow_mut(), wire::status::IO_ERR);
     assert!(device.release(0).is_err());
     assert_eq!(lent(&device), PERIODS_IN_FLIGHT);
 
     refuse_control_requests(&mut transport.borrow_mut(), wire::status::OK);
     device.configure(0, &params()).expect("configured again");
-    device.start(0, Frames::ZERO).expect("started again");
     ring.bind().write(&every_period()).expect("written");
-    let report = device.service(0, &mut ring.bind()).expect("serviced");
+    let report = device.service(0, &mut ring.bind()).expect("primed");
     assert_eq!(report.transferred, 2 * PERIOD_FRAMES, "what the ring held");
     assert_eq!(
         ring.bind().readable_frames(),
         Ok(PERIOD_FRAMES),
         "the rest waits"
+    );
+    device.start(0, report.position).expect("started again");
+    assert_eq!(
+        ring.bind().readable_frames(),
+        Ok(PERIOD_FRAMES),
+        "with periods in flight a start adds none"
+    );
+}
+
+#[test]
+fn a_start_with_nothing_primed_posts_a_period_of_silence_counted_lost() {
+    // With nothing in flight the device finishes nothing, so no period would
+    // ever elapse to ask the driver for the next.
+    let mut spec = DeviceSpec::qemu();
+    spec.streams.truncate(1);
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let (mut device, transport) = device_holding_transfers(&spec, &log, &host, &clock);
+    device.configure(0, &params()).expect("configured");
+    device.start(0, Frames::ZERO).expect("started");
+    assert_eq!(
+        transport.borrow_mut().drain_queue(wire::TX_QUEUE),
+        Ok(1),
+        "the start alone put a period in flight"
+    );
+    let played = log.borrow().played.clone();
+    assert_eq!(played.len(), PERIOD_FRAMES as usize * 4, "one whole period");
+    assert!(played.iter().all(|b| *b == 0), "of the format's silence");
+    let mut ring = Ring::new();
+    let report = device.service(0, &mut ring.bind()).expect("serviced");
+    assert_eq!(report.transferred, 0);
+    assert_eq!(
+        report.xrun_frames,
+        2 * u64::from(PERIOD_FRAMES),
+        "the start's silence, then the dry ring's"
     );
 }
 
@@ -1353,4 +1370,31 @@ fn a_dropped_device_whose_reset_never_confirms_releases_nothing() {
     let held = host.slabs_outstanding();
     drop(device);
     assert_eq!(host.slabs_outstanding(), held);
+}
+
+/// The device's causes are read after every call as well as on its
+/// interrupt, so a transfer still in flight must not read as a finished
+/// period: servicing it would pad silence into a ring the mixer, waiting on
+/// that very call, has not yet refilled.
+#[test]
+fn a_transfer_in_flight_is_no_period_boundary_until_the_device_hands_it_back() {
+    let log = Rc::new(RefCell::new(DeviceLog::default()));
+    let host = MockHost::new();
+    let clock = StepClock::new();
+    let (mut device, transport) =
+        device_holding_transfers(&DeviceSpec::qemu(), &log, &host, &clock);
+    device.configure(0, &params()).expect("configured");
+    device.start(0, Frames::ZERO).expect("started");
+    let mut ring = Ring::new();
+    ring.bind().write(&every_period()).expect("written");
+    device.service(0, &mut ring.bind()).expect("serviced");
+    assert!(
+        device.take_interrupt().expect("read").is_empty(),
+        "nothing has come back"
+    );
+    assert_eq!(
+        transport.borrow_mut().drain_queue(wire::TX_QUEUE),
+        Ok(PERIODS_IN_FLIGHT)
+    );
+    assert_eq!(device.take_interrupt().expect("read").period_elapsed, 1);
 }

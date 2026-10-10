@@ -86,6 +86,21 @@ pub enum IconKind {
     Audio,
     /// A film camera, for a video file.
     Video,
+    /// A bar behind a left-pointing triangle, for the start of the track or
+    /// the one before it.
+    SkipPrevious,
+    /// A right-pointing triangle against a bar, for the next track.
+    SkipNext,
+    /// Two crossing arrows, for playing in a shuffled order.
+    Shuffle,
+    /// A loop of two arrows, for playing the whole list again.
+    Repeat,
+    /// A loop of two arrows around a stroke, for playing one track again.
+    RepeatOne,
+    /// A microphone, for sound being recorded.
+    Microphone,
+    /// A speaker struck through, for a muted output.
+    VolumeMuted,
     /// A run/bolt mark, for an executable.
     Executable,
     /// A left arrow, for the file manager's Back navigation command.
@@ -302,6 +317,13 @@ impl IconKind {
             "folder-front" => Self::FolderFront,
             "audio" => Self::Audio,
             "video" => Self::Video,
+            "skip-previous" => Self::SkipPrevious,
+            "skip-next" => Self::SkipNext,
+            "shuffle" => Self::Shuffle,
+            "repeat" => Self::Repeat,
+            "repeat-one" => Self::RepeatOne,
+            "microphone" => Self::Microphone,
+            "volume-muted" => Self::VolumeMuted,
             "file" => Self::File,
             "app-bundle" => Self::AppBundle,
             "text" => Self::Text,
@@ -512,6 +534,13 @@ impl IconKind {
             Self::FolderFront => 99,
             Self::Audio => 100,
             Self::Video => 101,
+            Self::SkipPrevious => 102,
+            Self::SkipNext => 103,
+            Self::Shuffle => 104,
+            Self::Repeat => 105,
+            Self::RepeatOne => 106,
+            Self::Microphone => 107,
+            Self::VolumeMuted => 108,
         }
     }
 
@@ -631,6 +660,13 @@ impl IconKind {
             Self::FolderFront => "folder-front",
             Self::Audio => "audio",
             Self::Video => "video",
+            Self::SkipPrevious => "skip-previous",
+            Self::SkipNext => "skip-next",
+            Self::Shuffle => "shuffle",
+            Self::Repeat => "repeat",
+            Self::RepeatOne => "repeat-one",
+            Self::Microphone => "microphone",
+            Self::VolumeMuted => "volume-muted",
         }
     }
 }
@@ -689,6 +725,13 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Archive => archive(color),
         IconKind::Audio => audio(color),
         IconKind::Video => video(color),
+        IconKind::SkipPrevious => skip(color, false),
+        IconKind::SkipNext => skip(color, true),
+        IconKind::Shuffle => shuffle(color),
+        IconKind::Repeat => repeat(color, false),
+        IconKind::RepeatOne => repeat(color, true),
+        IconKind::Microphone => microphone(color),
+        IconKind::VolumeMuted => volume_muted(color),
         IconKind::Executable => executable(color),
         IconKind::NavBack => nav_back(color),
         IconKind::NavForward => nav_forward(color),
@@ -789,6 +832,61 @@ fn network(color: Color) -> alloc::vec::Vec<IconLayer> {
 fn volume(color: Color) -> alloc::vec::Vec<IconLayer> {
     const SPEAKER: &[(i32, i32)] = &[(3, 9), (7, 9), (12, 4), (12, 20), (7, 15), (3, 15)];
     vec![IconLayer::from_points(color, SPEAKER)]
+}
+
+/// The speaker cone with a cross beside it.
+fn volume_muted(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const SPEAKER: &[(i32, i32)] = &[(3, 9), (7, 9), (12, 4), (12, 20), (7, 15), (3, 15)];
+    const FALLING: &[(i32, i32)] = &[(14, 10), (16, 8), (22, 14), (20, 16)];
+    const RISING: &[(i32, i32)] = &[(20, 8), (22, 10), (16, 16), (14, 14)];
+    vec![
+        IconLayer::from_points(color, SPEAKER),
+        IconLayer::from_points(color, FALLING),
+        IconLayer::from_points(color, RISING),
+    ]
+}
+
+/// A microphone's head in its cradle, on a stem and a base.
+fn microphone(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const HEAD: &[(i32, i32)] = &[
+        (10, 2),
+        (14, 2),
+        (15, 4),
+        (15, 12),
+        (14, 14),
+        (10, 14),
+        (9, 12),
+        (9, 4),
+    ];
+    const CRADLE_LEFT: &[(i32, i32)] = &[
+        (6, 9),
+        (8, 9),
+        (8, 12),
+        (9, 14),
+        (12, 15),
+        (12, 17),
+        (8, 16),
+        (6, 13),
+    ];
+    const CRADLE_RIGHT: &[(i32, i32)] = &[
+        (18, 9),
+        (18, 13),
+        (16, 16),
+        (12, 17),
+        (12, 15),
+        (15, 14),
+        (16, 12),
+        (16, 9),
+    ];
+    const STEM: &[(i32, i32)] = &[(11, 17), (13, 17), (13, 20), (11, 20)];
+    const BASE: &[(i32, i32)] = &[(8, 20), (16, 20), (16, 22), (8, 22)];
+    vec![
+        IconLayer::from_points(color, HEAD),
+        IconLayer::from_points(color, CRADLE_LEFT),
+        IconLayer::from_points(color, CRADLE_RIGHT),
+        IconLayer::from_points(color, STEM),
+        IconLayer::from_points(color, BASE),
+    ]
 }
 
 /// A battery body with a small terminal nub on the right.
@@ -931,6 +1029,58 @@ fn audio(color: Color) -> alloc::vec::Vec<IconLayer> {
 }
 
 /// Video: a film camera, its body and the lens flaring out of it.
+/// A bar beside a triangle, for the start of the track or the next one: the
+/// triangle points away from the bar it is going to.
+fn skip(color: Color, forward: bool) -> alloc::vec::Vec<IconLayer> {
+    const BACK_BAR: &[(i32, i32)] = &[(5, 5), (8, 5), (8, 19), (5, 19)];
+    const BACK: &[(i32, i32)] = &[(19, 5), (9, 12), (19, 19)];
+    const ON: &[(i32, i32)] = &[(5, 5), (15, 12), (5, 19)];
+    const ON_BAR: &[(i32, i32)] = &[(16, 5), (19, 5), (19, 19), (16, 19)];
+    let (bar, triangle) = if forward {
+        (ON_BAR, ON)
+    } else {
+        (BACK_BAR, BACK)
+    };
+    vec![
+        IconLayer::from_points(color, bar),
+        IconLayer::from_points(color, triangle),
+    ]
+}
+
+/// Two crossing arrows, for playing in a shuffled order.
+fn shuffle(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RISING: &[(i32, i32)] = &[(3, 17), (5, 19), (16, 8), (14, 6)];
+    const RISING_HEAD: &[(i32, i32)] = &[(12, 4), (20, 4), (20, 12)];
+    const FALLING: &[(i32, i32)] = &[(3, 7), (5, 5), (16, 16), (14, 18)];
+    const FALLING_HEAD: &[(i32, i32)] = &[(12, 20), (20, 20), (20, 12)];
+    vec![
+        IconLayer::from_points(color, RISING),
+        IconLayer::from_points(color, RISING_HEAD),
+        IconLayer::from_points(color, FALLING),
+        IconLayer::from_points(color, FALLING_HEAD),
+    ]
+}
+
+/// A loop of two arrows chasing each other, for playing again from the top;
+/// with a stroke inside it, for playing the one track again.
+fn repeat(color: Color, one: bool) -> alloc::vec::Vec<IconLayer> {
+    const TOP: &[(i32, i32)] = &[(4, 13), (4, 6), (15, 6), (15, 9), (7, 9), (7, 13)];
+    const TOP_HEAD: &[(i32, i32)] = &[(15, 3), (20, 7), (15, 11)];
+    const BOTTOM: &[(i32, i32)] = &[(20, 11), (20, 18), (9, 18), (9, 15), (17, 15), (17, 11)];
+    const BOTTOM_HEAD: &[(i32, i32)] = &[(9, 13), (4, 17), (9, 21)];
+    const ONE: &[(i32, i32)] = &[(11, 10), (13, 10), (13, 14), (11, 14)];
+    let mut layers = vec![
+        IconLayer::from_points(color, TOP),
+        IconLayer::from_points(color, TOP_HEAD),
+        IconLayer::from_points(color, BOTTOM),
+        IconLayer::from_points(color, BOTTOM_HEAD),
+    ];
+    if one {
+        layers.push(IconLayer::from_points(color, ONE));
+    }
+    layers
+}
+
 fn video(color: Color) -> alloc::vec::Vec<IconLayer> {
     const BODY: &[(i32, i32)] = &[(3, 7), (15, 7), (15, 17), (3, 17)];
     const LENS: &[(i32, i32)] = &[(16, 10), (21, 7), (21, 17), (16, 14)];

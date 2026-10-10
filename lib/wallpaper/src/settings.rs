@@ -77,6 +77,7 @@ use crate::saver::{
     CellSize, CpuUse, Pace, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource,
     SlideshowOptions, StarDensity,
 };
+use crate::sound::SoundControls;
 use crate::text::{TextFamily, TextSize};
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
@@ -603,11 +604,19 @@ pub enum SettingsKey {
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
+    /// `audio.output` — the sink the user prefers as the default.
+    AudioOutput,
+    /// `audio.input` — the source the user prefers as the default.
+    AudioInput,
+    /// `audio.levels` — each endpoint's level the user set.
+    AudioLevels,
+    /// `audio.muted` — the endpoints the user muted.
+    AudioMuted,
 }
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 51] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -655,6 +664,10 @@ impl SettingsKey {
         Self::RetroGamesSpeed,
         Self::MonitorTasks,
         Self::LockAfter,
+        Self::AudioOutput,
+        Self::AudioInput,
+        Self::AudioLevels,
+        Self::AudioMuted,
     ];
 
     /// The keys describing the backdrop and the icons standing on it: what
@@ -734,6 +747,16 @@ impl SettingsKey {
     /// application's Lock Screen pane edits.
     pub const LOCK: [Self; 1] = [Self::LockAfter];
 
+    /// The keys remembering the user's sound controls. The session alone
+    /// writes them, from what the audio service shows its own room, so no
+    /// application's document may carry them.
+    pub const SOUND: [Self; 4] = [
+        Self::AudioOutput,
+        Self::AudioInput,
+        Self::AudioLevels,
+        Self::AudioMuted,
+    ];
+
     /// The canonical key spelling.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -785,6 +808,10 @@ impl SettingsKey {
             Self::RetroGamesSpeed => "screensaver.retro_games.speed",
             Self::MonitorTasks => "screensaver.system_monitor.tasks",
             Self::LockAfter => "lock.after_min",
+            Self::AudioOutput => "audio.output",
+            Self::AudioInput => "audio.input",
+            Self::AudioLevels => "audio.levels",
+            Self::AudioMuted => "audio.muted",
         }
     }
 
@@ -913,6 +940,8 @@ pub struct DesktopSettings {
     pub screensaver_options: ScreensaverOptions,
     /// How long the desktop sits idle before the screen locks.
     pub lock_after: IdleAfter,
+    /// What the user set on the sound devices.
+    pub sound: SoundControls,
 }
 
 impl Default for DesktopSettings {
@@ -948,6 +977,7 @@ impl Default for DesktopSettings {
             display_off_after: DisplayOffAfter::Minutes(30),
             screensaver_options: ScreensaverOptions::default(),
             lock_after: IdleAfter::Minutes(15),
+            sound: SoundControls::default(),
         }
     }
 }
@@ -1087,6 +1117,10 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::RetroGamesSpeed => put(&mut saver.retro_games.speed, Pace::from_value(value)),
         SettingsKey::MonitorTasks => put_bool(&mut saver.system_monitor.tasks, value),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
+        SettingsKey::AudioOutput => settings.sound.set_output(value),
+        SettingsKey::AudioInput => settings.sound.set_input(value),
+        SettingsKey::AudioLevels => settings.sound.set_levels(value),
+        SettingsKey::AudioMuted => settings.sound.set_muted(value),
     }
 }
 
@@ -1183,6 +1217,10 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
             tairix_appconf::bool_text(saver.system_monitor.tasks).to_string()
         }
         SettingsKey::LockAfter => settings.lock_after.render_value(),
+        SettingsKey::AudioOutput => settings.sound.render_output(),
+        SettingsKey::AudioInput => settings.sound.render_input(),
+        SettingsKey::AudioLevels => settings.sound.render_levels(),
+        SettingsKey::AudioMuted => settings.sound.render_muted(),
     }
 }
 
@@ -1211,7 +1249,22 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
 /// whole, never half-applied: the merge runs on a copy, so a refusal partway
 /// through leaves `base` exactly as it was.
 pub fn merge(base: &DesktopSettings, text: &str) -> Result<DesktopSettings, DocumentRefusal> {
-    merge_within(base, text, &SettingsKey::ALL)
+    merge_admitting(base, text, |_| true)
+}
+
+/// [`merge`], for a document an application asks the desktop to adopt: every
+/// key but [`SettingsKey::SOUND`], which the session alone writes from what
+/// the audio service shows its own room. A document naming one is refused
+/// whole with [`DocumentRefusal::OutsideGroup`].
+///
+/// # Errors
+///
+/// As [`merge_within`].
+pub fn merge_applied(
+    base: &DesktopSettings,
+    text: &str,
+) -> Result<DesktopSettings, DocumentRefusal> {
+    merge_admitting(base, text, |key| !SettingsKey::SOUND.contains(&key))
 }
 
 /// [`merge`], admitting only the keys of `group`: a document naming any other
@@ -1230,6 +1283,14 @@ pub fn merge_within(
     text: &str,
     group: &[SettingsKey],
 ) -> Result<DesktopSettings, DocumentRefusal> {
+    merge_admitting(base, text, |key| group.contains(&key))
+}
+
+fn merge_admitting(
+    base: &DesktopSettings,
+    text: &str,
+    admits: impl Fn(SettingsKey) -> bool,
+) -> Result<DesktopSettings, DocumentRefusal> {
     let document = Document::parse(text).map_err(DocumentRefusal::Malformed)?;
     if let Some(line) = document.unparsed().next() {
         return Err(DocumentRefusal::Unparsed(line.line));
@@ -1238,7 +1299,7 @@ pub fn merge_within(
     for setting in document.settings() {
         let key = SettingsKey::from_name(setting.key)
             .ok_or_else(|| DocumentRefusal::UnknownKey(setting.key.to_string()))?;
-        if !group.contains(&key) {
+        if !admits(key) {
             return Err(DocumentRefusal::OutsideGroup(key));
         }
         if !set_field(&mut settings, key, setting.value) {

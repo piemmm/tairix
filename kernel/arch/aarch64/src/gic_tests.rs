@@ -561,7 +561,7 @@ fn gicv3_tree(
     regions: &[(u64, u64)],
     stride: Option<u64>,
 ) -> std::vec::Vec<u8> {
-    let mut b = tairix_fdt::fixture::DtbBuilder::new();
+    let mut b = tairix_fdt::write::FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -715,7 +715,7 @@ fn finds_gicv2_bases_in_a_virt_tree() {
 fn no_gic_in_a_gicless_tree_is_none() {
     // A tree with only the two console UARTs (no `intc` node) yields
     // no GIC — the boot path then keeps the fail-safe default.
-    let mut b = tairix_fdt::fixture::DtbBuilder::new();
+    let mut b = tairix_fdt::write::FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);

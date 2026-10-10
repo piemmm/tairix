@@ -231,6 +231,9 @@ impl<A: Audio> AudioChannelServer<A> {
     fn try_attach(&mut self, params: &AttachParams) -> Result<(), Errno> {
         let slot = Self::slot_index(params.endpoint)?;
         let configured = self.endpoints[slot].as_mut().ok_or(Errno::NotConnected)?;
+        // A re-attach replaces a region the process has already let go, so a
+        // refused one must leave nothing attached.
+        configured.attached = None;
         // The one derivation: the mixer created a region of exactly this many
         // bytes, so a ring the device's own grant does not admit is refused
         // here rather than mis-read on the period path.

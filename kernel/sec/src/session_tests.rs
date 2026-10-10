@@ -13,7 +13,7 @@ fn instance(byte: u8) -> ProcId {
 
 /// A new session asked for by the anchor of `within`, which it nests in.
 fn found_in(within: ProcId) -> Placement {
-    Placement::found(within, within)
+    Placement::found(within, within, false)
 }
 
 /// Found a session anchored at process `pid` (instance `byte`) inside `within`.
@@ -71,7 +71,7 @@ fn nothing_joins_an_ending_session_or_one_nested_in_it() {
         Placement::join(desktop),
         found_in(desktop),
         Placement::anchored(instance(2), login),
-        Placement::found(instance(9), desktop),
+        Placement::found(instance(9), desktop, false),
     ] {
         assert_eq!(
             tree.place(ProcessId(40), instance(4), placement),
@@ -166,7 +166,7 @@ fn a_session_founded_around_its_spawner_counts_toward_the_bound() {
     }
     tree.place(ProcessId(90), instance(90), Placement::join(parent))
         .expect("a member that anchors nothing yet");
-    let around = |anchor| Placement::found(anchor, parent);
+    let around = |anchor| Placement::found(anchor, parent, false);
     assert_eq!(
         tree.place(ProcessId(91), instance(91), around(instance(90))),
         Err(PlacementError::TooDeep),
@@ -190,7 +190,7 @@ fn a_new_session_stays_inside_its_spawner_even_when_the_spawner_anchors_nothing(
     let desktop = found(&mut tree, 20, 2, ROOT_SESSION);
     tree.place(ProcessId(30), instance(3), Placement::join(desktop))
         .expect("a terminal joins the desktop");
-    let shell = Placement::found(instance(3), desktop);
+    let shell = Placement::found(instance(3), desktop, false);
     assert_eq!(
         tree.place(ProcessId(40), instance(4), shell),
         Ok(instance(4))
@@ -355,4 +355,54 @@ fn one_departure_releases_every_session_it_empties_innermost_first() {
         .collect();
     assert_eq!(exits, [exit_of(20), exit_of(10)]);
     assert!(released(&tree, login) && released(&tree, desktop));
+}
+
+/// A login session is the innermost one founded as another user that
+/// encloses a process: an application in a desktop, a shell nested in its
+/// terminal, the desktop itself. A session founded as the same user is no
+/// login session of its own.
+#[test]
+fn a_process_lies_within_the_innermost_login_session_founded_around_it() {
+    let mut tree = SessionTree::new();
+    assert_eq!(tree.login_session(ROOT_SESSION), ROOT_SESSION);
+    let authority = tree
+        .place(
+            ProcessId(10),
+            instance(1),
+            Placement::found(ROOT_SESSION, ROOT_SESSION, true),
+        )
+        .expect("founded");
+    let desktop = tree
+        .place(
+            ProcessId(20),
+            instance(2),
+            Placement::found(authority, authority, true),
+        )
+        .expect("founded");
+    assert_eq!(tree.login_session(desktop), desktop);
+    let app = tree
+        .place(
+            ProcessId(30),
+            instance(3),
+            Placement::anchored(desktop, desktop),
+        )
+        .expect("anchored");
+    assert_eq!(tree.login_session(app), desktop, "an application");
+    let shell = tree
+        .place(
+            ProcessId(40),
+            instance(4),
+            Placement::found(instance(3), desktop, false),
+        )
+        .expect("founded");
+    assert_eq!(tree.login_session(shell), desktop, "a terminal's shell");
+    let greeter = tree
+        .place(
+            ProcessId(50),
+            instance(5),
+            Placement::found(authority, authority, true),
+        )
+        .expect("founded");
+    assert_ne!(tree.login_session(greeter), tree.login_session(desktop));
+    assert_eq!(tree.login_session(authority), authority);
 }

@@ -1,0 +1,28 @@
+[package]
+name = "tairix-codec"
+description = "TAIRiX codec-v1 driver side: the server every audio codec driver runs under its node's codec duty — the caller's link attested by the kernel, one interface's driver holding the codec at a time — and the freestanding serve loop around it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `codec-v1` frames, the `Codec` class trait and the link records.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The supplier seam the server asks the kernel about its callers through.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The exit codes and the failure record every audio driver process ends with.
+tairix-audiochan = { path = "../audiochan", version = "=0.0.0" }
+# The send capability the endpoint is restricted to.
+tairix-caps = { path = "../caps", version = "=0.0.0" }
+# Every refusal, recorded with a stable event id.
+tairix-log = { path = "../log", version = "=0.0.0" }
+# The endpoint, the wait set and peer exits.
+tairix-rt = { path = "../rt", version = "=0.0.0" }

@@ -220,7 +220,7 @@ fn optional_u32(node: &Node<'_>, name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::DtbBuilder;
+    use crate::write::FdtWriter;
     use alloc::vec::Vec;
 
     const EXPANDER: u32 = 0xb;
@@ -231,7 +231,7 @@ mod tests {
     /// GPIO-selected I/O regulator on its line 4, the GPIO-enabled card
     /// regulator on its line 6, and an SD host naming both.
     fn pi4_like(io_gpio_flags: u32, card_active_high: bool) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("gpio");
         b.prop_str("compatible", "raspberrypi,firmware-gpio");
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_disabled_regulator_supplies_nothing() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("regulator");
         b.prop_str("compatible", "regulator-fixed");
@@ -355,7 +355,7 @@ mod tests {
     /// A regulator node whose one property `name` is `value`, under a
     /// two-cell GPIO controller, with the fields every decoder needs.
     fn regulator_with(compatible: &str, name: &str, value: &[u8]) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("gpio");
         b.prop_u32("#gpio-cells", 2);
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn a_controller_with_other_cell_counts_is_refused() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("gpio");
         b.prop_u32("#gpio-cells", 3);

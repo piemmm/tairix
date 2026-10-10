@@ -15,6 +15,7 @@ use tairix_drv_fs_fat32::Fat32;
 
 use crate::device::MemBlock;
 use crate::firmware::FirmwareFile;
+use crate::overlay::{pwm_audio_overlay, JACK_PINS, PWM_AUDIO_OVERLAY, PWM_AUDIO_OVERLAY_PATH};
 use crate::MkimageError;
 
 /// Name of the kernel image the firmware loads (`config.txt` `kernel=`).
@@ -57,6 +58,9 @@ pub use tairix_drv_fs_arxfs::ROOT_UNLOCK_NAME;
 /// reports and allocates, and every TAIRiX display surface sizes itself from
 /// that one answer, so leaving them on frames the console *and* the desktop
 /// in an unusable black border.
+///
+/// The headphone jack's pins go to PWM1, and the first-party overlay names
+/// that block for its driver ([`crate::overlay`]).
 #[must_use]
 pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
     let mut text = format!(
@@ -68,7 +72,9 @@ pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
          dtoverlay=disable-bt\n\
          disable_overscan=1\n\
          init_uart_clock=48000000\n\
-         init_uart_baud={console_baud}\n",
+         init_uart_baud={console_baud}\n\
+         {JACK_PINS}\n\
+         dtoverlay={PWM_AUDIO_OVERLAY}\n",
     );
     if with_armstub {
         text.push_str("armstub=armstub8.bin\n");
@@ -83,14 +89,16 @@ pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
 const BOOT_FAT_SERIAL: u32 = 0x5253_4F53; // "RSOS"
 
 /// Author the FAT32 boot partition: format `sectors` sectors and plant the
-/// firmware blobs, `config.txt`, `kernel8.img`, and the root volume's
+/// firmware blobs, the first-party overlays, `config.txt`, `kernel8.img`,
+/// and the root volume's
 /// `unlock_descriptor` (the encoded
 /// [`UnlockDescriptor`](tairix_drv_fs_arxfs::UnlockDescriptor) bytes, at
 /// [`ROOT_UNLOCK_NAME`]).
 ///
 /// # Errors
 ///
-/// [`MkimageError::BootPartition`] if formatting or any plant write fails.
+/// [`MkimageError::BootPartition`] if formatting or any plant write fails,
+/// or [`MkimageError::Overlay`] if an overlay cannot be written.
 pub fn build_boot_partition(
     sectors: u64,
     firmware: &[FirmwareFile],
@@ -107,6 +115,7 @@ pub fn build_boot_partition(
     for file in firmware {
         plant(&mut fs, &file.name, &file.bytes)?;
     }
+    plant(&mut fs, PWM_AUDIO_OVERLAY_PATH, &pwm_audio_overlay()?)?;
     plant(&mut fs, CONFIG_TXT_NAME, config.as_bytes())?;
     plant(&mut fs, KERNEL_IMG_NAME, kernel8)?;
     plant(&mut fs, ROOT_UNLOCK_NAME, unlock_descriptor)?;
@@ -220,7 +229,13 @@ mod tests {
         assert!(config.contains("init_uart_baud=57600"));
         assert!(config.contains("dtoverlay=disable-bt"));
         assert!(config.contains("disable_overscan=1"));
+        assert!(config.contains("gpio=40,41=a0\ndtoverlay=tairix-pwm-audio\n"));
         assert!(!config.contains("armstub="));
+        assert_eq!(
+            read_back(&mut fs, PWM_AUDIO_OVERLAY_PATH),
+            pwm_audio_overlay().expect("the overlay"),
+            "the overlay config.txt applies is planted where the firmware looks"
+        );
     }
 
     /// The firmware's default per-edge overscan margins inset the surface it

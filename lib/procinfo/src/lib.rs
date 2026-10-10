@@ -113,6 +113,7 @@
 
 extern crate alloc;
 
+pub mod audio;
 // The production client seams (`IpcTransport`, `RtOutput`) that back the
 // `sysinfo`/`ps`/`top` `Run` binaries. Compiled only for a freestanding
 // program that opts into the `program` feature (which pulls `tairix-rt`); the
@@ -142,6 +143,10 @@ pub mod users;
 pub mod valueread;
 pub mod volume;
 
+pub use audio::{
+    for_each_audio_device, for_each_audio_stream, render_audio_device, render_audio_stream,
+    StreamScope, AUDIO_DEVICE_HEADER, AUDIO_PAGE, AUDIO_STREAM_HEADER,
+};
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, NamedSource, OpenError, RtOutput};
 pub use composition::{memory_composition, MemoryPart};

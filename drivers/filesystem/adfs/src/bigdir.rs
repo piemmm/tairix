@@ -387,6 +387,46 @@ impl BigDir {
         index: u32,
         object: &Object,
     ) -> Result<(), DriverError> {
+        self.put_fields(store, index, object)?;
+        self.seal(store)
+    }
+
+    /// As [`Self::update`], and give the entry `object`'s spelling of its
+    /// name. The two names must match ignoring case, so the entry keeps its
+    /// place in the sort order and its name its length, and the heap is
+    /// rewritten in place.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::BadMagic`] if `index` is not a live entry or the names
+    /// do not match ignoring case.
+    pub fn update_respelt<S: DirStore>(
+        &mut self,
+        store: &mut S,
+        index: u32,
+        object: &Object,
+    ) -> Result<(), DriverError> {
+        let stored = self.entry(store, index)?.ok_or(DriverError::BadMagic)?;
+        if name_cmp(stored.name(), object.name()) != core::cmp::Ordering::Equal {
+            return Err(DriverError::BadMagic);
+        }
+        let mut ptr = [0u8; 4];
+        store.read_at(
+            self.header.entries_offset() + index * BIG_ENTRY_SIZE + 24,
+            &mut ptr,
+        )?;
+        store.write_at(self.header.heap_offset() + get_u32(&ptr, 0), object.name())?;
+        self.put_fields(store, index, object)?;
+        self.seal(store)
+    }
+
+    /// Write `object`'s metadata fields into the entry at `index`.
+    fn put_fields<S: DirStore>(
+        &self,
+        store: &mut S,
+        index: u32,
+        object: &Object,
+    ) -> Result<(), DriverError> {
         if index >= self.header.entries {
             return Err(DriverError::BadMagic);
         }
@@ -397,8 +437,7 @@ impl BigDir {
         put_u32(&mut raw, 8, object.size);
         put_u32(&mut raw, 12, object.indaddr);
         put_u32(&mut raw, 16, u32::from(object.attr) & 0xFF);
-        store.write_at(at, &raw)?;
-        self.seal(store)
+        store.write_at(at, &raw)
     }
 
     /// Repoint the directory's parent.

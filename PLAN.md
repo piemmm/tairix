@@ -897,6 +897,21 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-10 — §3: `lib/player`.** Both players — `play` and `music.app` —
+  decode a programme in the sandbox and write it gapless into one stream, so
+  the engine lives once rather than once per player.
+- **2026-10-09 — §3: `lib/sound`.** Every player decodes sound files, and
+  must do so in the sandbox worker rather than in its own process, so the
+  decoders live once in a `no_std` crate the worker links.
+- **2026-10-09 — §3: `lib/codec`.** Both codec drivers serve `codec-v1`
+  under their duty with the same attestation and holder rule, which would
+  otherwise be written twice.
+- **2026-10-09 — §3: `lib/linkclient`.** The PWM and I²S drivers both stream
+  through a DMA controller and run a clock, and the link calls and the posted
+  period wait would otherwise be written once per driver.
+- **2026-10-09 — §3: `drivers/clock/`.** The audio blocks' clocks are set in
+  the page that also sets the cores' and the memory's, so one driver alone
+  maps it and serves `clock-v1` to the blocks that name its clocks.
 - **2026-10-08 — §3, §17.1: EEVDF is the default scheduler.** At the user's
   direction the default image runs tickless; CFQ keeps its periodic-tick
   exception as a selectable policy.

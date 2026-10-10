@@ -14,7 +14,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | User-space bus-driver crate (link bring-up engine + `Run` bin; host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
-| `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + enumeration (host-proven) |
+| `drivers/bus/usb/xhci`   | generic xHCI host (`qemu-xhci`, Pi 4 VL805) | Protocol, enumeration, serving and isochronous streams; end to end on QEMU's `qemu-xhci` on every QEMU port; VL805 metal pending |
 | `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | User-space bus-driver crate: firmware-reload policy + `Run` bin (reload firmware → emit `usb,xhci` node B; host-proven); metal pending |
 
 ## Capability model
@@ -317,8 +317,13 @@ Each driver receives only the grants its matched node requested (`AGENTS.md`
 §18.3), reached through its rt-backed `DriverHost`. The engines are
 host-tested up to the controller hand-off, where the inert mock register
 window faults — the metal boundary; QEMU models no Pi PCIe link timing or
-USB, so the live enumerate→emit→autoload chain is the metal acceptance item
-(`plans/PI.md` P10 D5d, `AGENTS.md` §0.9).
+VL805, so the Pi's live enumerate→emit→autoload chain is the metal acceptance
+item (`plans/PI.md` P10 D5d and §0.9). The same host-controller
+driver runs end to end on QEMU's own `qemu-xhci`, which the kernel publishes
+on every PCI host it owns: there the driver binds the function by its xHCI
+class code, its register window stopping short of the MSI-X state the kernel
+programs (`PciBus::driver_window`). An HD Audio controller is published the
+same way by its class code (`0x04_03_00`), as an audio node.
 
 ## MMIO driver — `drivers/bus/mmio`
 
@@ -518,7 +523,22 @@ Every interface with an interrupt-IN endpoint or a bulk pair is configured
 (Configure Endpoint) and served, whatever its class; the engine sends no class
 request. A HID interface's protocol, idle rate, report descriptor and features
 are its class driver's (`drivers/input/usb_hid`, `plans/HID.md`), sent over its
-own URB transport inside its interface's `UrbScope`.
+own URB transport inside its interface's `UrbScope`. An interface driven over
+the control endpoint alone — one setting, no endpoint, as a USB Audio 1.0
+control interface is — is published too; an interface with settings to choose
+between gets no node of its own, and the served interface whose function it
+belongs to claims it.
+
+Alternate settings and isochronous streams (`plans/SOUND.md` SND6) are the
+host's to run, never a class driver's control request: selecting a setting
+reserves its isochronous endpoints' bus bandwidth with one Configure Endpoint
+before `SET_INTERFACE` reaches the device — a setting the bus cannot schedule
+is refused `NoBandwidth` with nothing changed, and one the device refuses is
+undone. A started stream's slots are scheduled onto the endpoint's ring at the
+frame each service interval is due in, and each finished slot is reported to
+the class driver with its first interval's bus microframe, the intervals the
+schedule jumped to reach it, and how every interval went: moved, missed or
+failed. A late packet is a gap, never a packet sent late.
 
 The interrupt-IN endpoint is armed only once the class driver's first report
 request names the longest report it expects: to that, or to one service
@@ -1022,6 +1042,13 @@ MsixBus` without naming a concrete `drivers/bus/*` type
 (`AGENTS.md` §8). A route that fails leaves the function undiscovered,
 rather than granting a line that never delivers.
 
+A function with no MSI-X capability — an HD Audio controller usually, QEMU's
+`intel-hda` always — is routed through its MSI capability instead
+(`Pci::route_msi`: 32- or 64-bit address, per-vector mask cleared where the
+function has one). `pci_host::route_message` is that one choice, made the
+same way at boot, on hot plug, and when interrupt remapping takes a
+function's messages over; the grant is the same message line either way.
+
 Where no controller takes messages — an FDT board's GICv2 or PLIC — the
 kernel grants a function its INTx line instead. The pin is swizzled to the
 root bus (`pin' = (pin − 1 + device) mod 4 + 1` at each bridge,
@@ -1053,6 +1080,10 @@ supertrait of `Bus`) is that seam:
   CPU mapping is the host bridge's job, so a bridge-aware `MmioMapper`
   (`lib/drvrt`'s `RtDriverHost`, which applies an outbound `BusWindow`'s
   bus→CPU translation) does it, not this architecture-neutral walk;
+- `driver_window(bdf, bar_index)` answers the part of a memory BAR a
+  driver may be granted: up to the first page holding the function's
+  MSI-X table or pending-bit array, which only the configuration-space
+  owner programs;
 - `enable_memory_space(bdf)` turns on decoding of the function's
   memory BARs, and `set_bus_master(bdf, master)` lets it issue upstream
   memory requests or stops it (PCI Local Bus 3.0 §6.2.2). Each changes
@@ -1212,7 +1243,8 @@ captured interface class — never a fabricated one (`AGENTS.md` §18.5) —
 so the class-wildcard `BIND_KEYS` of `usb_hid` and `usb_msd` resolve
 against it exactly as `devmgr` will. The node also states the interface's
 number (`HwProperty::UsbInterface`), the `wIndex` its class driver's requests
-must name. The node's `HwNode::address` is
+must name, and its device's bus speed (`HwProperty::UsbSpeed`), which fixes
+what an endpoint's `bInterval` means. The node's `HwNode::address` is
 the device's bus position (its root port above its Route String), which a
 controller reset keeps, so the sibling interface nodes of one
 composite device carry the same non-zero address and an inventory

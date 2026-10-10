@@ -1135,15 +1135,6 @@ struct PendingFdDelegation {
     grantor_instance: ProcId,
 }
 
-/// Most unredeemed delegations one grantor may have pending to one recipient.
-///
-/// A fixed containment bound, not a capacity: an honest hand-over is redeemed
-/// as it arrives, so only a grantor leaving them for the recipient to carry
-/// reaches it. Charging the grantor rather than the recipient keeps one from
-/// exhausting a recipient's table for every other, and a grantor's pending
-/// delegations end with it, so churning processes cannot accumulate them.
-pub const FD_DELEGATIONS_PENDING_PER_GRANTOR: usize = 64;
-
 /// The handle of the first entry in `by_handle` that `held` accepts — the
 /// duplicate suppression both delegation tables share.
 ///
@@ -1784,14 +1775,14 @@ impl AddressSpaceRegistry {
         Some(self.mint_with_origin(to, wanted, origin, Some(grantor)))
     }
 
-    /// Whether `task` holds the [`HwResourceKind::DmaController`] duty for the
+    /// Whether `task` holds the [`HwResourceKind::LinkDuty`] duty for the
     /// controller endpoint `endpoint`: the one authority to serve it. A
     /// consumer's request line naming the same endpoint never counts.
     #[must_use]
-    pub fn holds_dma_controller_duty(&self, task: ProcessId, endpoint: u64) -> bool {
+    pub fn holds_link_duty(&self, task: ProcessId, endpoint: u64) -> bool {
         self.live_grants(task).any(|grant| {
             grant
-                .dma_controller_duty()
+                .link_duty()
                 .is_ok_and(|duty| duty.endpoint() == endpoint)
         })
     }
@@ -2821,7 +2812,7 @@ impl AddressSpaceRegistry {
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] for a fresh delegation once `grantor` has
-    /// [`FD_DELEGATIONS_PENDING_PER_GRANTOR`] pending to `recipient`; those
+    /// [`tairix_abi::FD_GRANT_PENDING_MAX`] pending to `recipient`; those
     /// stay redeemable.
     pub fn mint_fd_delegation(
         &mut self,
@@ -2857,7 +2848,7 @@ impl AddressSpaceRegistry {
             .values()
             .filter(|held| held.grantor == grantor)
             .count();
-        if charged >= FD_DELEGATIONS_PENDING_PER_GRANTOR {
+        if charged >= tairix_abi::FD_GRANT_PENDING_MAX {
             return Err(Errno::LimitExceeded);
         }
         // Handle 0 is the reserved invalid value; the first minted handle
@@ -4402,23 +4393,22 @@ mod tests {
 
     #[test]
     fn only_a_controller_duty_authorises_serving_a_dma_endpoint() {
-        use tairix_abi::driver::dmaengine::{
-            DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
-        };
+        use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+        use tairix_abi::hwlink::{LinkDuty, LinkRequest};
         let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(21);
         let mut reg = AddressSpaceRegistry::new();
-        let duty = DmaControllerDuty::new(endpoint, Some(0x7F5)).expect("valid");
-        reg.mint_grant(ProcessId(2), HwResource::dma_controller(&duty));
-        let request = DmaRequestLine::new(endpoint, 0, &[2], b"tx").expect("valid");
-        reg.mint_grant(ProcessId(3), HwResource::dma_request(&request));
+        let duty = LinkDuty::new(endpoint, Some(0x7F5)).expect("valid");
+        reg.mint_grant(ProcessId(2), HwResource::duty(&duty));
+        let request = LinkRequest::new(endpoint, 0, &[2], b"tx").expect("valid");
+        reg.mint_grant(ProcessId(3), HwResource::request(&request));
         reg.mint_grant(ProcessId(4), HwResource::endpoint(endpoint));
-        assert!(reg.holds_dma_controller_duty(ProcessId(2), endpoint));
-        assert!(!reg.holds_dma_controller_duty(ProcessId(2), endpoint + 1));
+        assert!(reg.holds_link_duty(ProcessId(2), endpoint));
+        assert!(!reg.holds_link_duty(ProcessId(2), endpoint + 1));
         // A consumer's request line, and a plain endpoint grant, both name the
         // endpoint and neither is the duty.
-        assert!(!reg.holds_dma_controller_duty(ProcessId(3), endpoint));
-        assert!(!reg.holds_dma_controller_duty(ProcessId(4), endpoint));
-        assert!(!reg.holds_dma_controller_duty(ProcessId(5), endpoint));
+        assert!(!reg.holds_link_duty(ProcessId(3), endpoint));
+        assert!(!reg.holds_link_duty(ProcessId(4), endpoint));
+        assert!(!reg.holds_link_duty(ProcessId(5), endpoint));
     }
 
     #[test]
@@ -4788,7 +4778,7 @@ mod tests {
                 OpenFlags::READ,
             )
             .expect("mints");
-        for n in 1..FD_DELEGATIONS_PENDING_PER_GRANTOR {
+        for n in 1..tairix_abi::FD_GRANT_PENDING_MAX {
             reg.mint_fd_delegation(
                 recipient,
                 who,
@@ -4799,7 +4789,7 @@ mod tests {
             )
             .expect("within the bound");
         }
-        let past = FD_DELEGATIONS_PENDING_PER_GRANTOR;
+        let past = tairix_abi::FD_GRANT_PENDING_MAX;
         assert_eq!(
             reg.mint_fd_delegation(
                 recipient,

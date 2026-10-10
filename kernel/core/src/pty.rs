@@ -58,7 +58,8 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::{InputMode, Signal, TerminalSize};
+use tairix_abi::{Errno, InputMode, Signal, TerminalSize};
+use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
 use crate::foreground::{ForegroundOwner, ForegroundOwnership};
@@ -257,11 +258,43 @@ impl Pty {
         self.state.lock().size = size;
     }
 
-    /// The pty's controlling (foreground) ownership, for the shared
-    /// `console_foreground` transitions and the input filter's target.
+    /// The pty's controlling (foreground) ownership, for the shared gate and
+    /// the input filter's target.
     #[must_use]
     pub fn foreground(&self) -> &ForegroundOwnership {
         &self.fg
+    }
+
+    /// Hand the pty's foreground to `owner` (`console_foreground`).
+    ///
+    /// # Errors
+    ///
+    /// As [`ForegroundOwnership::grant`].
+    pub fn grant_foreground(&self, caller: ProcessId, owner: ForegroundOwner) -> Result<(), Errno> {
+        let moved = self.fg.grant(caller, owner)?;
+        self.foreground_moved(moved);
+        Ok(())
+    }
+
+    /// Release the pty's foreground (`console_foreground` with no owner).
+    ///
+    /// # Errors
+    ///
+    /// As [`ForegroundOwnership::release`].
+    pub fn release_foreground(&self, caller: ProcessId) -> Result<(), Errno> {
+        let moved = self.fg.release(caller)?;
+        self.foreground_moved(moved);
+        Ok(())
+    }
+
+    /// After the pty changed hands: its parked slave readers re-check the
+    /// gate, so one parked before the change takes nothing after it, and its
+    /// `Foreground` watchers see the edge.
+    fn foreground_moved(&self, moved: bool) {
+        if moved {
+            crate::waitq::stream_wake(self.input_waits.data);
+            crate::waitq::foreground_wake();
+        }
     }
 }
 
@@ -341,7 +374,7 @@ impl PtyMasterEnd {
             };
         }
         let target = if intercept && state.mode == InputMode::Cooked {
-            self.pty.fg.current()
+            self.pty.fg.job()
         } else {
             None
         };
@@ -841,7 +874,7 @@ mod tests {
     #[test]
     fn cooked_ctrl_c_with_a_foreground_job_is_a_signal_not_input() {
         let (m, s) = pty();
-        m.pty().foreground().grant(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
         let (consumed, signals) = wrote(m.write(&[0x03], true));
         assert_eq!(consumed, 1);
         assert_eq!(signals, vec![(owner(2), Signal::Interrupt)]);
@@ -853,7 +886,7 @@ mod tests {
     #[test]
     fn cooked_ctrl_z_with_a_foreground_job_maps_to_stop() {
         let (m, _s) = pty();
-        m.pty().foreground().grant(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
         let (_c, signals) = wrote(m.write(&[0x1A], true));
         assert_eq!(signals, vec![(owner(2), Signal::Stop)]);
     }
@@ -872,7 +905,7 @@ mod tests {
     #[test]
     fn intercept_false_buffers_the_control_byte_even_with_a_foreground_job() {
         let (m, s) = pty();
-        m.pty().foreground().grant(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
         let (consumed, signals) = wrote(m.write(&[0x03], false));
         assert_eq!(consumed, 1);
         assert!(signals.is_empty());
@@ -884,7 +917,7 @@ mod tests {
     #[test]
     fn raw_mode_passes_control_bytes_through_even_with_a_foreground_job() {
         let (m, s) = pty();
-        m.pty().foreground().grant(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
         m.pty().set_input_mode(InputMode::Raw);
         let (consumed, signals) = wrote(m.write(&[0x03], true));
         assert_eq!(consumed, 1);

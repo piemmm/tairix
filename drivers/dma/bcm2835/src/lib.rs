@@ -82,7 +82,7 @@ const REGISTER_HANDLE_MARKER: u64 = 0x444D_4131_0000_0001;
 ///
 /// Requires [`CapabilityId::DRV_LOAD`]. Serving the controller additionally
 /// needs the grants its matched node requested and the node's
-/// `DmaController` duty.
+/// DMA `LinkDuty`.
 pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     if !host.has_capability(CapabilityId::DRV_LOAD) {
         return Err(DriverError::PermissionDenied);

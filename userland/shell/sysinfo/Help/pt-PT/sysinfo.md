@@ -75,6 +75,12 @@ As consultas:
   o seu grupo, a geração e o estado do seu proprietário, os seus fluxos, e
   os mapeamentos do seu domínio e os bytes que abrangem (requer
   `CAP_SYSINFO_HW`).
+- `audio`, `sound` — os dispositivos de som: uma linha por saída e por
+  entrada — o seu identificador, se é a predefinida do seu sentido, o nível
+  e o silêncio, a frequência medida do seu relógio durante a reprodução, as
+  tramas perdidas, a localização e o nome — e depois uma linha por cada
+  fluxo de som seu — o dispositivo, o sentido, a função e o estado, a
+  posição, as falhas e quem o detém.
 - `show <resource-ref>` — lê uma referência de recurso
   `info:`/`state:`/`stats:` e imprime o seu valor. Esses espaços de nomes
   servem valores tipados através desta API, nunca fluxos de bytes: o `cat`
@@ -93,6 +99,8 @@ Sem consulta, mostra-se a ajuda curta.
 - `--all, -a` — com `processes`: listar todos os processos do sistema
   em vez de apenas os seus; o serviço só concede esta vista a um
   chamador que detenha `CAP_SYSINFO_GLOBAL`.
+  Com `audio`, todos os fluxos de som da máquina, com a mesma
+  capacidade.
 - `-h, -?` — mostrar a ajuda curta deste próprio comando.
 
 ## EXAMPLES

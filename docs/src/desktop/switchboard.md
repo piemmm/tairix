@@ -48,7 +48,10 @@ that application's own icon). Every command is authenticated
 against the kernel-attested sender of that very message, never a claim on
 the wire; a command from anyone but the attested session, a command that
 arrives before any session has been attested, and a frame that does not
-decode are each dropped with a stated reason and never touch the model.
+decode are each dropped with a stated reason and never touch the model. The
+command and window event mailboxes' ids are derived from the service's pid,
+so both admit only the session serving windows (`port_admit`): no other
+process can fill either, or drive a stated reason per frame into stderr.
 
 `WatchMachine` turns the **machine report** on and off for the session's
 System Monitor screensaver. While it is on, this service sends a
@@ -360,12 +363,12 @@ Resources is **one pane per resource device**, instrument-led. A vertical
 `Tabs` **sidebar** — the device rail — lists what discovery actually found,
 grouped: `Resources` (the processor, the machine's memory), `Storage` (one
 entry per storage device), `Network` (one per managed interface), `Graphics`
-(the display path), then `Machine` (identity and uptime, sessions and seats,
-permissions and limits). Each entry carries its name, its current reading and
-its own bounded trace, so the rail is a live summary of the whole machine and
-the pane is the detail of one part of it. The `Machine` entries carry no
-trace: they are facts rather than rates, and the absent instrument is what
-says so.
+(the display path), `Sound` (the sound devices), then `Machine` (identity and
+uptime, sessions and seats, permissions and limits). Each entry carries its
+name, its current reading and its own bounded trace, so the rail is a live
+summary of the whole machine and the pane is the detail of one part of it.
+The `Sound` and `Machine` entries carry no trace: they are facts rather than
+rates, and the absent instrument is what says so.
 
 **A `Storage` entry is a device, never a mount.** `VOLUME_IO_STATS` reports
 the *device's* cumulative counters — every volume on one disk reads the same
@@ -589,6 +592,16 @@ statement from none being free. A **per-engine** breakdown still has no
 producer — no display driver reports its engines separately — so that row
 carries the honest unmeasured mark rather than one device's occupancy dressed
 as an engine's.
+
+**The Audio pane** reads `AUDIO_DEVICES` and the streams through the System
+Information API every sample: the session's own (`SELF_AUDIO_STREAMS`), or
+every principal's (`GLOBAL_AUDIO_STREAMS`) under the global scope. Its rail
+reading is how many streams are playing or recording; its blocks are each
+output and input with its level, mute, default and measured rate and the
+frames it has lost, and each stream with its owner, the device it plays on or
+records from, its state, its position and its underruns. A reading that could
+not be taken states its absence rather than an empty list, and a machine with
+no device bound says so.
 
 **A device's commands are labelled, not glyphed**, and almost none has an
 endpoint. Of the commands the panes offer, only "sort tasks by *resource*" is

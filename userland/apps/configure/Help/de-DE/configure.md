@@ -102,6 +102,17 @@ Arbeit daher nur langsamer — es ändert niemals ein Ergebnis.
   Millisekunden nach dem Loslassen einen zweiten Druck melden, der als ein
   Klick gemeint war. Bei einer Maus, deren Schnellfeuermodus absichtlich
   Klickpaare sendet, `0` setzen.
+- `audio.output`, `audio.input` — standardmäßig `auto`, oder der Ort eines
+  Endpunkts, wie `audioctl` ihn anzeigt (sechzehn Hexadezimalziffern, ein
+  Punkt und der Index des Endpunkts): die Ausgabe und die Eingabe, die
+  dieser Rechner als Standard bevorzugt. Die eigene Wahl einer Sitzung geht
+  vor; dies ist die Wahl vor jeder Anmeldung und auf einem Rechner ohne
+  Desktop. `auto` ist das zuerst gefundene Gerät.
+- `audio.level` — in Dezibel, standardmäßig `0dB`, oder eine Dämpfung wie
+  `-12dB` oder `-6.5dB`, mit höchstens zwei Nachkommastellen: der Pegel,
+  mit dem jede Ausgabe und Eingabe beginnt. Nie über `0dB`. Der Audiodienst
+  übernimmt einen geänderten Wert beim nächsten Start; `audioctl` ändert
+  den laufenden Rechner.
 
 Die `net.*`-Einstellungen liest der Netzwerk-Stack; eine Änderung wirkt,
 sobald der Stack seine Konfiguration das nächste Mal anwendet.

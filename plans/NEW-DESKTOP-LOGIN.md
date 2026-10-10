@@ -35,7 +35,7 @@ Every `lib/abi` change regenerates the C header
 | G6 | `ScreenLock` composes `lib/greeter` | done |
 | G7 | Docs and README matrix | done |
 | G7.1 | QEMU verticals: 1 (a graphical boot reaches the greeter) | done |
-| G7.2 | QEMU verticals: 2–4 (authenticate, log out, switch accounts) | planned |
+| G7.2 | QEMU verticals: 2–4 (authenticate, log out, switch accounts); its harness also carries the two-session audio vertical (`plans/SOUND.md` SND13.1) | planned |
 | G8 | Text session boundary: `terminal_purge` + `session_ended` | done |
 | G9 | The ribbon of light behind the login column, and the screen's sleep after thirty idle minutes | done |
 

@@ -18,6 +18,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::FaultDomainState;
+use tairix_abi::hwtree::HwResourceKind;
 use tairix_abi::{Errno, HwNode};
 
 /// Whether a hardware-tree node is still in the live tree.
@@ -197,6 +198,41 @@ pub trait HwTreeSource: HwNodeLiveness {
     ///
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
     fn node(&self, node_id: u32) -> Result<Option<HwNode>, Errno>;
+
+    /// Visit every live node in id order, so a caller reading the whole tree
+    /// takes no snapshot of it. The visitor runs with the store held, so it
+    /// must not call back into the tree.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
+    fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno>;
+}
+
+/// The CPU-side range each DMA window in `tree` reaches, once each: the
+/// memory a device that reaches only part of it must be served from, which
+/// the frame allocator cuts its zones by. A tree that cannot be read states
+/// none.
+#[must_use]
+pub fn dma_reaches(tree: &dyn HwTreeSource) -> Vec<core::ops::Range<u64>> {
+    let mut reaches: Vec<core::ops::Range<u64>> = Vec::new();
+    let _ = tree.for_each_node(&mut |node| {
+        for resource in node.resources() {
+            if resource.kind() != Some(HwResourceKind::Dma) || resource.base() == 0 {
+                continue;
+            }
+            let limit = resource.base();
+            let low = if resource.is_translated_dma_window() {
+                limit.saturating_sub(resource.length())
+            } else {
+                0
+            };
+            if !reaches.contains(&(low..limit)) && reaches.try_reserve(1).is_ok() {
+                reaches.push(low..limit);
+            }
+        }
+    });
+    reaches
 }
 
 /// The hardware-tree source installed before any real store is wired.
@@ -240,9 +276,97 @@ impl HwTreeSource for NullHwTreeSource {
     fn node(&self, _node_id: u32) -> Result<Option<HwNode>, Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn for_each_node(&self, _visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullHwTreeSource`] instance the syscall handler defaults to
 /// until a boot path installs a real store through
 /// `KernelSyscallHandlers::with_hw_tree` (mirrors [`crate::users::NULL_USERS_DB`]).
 pub static NULL_HW_TREE: NullHwTreeSource = NullHwTreeSource;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tairix_abi::hwtree::{DmaCoherence, HwResource};
+    use tairix_abi::HwDeviceClass;
+
+    /// A tree of fixed nodes that answers only the whole-tree visit.
+    struct Fixed(Vec<HwNode>);
+
+    impl HwNodeLiveness for Fixed {
+        fn is_live(&self, node_id: u32) -> bool {
+            self.0.iter().any(|node| node.id() == node_id)
+        }
+    }
+
+    impl HwTreeSource for Fixed {
+        fn generation(&self) -> Result<u64, Errno> {
+            Ok(1)
+        }
+        fn snapshot(&self) -> Result<Vec<u8>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn publish(&self, _: u32, _: HwNode) -> Result<u32, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn remove(&self, _: u32, _: u32) -> Result<Vec<u32>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn node_endpoints(&self, _: u32, _: u32) -> Result<Vec<u64>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn set_health(&self, _: u32, _: FaultDomainState) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn node(&self, _: u32) -> Result<Option<HwNode>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
+            self.0.iter().for_each(visit);
+            Ok(())
+        }
+    }
+
+    fn node_with(id: u32, resources: &[HwResource]) -> HwNode {
+        let mut node = HwNode::new(id, 0, HwDeviceClass::Dma);
+        for resource in resources {
+            node.push_resource(*resource).expect("room");
+        }
+        node
+    }
+
+    #[test]
+    fn every_dma_window_is_read_as_the_range_it_reaches_once_each() {
+        const GIB: u64 = 1 << 30;
+        let low_gib = HwResource::dma_translated(GIB, GIB, 0xC000_0000, DmaCoherence::Unsnooped);
+        let peripherals = HwResource::dma_translated(
+            0xFF80_0000,
+            0x0380_0000,
+            0x7C00_0000,
+            DmaCoherence::Unsnooped,
+        );
+        let tree = Fixed(alloc::vec![
+            node_with(2, &[low_gib, peripherals]),
+            node_with(
+                3,
+                &[
+                    low_gib,
+                    HwResource::dma(3 * GIB, 4096, DmaCoherence::Snooped)
+                ]
+            ),
+            node_with(4, &[HwResource::dma(0, 0, DmaCoherence::Snooped)]),
+        ]);
+        assert_eq!(
+            dma_reaches(&tree),
+            [0..GIB, 0xFC00_0000..0xFF80_0000, 0..3 * GIB],
+            "a translated window reaches its extent below its limit, a plain one from zero, and no limit is no reach"
+        );
+        assert!(
+            dma_reaches(&NullHwTreeSource).is_empty(),
+            "an unreadable tree states none"
+        );
+    }
+}

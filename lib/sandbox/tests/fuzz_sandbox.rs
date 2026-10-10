@@ -1101,3 +1101,317 @@ fn nearly_right_edit_replies_are_refused_or_hold_their_description() {
         }
     }
 }
+
+/// The key the audio worker's cache is built over; the harness draws none.
+const AUDIO_SEED: tairix_hash::HashSeed = tairix_hash::HashSeed::from_words(7, 11);
+
+/// Frames per block an audio decode asks for, chosen per iteration.
+const AUDIO_BLOCKS: [u32; 4] = [1, 7, 512, tairix_sandbox::audiodecode::MAX_BLOCK_FRAMES];
+
+/// What an audio request came to, owned.
+#[derive(Debug, PartialEq)]
+enum AudioOutcome {
+    Opened,
+    Block(u64, Vec<u8>),
+    Ended(u64),
+    Sought(u64),
+    Refused(tairix_sandbox::audiodecode::AudioRefusal),
+}
+
+/// Records the frames an audio worker answers with.
+struct Answers(Vec<Vec<u8>>);
+
+impl FrameOut for Answers {
+    fn frame(&mut self, payload: &[u8]) -> Result<(), tairix_sandbox::proto::ProtoError> {
+        self.0.push(payload.to_vec());
+        Ok(())
+    }
+}
+
+/// Carry the client's waiting request through `worker` to its answer,
+/// supplying every need from `file`. An honest worker is always believed,
+/// and answers every frame with exactly one.
+fn audio_ask(
+    worker: &mut tairix_sandbox::audiodecode::AudioDecodeService,
+    client: &mut tairix_sandbox::audiodecode::AudioDecodeClient,
+    file: &[u8],
+    answers: &mut Vec<Vec<u8>>,
+) -> AudioOutcome {
+    use tairix_sandbox::audiodecode::{DecodeEvent, CACHE_PAGES};
+    for _ in 0..=CACHE_PAGES {
+        let request = client.outgoing().expect("a request waits").to_vec();
+        client.sent();
+        let mut out = Answers(Vec::new());
+        assert_eq!(worker.handle(&request, &mut out), SessionStep::Continue);
+        assert_eq!(out.0.len(), 1, "one answer a frame");
+        let answer = out.0.remove(0);
+        let event = client
+            .on_frame(&answer)
+            .expect("an honest worker is believed");
+        let outcome = match event {
+            DecodeEvent::Need { offset, len } => {
+                let start = usize::try_from(offset).expect("small");
+                client
+                    .supply(&file[start..start + len])
+                    .expect("the asked length");
+                None
+            }
+            DecodeEvent::Opened => Some(AudioOutcome::Opened),
+            DecodeEvent::Block { position, pcm } => {
+                Some(AudioOutcome::Block(position, pcm.to_vec()))
+            }
+            DecodeEvent::Ended { position } => Some(AudioOutcome::Ended(position)),
+            DecodeEvent::Sought { position } => Some(AudioOutcome::Sought(position)),
+            DecodeEvent::Refused(refusal) => Some(AudioOutcome::Refused(refusal)),
+            other => panic!("{other:?} without a replacement"),
+        };
+        answers.push(answer);
+        if let Some(outcome) = outcome {
+            return outcome;
+        }
+    }
+    panic!("a request needed more exchanges than the cache holds pages");
+}
+
+/// A WAVE file of `tag`-coded samples, `bits` wide, over `data`.
+fn audio_wave(tag: u16, channels: u16, bits: u16, data: &[u8]) -> Vec<u8> {
+    let align = channels * bits.div_ceil(8);
+    let mut format = Vec::new();
+    for field in [tag, channels] {
+        format.extend(field.to_le_bytes());
+    }
+    format.extend(8000u32.to_le_bytes());
+    format.extend((8000 * u32::from(align)).to_le_bytes());
+    format.extend(align.to_le_bytes());
+    format.extend(bits.to_le_bytes());
+    let mut info = b"INFO".to_vec();
+    info.extend(b"INAM\x05\0\0\0title\0");
+    let body = [
+        b"fmt \x10\0\0\0".to_vec(),
+        format,
+        b"LIST".to_vec(),
+        u32::try_from(info.len())
+            .expect("small")
+            .to_le_bytes()
+            .to_vec(),
+        info,
+        b"data".to_vec(),
+        u32::try_from(data.len())
+            .expect("small")
+            .to_le_bytes()
+            .to_vec(),
+        data.to_vec(),
+    ]
+    .concat();
+    [
+        b"RIFF".to_vec(),
+        u32::try_from(body.len() + 4)
+            .expect("small")
+            .to_le_bytes()
+            .to_vec(),
+        b"WAVE".to_vec(),
+        body,
+    ]
+    .concat()
+}
+
+/// An AU file of `encoding` over `data`, with an annotation.
+fn audio_au(encoding: u32, channels: u32, data: &[u8]) -> Vec<u8> {
+    let mut file = b".snd".to_vec();
+    for field in [
+        32,
+        u32::try_from(data.len()).expect("small"),
+        encoding,
+        8000,
+        channels,
+    ] {
+        file.extend(field.to_be_bytes());
+    }
+    file.extend(b"annotate");
+    file.extend(data);
+    file
+}
+
+fn audio_templates(rng: &mut Prng) -> Vec<Vec<u8>> {
+    let mut data = vec![0u8; 2400];
+    rng.fill(&mut data);
+    vec![
+        audio_wave(1, 2, 16, &data),
+        audio_wave(1, 1, 8, &data[..999]),
+        audio_wave(3, 1, 32, &data),
+        audio_wave(7, 2, 8, &data),
+        audio_au(3, 2, &data),
+        audio_au(23, 1, &data),
+        audio_au(27, 1, &data[..777]),
+    ]
+}
+
+/// What an in-process decode of `file` in blocks of `frames` comes to:
+/// the open's outcome, then each block's.
+fn audio_direct(file: &[u8], frames: u32) -> Vec<AudioOutcome> {
+    use tairix_sandbox::audiodecode::{AudioRefusal, LIMITS};
+    let mut input = file;
+    let mut source = match tairix_sound::PcmSource::open(&mut input, &LIMITS) {
+        Ok(source) => source,
+        Err(err) => return vec![AudioOutcome::Refused(AudioRefusal::Decode(err))],
+    };
+    let frame_bytes = source.info().frame_bytes();
+    let mut block = vec![0u8; frames as usize * frame_bytes];
+    let mut outcomes = vec![AudioOutcome::Opened];
+    loop {
+        let position = source.position();
+        match source.next_block(&mut input, &mut block) {
+            Ok(0) => {
+                outcomes.push(AudioOutcome::Ended(position));
+                return outcomes;
+            }
+            Ok(written) => {
+                outcomes.push(AudioOutcome::Block(
+                    position,
+                    block[..written * frame_bytes].to_vec(),
+                ));
+            }
+            Err(err) => {
+                outcomes.push(AudioOutcome::Refused(AudioRefusal::Decode(err)));
+                return outcomes;
+            }
+        }
+    }
+}
+
+/// One audio iteration: a mutated or truncated file — or noise — decoded
+/// through an honest worker exactly as in process, a seek checked against
+/// the in-process stream, then nearly right answers and noise fed to the
+/// client in every state, and noise fed to the worker as requests.
+fn fuzz_audio_iteration(noise: &[u8], rng: &mut Prng) {
+    use tairix_sandbox::audiodecode::{AudioDecodeClient, AudioDecodeService};
+    let mut templates = audio_templates(rng);
+    let pick = rng.below(templates.len() + 1);
+    let mut file = if pick == templates.len() {
+        noise.to_vec()
+    } else {
+        templates.swap_remove(pick)
+    };
+    for _ in 0..rng.at_most(4) {
+        if !file.is_empty() {
+            let at = rng.below(file.len());
+            file[at] ^= rng.next_u8();
+        }
+    }
+    file.truncate(file.len() - rng.at_most(file.len() / 4));
+
+    let frames = *rng.pick(&AUDIO_BLOCKS);
+    let expected = audio_direct(&file, frames);
+    let mut worker = AudioDecodeService::new();
+    let mut client = AudioDecodeClient::new();
+    let mut answers = Vec::new();
+    client
+        .open(file.len() as u64, None, AUDIO_SEED)
+        .expect("idle");
+    let mut got = vec![audio_ask(&mut worker, &mut client, &file, &mut answers)];
+    while matches!(
+        got.last(),
+        Some(AudioOutcome::Opened | AudioOutcome::Block(..))
+    ) {
+        client.decode(frames).expect("idle");
+        got.push(audio_ask(&mut worker, &mut client, &file, &mut answers));
+    }
+    assert_eq!(
+        got, expected,
+        "the sandbox decoded otherwise than the process"
+    );
+
+    if let Some(info) = client.info().copied() {
+        let target = info
+            .frames
+            .map_or(0, |stated| rng.next_u64() % (stated + 2));
+        client.seek(target).expect("idle");
+        let sought = audio_ask(&mut worker, &mut client, &file, &mut answers);
+        if info.seekable && info.frames.is_some_and(|stated| target <= stated) {
+            assert_eq!(sought, AudioOutcome::Sought(target));
+        } else {
+            assert!(matches!(sought, AudioOutcome::Refused(_)), "{sought:?}");
+        }
+    }
+
+    for answer in answers.iter().take(8) {
+        let mut nearly = answer.clone();
+        let at = rng.below(nearly.len());
+        nearly[at] ^= rng.next_u8() | 1;
+        for mut client in hostile_audio_clients(&file) {
+            let _ = client.on_frame(&nearly);
+            let _ = client.on_frame(noise);
+        }
+    }
+
+    let mut worker = AudioDecodeService::new();
+    let mut out = Answers(Vec::new());
+    let (mut offset, mut requests) = (0, 0);
+    while offset < noise.len() {
+        let len = rng.at_most(noise.len() - offset).max(1);
+        assert_eq!(
+            worker.handle(&noise[offset..offset + len], &mut out),
+            SessionStep::Continue
+        );
+        offset += len;
+        requests += 1;
+    }
+    assert_eq!(
+        out.0.len(),
+        requests,
+        "one answer a frame, whatever it held"
+    );
+}
+
+/// Clients waiting in each state an answer can arrive in: an open, a
+/// decode, a seek.
+fn hostile_audio_clients(file: &[u8]) -> Vec<tairix_sandbox::audiodecode::AudioDecodeClient> {
+    use tairix_sandbox::audiodecode::{AudioDecodeClient, AudioDecodeService};
+    let mut opening = AudioDecodeClient::new();
+    opening
+        .open(file.len() as u64, None, AUDIO_SEED)
+        .expect("idle");
+    opening.sent();
+    let mut clients = vec![opening];
+    let mut worker = AudioDecodeService::new();
+    let mut opened = AudioDecodeClient::new();
+    opened
+        .open(file.len() as u64, None, AUDIO_SEED)
+        .expect("idle");
+    if audio_ask(&mut worker, &mut opened, file, &mut Vec::new()) == AudioOutcome::Opened {
+        let mut decoding = opened;
+        decoding.decode(4).expect("idle");
+        decoding.sent();
+        clients.push(decoding);
+        let mut seeking = AudioDecodeClient::new();
+        seeking
+            .open(file.len() as u64, None, AUDIO_SEED)
+            .expect("idle");
+        let mut worker = AudioDecodeService::new();
+        if audio_ask(&mut worker, &mut seeking, file, &mut Vec::new()) == AudioOutcome::Opened {
+            seeking.seek(1).expect("idle");
+            seeking.sent();
+            clients.push(seeking);
+        }
+    }
+    clients
+}
+
+#[test]
+fn audio_decode_crosses_as_an_in_process_decode_and_never_panics() {
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "audio_decode_crosses_as_an_in_process_decode_and_never_panics",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let mut iteration: u64 = 0;
+    loop {
+        let mut noise = vec![0u8; rng.at_most(MAX_NOISE)];
+        rng.fill(&mut noise);
+        fuzz_audio_iteration(&noise, &mut rng);
+        iteration += 1;
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS / 4 {
+            break;
+        }
+    }
+}

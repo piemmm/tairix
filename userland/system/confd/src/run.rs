@@ -145,7 +145,12 @@ mod program {
         }
 
         fn rename(&mut self, src: &str, dst: &str) -> Result<(), Errno> {
-            let ret = tairix_rt::fs_rename(src.as_bytes(), dst.as_bytes());
+            // Publishing replaces the live document, so the move must replace.
+            let ret = tairix_rt::fs_rename(
+                src.as_bytes(),
+                dst.as_bytes(),
+                tairix_abi::RenameFlags::empty(),
+            );
             if ret == 0 {
                 Ok(())
             } else {

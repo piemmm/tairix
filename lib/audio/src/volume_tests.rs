@@ -5,9 +5,11 @@
 #![allow(clippy::float_cmp)]
 
 use super::{
-    fraction_to_millibel, millibel_to_linear, resolve, VolumeRequest, DEFAULT_FLOOR_MILLIBEL,
-    DUCK_MILLIBEL, UNITY_MILLIBEL,
+    endpoint_level, fraction_to_millibel, level_at_permille, linear_to_millibel,
+    millibel_to_linear, permille_of_level, stream_multiply, typed_level, EndpointLevel, LevelError,
+    VolumeRequest, DEFAULT_FLOOR_MILLIBEL, DUCK_MILLIBEL, UNITY_MILLIBEL,
 };
+use tairix_abi::audio::AudioGain;
 use tairix_abi::driver::audio::GainRange;
 
 /// A conventional codec control: sixty-four decibels of attenuation in half-
@@ -53,6 +55,24 @@ fn the_curve_is_monotone_and_saturates_instead_of_overflowing() {
 }
 
 #[test]
+fn a_multiplier_names_the_gain_it_is_and_nothing_names_silence() {
+    assert_eq!(linear_to_millibel(1.0), Some(UNITY_MILLIBEL));
+    assert_eq!(linear_to_millibel(0.5), Some(-602));
+    assert_eq!(linear_to_millibel(0.1), Some(-2_000));
+    assert_eq!(linear_to_millibel(2.0), Some(602));
+    for millibel in [-6_000, -1_234, -1, 1, 1_200] {
+        assert_eq!(
+            linear_to_millibel(millibel_to_linear(millibel)),
+            Some(millibel),
+            "{millibel}"
+        );
+    }
+    for nothing in [0.0, -0.5, f32::NAN, f32::INFINITY] {
+        assert_eq!(linear_to_millibel(nothing), None, "{nothing}");
+    }
+}
+
+#[test]
 fn the_taper_runs_from_the_floor_to_unity_and_clamps_outside() {
     assert_eq!(fraction_to_millibel(1.0, DEFAULT_FLOOR_MILLIBEL), 0);
     assert_eq!(
@@ -75,94 +95,90 @@ fn the_taper_runs_from_the_floor_to_unity_and_clamps_outside() {
     );
 }
 
+fn level(millibel: i32) -> AudioGain {
+    AudioGain::new(millibel).expect("attenuation")
+}
+
 #[test]
-fn the_four_gains_sum_and_saturate() {
+fn a_streams_gains_sum_and_saturate() {
     let request = VolumeRequest {
         stream_millibel: -100,
-        application_millibel: -200,
-        sink_millibel: -300,
         duck_millibel: DUCK_MILLIBEL,
         muted: false,
     };
-    assert_eq!(request.total_millibel(), -600 + DUCK_MILLIBEL);
+    assert_eq!(request.total_millibel(), -100 + DUCK_MILLIBEL);
     let absurd = VolumeRequest {
         stream_millibel: i32::MIN,
-        application_millibel: i32::MIN,
-        ..VolumeRequest::default()
+        duck_millibel: i32::MIN,
+        muted: false,
     };
     assert_eq!(absurd.total_millibel(), i32::MIN);
 }
 
 /// The point of using the device's own control: where it can deliver the
-/// whole gain, the mixer multiplies by exactly one and the path stays exact.
+/// whole level, the mixer multiplies by exactly one and the path stays exact.
 #[test]
-fn a_gain_on_the_devices_own_grid_leaves_the_software_multiply_at_unity() {
+fn a_level_on_the_devices_own_grid_leaves_the_multiply_at_unity() {
     for millibel in [0, -50, -1_000, -6_400] {
-        let request = VolumeRequest {
-            stream_millibel: millibel,
-            ..VolumeRequest::default()
-        };
-        let resolved = resolve(&request, Some(codec_range()));
-        assert_eq!(resolved.hardware_millibel, Some(millibel));
-        assert_eq!(resolved.software, 1.0, "at {millibel}");
-        assert_eq!(resolved.total_millibel, millibel);
+        let endpoint = endpoint_level(level(millibel), false, Some(codec_range()));
+        assert_eq!(endpoint.hardware_millibel, Some(millibel));
+        assert_eq!(endpoint.software_millibel, UNITY_MILLIBEL);
+        assert_eq!(
+            stream_multiply(&VolumeRequest::default(), endpoint),
+            1.0,
+            "at {millibel}"
+        );
     }
 }
 
 /// Rounding the hardware setting the other way would leave software making
 /// the difference up with gain, on a path with no headroom to spare.
 #[test]
-fn an_off_grid_gain_leaves_the_software_remainder_as_attenuation() {
-    let request = VolumeRequest {
-        stream_millibel: -1_025,
-        ..VolumeRequest::default()
-    };
-    let resolved = resolve(&request, Some(codec_range()));
-    assert_eq!(resolved.hardware_millibel, Some(-1_000));
-    assert!(
-        resolved.software < 1.0,
-        "software must attenuate, not amplify: {}",
-        resolved.software
+fn an_off_grid_level_leaves_the_software_remainder_as_attenuation() {
+    let endpoint = endpoint_level(level(-1_025), false, Some(codec_range()));
+    assert_eq!(endpoint.hardware_millibel, Some(-1_000));
+    assert_eq!(endpoint.software_millibel, -25);
+    close(
+        stream_multiply(&VolumeRequest::default(), endpoint),
+        millibel_to_linear(-25),
     );
-    close(resolved.software, millibel_to_linear(-25));
 }
 
 #[test]
-fn a_gain_below_what_the_hardware_reaches_is_finished_in_software() {
+fn a_level_below_what_the_hardware_reaches_is_finished_in_software() {
+    let endpoint = endpoint_level(level(-9_000), false, Some(codec_range()));
+    assert_eq!(endpoint.hardware_millibel, Some(-6_400));
+    assert_eq!(endpoint.software_millibel, -2_600);
+}
+
+#[test]
+fn a_device_with_no_control_takes_the_whole_level_in_software() {
+    let endpoint = endpoint_level(level(-1_234), false, None);
+    assert_eq!(endpoint.hardware_millibel, None);
     let request = VolumeRequest {
-        stream_millibel: -9_000,
+        stream_millibel: -100,
         ..VolumeRequest::default()
     };
-    let resolved = resolve(&request, Some(codec_range()));
-    assert_eq!(resolved.hardware_millibel, Some(-6_400));
-    close(resolved.software, millibel_to_linear(-2_600));
-    assert_eq!(resolved.total_millibel, -9_000);
+    close(
+        stream_multiply(&request, endpoint),
+        millibel_to_linear(-1_334),
+    );
 }
 
 #[test]
-fn a_device_with_no_control_takes_the_whole_gain_in_software() {
-    let request = VolumeRequest {
-        stream_millibel: -1_234,
-        ..VolumeRequest::default()
-    };
-    let resolved = resolve(&request, None);
-    assert_eq!(resolved.hardware_millibel, None);
-    close(resolved.software, millibel_to_linear(-1_234));
-}
-
-#[test]
-fn mute_is_silence_in_both_halves_and_keeps_the_level_it_would_return_to() {
-    let request = VolumeRequest {
+fn a_mute_on_either_side_is_silence_and_keeps_the_level_it_returns_to() {
+    let muted = endpoint_level(level(-500), true, Some(codec_range()));
+    assert_eq!(muted.hardware_millibel, Some(-6_400));
+    assert_eq!(stream_multiply(&VolumeRequest::default(), muted), 0.0);
+    let quiet = VolumeRequest {
         stream_millibel: -500,
         muted: true,
         ..VolumeRequest::default()
     };
-    let resolved = resolve(&request, Some(codec_range()));
-    assert_eq!(resolved.software, 0.0);
-    assert_eq!(resolved.hardware_millibel, Some(-6_400));
-    assert!(resolved.muted);
-    // The reported total is still the level, so unmuting restores it.
-    assert_eq!(resolved.total_millibel, -500);
+    assert_eq!(stream_multiply(&quiet, EndpointLevel::UNITY), 0.0);
+    // Unmuted, the endpoint is back at the level it was set to.
+    let back = endpoint_level(level(-500), false, Some(codec_range()));
+    assert_eq!(back.hardware_millibel, Some(-500));
 }
 
 #[test]
@@ -170,14 +186,43 @@ fn a_grid_that_does_not_reach_the_top_settles_on_the_loudest_setting() {
     // A step that does not divide the range: the grid's last point is short
     // of the maximum, so the maximum itself is the closest the device has.
     let awkward = GainRange::new(-1_000, 0, 300).expect("valid");
-    let request = VolumeRequest::default();
-    let resolved = resolve(&request, Some(awkward));
-    let setting = resolved.hardware_millibel.expect("a control is present");
+    let endpoint = endpoint_level(AudioGain::UNITY, false, Some(awkward));
+    let setting = endpoint.hardware_millibel.expect("a control is present");
     assert!((-1_000..=0).contains(&setting), "{setting}");
-    assert!(
-        resolved.software <= 1.0,
-        "software amplified to make up the shortfall"
+    assert!(endpoint.software_millibel <= UNITY_MILLIBEL);
+}
+
+/// A control with boost above 0 dB is never driven into it: the endpoint's
+/// level is attenuation, and the loudest it asks for is the device's own
+/// nominal point.
+#[test]
+fn a_control_with_boost_is_never_driven_past_0_db() {
+    let boost = GainRange::new(-1_000, 1_200, 75).expect("valid");
+    let endpoint = endpoint_level(AudioGain::UNITY, false, Some(boost));
+    let setting = endpoint.hardware_millibel.expect("a control is present");
+    assert!(setting <= 0, "{setting}");
+    assert_eq!(
+        setting,
+        -1_000 + 13 * 75,
+        "the loudest step at or below 0 dB"
     );
+    assert_eq!(endpoint.software_millibel, UNITY_MILLIBEL);
+    // A control lying wholly above 0 dB is set to its quietest, and the mixer
+    // finishes the attenuation.
+    let above = GainRange::new(300, 1_200, 100).expect("valid");
+    let endpoint = endpoint_level(level(-600), false, Some(above));
+    assert_eq!(endpoint.hardware_millibel, Some(300));
+    assert_eq!(endpoint.software_millibel, -900);
+}
+
+/// A control that cannot get as loud as the target never has the mixer make
+/// up the shortfall with gain.
+#[test]
+fn a_control_short_of_unity_is_not_made_up_in_software() {
+    let quiet = GainRange::new(-6_400, -1_000, 50).expect("valid");
+    let endpoint = endpoint_level(AudioGain::UNITY, false, Some(quiet));
+    assert_eq!(endpoint.hardware_millibel, Some(-1_000));
+    assert_eq!(endpoint.software_millibel, UNITY_MILLIBEL);
 }
 
 #[test]
@@ -187,4 +232,64 @@ fn the_duck_step_is_a_real_attenuation_and_not_silence() {
         ducked > 0.0 && ducked < 0.2,
         "ducking must leave the media audible but plainly under the speech: {ducked}"
     );
+}
+
+#[test]
+fn a_typed_level_is_decibels_to_the_hundredth_and_never_a_boost() {
+    for (text, millibel) in [
+        ("-6", -600),
+        ("-3.5", -350),
+        ("-3.25", -325),
+        ("0", 0),
+        ("-0", 0),
+        ("-12dB", -1_200),
+        ("-6.5dB", -650),
+    ] {
+        assert_eq!(
+            typed_level(text).map(AudioGain::millibel),
+            Ok(millibel),
+            "{text}"
+        );
+    }
+    assert_eq!(typed_level("+3"), Err(LevelError::Boost));
+    assert_eq!(typed_level("3dB"), Err(LevelError::Boost));
+    for bad in [
+        "",
+        "-",
+        "dB",
+        "-3.",
+        "-3.333",
+        "x",
+        "--6",
+        "-99999999999",
+        "-6 dB",
+        "-6db",
+    ] {
+        assert_eq!(typed_level(bad), Err(LevelError::Malformed), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_volume_control_tapers_from_the_floor_to_unity_and_reads_back() {
+    assert_eq!(level_at_permille(0).millibel(), DEFAULT_FLOOR_MILLIBEL);
+    assert_eq!(level_at_permille(1_000), AudioGain::UNITY);
+    assert_eq!(level_at_permille(u16::MAX), AudioGain::UNITY);
+    assert_eq!(permille_of_level(AudioGain::UNITY), 1_000);
+    let below = AudioGain::new(DEFAULT_FLOOR_MILLIBEL - 1).expect("attenuation");
+    assert_eq!(permille_of_level(below), 0, "below the floor is the bottom");
+    for permille in (0..=1_000).step_by(50) {
+        assert_eq!(
+            permille_of_level(level_at_permille(permille)),
+            permille,
+            "{permille}"
+        );
+    }
+    for millibel in [0, -300, -1_500, -6_000] {
+        let level = AudioGain::new(millibel).expect("attenuation");
+        assert_eq!(
+            level_at_permille(permille_of_level(level)),
+            level,
+            "{millibel}"
+        );
+    }
 }

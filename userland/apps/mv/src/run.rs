@@ -43,7 +43,7 @@ mod program {
     use core::cell::RefCell;
 
     use tairix_abi::fs::{DirEntries, OpenFlags};
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, RenameFlags};
     use tairix_help::BundleHelp;
     use tairix_mv::{
         parse, run, Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome, USAGE,
@@ -158,8 +158,13 @@ mod program {
             })
         }
 
-        fn rename(&self, source: &str, dest: &str) -> Result<RenameOutcome, Errno> {
-            let ret = tairix_rt::fs_rename(source.as_bytes(), dest.as_bytes());
+        fn rename(
+            &self,
+            source: &str,
+            dest: &str,
+            flags: RenameFlags,
+        ) -> Result<RenameOutcome, Errno> {
+            let ret = tairix_rt::fs_rename(source.as_bytes(), dest.as_bytes(), flags);
             if ret == 0 {
                 self.forget(source);
                 self.forget(dest);

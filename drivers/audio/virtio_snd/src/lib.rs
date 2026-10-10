@@ -1033,61 +1033,6 @@ fn decode_chmap(record: &[u8], channels: u8) -> Option<ChannelMap> {
     ChannelMap::new(&positions[..usize::from(channels)]).ok()
 }
 
-/// The conventional layout for `channels` channels, which is what a device
-/// reporting a channel count and no positions has said.
-///
-/// Mono and stereo are unambiguous; wider counts follow the standard
-/// interleave order every consumer format uses. A count with no conventional
-/// reading is refused rather than guessed at.
-fn conventional_map(channels: u8) -> Option<ChannelMap> {
-    use ChannelPosition::{
-        FrontCentre, FrontLeft, FrontRight, LowFrequency, Mono, RearLeft, RearRight, SideLeft,
-        SideRight,
-    };
-    let positions: &[ChannelPosition] = match channels {
-        1 => &[Mono],
-        2 => &[FrontLeft, FrontRight],
-        3 => &[FrontLeft, FrontRight, FrontCentre],
-        4 => &[FrontLeft, FrontRight, RearLeft, RearRight],
-        6 => &[
-            FrontLeft,
-            FrontRight,
-            FrontCentre,
-            LowFrequency,
-            RearLeft,
-            RearRight,
-        ],
-        8 => &[
-            FrontLeft,
-            FrontRight,
-            FrontCentre,
-            LowFrequency,
-            RearLeft,
-            RearRight,
-            SideLeft,
-            SideRight,
-        ],
-        _ => return None,
-    };
-    ChannelMap::new(positions).ok()
-}
-
-/// Turn a monotonic nanosecond reading into the instant a clock pair is
-/// stamped with.
-///
-/// The reading's epoch is unspecified and only differences are meaningful,
-/// which is exactly what a linear rate fit needs: a wall clock stepped by a
-/// time-synchronisation service would corrupt every fit built across the
-/// step, so the audio clock domain is deliberately monotonic.
-fn monotonic_instant(nanos: u64) -> Time64 {
-    const NANOS_PER_SEC: u64 = 1_000_000_000;
-    let secs = i64::try_from(nanos / NANOS_PER_SEC).unwrap_or(i64::MAX);
-    // The remainder is below a billion by construction, so the only way the
-    // constructor can refuse is a value it cannot produce.
-    let nanos = u32::try_from(nanos % NANOS_PER_SEC).unwrap_or(0);
-    Time64::new(secs, nanos).unwrap_or(Time64::UNIX_EPOCH)
-}
-
 /// The device's own bit index for a sample format.
 fn format_bit(format: SampleFormat) -> u8 {
     match format {
@@ -1140,8 +1085,8 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         let stream = self.stream(endpoint)?;
         let channel_map = match stream.published_map {
             Some(map) => map,
-            None => conventional_map(stream.channels_max)
-                .or_else(|| conventional_map(stream.channels_min))
+            None => ChannelMap::conventional(stream.channels_max)
+                .or_else(|| ChannelMap::conventional(stream.channels_min))
                 .ok_or(DriverError::DeviceFault)?,
         };
         let facts = AudioEndpointFacts {
@@ -1211,7 +1156,7 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         let channel_map = if channels == params.channel_map.channels() {
             params.channel_map
         } else {
-            conventional_map(channels).ok_or(DriverError::Unsupported)?
+            ChannelMap::conventional(channels).ok_or(DriverError::Unsupported)?
         };
         let period_frames = params
             .period_frames
@@ -1305,6 +1250,11 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         // The mixer names the position its first frame belongs at, so the
         // stream's arithmetic describes the same timeline the client's does.
         stream.transferred = at;
+        if stream.direction == StreamDirection::Playback {
+            // A device with nothing in flight finishes nothing, so no period
+            // would ever elapse to ask for the next.
+            self.fill_playback(endpoint, None)?;
+        }
         Ok(())
     }
 
@@ -1351,30 +1301,34 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
         {
             return Err(DriverError::BadMagic);
         }
-        let direction = stream.direction;
-        let transferred_before = stream.transferred;
-        self.reap_transfers(endpoint, ring)?;
-        match direction {
-            StreamDirection::Playback => self.fill_playback(endpoint, ring)?,
-            StreamDirection::Capture => self.post_capture(endpoint)?,
-        }
-        if direction == StreamDirection::Playback {
-            self.finish_drain_if_played_out(endpoint, ring)?;
-        }
-        let stream = self.stream(endpoint)?;
-        let moved = stream
-            .transferred
-            .get()
-            .saturating_sub(transferred_before.get());
-        let Ok(transferred) = u32::try_from(moved) else {
-            return Err(DriverError::DeviceFault);
+        // What moved through the ring, not what the device was handed: a
+        // padded period's silence never came from the mixer.
+        let transferred = match stream.direction {
+            StreamDirection::Playback => {
+                self.reap_transfers(endpoint, ring)?;
+                let taken = self.fill_playback(endpoint, Some(&mut *ring))?;
+                self.finish_drain_if_played_out(endpoint, ring)?;
+                taken
+            }
+            StreamDirection::Capture => {
+                let before = stream.transferred;
+                self.reap_transfers(endpoint, ring)?;
+                self.post_capture(endpoint)?;
+                let delivered = self
+                    .stream(endpoint)?
+                    .transferred
+                    .get()
+                    .saturating_sub(before.get());
+                u32::try_from(delivered).map_err(|_| DriverError::DeviceFault)?
+            }
         };
+        let stream = self.stream(endpoint)?;
         Ok(AudioServiced {
             transferred,
             running: stream.running,
             position: stream.position(),
             xrun_frames: stream.xrun_frames,
-            sampled_at: monotonic_instant(self.clock.now_ns()),
+            sampled_at: Time64::from_nanos(self.clock.now_ns()),
         })
     }
 
@@ -1401,16 +1355,15 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
     fn take_interrupt(&mut self) -> Result<AudioInterrupt, DriverError> {
         self.transport.ack_interrupt();
         self.drain_events()?;
+        self.collect_transfers(StreamDirection::Playback)?;
+        self.collect_transfers(StreamDirection::Capture)?;
         // A completed transfer is a period boundary whether or not the device
         // also posted an event: a device that suppresses the event queue
         // would otherwise leave the mixer waiting for a wake that never
-        // comes.
+        // comes. A transfer merely in flight is none, and reporting it would
+        // have a period serviced before the mixer could supply it.
         for (index, stream) in self.streams.iter().enumerate() {
-            if stream
-                .periods
-                .iter()
-                .any(|p| p.posted.is_some() || p.returned.is_some())
-            {
+            if stream.periods.iter().any(|p| p.returned.is_some()) {
                 if let Ok(bit) = u16::try_from(index) {
                     if bit < MAX_DEVICE_ENDPOINTS {
                         self.pending.period_elapsed |= 1u32 << bit;
@@ -1641,8 +1594,15 @@ impl<T: Transport> VirtioSnd<'_, T> {
     /// has nothing left in flight, and the ring is short — then and only then
     /// the missing frames are silence, counted as lost. Padding a period the
     /// device has not yet asked for would manufacture a glitch out of frames
-    /// that were merely going to arrive in time.
-    fn fill_playback(&mut self, endpoint: u16, ring: &mut PcmRing<'_>) -> Result<(), DriverError> {
+    /// that were merely going to arrive in time. With no ring — a start
+    /// nothing was primed for — that last case is a whole period of silence.
+    ///
+    /// Answers the frames read out of the ring.
+    fn fill_playback(
+        &mut self,
+        endpoint: u16,
+        mut ring: Option<&mut PcmRing<'_>>,
+    ) -> Result<u32, DriverError> {
         let (period_frames, frame_bytes, running, draining, mut in_flight) = {
             let stream = self.stream(endpoint)?;
             let grant = stream.configured.ok_or(DriverError::DeviceFault)?;
@@ -1658,6 +1618,7 @@ impl<T: Transport> VirtioSnd<'_, T> {
                     .count(),
             )
         };
+        let mut taken = 0u32;
         for slot in 0..PERIODS_IN_FLIGHT {
             if self.stream(endpoint)?.periods[slot].posted.is_some() {
                 continue;
@@ -1668,7 +1629,10 @@ impl<T: Transport> VirtioSnd<'_, T> {
             if usize::from(self.txq.ring.free_count()) < TRANSFER_CHAIN_DESCRIPTORS {
                 break;
             }
-            let readable = ring.readable_frames().map_err(|_| DriverError::BadMagic)?;
+            let readable = match ring.as_deref_mut() {
+                Some(ring) => ring.readable_frames().map_err(|_| DriverError::BadMagic)?,
+                None => 0,
+            };
             let (take, shortfall) = if readable >= period_frames {
                 (period_frames, 0)
             } else if draining && readable > 0 {
@@ -1703,9 +1667,12 @@ impl<T: Transport> VirtioSnd<'_, T> {
                 return Err(DriverError::DeviceFault);
             };
             let taken_bytes = take as usize * frame_bytes;
-            let read = ring
-                .read(&mut payload[..taken_bytes])
-                .map_err(|_| DriverError::BadMagic)?;
+            let read = match ring.as_deref_mut() {
+                Some(ring) => ring
+                    .read(&mut payload[..taken_bytes])
+                    .map_err(|_| DriverError::BadMagic)?,
+                None => 0,
+            };
             if read != take {
                 return Err(DriverError::DeviceFault);
             }
@@ -1718,8 +1685,9 @@ impl<T: Transport> VirtioSnd<'_, T> {
             }
             txq.post(transport, stream, slot, carried, payload_bytes)?;
             in_flight += 1;
+            taken += take;
         }
-        Ok(())
+        Ok(taken)
     }
 
     /// Post every free capture period back to the device, and move whatever

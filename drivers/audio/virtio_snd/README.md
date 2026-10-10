@@ -84,6 +84,10 @@ has not yet asked for would manufacture a glitch out of frames that were
 merely going to arrive in time, so it does not; a drain's tail goes as a short
 transfer rather than a padded one, because nothing was lost.
 
+A start begins the device on the periods the mixer primed it with. One with
+nothing in flight posts a period of silence, counted lost, because a device
+with nothing in flight finishes nothing and so never asks for the next.
+
 A capture period that the mixer's ring could not hold is over-run, and it is
 counted too: a recording that silently loses frames has an invisible edit in
 it.
@@ -111,6 +115,6 @@ Host tests drive the engine against the in-process `MockTransport` with a shim
 that answers as the specification's device does: bring-up reading, the
 substitution policy, the period accounting, the silence-and-count path, the
 capture delivery, and every control refusal surfacing as its own typed error.
-The end-to-end QEMU verticals (`audio_virtio_qemu_{aarch64,x86_64,riscv64}`)
+The end-to-end QEMU verticals (`audio_qemu_{aarch64,x86_64,riscv64}`)
 play a known signal on a real machine model and assert the host-side WAV is
 sample-exact.

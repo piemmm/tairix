@@ -1946,6 +1946,14 @@ impl DesktopShell {
         Ok(())
     }
 
+    /// Show what the audio service reports on the bar, re-presenting it only
+    /// when that moved its pixels.
+    pub fn set_sound(&mut self, compositor: &mut Compositor, state: tairix_taskbar::SoundState) {
+        if self.session.taskbar_mut().set_sound(state) {
+            self.present(compositor);
+        }
+    }
+
     /// Withdraw every shown notification `policy` no longer admits,
     /// re-presenting when any went.
     pub fn withdraw_unadmitted(&mut self, compositor: &mut Compositor, policy: &NotifyPolicy) {

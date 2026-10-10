@@ -1783,7 +1783,9 @@ impl<A: DocumentApp> Host<A> {
                 handle,
                 writable,
             } => self.picked(index, *window_id, *handle, *writable),
-            WindowEvent::PickCancelled { .. } => {
+            // A document app asks for no folder, so a folder answer ends its
+            // pick as a cancellation does.
+            WindowEvent::PickCancelled { .. } | WindowEvent::FolderPicked { .. } => {
                 let _ = window.file.end_pick();
             }
             WindowEvent::MenuClosed {
@@ -1918,6 +1920,7 @@ impl<A: DocumentApp> Host<A> {
                 self.point_app(index, at, *modifiers, pinch);
             }
             WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::ToolMoved { .. }
@@ -2029,6 +2032,7 @@ impl<A: DocumentApp> Host<A> {
             WindowEvent::Resized { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }

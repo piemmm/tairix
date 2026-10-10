@@ -1,0 +1,42 @@
+[package]
+name = "tairix-drv-audio-bcm2711-pwm"
+description = "TAIRiX autoloaded user-space driver for the Raspberry Pi 4's 3.5 mm jack: the BCM2711 PWM block fed by a cyclic DMA channel at 375 kHz, its samples noise-shaped onto the PWM's duty levels, serving audiochan-v1 to the mixer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, on cargo's default paths and names like every sibling
+# driver: the bundle builder cross-compiles `--bin <package>`. The shaper, the
+# PWM block and the jack (`src/lib.rs`) are host-testable; the `Run` binary
+# (`src/main.rs`) links the userland runtime, so it is freestanding-only and an
+# inert host stub elsewhere (`build.rs`).
+
+[dependencies]
+# The audio class trait, the PCM ring, the DMA and clock records, the register
+# seam.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The dither the shaper adds inside its loop: decorrelation, not secrecy.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# The cyclic-DMA playback engine the jack is, and in the driver process the
+# audiochan-v1 serve loop it is served through.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+
+[dev-dependencies]
+# The modelled DMA channel the jack's tests drive the engine over.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0", features = ["mock-dma"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed host is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The node's grants and its register window.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The DMA channel and the clock, reached through the links the node holds.
+tairix-linkclient = { path = "../../../lib/linkclient", version = "=0.0.0" }
+# `_start`, the shared-region mapping and the monotonic clock.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

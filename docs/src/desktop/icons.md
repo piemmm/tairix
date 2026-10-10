@@ -45,7 +45,9 @@ panicking (`AGENTS.md` §2.9).
 ## The glyph set
 
 `IconKind` is the closed set of built-in glyphs: the status kinds (`Network`
-— rising signal bars, `Volume`, `Battery`, `Bell`), the file-manager kinds
+— rising signal bars, `Volume` and `VolumeMuted` — the speaker cone, then struck
+through — `Microphone` for sound being recorded, `Battery`, `Bell`), the
+file-manager kinds
 (`Folder`/`FolderFilled`/`FolderOpen` — an empty folder, one that holds
 something, and an open one — the `FolderBack`/`FolderFront` halves a folder's
 picture of what it holds is composed between, `File`, `AppBundle`, the type
@@ -56,7 +58,9 @@ taskbar's `Library` (the program-library launcher's three-by-three tile
 grid, `plans/NEW-TASKBAR.md` T4) and `User` (a head-and-shoulders bust, the
 last-resort mark for the always-trailing account capsule — an account with a
 name draws its circular identity disc instead, see below),
-the viewer's playback marks `Pause` and `Resume`, the painter's tools
+the viewer's playback marks `Pause` and `Resume`, the music player's
+`SkipPrevious`/`SkipNext`, `Shuffle`, and `Repeat`/`RepeatOne` (a loop of two arrows,
+and the same loop with a stroke inside it), the painter's tools
 (`ToolSelect`, `ToolPencil`, `ToolBrush`, `ToolSpray`, `ToolEraser`,
 `ToolFill`, `ToolGradient`, `ToolEyedropper`, `ToolClone`, `ToolText`,
 `ToolLine`, `ToolRectangle`, `ToolEllipse`, `ToolPolygon`, `ToolCrop`,

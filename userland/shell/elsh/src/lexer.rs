@@ -898,6 +898,25 @@ mod tests {
         );
     }
 
+    /// An empty quote pair inside a word leaves the word whole, so a script
+    /// can spell a marker its own echoed line does not contain.
+    #[test]
+    fn empty_quotes_inside_a_word_split_nothing() {
+        let tokens = tokenize(r#"PLAY""-PASS"#).unwrap();
+        let [Token::Word(segments)] = tokens.as_slice() else {
+            panic!("one word: {tokens:?}");
+        };
+        let text: alloc::string::String = segments
+            .iter()
+            .map(|segment| match segment {
+                Segment::Literal(text)
+                | Segment::Expandable(text)
+                | Segment::QuotedExpandable(text) => text.as_str(),
+            })
+            .collect();
+        assert_eq!(text, "PLAY-PASS");
+    }
+
     #[test]
     fn empty_double_quotes_make_an_empty_word() {
         assert_eq!(tokenize(r#""""#).unwrap(), vec![Token::Word(vec![])]);

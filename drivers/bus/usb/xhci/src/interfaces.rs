@@ -13,12 +13,21 @@
 //! nothing of another device's. Endpoints are reused. A removed node's grant
 //! to one is revoked with it, and whatever its driver queued before that is
 //! answered `NotFound` before the endpoint carries another node.
+//!
+//! A node's isochronous streams each ride a region of their own, created for
+//! the stream and granted to the caller that started it, whose slot
+//! completions go to the notify port its attested pid names. A stream ends
+//! with its device, with a controller reset, or when its notification cannot
+//! be delivered; its class driver is told why when it still can be.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
-use tairix_abi::usb_urb::URB_REQUEST_LEN;
-use tairix_abi::{DriverError, Errno, HwNode};
-use tairix_usb::device::{DeviceIdentity, HubEvent};
+use tairix_abi::usb_urb::{
+    iso_notify_endpoint_for, IsoGrant, IsoNotify, IsoStartParams, UsbRequest, USB_REQUEST_MAX_LEN,
+};
+use tairix_abi::{DriverError, Errno, HwNode, ProcId};
+use tairix_usb::device::{DeviceIdentity, HubEvent, BULK_BUF_LEN};
 use tairix_usb::transport::UrbEngine;
 
 use crate::domain::{ControllerDomainEvent, ControllerHealth};
@@ -28,6 +37,12 @@ use crate::serve::{attach_transport_grants, Reach, UrbOutcome, UrbReply, UrbServ
 /// submits one at a time and blocks on the reply, so a small queue absorbs a
 /// resubmit racing the previous reply.
 pub const ENDPOINT_CAPACITY: usize = 4;
+
+/// Bytes of a node's URB buffer: one bulk chunk, the engine's per-TD ceiling,
+/// which also holds a boot report and any control-IN descriptor a class driver
+/// reads. One page, so the mass-storage data path costs the keyboard path
+/// nothing extra.
+pub const URB_BUFFER_LEN: usize = BULK_BUF_LEN;
 
 /// The HCD's own mapping of one node's shared buffer, released when dropped.
 pub trait UrbBuffer {
@@ -67,6 +82,15 @@ pub enum Note {
         event: ControllerDomainEvent,
         /// The controller's owner id.
         owner: u32,
+    },
+    /// An isochronous stream ended other than by its class driver's stop.
+    StreamEnded {
+        /// The device-table index of its device.
+        index: usize,
+        /// Its endpoint address.
+        endpoint: u8,
+        /// Why.
+        reason: Errno,
     },
 }
 
@@ -119,8 +143,30 @@ pub trait Seam {
     /// Register transport `slot`'s `endpoint` with the event loop, returning
     /// whether it took.
     fn watch_endpoint(&mut self, slot: usize, endpoint: u64) -> bool;
-    /// A fresh, zeroed shared buffer.
-    fn create_buffer(&mut self) -> Option<Self::Buffer>;
+    /// A fresh, zeroed shared buffer of at least `len` bytes.
+    fn create_buffer(&mut self, len: usize) -> Option<Self::Buffer>;
+    /// The kernel-attested pid of the caller whose call `ticket` on
+    /// `endpoint` is in service.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal, such as a caller that has ended.
+    fn caller_pid(&mut self, endpoint: u64, ticket: u64) -> Result<u64, Errno>;
+    /// Delegate `region` to the caller whose call `ticket` on `endpoint` is
+    /// in service, returning the handle it maps.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal.
+    fn grant_peer(&mut self, region: u64, endpoint: u64, ticket: u64) -> Result<u64, Errno>;
+    /// This process's instance, the grantor of every region it delegates.
+    fn self_instance(&self) -> ProcId;
+    /// Send `notice` to the port `port`, without waiting.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal: no such port, or a full one.
+    fn notify(&mut self, port: u64, notice: &IsoNotify) -> Result<(), Errno>;
     /// The next call queued on `endpoint`, without blocking: its ticket and
     /// the length of the request copied into `request`.
     ///
@@ -165,6 +211,17 @@ struct Node<B> {
     /// Where the device is served; a controller reset can move it.
     index: usize,
     buffer: B,
+    streams: Vec<Stream<B>>,
+    /// The number the node's latest stream took.
+    last_stream: Option<NonZeroU32>,
+}
+
+/// One isochronous stream a node's class driver started.
+struct Stream<B> {
+    endpoint: u8,
+    number: NonZeroU32,
+    region: B,
+    notify: u64,
 }
 
 impl<B> Default for Interfaces<B> {
@@ -274,7 +331,7 @@ impl<B: UrbBuffer> Interfaces<B> {
             return;
         };
         refuse_queued(transport.endpoint, seam);
-        let Some(buffer) = seam.create_buffer() else {
+        let Some(buffer) = seam.create_buffer(URB_BUFFER_LEN) else {
             return;
         };
         let node = seam
@@ -288,6 +345,8 @@ impl<B: UrbBuffer> Interfaces<B> {
             identity: *identity,
             index,
             buffer,
+            streams: Vec::new(),
+            last_stream: None,
         });
         seam.note(Note::Published { node: id });
     }
@@ -324,9 +383,10 @@ impl<B: UrbBuffer> Interfaces<B> {
 
     /// Serve the call that woke transport `slot`.
     ///
-    /// A transfer that ran synchronously parked on the controller's
-    /// interrupt line and may have taken another transport's completion off
-    /// it, so every held URB is driven after one.
+    /// A transfer or operation that ran synchronously parked on the
+    /// controller's interrupt line and may have taken another transport's
+    /// completion off it, so every held URB is driven, and every finished
+    /// slot delivered, after one.
     pub fn serve_submit<S: Seam<Buffer = B>>(
         &mut self,
         slot: usize,
@@ -336,8 +396,8 @@ impl<B: UrbBuffer> Interfaces<B> {
         let Some(transport) = self.transports.get_mut(slot) else {
             return;
         };
-        let mut request = [0u8; URB_REQUEST_LEN];
-        let (ticket, len) = match seam.receive(transport.endpoint, &mut request) {
+        let mut frame = [0u8; USB_REQUEST_MAX_LEN];
+        let (ticket, len) = match seam.receive(transport.endpoint, &mut frame) {
             Ok(Some(call)) => call,
             // Its poster exited between the wake and the receive.
             Ok(None) => return,
@@ -346,24 +406,47 @@ impl<B: UrbBuffer> Interfaces<B> {
                 return;
             }
         };
-        let (reach, index, shm): (Reach, usize, &mut [u8]) = match transport.node.as_mut() {
-            None => (Reach::Retracted, 0, &mut []),
-            Some(node) if health.is_recovering() => {
-                (Reach::Recovering, node.index, node.buffer.bytes())
+        let request = match UsbRequest::decode(frame.get(..len).unwrap_or_default()) {
+            Ok(request) => request,
+            Err(errno) => {
+                seam.reply(transport.endpoint, UrbReply::new(ticket, Err(errno)));
+                return;
             }
-            Some(node) => (Reach::Served, node.index, node.buffer.bytes()),
         };
-        let outcome = transport.service.on_submit(
-            reach,
-            ticket,
-            request.get(..len).unwrap_or_default(),
-            shm,
-            &mut seam.engine(index),
-        );
-        if let UrbOutcome::Reply(reply) = outcome {
-            seam.reply(transport.endpoint, reply);
-            if reach == Reach::Served {
-                self.drive_busy(health, seam);
+        let reach = match transport.node {
+            None => Reach::Retracted,
+            Some(_) if health.is_recovering() => Reach::Recovering,
+            Some(_) => Reach::Served,
+        };
+        let reply = if let UsbRequest::Transfer(urb) = request {
+            let (index, shm): (usize, &mut [u8]) = match transport.node.as_mut() {
+                None => (0, &mut []),
+                Some(node) => (node.index, node.buffer.bytes()),
+            };
+            match transport
+                .service
+                .on_submit(reach, ticket, &urb, shm, &mut seam.engine(index))
+            {
+                UrbOutcome::Reply(reply) => reply,
+                UrbOutcome::Held | UrbOutcome::Idle => return,
+            }
+        } else {
+            transport.operate(reach, ticket, request, seam)
+        };
+        seam.reply(transport.endpoint, reply);
+        if reach == Reach::Served {
+            self.drive_busy(health, seam);
+            self.deliver_streams(seam);
+        }
+    }
+
+    /// Tell every stream's class driver of each slot its stream finished,
+    /// ending a stream that halted or whose notification could not be
+    /// delivered.
+    pub fn deliver_streams<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
+        for transport in &mut self.transports {
+            if let Some(node) = transport.node.as_mut() {
+                node.deliver(seam);
             }
         }
     }
@@ -469,6 +552,11 @@ impl<B: UrbBuffer> Interfaces<B> {
         }
         let serving = seam.reset().is_ok() && !seam.faulted();
         if serving {
+            // The reset took every stream with it; a node kept across it
+            // governs its own interface alone again.
+            for node in self.transports.iter_mut().filter_map(|t| t.node.as_mut()) {
+                node.end_streams(Errno::WouldBlock, seam);
+            }
             self.reconcile_as(Matching::Reenumerated, seam);
         }
         for transport in &mut self.transports {
@@ -519,13 +607,213 @@ impl<B> Transport<B> {
 impl<B: UrbBuffer> Transport<B> {
     /// Retract the node, then release the HCD's mapping of its buffer and
     /// answer its held URB `NotFound`, so a driver being unloaded is never
-    /// left parked on a device that is gone.
+    /// left parked on a device that is gone. Its streams end first.
     fn retract<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
-        if let Some(node) = self.node.take() {
+        if let Some(mut node) = self.node.take() {
+            node.end_streams(Errno::NotFound, seam);
             seam.remove(node.id);
         }
         self.answer_held(Errno::NotFound, seam);
     }
+
+    /// Perform an interface or stream operation for the node, answering at
+    /// once.
+    fn operate<S: Seam<Buffer = B>>(
+        &mut self,
+        reach: Reach,
+        ticket: u64,
+        request: UsbRequest,
+        seam: &mut S,
+    ) -> UrbReply {
+        let endpoint = self.endpoint;
+        let node = match (reach, self.node.as_mut()) {
+            (Reach::Served, Some(node)) => node,
+            (Reach::Recovering, Some(_)) => {
+                return UrbReply::status(ticket, Err(Errno::WouldBlock));
+            }
+            _ => return UrbReply::status(ticket, Err(Errno::NotFound)),
+        };
+        let index = node.index;
+        let result = match request {
+            UsbRequest::SetInterface {
+                interface,
+                alternate,
+            } => seam.engine(index).set_interface(interface, alternate),
+            UsbRequest::ClaimInterface { interface } => {
+                seam.engine(index).claim_interface(interface)
+            }
+            UsbRequest::IsoStart(params) => {
+                return match node.start_stream(params, endpoint, ticket, seam) {
+                    Ok(grant) => UrbReply::grant(ticket, &grant),
+                    Err(errno) => UrbReply::status(ticket, Err(errno)),
+                };
+            }
+            UsbRequest::IsoQueue { endpoint, slot } => node.queue(endpoint, slot, seam),
+            UsbRequest::IsoStop { endpoint } => node.stop(endpoint, seam),
+            UsbRequest::Transfer(_) => Err(DriverError::OutOfRange),
+        };
+        UrbReply::status(ticket, result.map_err(DriverError::as_errno))
+    }
+}
+
+impl<B: UrbBuffer> Node<B> {
+    /// Start a stream for the caller of `ticket` on transport `endpoint`: a
+    /// region of its own, granted to that caller, its notifications sent to
+    /// the port that caller's attested pid names.
+    fn start_stream<S: Seam<Buffer = B>>(
+        &mut self,
+        params: IsoStartParams,
+        endpoint: u64,
+        ticket: u64,
+        seam: &mut S,
+    ) -> Result<IsoGrant, Errno> {
+        let notify = iso_notify_endpoint_for(seam.caller_pid(endpoint, ticket)?, params.endpoint);
+        self.streams
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        let mut region = seam
+            .create_buffer(params.layout.region_len())
+            .ok_or(Errno::OutOfMemory)?;
+        if region.bytes().len() < params.layout.region_len() {
+            return Err(Errno::OutOfMemory);
+        }
+        let shape = seam
+            .engine(self.index)
+            .iso_start(params.endpoint, params.layout)
+            .map_err(DriverError::as_errno)?;
+        // Whatever ran there before was replaced with the engine's stream.
+        self.streams
+            .retain(|stream| stream.endpoint != params.endpoint);
+        let region_grant = match seam.grant_peer(region.region(), endpoint, ticket) {
+            Ok(grant) => grant,
+            Err(errno) => {
+                let _ = seam.engine(self.index).iso_stop(params.endpoint);
+                return Err(errno);
+            }
+        };
+        let number = self.next_stream_number();
+        self.streams.push(Stream {
+            endpoint: params.endpoint,
+            number,
+            region,
+            notify,
+        });
+        Ok(IsoGrant {
+            region_grant,
+            grantor: seam.self_instance(),
+            notify,
+            interval_microframes: shape.interval_microframes,
+            speed: shape.speed,
+            stream: number,
+        })
+    }
+
+    /// The next stream's number: never zero, and never its predecessor's on
+    /// any endpoint of the node.
+    fn next_stream_number(&mut self) -> NonZeroU32 {
+        let number = self
+            .last_stream
+            .and_then(|last| last.checked_add(1))
+            .unwrap_or(NonZeroU32::MIN);
+        self.last_stream = Some(number);
+        number
+    }
+
+    /// Queue slot `slot` of the stream on `endpoint` from its region.
+    fn queue<S: Seam<Buffer = B>>(
+        &mut self,
+        endpoint: u8,
+        slot: u16,
+        seam: &mut S,
+    ) -> Result<(), DriverError> {
+        let stream = self
+            .streams
+            .iter_mut()
+            .find(|stream| stream.endpoint == endpoint)
+            .ok_or(DriverError::NotFound)?;
+        seam.engine(self.index)
+            .iso_queue(endpoint, slot, stream.region.bytes())
+    }
+
+    /// Stop the stream on `endpoint` at its class driver's word.
+    fn stop<S: Seam<Buffer = B>>(&mut self, endpoint: u8, seam: &mut S) -> Result<(), DriverError> {
+        let at = self
+            .streams
+            .iter()
+            .position(|stream| stream.endpoint == endpoint)
+            .ok_or(DriverError::NotFound)?;
+        self.streams.swap_remove(at);
+        seam.engine(self.index).iso_stop(endpoint)
+    }
+
+    /// Notify each stream's finished slots, ending a stream that halted or
+    /// cannot be told.
+    fn deliver<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
+        let index = self.index;
+        let mut at = 0;
+        while let Some(stream) = self.streams.get_mut(at) {
+            let ended = loop {
+                let taken = seam
+                    .engine(index)
+                    .iso_take(stream.endpoint, stream.region.bytes());
+                match taken {
+                    Ok(Some(done)) => {
+                        let notice = IsoNotify::SlotDone {
+                            endpoint: stream.endpoint,
+                            stream: stream.number,
+                            slot: done.slot,
+                            skipped: done.skipped,
+                            microframe: done.microframe,
+                            completed_at: seam.now_ns(),
+                        };
+                        if let Err(errno) = seam.notify(stream.notify, &notice) {
+                            break Some(errno);
+                        }
+                    }
+                    Ok(None) => break None,
+                    Err(err) => break Some(err.as_errno()),
+                }
+            };
+            let Some(reason) = ended else {
+                at += 1;
+                continue;
+            };
+            let stream = self.streams.swap_remove(at);
+            let _ = seam.engine(index).iso_stop(stream.endpoint);
+            end_stream(index, &stream, reason, seam);
+        }
+    }
+
+    /// End every stream, telling each class driver `reason`. The engine's
+    /// streams are already gone with the device or the controller state.
+    fn end_streams<S: Seam<Buffer = B>>(&mut self, reason: Errno, seam: &mut S) {
+        for stream in core::mem::take(&mut self.streams) {
+            end_stream(self.index, &stream, reason, seam);
+        }
+    }
+}
+
+/// Tell `stream`'s class driver it ended, as best the port still allows, and
+/// record why.
+fn end_stream<B, S: Seam<Buffer = B>>(
+    index: usize,
+    stream: &Stream<B>,
+    reason: Errno,
+    seam: &mut S,
+) {
+    let _ = seam.notify(
+        stream.notify,
+        &IsoNotify::Halted {
+            endpoint: stream.endpoint,
+            stream: stream.number,
+            reason,
+        },
+    );
+    seam.note(Note::StreamEnded {
+        index,
+        endpoint: stream.endpoint,
+        reason,
+    });
 }
 
 impl<B> Node<B> {
@@ -559,7 +847,7 @@ impl Matching {
 /// Answer `NotFound` to every call queued on `endpoint`, which the endpoint's
 /// depth bounds.
 fn refuse_queued<S: Seam>(endpoint: u64, seam: &mut S) {
-    let mut request = [0u8; URB_REQUEST_LEN];
+    let mut request = [0u8; USB_REQUEST_MAX_LEN];
     for _ in 0..ENDPOINT_CAPACITY {
         let Ok(Some((ticket, _))) = seam.receive(endpoint, &mut request) else {
             return;

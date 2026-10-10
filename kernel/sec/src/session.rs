@@ -13,6 +13,11 @@
 //! under its own session *and every ancestor of it*, so ending a session is
 //! an ordered walk of one range, a containment check is one lookup, and a
 //! join or a departure costs a chain walk bounded by [`SESSION_DEPTH_MAX`].
+//!
+//! A session founded around a process started as another user is a **login
+//! session**: one principal's sign-in, the unit a seat's devices are
+//! arbitrated between. Every process lies within at most one innermost login
+//! session ([`SessionTree::login_session`]), fixed with its membership.
 //! No process ever changes session: membership is fixed at admission and
 //! released at teardown. An anchor's exit is held until its session is empty,
 //! so a parent that reaps an anchor finds nothing of its session still
@@ -58,8 +63,12 @@ enum Kind {
     Anchored { anchor: ProcId, parent: ProcId },
     /// Found a session anchored at the admitted process inside the one
     /// anchored at `anchor` — or inside the root, for the kernel, which
-    /// anchors nothing.
-    Found { anchor: ProcId, parent: ProcId },
+    /// anchors nothing — a login session where `login`.
+    Found {
+        anchor: ProcId,
+        parent: ProcId,
+        login: bool,
+    },
 }
 
 impl Placement {
@@ -71,8 +80,12 @@ impl Placement {
         Self(Kind::Anchored { anchor, parent })
     }
 
-    pub(crate) const fn found(anchor: ProcId, parent: ProcId) -> Self {
-        Self(Kind::Found { anchor, parent })
+    pub(crate) const fn found(anchor: ProcId, parent: ProcId, login: bool) -> Self {
+        Self(Kind::Found {
+            anchor,
+            parent,
+            login,
+        })
     }
 }
 
@@ -123,8 +136,9 @@ struct Plan {
     container: Option<Founding>,
     /// The session joined, or the one a session of the process's own nests in.
     session: ProcId,
-    /// The depth of the session the process founds, if it founds one.
-    founds: Option<u8>,
+    /// The depth of the session the process founds, if it founds one, and
+    /// whether it is a login session.
+    founds: Option<(u8, bool)>,
 }
 
 /// Why a process could not be placed.
@@ -144,6 +158,8 @@ pub enum PlacementError {
 struct Node {
     parent: ProcId,
     depth: u8,
+    /// Founded around a process started as another user.
+    login: bool,
     /// Set once the anchor has died; nothing joins an ending session.
     ending: bool,
     /// The anchor's exit, held until the last member departs.
@@ -196,6 +212,20 @@ impl SessionTree {
         session == ROOT_SESSION || self.members.contains(&(session, member))
     }
 
+    /// The innermost login session `session` lies within, itself included:
+    /// its anchor's instance, or [`ROOT_SESSION`] where none encloses it.
+    #[must_use]
+    pub fn login_session(&self, session: ProcId) -> ProcId {
+        let mut at = session;
+        while let Some(node) = self.nodes.get(&at) {
+            if node.login {
+                return at;
+            }
+            at = node.parent;
+        }
+        ROOT_SESSION
+    }
+
     /// Whether a session enclosing `session` — not `session` itself — is
     /// ending, so its end reaches every member of this one.
     #[must_use]
@@ -243,11 +273,11 @@ impl SessionTree {
             depth,
         }) = plan.container
         {
-            self.insert_node(anchor, parent, depth);
+            self.insert_node(anchor, parent, depth, false);
         }
         let session = match plan.founds {
-            Some(depth) => {
-                self.insert_node(instance, plan.session, depth);
+            Some((depth, login)) => {
+                self.insert_node(instance, plan.session, depth, login);
                 instance
             }
             None => plan.session,
@@ -281,7 +311,11 @@ impl SessionTree {
                     founds: None,
                 })
             }
-            Kind::Found { anchor, parent } => {
+            Kind::Found {
+                anchor,
+                parent,
+                login,
+            } => {
                 let (session, depth, container) = if anchor.is_kernel() {
                     (ROOT_SESSION, 0, None)
                 } else {
@@ -294,7 +328,7 @@ impl SessionTree {
                 Ok(Plan {
                     container,
                     session,
-                    founds: Some(depth + 1),
+                    founds: Some((depth + 1, login)),
                 })
             }
         }
@@ -336,12 +370,13 @@ impl SessionTree {
         }
     }
 
-    fn insert_node(&mut self, session: ProcId, parent: ProcId, depth: u8) {
+    fn insert_node(&mut self, session: ProcId, parent: ProcId, depth: u8, login: bool) {
         self.nodes.insert(
             session,
             Node {
                 parent,
                 depth,
+                login,
                 ending: false,
                 held: None,
             },

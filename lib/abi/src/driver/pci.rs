@@ -40,6 +40,20 @@ pub const BUS_MASTER_ENABLE: u32 = 1 << 2;
 /// its INTx pin.
 pub const INTERRUPT_DISABLE: u32 = 1 << 10;
 
+/// Byte offset of the dword holding a function's revision id and its 24-bit
+/// class code, the class in the upper three bytes (PCI Local Bus 3.0 §6.2.1).
+pub const CLASS_OFFSET: u16 = 0x08;
+
+/// The 24-bit class code of an xHCI USB host controller: serial bus `0x0C`,
+/// USB `0x03`, programming interface `0x30` (PCI Code and ID Assignment
+/// §1.13). The programming interface is what tells it from the OHCI, UHCI and
+/// EHCI hosts sharing the sub-class.
+pub const CLASS_USB_XHCI: u32 = 0x0C_03_30;
+
+/// The class code of an Intel High Definition Audio controller: multimedia,
+/// audio device, programming interface zero.
+pub const CLASS_HD_AUDIO: u32 = 0x04_03_00;
+
 /// Devices one PCI bus holds.
 pub const PCI_DEVICES: u8 = 32;
 /// Functions one PCI device holds.
@@ -186,6 +200,26 @@ pub trait PciBus: Bus {
         bar_index: u8,
         mapper: &dyn MmioMapper,
     ) -> Result<RegisterWindow, DriverError>;
+
+    /// The span of function `bdf`'s memory BAR `bar_index` a driver may be
+    /// granted, as its physical base and length: the BAR up to the first page
+    /// holding the function's MSI-X table or pending-bit array. Only the owner
+    /// of the function's configuration space programs those, because a driver
+    /// that could write its own table could aim the function's messages at
+    /// any address.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] — no memory BAR at `bar_index`, or one
+    ///   whose first page already holds MSI-X state, leaving a driver
+    ///   nothing.
+    /// * [`DriverError::Unsupported`] — an I/O-port BAR, a header other than
+    ///   type 0, or a bus that resolves no BARs.
+    /// * [`DriverError::DeviceFault`] — a capability list that never ends, so
+    ///   where the MSI-X state lies cannot be known.
+    fn driver_window(&self, _bdf: u64, _bar_index: u8) -> Result<(u64, u64), DriverError> {
+        Err(DriverError::Unsupported)
+    }
 
     /// Turn on decoding of function `bdf`'s memory BARs (Memory Space
     /// Enable, PCI Local Bus 3.0 §6.2.2), leaving every other command bit

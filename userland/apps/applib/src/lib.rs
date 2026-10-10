@@ -66,8 +66,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::fmt::Write as _;
 
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, JsonStr, Severity, StdInfoKind, StdInfoRecord};
 use tairix_abi::{Errno, LibraryCategory};
 use tairix_appconf::Document;
 use tairix_appstore::{
@@ -810,35 +811,18 @@ fn change_ai(action: &str, id: &EntryId, entry: Option<&LibraryEntry>) -> String
     let mut ai = String::from("{\"subject\":\"program_library\",\"action\":\"");
     ai.push_str(action);
     ai.push_str("\",\"id\":");
-    push_json_string(&mut ai, id.as_str());
+    let _ = write!(ai, "{}", JsonStr(id.as_str()));
     if let Some(entry) = entry {
-        ai.push_str(",\"name\":");
-        push_json_string(&mut ai, entry.name().as_str());
-        ai.push_str(",\"category\":");
-        push_json_string(&mut ai, entry.category().as_str());
-        ai.push_str(",\"bundle\":");
-        push_json_string(&mut ai, entry.bundle().as_str());
+        let _ = write!(
+            ai,
+            ",\"name\":{},\"category\":{},\"bundle\":{}",
+            JsonStr(entry.name().as_str()),
+            JsonStr(entry.category().as_str()),
+            JsonStr(entry.bundle().as_str()),
+        );
     }
     ai.push('}');
     ai
-}
-
-/// Append `text` as a JSON string literal: quoted, with `"`, `\`, and
-/// control characters escaped, so a hostile-looking value can never break
-/// out of the `ai` object it is embedded in.
-fn push_json_string(out: &mut String, text: &str) {
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            ch if (ch as u32) < 0x20 => {
-                let _ = fmt::Write::write_fmt(out, format_args!("\\u{:04x}", ch as u32));
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
 }
 
 /// Emit one fd-3 `stdinfo` summary record (best-effort): terse human text plus

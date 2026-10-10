@@ -36,7 +36,7 @@ use alloc::sync::Arc;
 use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::{
     CapabilityId, CapabilityQuery, DirEntry, Errno, FileKind, FileStat, OpenFlags, RealpathMode,
-    UnlinkFlags, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
+    RenameFlags, UnlinkFlags, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS,
 };
 use tairix_arch_api::BOOT_CPU;
 use tairix_arch_riscv64::fdt::Fdt;
@@ -380,6 +380,7 @@ impl FilesystemService for FixtureFs {
         _caps: &dyn CapabilityQuery,
         _from: &str,
         _to: &str,
+        _flags: RenameFlags,
     ) -> Result<(), Errno> {
         Err(Errno::PermissionDenied)
     }

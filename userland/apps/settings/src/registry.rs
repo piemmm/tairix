@@ -30,6 +30,7 @@ use crate::network::{ADDRESSING_FACTS, RESOLVER_FACTS};
 use crate::notices::SOURCE_FACTS;
 use crate::pictures::Chooser;
 use crate::saver::SaverOption;
+use crate::sound::SOUND_FACTS;
 use crate::volumes::VOLUME_FACTS;
 
 /// One top-level entry of the sidebar: a group of related settings.
@@ -828,13 +829,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             name: "sound",
             title: "Sound",
             icon: None,
-            backing: PaneBacking::None {
-                missing: "Programs play sound through the audio service, but it offers no \
-                          control over a device's volume or over which device is the default, \
-                          so there is nothing here to set.",
-                needs: "A device-volume and default-device control in the audio service.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Sound)),
+            settings: &SOUND_FACTS,
         }],
     },
     CategoryRow {

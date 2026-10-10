@@ -14,7 +14,9 @@
 //! A pick has a purpose. An **open** chooses an existing file to read. A
 //! **save** chooses where a document goes: a name field and its two answers
 //! sit under the listing, a name that already names a file is replaced only
-//! once the user says so, and the file is delegated write-only.
+//! once the user says so, and the file is delegated write-only. A **folder**
+//! chooses the folder shown, and the session delegates the files in it the
+//! requester opens; the requester never holds the folder.
 //!
 //! [`SessionPicker`] is the host-testable engine: the single picker slot
 //! (one pick UI at a time, the session's modality policy), the browser
@@ -44,8 +46,8 @@ use tairix_browse::render::{
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
 use tairix_browse::{
-    apply_command, vfs, BrowseError, Browser, DirectorySource, Ending, EntryKind, WatchUpdate,
-    WIN_HEIGHT, WIN_WIDTH,
+    apply_command, vfs, BrowseError, Browser, DirectorySource, Ending, Entry, EntryKind,
+    WatchUpdate, WIN_HEIGHT, WIN_WIDTH,
 };
 use tairix_controls::{damage, Button, ButtonContent, ControlRole, TextAction, TextField};
 use tairix_font::BitmapFont;
@@ -63,6 +65,9 @@ pub const PICKER_TITLE: &str = "Choose a file";
 
 /// Fixed prefix of a save picker's title.
 pub const SAVE_TITLE: &str = "Save as";
+
+/// Fixed prefix of a folder picker's title.
+pub const FOLDER_TITLE: &str = "Choose a folder";
 
 /// Between the fixed prefix and the location it is showing.
 const PICKER_TITLE_SEPARATOR: &str = ": ";
@@ -113,6 +118,10 @@ const SAVE_LABEL: &str = "Save";
 const REPLACE_LABEL: &str = "Replace";
 const CANCEL_LABEL: &str = "Cancel";
 
+/// A folder band's committing answer, and what it says until it is pressed.
+const OPEN_LABEL: &str = "Open";
+const FOLDER_PROMPT: &str = "Opens the files in the folder shown";
+
 /// How the file a pick chose is opened.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PickAccess {
@@ -124,6 +133,9 @@ pub enum PickAccess {
     Create,
     /// The existing file the user agreed to replace, to write.
     Replace,
+    /// A folder, whose files the requester opens are each delegated to it
+    /// read-only.
+    Folder,
 }
 
 impl PickAccess {
@@ -132,7 +144,7 @@ impl PickAccess {
     #[must_use]
     pub const fn save_flags(self) -> Option<OpenFlags> {
         match self {
-            Self::Read => None,
+            Self::Read | Self::Folder => None,
             // Refusing a name that exists is what keeps an unconfirmed save
             // from overwriting a file, and a link planted in its place from
             // redirecting the write.
@@ -332,6 +344,28 @@ fn save_button(replacing: bool) -> Button {
     }
 }
 
+/// A folder pick's own controls, under the listing: what choosing does, and
+/// the two answers.
+struct FolderBand {
+    cancel: Button,
+    open: Button,
+    /// Progress or a refusal, shown in place of the prompt.
+    message: Option<String>,
+}
+
+impl FolderBand {
+    fn new() -> Self {
+        Self {
+            cancel: Button::labelled(CANCEL_LABEL),
+            open: Button::new(
+                ButtonContent::Label(String::from(OPEN_LABEL)),
+                ControlRole::Primary,
+            ),
+            message: None,
+        }
+    }
+}
+
 /// One live pick: the requesting window, the picker's compositor window,
 /// and the browser state behind it.
 struct ActivePick<S: DirectorySource> {
@@ -340,6 +374,8 @@ struct ActivePick<S: DirectorySource> {
     browser: Browser<S>,
     /// The save band, for a pick choosing where to save.
     save: Option<SaveBand>,
+    /// The folder band, for a pick choosing a folder.
+    folder: Option<FolderBand>,
     /// The open asked for and not yet answered; input waits while it is.
     waiting: Option<Waiting>,
     /// Whether [`PICKER_SHOWN`] has been announced for this pick.
@@ -356,11 +392,23 @@ struct ActivePick<S: DirectorySource> {
 
 impl<S: DirectorySource> ActivePick<S> {
     fn title_prefix(&self) -> &'static str {
-        if self.save.is_some() {
-            SAVE_TITLE
-        } else {
-            PICKER_TITLE
-        }
+        title_prefix(self.save.is_some(), self.folder.is_some())
+    }
+
+    /// Whether a band sits under the listing.
+    const fn banded(&self) -> bool {
+        self.save.is_some() || self.folder.is_some()
+    }
+}
+
+/// The title prefix of a save, a folder, or an open pick.
+const fn title_prefix(saving: bool, folder: bool) -> &'static str {
+    if saving {
+        SAVE_TITLE
+    } else if folder {
+        FOLDER_TITLE
+    } else {
+        PICKER_TITLE
     }
 }
 
@@ -431,10 +479,13 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let KeyInput::Pressed { key, .. } = record else {
             return None;
         };
-        let (saving, waiting) = self
-            .active
-            .as_ref()
-            .map(|active| (active.save.is_some(), active.waiting.is_some()))?;
+        let (saving, folder, waiting) = self.active.as_ref().map(|active| {
+            (
+                active.save.is_some(),
+                active.folder.is_some(),
+                active.waiting.is_some(),
+            )
+        })?;
         if waiting {
             return matches!(key, KeyValue::Named(NamedKeyCode::Escape))
                 .then(|| self.cancel(shell, compositor))
@@ -452,6 +503,23 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 browser.select_previous();
                 NavOutcome::Redraw
             }),
+            KeyValue::Named(NamedKeyCode::Enter) if folder => {
+                let into = self.active.as_ref().and_then(|active| {
+                    let index = active.browser.chosen_index()?;
+                    active
+                        .browser
+                        .entries()
+                        .get(index)
+                        .filter(|entry| entry.is_directory())
+                        .map(|_| index)
+                });
+                match into {
+                    Some(index) => {
+                        self.navigate(shell, compositor, move |browser| descend(browser, index))
+                    }
+                    None => self.choose_folder(shell, compositor),
+                }
+            }
             KeyValue::Named(NamedKeyCode::Enter) => self.navigate(shell, compositor, |browser| {
                 browser
                     .chosen_index()
@@ -542,6 +610,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         })?;
         if self.active.as_ref()?.save.is_some() {
             return self.offer_entry(index, shell, compositor);
+        }
+        if self.active.as_ref()?.folder.is_some() {
+            return self.navigate(shell, compositor, move |browser| descend(browser, index));
         }
         self.navigate(shell, compositor, move |browser| {
             open_or_choose(browser, index)
@@ -762,6 +833,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     ) -> Option<PickEnd> {
         let active = self.active.as_mut()?;
         let waiting = active.waiting.take_if(|waiting| waiting.serial == serial)?;
+        if let (Some(band), Err(err)) = (active.folder.as_mut(), result) {
+            band.message = Some(format!("Not opened: {err}"));
+            redraw_band(active, shell, compositor);
+            return None;
+        }
         let Some(band) = active.save.as_mut() else {
             let for_window = self.close(shell, compositor)?;
             return Some(match result {
@@ -858,7 +934,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         None
     }
 
-    /// A press on a save's band, below the listing.
+    /// A press on a band, below the listing.
     fn band_click(
         &mut self,
         local: Point,
@@ -869,6 +945,15 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let theme = shell.session().active_theme();
         let layout = band_layout(scale, theme);
         let active = self.active.as_mut()?;
+        if active.folder.is_some() {
+            if layout.save.contains(local) {
+                return self.choose_folder(shell, compositor);
+            }
+            if layout.cancel.contains(local) {
+                return self.cancel(shell, compositor);
+            }
+            return None;
+        }
         let band = active.save.as_mut()?;
         if layout.save.contains(local) {
             return self.submit(shell, compositor);
@@ -1007,6 +1092,21 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         }
     }
 
+    /// Choose the folder the picker shows, asking the embedder to delegate
+    /// its files.
+    fn choose_folder(
+        &mut self,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let components = self.active.as_ref()?.browser.components();
+        let path = vfs::absolute_path(components).ok()?;
+        let name = components
+            .last()
+            .map_or_else(|| String::from("/"), String::clone);
+        self.request_at(name, path, PickAccess::Folder, shell, compositor)
+    }
+
     /// Ask the embedder to open the file `name` names in the directory the
     /// picker shows.
     fn request(
@@ -1036,6 +1136,10 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let serial = self.serial;
         if let Some(band) = active.save.as_mut() {
             band.edit(Some(String::from("Saving…")));
+            redraw_band(active, shell, compositor);
+        }
+        if let Some(band) = active.folder.as_mut() {
+            band.message = Some(String::from("Opening…"));
             redraw_band(active, shell, compositor);
         }
         active.waiting = Some(Waiting {
@@ -1092,6 +1196,13 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                         band.edit(None);
                         redraw_band(active, shell, compositor);
                     }
+                    // A refusal stated for the folder left behind is not one
+                    // about the folder showing now.
+                    if let Some(band) = active.folder.as_mut().filter(|band| band.message.is_some())
+                    {
+                        band.message = None;
+                        redraw_band(active, shell, compositor);
+                    }
                 }
                 None
             }
@@ -1105,6 +1216,26 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let _ = shell.close_window(compositor, active.wm);
         Some(active.for_window)
     }
+}
+
+/// Keep, of a chosen folder's `entries`, the regular files whose content type
+/// is one of `kinds`, in the order the picker lists them and at most the most
+/// one folder pick delegates, answering how many matching files the bound left
+/// out.
+///
+/// A link is never kept: a pick hands over only what the folder itself holds.
+pub fn folder_selection(entries: &mut Vec<Entry>, kinds: &[String]) -> u32 {
+    entries.retain(|entry| {
+        entry.kind() == EntryKind::File
+            && tairix_browse::media::media_for_name(entry.name())
+                .is_some_and(|media| kinds.iter().any(|kind| kind == media.as_str()))
+    });
+    tairix_browse::sort_entries(entries, tairix_browse::SortMode::default_order());
+    let left_out = entries
+        .len()
+        .saturating_sub(tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX);
+    entries.truncate(tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX);
+    u32::try_from(left_out).unwrap_or(u32::MAX)
 }
 
 /// The path of the file `name` in the folder `components` names, or `None`
@@ -1140,27 +1271,23 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             }
         };
         let save = match purpose {
-            PickPurpose::Open => None,
+            PickPurpose::Open | PickPurpose::Folder => None,
             PickPurpose::Save { suggested, endings } => {
                 Some(SaveBand::new(suggested.as_str(), *endings))
             }
         };
+        let folder = matches!(purpose, PickPurpose::Folder).then(FolderBand::new);
         let scale = compositor.scale();
         let surface = {
             let theme = shell.session().active_theme();
-            let (width, height) = window_size(save.is_some(), scale, theme);
+            let banded = save.is_some() || folder.is_some();
+            let (width, height) = window_size(banded, scale, theme);
             let mut surface = Surface::new(width, height).ok_or(Errno::LengthOutOfRange)?;
             paint_listing(&mut surface, &browser, scale, theme);
-            if let Some(band) = &save {
-                paint_band(&mut surface, band, scale, theme);
-            }
+            paint_bands(&mut surface, save.as_ref(), folder.as_ref(), scale, theme);
             surface
         };
-        let prefix = if save.is_some() {
-            SAVE_TITLE
-        } else {
-            PICKER_TITLE
-        };
+        let prefix = title_prefix(save.is_some(), folder.is_some());
         let titled = picker_title(prefix, browser.components());
         let wm = shell
             .open_window(compositor, PICKER_ORIGIN, surface, titled.clone())
@@ -1176,6 +1303,7 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             wm,
             browser,
             save,
+            folder,
             waiting: None,
             shown: false,
             lost,
@@ -1230,13 +1358,25 @@ fn open_or_choose<S: DirectorySource>(browser: &mut Browser<S>, index: usize) ->
         return NavOutcome::None;
     };
     if entry.is_directory() {
-        return match browser.open_index(index) {
-            Ok(()) => NavOutcome::Redraw,
-            // A refused descent (unreadable directory) changes nothing.
-            Err(_) => NavOutcome::None,
-        };
+        return descend(browser, index);
     }
     NavOutcome::Chosen(String::from(entry.name()))
+}
+
+/// Descend into the entry at `index` when it is a directory; anything else,
+/// and a refused descent, changes nothing.
+fn descend<S: DirectorySource>(browser: &mut Browser<S>, index: usize) -> NavOutcome {
+    if !browser
+        .entries()
+        .get(index)
+        .is_some_and(Entry::is_directory)
+    {
+        return NavOutcome::None;
+    }
+    match browser.open_index(index) {
+        Ok(()) => NavOutcome::Redraw,
+        Err(_) => NavOutcome::None,
+    }
 }
 
 /// The listing's part of the picker window at `scale`: the shared
@@ -1277,11 +1417,12 @@ fn band_layout(scale: Scale, theme: &Theme) -> BandLayout {
         .saturating_add(message);
     let top = listing.bottom();
     let band = Rect::new(0, top, listing.width, height);
-    // The committing answer is as wide as its wider label, so asking to
-    // replace moves nothing.
+    // The committing answer is as wide as its widest label, so asking to
+    // replace moves nothing, and a folder band lays out as a save's does.
     let save_w = save_button(false)
         .measured_width(scale, theme)
-        .max(save_button(true).measured_width(scale, theme));
+        .max(save_button(true).measured_width(scale, theme))
+        .max(FolderBand::new().open.measured_width(scale, theme));
     let cancel_w = Button::labelled(CANCEL_LABEL).measured_width(scale, theme);
     let row_top = top.saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));
     let right = listing.width.saturating_sub(inset);
@@ -1297,11 +1438,11 @@ fn band_layout(scale: Scale, theme: &Theme) -> BandLayout {
     }
 }
 
-/// The picker window's physical size: the listing, and the save band under it
-/// for a save.
-fn window_size(saving: bool, scale: Scale, theme: &Theme) -> (u32, u32) {
+/// The picker window's physical size: the listing, and the band under it for
+/// a save or a folder.
+fn window_size(banded: bool, scale: Scale, theme: &Theme) -> (u32, u32) {
     let listing = picker_viewport(scale);
-    if saving {
+    if banded {
         let band = band_layout(scale, theme).band;
         (listing.width, listing.height.saturating_add(band.height))
     } else {
@@ -1334,9 +1475,18 @@ fn paint_listing<S: DirectorySource>(
     );
 }
 
-/// Paint a save's band under the listing.
-fn paint_band(surface: &mut Surface, band: &SaveBand, scale: Scale, theme: &Theme) {
+/// Paint whichever band the pick has under the listing.
+fn paint_bands(
+    surface: &mut Surface,
+    save: Option<&SaveBand>,
+    folder: Option<&FolderBand>,
+    scale: Scale,
+    theme: &Theme,
+) {
     let layout = band_layout(scale, theme);
+    if save.is_none() && folder.is_none() {
+        return;
+    }
     let palette = theme.palette();
     let (Ok(x), Ok(y)) = (
         u32::try_from(layout.band.left()),
@@ -1352,9 +1502,43 @@ fn paint_band(surface: &mut Surface, band: &SaveBand, scale: Scale, theme: &Them
         palette.surface.into(),
     );
     surface.fill_rect(x, y, layout.band.width, 1, palette.on_surface_muted.into());
-    band.name.render(surface, layout.field, scale, theme);
-    band.cancel.render(surface, layout.cancel, scale, theme);
-    band.save.render(surface, layout.save, scale, theme);
+    if let Some(band) = save {
+        band.name.render(surface, layout.field, scale, theme);
+        band.cancel.render(surface, layout.cancel, scale, theme);
+        band.save.render(surface, layout.save, scale, theme);
+    }
+    if let Some(band) = folder {
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+        let text = band.message.as_deref().unwrap_or(FOLDER_PROMPT);
+        let colour = if band.message.is_some() {
+            palette.on_surface
+        } else {
+            palette.on_surface_muted
+        };
+        let (Ok(left), Ok(top)) = (
+            u32::try_from(layout.field.left()),
+            u32::try_from(layout.field.top()),
+        ) else {
+            return;
+        };
+        surface.with_clip(
+            left,
+            top,
+            layout.field.width,
+            layout.field.height,
+            |surface| {
+                font.draw_text(
+                    surface,
+                    layout.field.left(),
+                    layout.field.top(),
+                    text,
+                    colour.into(),
+                );
+            },
+        );
+        band.cancel.render(surface, layout.cancel, scale, theme);
+        band.open.render(surface, layout.save, scale, theme);
+    }
 }
 
 /// Repaint the parts of the picker window `area` covers into the buffer it
@@ -1368,7 +1552,7 @@ fn repaint<S: DirectorySource>(
 ) {
     let scale = compositor.scale();
     let theme = shell.session().active_theme();
-    let size = window_size(active.save.is_some(), scale, theme);
+    let size = window_size(active.banded(), scale, theme);
     compositor.repaint_window(active.wm, size, area, |surface, rects| {
         for rect in rects {
             let Some((x, y)) = rect.surface_origin() else {
@@ -1376,9 +1560,13 @@ fn repaint<S: DirectorySource>(
             };
             surface.with_clip(x, y, rect.width, rect.height, |surface| {
                 paint_listing(surface, &active.browser, scale, theme);
-                if let Some(band) = &active.save {
-                    paint_band(surface, band, scale, theme);
-                }
+                paint_bands(
+                    surface,
+                    active.save.as_ref(),
+                    active.folder.as_ref(),
+                    scale,
+                    theme,
+                );
             });
         }
     });
@@ -1392,7 +1580,7 @@ fn redraw<S: DirectorySource>(
     compositor: &mut Compositor,
 ) {
     let (width, height) = window_size(
-        active.save.is_some(),
+        active.banded(),
         compositor.scale(),
         shell.session().active_theme(),
     );
@@ -1401,7 +1589,7 @@ fn redraw<S: DirectorySource>(
     repaint(active, &whole, shell, compositor);
 }
 
-/// Repaint a save's band alone: a change to the name, a question, or a
+/// Repaint a band alone: a change to the name, a question, progress, or a
 /// refusal moves nothing in the listing.
 fn redraw_band<S: DirectorySource>(
     active: &ActivePick<S>,

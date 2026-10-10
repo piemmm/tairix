@@ -35,6 +35,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::hwlink::LinkRole;
 use tairix_abi::Errno;
 use tairix_kernel_ipc::audit::record;
 use tairix_kernel_ipc::{AuditEvent, CallEndpoint, EndpointId};
@@ -97,6 +98,7 @@ pub fn register(endpoint: Arc<CallEndpoint>, audit: &dyn Sink) -> Result<(), Err
         record(audit, AuditEvent::CallEndpointRegisterDenied, &[id_field]);
         return Err(Errno::AlreadyExists);
     }
+    report_link_service(id);
     Ok(())
 }
 
@@ -113,7 +115,11 @@ pub fn lookup(id: EndpointId) -> Option<Arc<CallEndpoint>> {
 /// Remove the binding for `id`, returning the endpoint that was bound (if
 /// any) so the caller can [`CallEndpoint::destroy`] it. Idempotent.
 pub fn unregister(id: EndpointId) -> Option<Arc<CallEndpoint>> {
-    CALL_ENDPOINTS.lock().remove(&id)
+    let removed = CALL_ENDPOINTS.lock().remove(&id);
+    if removed.is_some() {
+        report_link_service(id);
+    }
+    removed
 }
 
 /// Unbind and [`CallEndpoint::destroy`] every endpoint owned by the exiting
@@ -136,7 +142,48 @@ fn unregister_owned_by(owner: u64, audit: &dyn Sink) -> Vec<EndpointId> {
     for ep in &removed {
         ep.destroy(audit);
     }
-    removed.iter().map(|ep| ep.id()).collect()
+    let ids: Vec<EndpointId> = removed.iter().map(|ep| ep.id()).collect();
+    for &id in &ids {
+        report_link_service(id);
+    }
+    ids
+}
+
+/// An observer of the link suppliers' endpoints: told whether one is live
+/// each time it is bound or unbound, so the hardware tree can state which
+/// suppliers are serving.
+pub trait LinkServiceObserver: Sync {
+    /// The link endpoint `id` is now live, or is not.
+    fn link_service_changed(&self, id: EndpointId, live: bool);
+}
+
+/// The set-once link-service observer, installed by the boot path.
+static LINK_OBSERVER: tairix_sync::OnceCell<&'static dyn LinkServiceObserver> =
+    tairix_sync::OnceCell::new();
+
+/// Orders each report's reading of the registry with its delivery, so the
+/// last report delivered states the registry as it stands.
+static LINK_REPORT: SpinLock<()> = SpinLock::new(());
+
+/// Install the link-service observer. First-wins and idempotent, like the
+/// vanish observer.
+pub fn install_link_observer(observer: &'static dyn LinkServiceObserver) {
+    let _ = LINK_OBSERVER.set(observer);
+}
+
+/// Tell the observer whether `id` is live, when it is a link endpoint.
+///
+/// The registry is re-read rather than the change being passed along: a
+/// teardown and a rebind of one id can race, and a report of what the caller
+/// did could land after the other's and leave the tree stating the past.
+fn report_link_service(id: EndpointId) {
+    if LinkRole::of_endpoint(id.0).is_none() {
+        return;
+    }
+    if let Ok(Some(observer)) = LINK_OBSERVER.get() {
+        let _ordered = LINK_REPORT.lock();
+        observer.link_service_changed(id, contains(id));
+    }
 }
 
 /// An observer of endpoint teardown: told, after the fact, that an owner's
@@ -411,5 +458,79 @@ mod tests {
         let id = EndpointId(0xCA11_0003);
         assert!(lookup(id).is_none());
         assert!(unregister(id).is_none());
+    }
+
+    struct Recorder;
+
+    static REPORTS: std::sync::Mutex<std::vec::Vec<(u64, bool)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+
+    impl LinkServiceObserver for Recorder {
+        fn link_service_changed(&self, id: EndpointId, live: bool) {
+            REPORTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((id.0, live));
+        }
+    }
+
+    static RECORDER: Recorder = Recorder;
+
+    fn reports_for(id: u64) -> std::vec::Vec<bool> {
+        REPORTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|&&(of, _)| of == id)
+            .map(|&(_, live)| live)
+            .collect()
+    }
+
+    /// An endpoint `owner` binds at `id`, which may be reserved.
+    fn privileged_endpoint(id: u64, owner: u64) -> Arc<CallEndpoint> {
+        let sink = NullSink;
+        let mut caps = CapabilitySet::empty();
+        caps.insert(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED);
+        let creator = TaskCapabilities::derive(ProcessId(owner), UserId(1), caps, caps, &sink);
+        let limits = CallEndpointLimits {
+            max_request: 64,
+            max_reply: 64,
+            capacity: 4,
+        };
+        Arc::new(
+            CallEndpoint::create(
+                EndpointId(id),
+                &creator,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                limits,
+                &sink,
+            )
+            .expect("a privileged bind"),
+        )
+    }
+
+    #[test]
+    fn a_link_endpoint_is_reported_live_and_gone_however_it_leaves() {
+        install_link_observer(&RECORDER);
+        let sink = NullSink;
+        let owner = crate::test_boot::claim_task();
+        let clock = tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS.endpoint(0xCA11_0006);
+        register(privileged_endpoint(clock, owner), &sink).expect("bound");
+        assert_eq!(reports_for(clock), [true]);
+        assert!(unregister(EndpointId(clock)).is_some());
+        assert_eq!(reports_for(clock), [true, false]);
+
+        register(privileged_endpoint(clock, owner), &sink).expect("rebound");
+        teardown_owned_by(owner, &RwLock::new(AddressSpaceRegistry::new()), &sink);
+        assert_eq!(reports_for(clock), [true, false, true, false]);
+
+        let plain = 0xCA11_0007;
+        register(endpoint(plain), &sink).expect("bound");
+        unregister(EndpointId(plain));
+        assert!(
+            reports_for(plain).is_empty(),
+            "only a link endpoint is reported"
+        );
     }
 }

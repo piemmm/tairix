@@ -68,10 +68,24 @@ impl Writer {
         Some(Self { out })
     }
 
+    /// Start an empty payload in `buffer`, keeping its capacity, so a
+    /// sender that encodes frame after frame allocates once.
+    #[must_use]
+    pub fn reusing(mut buffer: Vec<u8>) -> Self {
+        buffer.clear();
+        Self { out: buffer }
+    }
+
     /// Finish, yielding the encoded payload.
     #[must_use]
     pub fn finish(self) -> Vec<u8> {
         self.out
+    }
+
+    /// Append `bytes` as they are: a fixed-width field, or a payload whose
+    /// length the frame's own states.
+    pub fn raw(&mut self, bytes: &[u8]) {
+        self.out.extend_from_slice(bytes);
     }
 
     /// Append one byte.
@@ -129,6 +143,13 @@ impl<'a> Reader<'a> {
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
         self.at == self.input.len()
+    }
+
+    /// Bytes not yet consumed: what bounds how many items a declared count
+    /// can honestly name.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.input.len() - self.at
     }
 
     /// Consume `len` raw bytes.
@@ -233,12 +254,21 @@ mod tests {
         let payload = w.finish();
 
         let mut r = Reader::new(&payload);
+        assert_eq!(r.remaining(), payload.len());
         assert_eq!(r.u8(), Ok(0xAB));
         assert_eq!(r.u32(), Ok(0xDEAD_BEEF));
         assert_eq!(r.u64(), Ok(0x0123_4567_89AB_CDEF));
         assert_eq!(r.bytes(16), Ok(&b"raw"[..]));
         assert_eq!(r.string(16), Ok(String::from("text")));
         assert!(r.is_exhausted());
+    }
+
+    #[test]
+    fn a_reused_writer_starts_empty_and_appends_raw_bytes_unprefixed() {
+        let mut w = Writer::reusing(vec![9u8; 32]);
+        w.raw(b"ab");
+        w.u8(1);
+        assert_eq!(w.finish(), b"ab\x01");
     }
 
     #[test]

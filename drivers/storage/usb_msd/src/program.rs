@@ -15,8 +15,7 @@ use tairix_caps::CapabilitySet;
 use tairix_drv_storage_usb_msd::bot::{Bot, MsdTransport};
 use tairix_drv_storage_usb_msd::cbi::{Cbi, CbiStatus};
 use tairix_drv_storage_usb_msd::desc::{
-    configuration_total_length, find_storage_interface, StorageInterface, StorageProtocol,
-    UasEndpoints, CONFIGURATION_HEADER_LEN,
+    find_storage_interface, StorageInterface, StorageProtocol, UasEndpoints,
 };
 use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery, ServeBuffers};
 use tairix_drv_storage_usb_msd::scsi::{
@@ -27,8 +26,8 @@ use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
-use tairix_usb::device::{setup_get_configuration_descriptor, BULK_BUF_LEN};
-use tairix_usb::transport::{UrbCall, UrbClient, UrbLink};
+use tairix_usb::device::BULK_BUF_LEN;
+use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink};
 use tairix_util::fmt::format_hex_u64;
 
 /// Exit code when the rt-backed driver host could not be built from the
@@ -572,9 +571,8 @@ fn map_urb_transport() -> Result<(u64, &'static mut [u8], u8), i32> {
 }
 
 /// Learn `interface`'s transport endpoints from the device's own
-/// configuration descriptor (never assumed): header first for the total
-/// length, then the full stream, parsed in place from the shared buffer the
-/// control-IN landed it in.
+/// configuration descriptor (never assumed), read whole through the shared
+/// buffer each control-IN lands in.
 ///
 /// `Err` is the exit code the entry point returns.
 fn discover_storage_interface(
@@ -582,40 +580,17 @@ fn discover_storage_interface(
     shm: &[u8],
     interface: u8,
 ) -> Result<StorageInterface, i32> {
-    // `wLength` is 16-bit on the wire; refuse rather than truncate.
-    let Ok(header_len) = u16::try_from(CONFIGURATION_HEADER_LEN) else {
-        return Err(EXIT_BRINGUP_FAILED);
-    };
-    let Ok(n) = client.control_in(
-        setup_get_configuration_descriptor(header_len),
-        0,
-        header_len.into(),
-    ) else {
-        return Err(EXIT_BRINGUP_FAILED);
-    };
-    let Ok(total) = configuration_total_length(&shm[..(n as usize).min(shm.len())]) else {
-        return Err(EXIT_BRINGUP_FAILED);
-    };
-    // A configuration stream larger than the shared buffer cannot be
-    // fetched over this transport; refuse the device rather than parse a
-    // truncated stream.
-    let Ok(total_u16) = u16::try_from(total) else {
-        return Err(EXIT_BRINGUP_FAILED);
-    };
-    if total > shm.len() {
-        return Err(EXIT_BRINGUP_FAILED);
-    }
-    let Ok(n) = client.control_in(
-        setup_get_configuration_descriptor(total_u16),
-        0,
-        total_u16.into(),
-    ) else {
-        return Err(EXIT_BRINGUP_FAILED);
-    };
-    if (n as usize) < total {
-        return Err(EXIT_BRINGUP_FAILED);
-    }
-    find_storage_interface(&shm[..total], interface).map_err(|_| EXIT_BRINGUP_FAILED)
+    let config = read_configuration(&mut |setup, data| {
+        let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let delivered = usize::try_from(client.control_in(setup, len)?)
+            .map_err(|_| Errno::LengthOutOfRange)?
+            .min(data.len());
+        let landed = shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
+        data[..delivered].copy_from_slice(landed);
+        Ok(delivered)
+    })
+    .map_err(|_| EXIT_BRINGUP_FAILED)?;
+    find_storage_interface(&config, interface).map_err(|_| EXIT_BRINGUP_FAILED)
 }
 
 /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime

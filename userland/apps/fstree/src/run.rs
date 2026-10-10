@@ -43,7 +43,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK, FS_SYMLINK_MAX};
-    use tairix_abi::{Errno, FileKind, InputMode, UnlinkFlags, STDOUT};
+    use tairix_abi::{Errno, FileKind, InputMode, RenameFlags, UnlinkFlags, STDOUT};
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
     use tairix_fstree::{run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo};
@@ -398,8 +398,13 @@ mod program {
             Ok(())
         }
 
-        fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno> {
-            let ret = tairix_rt::fs_rename(src.as_bytes(), dst.as_bytes());
+        fn rename(
+            &mut self,
+            src: &str,
+            dst: &str,
+            flags: RenameFlags,
+        ) -> Result<RenameOutcome, Errno> {
+            let ret = tairix_rt::fs_rename(src.as_bytes(), dst.as_bytes(), flags);
             if ret == 0 {
                 self.forget(src);
                 self.forget(dst);

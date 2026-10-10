@@ -221,6 +221,7 @@ impl KnownNamespace {
             KnownNamespace::Info => INFO_SELECTORS,
             KnownNamespace::State => STATE_SELECTORS,
             KnownNamespace::Stats => STATS_SELECTORS,
+            KnownNamespace::Audio => AUDIO_SELECTORS,
             // No resolver is wired for these namespaces yet; their members
             // are discovered per machine and gain a catalogue in place when
             // a resolver lands.
@@ -230,7 +231,6 @@ impl KnownNamespace {
             | KnownNamespace::Tty
             | KnownNamespace::Net
             | KnownNamespace::Input
-            | KnownNamespace::Audio
             | KnownNamespace::Gpu
             | KnownNamespace::Bus
             | KnownNamespace::Svc
@@ -259,6 +259,10 @@ impl KnownNamespace {
             KnownNamespace::Info | KnownNamespace::State | KnownNamespace::Stats => {
                 NamespaceBacking::Value
             }
+            // Opened through the audio service's own stream protocol; the
+            // single path it keeps has no device node beside it
+            // (`plans/SOUND.md`).
+            KnownNamespace::Audio => NamespaceBacking::Service,
             // Byte streams. `sys:` is resolved by the kernel today; the
             // device namespaces are streams whose resolvers land in place as
             // their consumers appear.
@@ -269,7 +273,6 @@ impl KnownNamespace {
             | KnownNamespace::Tty
             | KnownNamespace::Net
             | KnownNamespace::Input
-            | KnownNamespace::Audio
             | KnownNamespace::Gpu
             | KnownNamespace::Bus
             | KnownNamespace::Svc
@@ -323,6 +326,11 @@ pub enum NamespaceBacking {
     /// such form: a value-backed resource is changed by a typed service
     /// command.
     Value,
+    /// A name the service that owns it resolves through its own protocol:
+    /// an `audio:` reference names the sink or source a stream is opened on
+    /// through `audio-v1`. Neither a byte stream — there is no raw device
+    /// node to open — nor a value to read.
+    Service,
 }
 
 /// The typed set a [`SelectorEntry`] placeholder segment draws its names
@@ -353,6 +361,12 @@ pub enum SelectorDomain {
     LimitKind,
     /// A reclaim class (`<class>`) — `tairix_abi::sysinfo::RECLAIM_CLASS_NAMES`.
     ReclaimClass,
+    /// A sink (`<sink>`): a playback device's id or location, discovered per
+    /// machine.
+    Sink,
+    /// A source (`<source>`): a capture device's id or location, discovered
+    /// per machine.
+    Source,
 }
 
 /// One entry in a namespace's *selector catalogue*: a selector spelling the
@@ -429,6 +443,8 @@ pub fn placeholder_domain(segment: &str) -> Option<SelectorDomain> {
         "<cpu>" => SelectorDomain::Cpu,
         "<kind>" => SelectorDomain::LimitKind,
         "<class>" => SelectorDomain::ReclaimClass,
+        "<sink>" => SelectorDomain::Sink,
+        "<source>" => SelectorDomain::Source,
         _ => return None,
     })
 }
@@ -442,6 +458,15 @@ pub fn is_placeholder(segment: &str) -> bool {
 
 /// The `sys:` catalogue: the kernel-resolved unprivileged members
 /// (`kernel/core`'s `resource` resolver).
+/// The `audio:` selectors: each direction's default, and one device named
+/// by its id for this boot or its location across boots (`plans/SOUND.md`).
+const AUDIO_SELECTORS: &[SelectorEntry] = &[
+    SelectorEntry::bare("sink/default"),
+    SelectorEntry::bare("sink/<sink>"),
+    SelectorEntry::bare("source/default"),
+    SelectorEntry::bare("source/<source>"),
+];
+
 const SYS_SELECTORS: &[SelectorEntry] =
     &[SelectorEntry::bare("null"), SelectorEntry::bare("random")];
 
@@ -1567,11 +1592,14 @@ mod tests {
                 KnownNamespace::State
             ],
         );
-        // `sys:` — the one namespace with a wired resolver today — is a
-        // stream, and so is every namespace still awaiting one.
+        // `audio:` is its service's own to resolve. `sys:` — the one
+        // namespace with a wired kernel resolver today — is a stream, and so
+        // is every namespace still awaiting one.
         for ns in KnownNamespace::ALL {
             let expected = if value.contains(&ns) {
                 NamespaceBacking::Value
+            } else if ns == KnownNamespace::Audio {
+                NamespaceBacking::Service
             } else {
                 NamespaceBacking::Stream
             };
@@ -1609,12 +1637,15 @@ mod tests {
     #[test]
     fn unserved_namespaces_have_no_catalogue() {
         for ns in KnownNamespace::ALL {
+            // `audio:` is resolved against the live devices by
+            // `lib/audio::target`.
             let served = matches!(
                 ns,
                 KnownNamespace::Sys
                     | KnownNamespace::Info
                     | KnownNamespace::State
                     | KnownNamespace::Stats
+                    | KnownNamespace::Audio
             );
             assert_eq!(
                 !ns.selector_catalogue().is_empty(),

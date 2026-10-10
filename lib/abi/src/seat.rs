@@ -20,6 +20,7 @@
 //! guessing.
 
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::Errno;
 
 /// Reserved well-known call-endpoint id of the seat-manager service
@@ -124,74 +125,142 @@ impl ReleaseSurface {
 
 /// The boot seat's display lease, as the
 /// [`NoticeTopic::DisplayLease`](crate::notice::NoticeTopic::DisplayLease)
-/// topic carries it.
+/// topic carries it: where the lease stands, and the login session its holder
+/// lies within.
 ///
-/// One word that only ever grows across the seat's lease transitions: twice
-/// the generation of the last lease minted, plus one once that lease has
-/// ended. It is therefore the topic's generation as well as its payload, so a
-/// subscriber can never read a lease older than the edge that woke it, and a
-/// lease that came and went while nobody looked still moves the word.
+/// The lease is one word that only ever grows across the seat's transitions:
+/// four times the generation of the last lease minted, plus its phase — held,
+/// ended in a handover, or ended back to the text console. It is therefore the
+/// topic's generation as well as its payload's head, so a subscriber can never
+/// read a lease older than the edge that woke it, a lease that came and went
+/// while nobody looked still moves the word, and so does a handover the text
+/// console takes back without a lease.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct DisplayLease(u64);
+pub struct DisplayLease {
+    word: u64,
+    session: ProcId,
+}
 
 impl DisplayLease {
     /// A seat nobody has held yet.
-    pub const UNHELD: Self = Self(0);
+    pub const UNHELD: Self = Self {
+        word: 0,
+        session: ProcId::KERNEL,
+    };
 
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 8;
+    pub const WIRE_LEN: usize = 8 + PROC_ID_LEN;
 
-    /// The lease minted as `generation`, still held or since ended. The
-    /// never-minted generation `0` is [`Self::UNHELD`] either way.
+    /// Low bits of the word naming the lease's phase.
+    const PHASE: u64 = 0b11;
+    const HELD: u64 = 0;
+    const HANDOVER: u64 = 1;
+    const TEXT: u64 = 2;
+
+    /// The lease minted as `generation`, held by a process `session` encloses
+    /// ([`ProcId::KERNEL`] where no login does). The never-minted generation
+    /// `0` is [`Self::UNHELD`].
     #[must_use]
-    pub const fn new(generation: u64, held: bool) -> Self {
+    pub const fn held(generation: u64, session: ProcId) -> Self {
         if generation == 0 {
             return Self::UNHELD;
         }
-        Self(generation.wrapping_mul(2) | if held { 0 } else { 1 })
+        Self {
+            word: generation.wrapping_mul(4) | Self::HELD,
+            session,
+        }
+    }
+
+    /// The lease minted as `generation`, since ended with the screen gone to
+    /// `surface`.
+    #[must_use]
+    pub const fn ended(generation: u64, surface: ReleaseSurface) -> Self {
+        if generation == 0 {
+            return Self::UNHELD;
+        }
+        let phase = match surface {
+            ReleaseSurface::Text => Self::TEXT,
+            ReleaseSurface::Handover => Self::HANDOVER,
+        };
+        Self {
+            word: generation.wrapping_mul(4) | phase,
+            session: ProcId::KERNEL,
+        }
     }
 
     /// The generation the seat is held under, or `None` while nobody holds
     /// it.
     #[must_use]
     pub const fn live_generation(self) -> Option<u64> {
-        if self.0 == 0 || self.0 & 1 == 1 {
-            None
+        if self.word != 0 && self.word & Self::PHASE == Self::HELD {
+            Some(self.word >> 2)
         } else {
-            Some(self.0 >> 1)
+            None
         }
     }
 
-    /// The raw word, which only grows across transitions.
+    /// Where the screen went when the lease ended, or `None` while it is
+    /// held. A seat nobody has held is its text console's.
     #[must_use]
-    pub const fn epoch(self) -> u64 {
-        self.0
+    pub const fn released_to(self) -> Option<ReleaseSurface> {
+        if self.word == 0 {
+            return Some(ReleaseSurface::Text);
+        }
+        match self.word & Self::PHASE {
+            Self::HELD => None,
+            Self::HANDOVER => Some(ReleaseSurface::Handover),
+            _ => Some(ReleaseSurface::Text),
+        }
     }
 
-    /// The lease a raw word names. Every word is one some sequence of
-    /// transitions produces, so none is refused.
+    /// The login session the holder lies within, while a process one encloses
+    /// holds the seat.
     #[must_use]
-    pub const fn from_epoch(epoch: u64) -> Self {
-        Self(epoch)
+    pub fn session(self) -> Option<ProcId> {
+        (!self.session.is_kernel()).then_some(self.session)
+    }
+
+    /// The word, which only grows across transitions and names no holder.
+    #[must_use]
+    pub const fn epoch(self) -> u64 {
+        self.word
     }
 
     /// Encode `self` little-endian.
     #[must_use]
-    pub const fn to_le_bytes(self) -> [u8; Self::WIRE_LEN] {
-        self.0.to_le_bytes()
+    pub fn to_le_bytes(self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.word);
+        out[8..].copy_from_slice(self.session.as_bytes());
+        out
     }
 
-    /// Decode from `bytes`; only the length can be wrong.
+    /// Decode from `bytes`.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] unless `bytes` is exactly
-    /// [`Self::WIRE_LEN`] long.
+    /// [`Self::WIRE_LEN`] long, and [`Errno::BadMagic`] for a word no sequence
+    /// of transitions produces or a session named while nobody holds the
+    /// seat.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != Self::WIRE_LEN {
             return Err(Errno::LengthOutOfRange);
         }
-        Ok(Self::from_epoch(read_u64(bytes, 0)))
+        let lease = Self {
+            word: read_u64(bytes, 0),
+            session: ProcId::from_bytes(&bytes[8..])?,
+        };
+        let phase = lease.word & Self::PHASE;
+        let reachable = if lease.word >> 2 == 0 {
+            lease.word == 0
+        } else {
+            phase != Self::PHASE
+        };
+        if !reachable || (lease.live_generation().is_none() && !lease.session.is_kernel()) {
+            return Err(Errno::BadMagic);
+        }
+        Ok(lease)
     }
 }
 
@@ -306,28 +375,55 @@ impl SeatAdminRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayLease, SeatAdminRequest, SEATMGR_REPLY_LEN, SEATMGR_REQUEST_MAGIC};
+    use super::{
+        DisplayLease, ReleaseSurface, SeatAdminRequest, SEATMGR_REPLY_LEN, SEATMGR_REQUEST_MAGIC,
+    };
+    use crate::origin::{ProcId, PROC_ID_LEN};
     use crate::Errno;
 
+    const DESKTOP: ProcId = ProcId::from_raw([0x51; PROC_ID_LEN]);
+
     #[test]
-    fn a_lease_names_its_generation_only_while_held() {
+    fn a_lease_names_its_generation_and_holder_only_while_held() {
         assert_eq!(DisplayLease::UNHELD.live_generation(), None);
-        assert_eq!(DisplayLease::new(0, true), DisplayLease::UNHELD);
-        assert_eq!(DisplayLease::new(7, true).live_generation(), Some(7));
-        assert_eq!(DisplayLease::new(7, false).live_generation(), None);
+        assert_eq!(
+            DisplayLease::UNHELD.released_to(),
+            Some(ReleaseSurface::Text)
+        );
+        assert_eq!(DisplayLease::held(0, DESKTOP), DisplayLease::UNHELD);
+        assert_eq!(
+            DisplayLease::ended(0, ReleaseSurface::Handover),
+            DisplayLease::UNHELD
+        );
+
+        let held = DisplayLease::held(7, DESKTOP);
+        assert_eq!(held.live_generation(), Some(7));
+        assert_eq!(held.released_to(), None);
+        assert_eq!(held.session(), Some(DESKTOP));
+        assert_eq!(DisplayLease::held(7, ProcId::KERNEL).session(), None);
+
+        for surface in [ReleaseSurface::Text, ReleaseSurface::Handover] {
+            let ended = DisplayLease::ended(7, surface);
+            assert_eq!(ended.live_generation(), None);
+            assert_eq!(ended.released_to(), Some(surface));
+            assert_eq!(ended.session(), None);
+        }
     }
 
-    /// Acquire, release, acquire again: every transition grows the word, so it
-    /// can stand as the topic's generation.
+    /// Every transition grows the word — including the text console taking a
+    /// handover back with no lease minted — so it can stand as the topic's
+    /// generation.
     #[test]
     fn the_word_grows_across_every_transition() {
         let sequence = [
             DisplayLease::UNHELD,
-            DisplayLease::new(1, true),
-            DisplayLease::new(1, false),
-            DisplayLease::new(2, true),
-            DisplayLease::new(2, false),
-            DisplayLease::new(3, true),
+            DisplayLease::held(1, DESKTOP),
+            DisplayLease::ended(1, ReleaseSurface::Handover),
+            DisplayLease::ended(1, ReleaseSurface::Text),
+            DisplayLease::held(2, ProcId::KERNEL),
+            DisplayLease::ended(2, ReleaseSurface::Handover),
+            DisplayLease::held(3, DESKTOP),
+            DisplayLease::ended(3, ReleaseSurface::Text),
         ];
         for pair in sequence.windows(2) {
             assert!(pair[1].epoch() > pair[0].epoch(), "{pair:?}");
@@ -335,8 +431,14 @@ mod tests {
     }
 
     #[test]
-    fn a_lease_round_trips_and_refuses_a_wrong_length() {
-        for lease in [DisplayLease::UNHELD, DisplayLease::new(9, true)] {
+    fn a_lease_round_trips_and_refuses_what_no_transition_produces() {
+        for lease in [
+            DisplayLease::UNHELD,
+            DisplayLease::held(9, DESKTOP),
+            DisplayLease::held(9, ProcId::KERNEL),
+            DisplayLease::ended(9, ReleaseSurface::Text),
+            DisplayLease::ended(9, ReleaseSurface::Handover),
+        ] {
             assert_eq!(DisplayLease::from_bytes(&lease.to_le_bytes()), Ok(lease));
         }
         assert_eq!(
@@ -347,6 +449,23 @@ mod tests {
             DisplayLease::from_bytes(&[0u8; DisplayLease::WIRE_LEN + 1]),
             Err(Errno::LengthOutOfRange)
         );
+
+        let mut unused_phase = DisplayLease::held(9, DESKTOP).to_le_bytes();
+        unused_phase[0] |= 0b11;
+        let mut phase_without_lease = DisplayLease::UNHELD.to_le_bytes();
+        phase_without_lease[0] = 0b10;
+        let mut holder_after_end = DisplayLease::ended(9, ReleaseSurface::Text).to_le_bytes();
+        holder_after_end[8..].copy_from_slice(DESKTOP.as_bytes());
+        let mut holder_never_held = DisplayLease::UNHELD.to_le_bytes();
+        holder_never_held[8] = 1;
+        for corrupt in [
+            unused_phase,
+            phase_without_lease,
+            holder_after_end,
+            holder_never_held,
+        ] {
+            assert_eq!(DisplayLease::from_bytes(&corrupt), Err(Errno::BadMagic));
+        }
     }
 
     #[test]

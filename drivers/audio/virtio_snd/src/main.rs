@@ -157,7 +157,7 @@ mod program {
                     Ok(audio) => audio,
                     Err(err) => return fail(exit::BRINGUP_FAILED, OPEN_REFUSED, Some(err)),
                 };
-                tairix_audiochan::serve(audio, irq_handle)
+                tairix_audiochan::serve(audio, &[tairix_audiochan::Wake::Irq(irq_handle)])
             }
             // No role-tagged window at all: a single-aperture MMIO delivery.
             Err(DriverError::NotFound) => {
@@ -195,7 +195,7 @@ mod program {
                     Ok(audio) => audio,
                     Err(err) => return fail(exit::BRINGUP_FAILED, OPEN_REFUSED, Some(err)),
                 };
-                tairix_audiochan::serve(audio, irq_handle)
+                tairix_audiochan::serve(audio, &[tairix_audiochan::Wake::Irq(irq_handle)])
             }
             // Some virtio-PCI windows but not the full four — a malformed,
             // mis-provisioned node. Fail closed rather than half-bind.

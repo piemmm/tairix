@@ -143,13 +143,6 @@ impl RwMockFs {
         self.nodes.len() - 1
     }
 
-    fn names_match(matching: NameMatching, stored: &str, wanted: &str) -> bool {
-        match matching {
-            NameMatching::Exact => stored == wanted,
-            NameMatching::AsciiCaseInsensitive => stored.eq_ignore_ascii_case(wanted),
-        }
-    }
-
     /// Set the owner/mode a node created through the write surface receives,
     /// so a test can create files the resolving principal then owns.
     #[cfg(test)]
@@ -192,11 +185,22 @@ impl RwMockFs {
         };
         let needle = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
         for (k, &v) in children {
-            if Self::names_match(self.name_matching, k, needle) {
+            if self.name_matching.matches(k.as_bytes(), needle.as_bytes()) {
                 return Ok(Some(v));
             }
         }
         Ok(None)
+    }
+
+    /// The spelling directory `dir_idx` stores for the entry `name` matches.
+    fn stored_name(&self, dir_idx: usize, name: &[u8]) -> Option<&[u8]> {
+        let RwNode::Dir(children) = self.nodes.get(dir_idx)? else {
+            return None;
+        };
+        children
+            .keys()
+            .find(|k| self.name_matching.matches(k.as_bytes(), name))
+            .map(String::as_bytes)
     }
 
     /// Remove the entry named `name` from directory `dir_idx`, returning the
@@ -212,7 +216,7 @@ impl RwMockFs {
         };
         let key = children
             .keys()
-            .find(|k| Self::names_match(matching, k, name))
+            .find(|k| matching.matches(k.as_bytes(), name.as_bytes()))
             .cloned()?;
         let child = children.remove(&key)?;
         self.generation = self.generation.wrapping_add(1);
@@ -520,21 +524,30 @@ impl FilesystemWrite for RwMockFs {
             return Err(DriverError::DirectoryCycle);
         }
 
-        // Replace an existing destination of a compatible kind.
-        if let Some(dst_idx) = self.child_index(dst_dir, dst_name)? {
-            if dst_idx == src_idx {
-                return Ok(());
-            }
-            let dst_is_dir = matches!(self.nodes[dst_idx], RwNode::Dir(_));
-            if dst_is_dir != moving_dir {
-                return Err(DriverError::Unsupported);
-            }
-            if let RwNode::Dir(children) = &self.nodes[dst_idx] {
-                if !children.is_empty() {
-                    return Err(DriverError::DirectoryNotEmpty);
+        match self.child_index(dst_dir, dst_name)? {
+            Some(dst_idx) if dst_idx == src_idx => {
+                // Another name for the same node is left alone, as POSIX has
+                // it; the source's own entry takes the spelling asked for.
+                let own_entry =
+                    src_dir == dst_dir && self.name_matching.matches(src_name, dst_name);
+                if !own_entry || self.stored_name(dst_dir_idx, dst_name) == Some(dst_name) {
+                    return Ok(());
                 }
             }
-            self.unlink_name(dst_dir_idx, &dst_key);
+            // Replace an existing destination of a compatible kind.
+            Some(dst_idx) => {
+                let dst_is_dir = matches!(self.nodes[dst_idx], RwNode::Dir(_));
+                if dst_is_dir != moving_dir {
+                    return Err(DriverError::Unsupported);
+                }
+                if let RwNode::Dir(children) = &self.nodes[dst_idx] {
+                    if !children.is_empty() {
+                        return Err(DriverError::DirectoryNotEmpty);
+                    }
+                }
+                self.unlink_name(dst_dir_idx, &dst_key);
+            }
+            None => {}
         }
 
         // Detach the source name and attach the node under the new name; the

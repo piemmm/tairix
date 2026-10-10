@@ -28,11 +28,14 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-#[cfg(any(test, feature = "test-fixtures"))]
+#[cfg(any(test, feature = "writer"))]
 extern crate alloc;
 
 #[cfg(any(test, feature = "test-fixtures"))]
 pub mod fixture;
+
+#[cfg(any(test, feature = "writer"))]
+pub mod write;
 
 pub mod bus;
 pub mod idmap;
@@ -1257,12 +1260,13 @@ pub struct CpuNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{arm_with_cpus, virt_like, virt_like_arm, DtbBuilder};
+    use crate::fixture::{arm_with_cpus, virt_like, virt_like_arm};
+    use crate::write::FdtWriter;
     use alloc::vec::Vec;
 
     #[test]
     fn a_phandle_is_read_from_either_spelling_and_never_a_reserved_value() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         for (name, property, value) in [
             ("modern", "phandle", 7u32),
@@ -1338,7 +1342,7 @@ mod tests {
     #[test]
     fn memory_uses_root_cell_counts() {
         // A tree declaring 1/1 root cells must read 32-bit base+size.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1356,7 +1360,7 @@ mod tests {
 
     #[test]
     fn missing_memory_node_returns_none() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1372,7 +1376,7 @@ mod tests {
 
     #[test]
     fn first_memory_node_wins_over_later_ones() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1407,7 +1411,7 @@ mod tests {
         // Pi 4 (8 GiB) shape: one /memory node whose reg carries the
         // below-hole window plus the 1 GiB..4 GiB window, and a second
         // /memory node for the range above 4 GiB.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1443,7 +1447,7 @@ mod tests {
     #[test]
     fn a_disabled_memory_node_contributes_no_ram_wherever_its_status_sits() {
         // QEMU `virt,secure=on` shape: memory only the secure world may use.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1473,7 +1477,7 @@ mod tests {
 
     #[test]
     fn operational_nodes_skip_each_unusable_node_with_its_subtree() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("cpus");
         b.begin_node("cpu@0");
@@ -1539,7 +1543,7 @@ mod tests {
 
     #[test]
     fn each_cpu_lists_a_quiescent_cpu_and_no_failed_or_reserved_one() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("cpus");
         b.prop_u32("#address-cells", 1);
@@ -1585,7 +1589,7 @@ mod tests {
 
     #[test]
     fn each_memory_region_honours_one_cell_layouts() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1610,7 +1614,7 @@ mod tests {
     fn each_memory_region_ignores_a_truncated_trailing_pair() {
         // A reg holding one whole pair plus a dangling half pair yields
         // only the whole pair — never an invented range.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1721,7 +1725,7 @@ mod tests {
     fn spin_table_release_requires_the_spin_table_enable_method() {
         // A `cpu-release-addr` without `enable-method = "spin-table"`
         // (or under a different method) is not a release target.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("cpus");
         b.begin_node("cpu@1");
@@ -1747,7 +1751,7 @@ mod tests {
     fn spin_table_release_rejects_a_zero_or_malformed_address() {
         // A zero release address is firmware's "not provided"; a
         // wrong-sized property does not decode. Both fail closed.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("cpus");
         b.begin_node("cpu@1");
@@ -1793,7 +1797,7 @@ mod tests {
     /// A minimal tree with one `/cpus/cpu@0` node carrying `compatible`,
     /// plus a `cpu-map` sibling that must not be mistaken for a cpu node.
     fn tree_with_cpu_compatible(compatible: Option<&[u8]>) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("cpus");
         b.begin_node("cpu-map");
@@ -1834,7 +1838,7 @@ mod tests {
 
     #[test]
     fn property_u64_decodes_single_and_double_cells() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("chosen");
         b.prop_u32("one-cell", 0x1234);
@@ -1858,7 +1862,7 @@ mod tests {
             let byte = u8::try_from(i).unwrap_or(0);
             byte.wrapping_mul(7).wrapping_add(3)
         });
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("chosen");
         b.prop("rng-seed", &seed);
@@ -1873,7 +1877,7 @@ mod tests {
     fn chosen_rng_seed_is_none_without_the_property() {
         // A `/chosen` with an unrelated property, and a tree with no
         // `/chosen` at all, both yield `None` rather than a guessed value.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("chosen");
         b.prop("stdout-path", b"/serial\0");
@@ -1893,7 +1897,7 @@ mod tests {
         // A `virt`-shaped tree: two virtio-MMIO transports and an
         // unrelated `/memory` node, mirroring the QEMU `virt` layout the
         // bus enumerator walks.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1963,7 +1967,7 @@ mod tests {
 
     #[test]
     fn property_reads_fail_closed_past_the_value_end() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("dev");
         b.prop("reg", &0x1234u32.to_be_bytes());
@@ -1988,9 +1992,9 @@ mod tests {
     fn nodes_fail_closed_on_malformed_token() {
         let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 14);
         let mut corrupt = blob.clone();
-        // Overwrite the first structure-block token with an unknown value
-        // (the structure block begins at the 40-byte header end).
-        corrupt[40..44].copy_from_slice(&0x00ff_ff00u32.to_be_bytes());
+        // Overwrite the first structure-block token with an unknown value.
+        let struct_off = u32::from_be_bytes(blob[8..12].try_into().expect("header")) as usize;
+        corrupt[struct_off..struct_off + 4].copy_from_slice(&0x00ff_ff00u32.to_be_bytes());
         let fdt = Fdt::new(&corrupt).expect("header still valid");
         assert!(matches!(fdt.nodes().next(), Some(Err(FdtError::Malformed))));
     }
@@ -1998,7 +2002,7 @@ mod tests {
     /// Two sibling nodes, `a` then `b`, each carrying `reg = <0x1234>` and
     /// the compatible `vendor,<name>`.
     fn two_siblings() -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         for (name, compatible) in [("a", "vendor,a"), ("b", "vendor,b")] {
             b.begin_node(name);

@@ -14,15 +14,16 @@
 //! |-----:|-------|-------------------------------|------|
 //! | 3000 | Info  | `PORT_CREATED`                | A capability-checked port was created. |
 //! | 3001 | Error | `PORT_CREATE_DENIED`          | A port-creation request was refused (creator lacks bind authority). |
-//! | 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed (any subsequent send fails closed). |
+//! | 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed (any subsequent send fails closed). `drained` counts the messages discarded with it, `refused` the sends refused over its life because its owner admitted another sender. |
 //! | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry under its `EndpointId`. |
 //! | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused because the `EndpointId` was already bound. |
 //! | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
 //! | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint in the registry. |
 //! | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
 //! | 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
+//! | 3009 | Info  | `PORT_SENDER_ADMITTED`        | A port's owner admitted the one sender its port takes; `discarded` counts the queued messages of other senders dropped with it. |
 //! | 3010 | Debug | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. Recorded at `Debug` for the same reason as `CALL_POSTED` (3043): routine high-throughput transport. |
-//! | 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused because the sender lacked the port's required capabilities. |
+//! | 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused. `reason` discriminates: `missing_capability` (the sender lacks the port's required capabilities) or `not_admitted` (the port's owner admitted another sender — recorded once per admission, the rest counted into `PORT_DESTROYED`, so a sender the port will never take cannot flood the trail). |
 //! | 3012 | Error | `MESSAGE_TOO_LARGE`           | A send was refused because the payload exceeded the port's `max_payload`. |
 //! | 3013 | Error | `MESSAGE_SEND_TO_CLOSED_PORT` | A send raced with destruction and lost. |
 //! | 3014 | Debug | `MAILBOX_FULL`                | A send was refused because the receiver's mailbox was full. Recorded at `Debug`: a busy receiver is a routine resource condition on a normal high-rate path, not an authorisation decision, so recording one per refused send would flood the log; forensics recovers it by lowering the level. |
@@ -46,6 +47,8 @@
 //! | 3053 | Warn  | `CALL_TIMED_OUT`              | An in-flight call's deadline elapsed before the server replied; the ticket is retired and a late reply is refused. Recorded because the caller's own failure may be handled silently — for an in-kernel caller (the filesystem's block path) this is the only trace that a device missed its budget. |
 //! | 3050 | Error | `CALL_ENDPOINT_REGISTER_DENIED` | A registry bind was refused because the `EndpointId` was already bound (the created endpoint is dropped; mirrors `PORT_REGISTER_DENIED`, 3004). |
 //! | 3051 | Info  | `CALL_POSTER_VANISHED`        | A caller task exited with calls still in flight on this endpoint; the kernel cancelled them (queued requests dropped before service, in-service tickets retired so the server's reply fails closed, unclaimed replies discarded). |
+//! | 3052 | Info  | `CALL_ENDPOINT_GRANTS_REVOKED` | A destroyed endpoint's delegated per-endpoint grants were revoked. |
+//! | 3060 | Error | `PAYLOAD_ALLOC_FAILED`        | The kernel heap could not hold the wiped-on-drop copy of a port send, call post, or reply, so the transfer failed closed. |
 //!
 //! Adding a new event requires assigning the next free identifier in
 //! this file and appending a row to the table in
@@ -80,13 +83,17 @@ pub enum AuditEvent {
     /// A well-known name binding was removed (explicitly, or because the
     /// endpoint it resolved to was unregistered).
     PortNameWithdrawn,
+    /// A port's owner admitted the one sender its port takes, discarding
+    /// what other senders had queued.
+    PortSenderAdmitted,
     /// A message was enqueued for delivery.
     ///
     /// Recorded at [`Level::Debug`] for the same reason as
     /// [`Self::CallPosted`]: a routine high-throughput transport, not an
     /// authorisation decision.
     MessageDelivered,
-    /// A send was refused for lack of the port's required capabilities.
+    /// A send was refused: the sender lacks the port's required
+    /// capabilities, or the port's owner admitted another sender.
     MessageSendDenied,
     /// A send was refused because the payload exceeded `max_payload`.
     MessageTooLarge,
@@ -184,6 +191,7 @@ impl AuditEvent {
             Self::PortNamePublished => 3006,
             Self::PortNamePublishDenied => 3007,
             Self::PortNameWithdrawn => 3008,
+            Self::PortSenderAdmitted => 3009,
             Self::MessageDelivered => 3010,
             Self::MessageSendDenied => 3011,
             Self::MessageTooLarge => 3012,
@@ -247,6 +255,7 @@ impl AuditEvent {
             | Self::PortUnregistered
             | Self::PortNamePublished
             | Self::PortNameWithdrawn
+            | Self::PortSenderAdmitted
             | Self::ShmemCreated
             | Self::ShmemMapped
             | Self::ShmemRevoked
@@ -298,6 +307,7 @@ impl AuditEvent {
             Self::PortNamePublished => "ipc port name published",
             Self::PortNamePublishDenied => "ipc port name publish denied",
             Self::PortNameWithdrawn => "ipc port name withdrawn",
+            Self::PortSenderAdmitted => "ipc port sender admitted",
             Self::MessageDelivered => "ipc message delivered",
             Self::MessageSendDenied => "ipc message send denied",
             Self::MessageTooLarge => "ipc message too large",
@@ -421,6 +431,7 @@ mod tests {
         assert_eq!(AuditEvent::PortNamePublished.id(), EventId(3006));
         assert_eq!(AuditEvent::PortNamePublishDenied.id(), EventId(3007));
         assert_eq!(AuditEvent::PortNameWithdrawn.id(), EventId(3008));
+        assert_eq!(AuditEvent::PortSenderAdmitted.id(), EventId(3009));
         assert_eq!(AuditEvent::MessageDelivered.id(), EventId(3010));
         assert_eq!(AuditEvent::MessageSendDenied.id(), EventId(3011));
         assert_eq!(AuditEvent::MessageTooLarge.id(), EventId(3012));
@@ -447,6 +458,7 @@ mod tests {
         assert_eq!(AuditEvent::CallEndpointRegisterDenied.id(), EventId(3050));
         assert_eq!(AuditEvent::CallPosterVanished.id(), EventId(3051));
         assert_eq!(AuditEvent::CallEndpointGrantsRevoked.id(), EventId(3052));
+        assert_eq!(AuditEvent::CallTimedOut.id(), EventId(3053));
     }
 
     #[test]
@@ -461,6 +473,7 @@ mod tests {
             AuditEvent::PortNamePublished,
             AuditEvent::PortNamePublishDenied,
             AuditEvent::PortNameWithdrawn,
+            AuditEvent::PortSenderAdmitted,
             AuditEvent::MessageDelivered,
             AuditEvent::MessageSendDenied,
             AuditEvent::MessageTooLarge,
@@ -486,6 +499,8 @@ mod tests {
             AuditEvent::CallEndpointRegisterDenied,
             AuditEvent::CallPosterVanished,
             AuditEvent::CallEndpointGrantsRevoked,
+            AuditEvent::CallTimedOut,
+            AuditEvent::PayloadAllocFailed,
         ] {
             let id = ev.id().0;
             assert!(

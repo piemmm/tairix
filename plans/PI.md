@@ -33,6 +33,9 @@ say — the standing task direction supersedes that language. Changing a
 | **P11** | Login on the consoles | in progress |
 | **P12** | On-board gigabit Ethernet (GENET) | in progress |
 | **P13** | The legacy DMA engines (`drivers/dma/bcm2835`, `plans/SOUND.md` SND5) — host-proven; its metal run is SND8's first transfer | in progress |
+| **P14** | The clock manager (`drivers/clock/bcm2711_cprman`, `plans/SOUND.md` SND8c) — host-proven against a register model; its metal run is the PWM audio's first clock, with the PLLD rate it reads checked against the firmware's | in progress |
+| **P15** | The headphone jack (`drivers/audio/bcm2711_pwm`, `plans/SOUND.md` SND8e) — host-proven, its shaped noise measured; its metal run measures the analogue output | in progress |
+| **P16** | The I²S interface and its codecs (`drivers/audio/bcm2711_i2s`, `pcm5102a`, `pcm5122`, `plans/SOUND.md` SND8f, SND8g) — host-proven against register models and suppliers that decode every frame; its metal run plays through a HAT of each codec | in progress |
 
 ---
 
@@ -2964,6 +2967,73 @@ rest is metal.
    its channel's line, including channels 7–10 on their shared lines.
 3. A consumer killed mid-stream has its channel stopped and released, and
    the next instance of its driver opens the same line.
+
+**Done when:** the checklist above is recorded against a real Pi 4B.
+
+### P14 — The clock manager
+
+`drivers/clock/bcm2711_cprman` binds the discovered `brcm,bcm2711-cprman`
+node, serves its `clock-v1` endpoint for the PCM and PWM clocks and ships as
+`/System/Drivers/clock/bcm2711_cprman/Run`. It is host-proven against a
+register-level model of the generators and PLL registers
+(`docs/src/drivers/clock.md`); there is no `raspi4b` vertical (no firmware
+tree hand-off), so the rest is metal.
+
+**Metal checklist**, run with SND8's first consumer:
+
+1. The PLLD peripheral rate the driver reads agrees with the firmware's own
+   (`vcgencmd measure_clock` on the same board under Linux), and the
+   oscillator's 54 MHz comes from the tree.
+2. A PWM clock set through `clock-v1` measures at the rate the reply states,
+   and a second PWM block asking another rate is refused while the first
+   holds it.
+3. A consumer killed while holding a clock has it stopped, and no clock it
+   did not name changes: the cores, the memory and the console run on.
+
+**Done when:** the checklist above is recorded against a real Pi 4B.
+
+### P15 — The headphone jack
+
+`drivers/audio/bcm2711_pwm` binds the PWM block the image's overlay names
+`tairix,bcm2711-pwm-audio`, runs at 375 kHz from a 93.75 MHz PWM clock, and
+ships as `/System/Drivers/audio/bcm2711_pwm/Run`. It is host-proven with its
+shaped noise measured (`docs/src/drivers/audio.md`); the rest is metal.
+
+**Metal checklist**, run with the overlay of SND8h:
+
+1. PWM1 is paced by DREQ 1, which this part muxes with DSI0 through
+   `PACTL_CS` bit 23, PWM1 at its reset value (BCM2711 ARM Peripherals, 4.2.1.3).
+   With no DSI display attached the request reaches the PWM, and a cyclic
+   transfer raises one boundary per period.
+2. A tone panned left plays from the jack's left side: the first PWM
+   channel, GPIO 40, drives the right.
+3. Bring-up, starting a stream, stopping it and a driver's death make no
+   audible pop; the jack holds silence between streams with no DMA running.
+4. The analogue output's noise and distortion are measured at the jack
+   (20 Hz – 20 kHz), and the figure is recorded beside the digital one in the
+   crate's documentation.
+
+**Done when:** the checklist above is recorded against a real Pi 4B.
+
+### P16 — The I²S interface and its codecs
+
+`drivers/audio/bcm2711_i2s` binds the PCM block a HAT's overlay enables,
+composed through the card's codec link with `ti,pcm5102a` or `ti,pcm5122`,
+and ships as `/System/Drivers/audio/bcm2711_i2s/Run` beside both codec
+drivers. It is host-proven (`docs/src/drivers/audio.md`); the rest is metal.
+
+**Metal checklist**, with a PCM5102A HAT and a PCM5122 HAT in turn:
+
+1. The bit clock on GPIO 18 measures 64 times the stream's rate and the frame
+   clock on GPIO 19 the rate itself, at 44.1 kHz, 48 kHz and the highest rate
+   the codec takes; the PCM5122 locks its PLL to that bit clock.
+2. A tone panned left plays from the HAT's left output, and a hundred stops
+   and starts in a row never swap the two channels.
+3. On the PCM5122 the mixer's gain moves the output by the step the codec
+   states, mute silences it, and neither a stop nor a start pops.
+4. Either side's driver killed mid-stream leaves no tone sounding: the
+   interface's channel stops with its process, and the codec is muted when
+   its holder ends.
 
 **Done when:** the checklist above is recorded against a real Pi 4B.
 

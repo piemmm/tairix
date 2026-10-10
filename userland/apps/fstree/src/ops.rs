@@ -26,7 +26,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use tairix_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileKind, RenameFlags};
 use tairix_path::{join, leaf_name};
 
 use crate::fs::{Fs, RenameOutcome};
@@ -412,30 +412,41 @@ impl FileOp {
         dst: String,
         approved: Option<FileKind>,
     ) -> Result<(), StepEnd> {
-        if approved.is_none() {
-            // A rename replaces an existing destination atomically when the
-            // two are kind-compatible, so *any* occupied leaf name is asked
-            // about — a link included, because replacing one is a real loss
-            // the user must agree to. A directory target was already
-            // redirected into by the planner; whatever remains (dir over
-            // file, dir over dir) is the kernel's to judge, and the rename
-            // below surfaces its refusal unchanged.
-            let occupant = probe(fs, &dst).map_err(StepEnd::Failed)?;
-            if let Some(occupant) = occupant.filter(|held| replaces_leaf(kind, *held)) {
-                return Err(self.pause(
-                    src.clone(),
-                    dst.clone(),
-                    occupant,
-                    Work::Rename {
-                        src,
-                        kind,
-                        dst,
-                        approved: Some(occupant),
-                    },
-                ));
+        // Until the user has agreed to replace, the kernel is asked to refuse
+        // an occupied destination rather than replace it, so a name created
+        // after any look is never destroyed unasked — and the source's own
+        // entry, re-spelled on a volume that ignores case, is no occupant.
+        let flags = if approved.is_some() {
+            RenameFlags::empty()
+        } else {
+            RenameFlags::NO_REPLACE
+        };
+        let outcome = match fs.rename(&src, &dst, flags) {
+            Err(Errno::AlreadyExists) if approved.is_none() => {
+                // Any occupied leaf name is asked about — a link included,
+                // because replacing one is a real loss the user must agree
+                // to. A directory target was already redirected into by the
+                // planner; whatever remains (dir over file, dir over dir) is
+                // the kernel's to judge, and its refusal surfaces unchanged.
+                let occupant = probe(fs, &dst).map_err(StepEnd::Failed)?;
+                if let Some(occupant) = occupant.filter(|held| replaces_leaf(kind, *held)) {
+                    return Err(self.pause(
+                        src.clone(),
+                        dst.clone(),
+                        occupant,
+                        Work::Rename {
+                            src,
+                            kind,
+                            dst,
+                            approved: Some(occupant),
+                        },
+                    ));
+                }
+                fs.rename(&src, &dst, RenameFlags::empty())
             }
-        }
-        match fs.rename(&src, &dst) {
+            other => other,
+        };
+        match outcome {
             Ok(RenameOutcome::Renamed) => {
                 self.done += 1;
                 Ok(())

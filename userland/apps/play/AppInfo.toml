@@ -1,0 +1,18 @@
+# Signed-AppInfo manifest source for the `play` command app
+# (plans/SOUND.md SND10). Playback itself asks for nothing: the audio
+# service authorises a stream against the caller's seat. CAP_CONSOLE_WRITE
+# covers standard output, standard error and the full-screen interface;
+# CAP_CONSOLE_READ the raw keystrokes, the input-mode switch and the
+# foreground query the interface follows; CAP_FS_ACCESS opens the files
+# named and the bundle's own Help/; CAP_SANDBOX_SPAWN re-enters this binary
+# as the capability-empty decoder no sound file is parsed outside;
+# CAP_SHM creates the stream's ring and grants it to the audio service; and
+# CAP_LOG_EMIT records a decoder replaced after it failed.
+id = "os.tairix.play"
+name = "play"
+title = "Play"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_CONSOLE_READ", "CAP_FS_ACCESS", "CAP_SANDBOX_SPAWN", "CAP_SHM", "CAP_LOG_EMIT"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "play.png"

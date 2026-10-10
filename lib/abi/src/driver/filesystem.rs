@@ -196,6 +196,18 @@ pub enum NameMatching {
     AsciiCaseInsensitive,
 }
 
+impl NameMatching {
+    /// Whether `a` and `b` name the same entry under this rule — the one
+    /// definition every consumer of the rule compares through.
+    #[must_use]
+    pub fn matches(self, a: &[u8], b: &[u8]) -> bool {
+        match self {
+            Self::Exact => a == b,
+            Self::AsciiCaseInsensitive => a.eq_ignore_ascii_case(b),
+        }
+    }
+}
+
 /// Structural metadata about a node, returned by
 /// [`FilesystemRead::node_info`].
 ///
@@ -1291,6 +1303,16 @@ mod tests {
         );
         assert!(fs.unmount().is_ok());
         assert_eq!(fs.unmount(), Err(DriverError::NotFound));
+    }
+
+    #[test]
+    fn name_matching_compares_by_its_own_rule() {
+        assert!(NameMatching::Exact.matches(b"Foo", b"Foo"));
+        assert!(!NameMatching::Exact.matches(b"Foo", b"foo"));
+        assert!(NameMatching::AsciiCaseInsensitive.matches(b"Foo.TXT", b"foo.txt"));
+        assert!(!NameMatching::AsciiCaseInsensitive.matches(b"foo", b"food"));
+        // Only ASCII letters fold.
+        assert!(!NameMatching::AsciiCaseInsensitive.matches("é".as_bytes(), "É".as_bytes()));
     }
 
     #[test]

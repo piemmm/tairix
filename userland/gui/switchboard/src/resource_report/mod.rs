@@ -30,6 +30,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact as SystemFact, Unmeasured};
 use crate::view::resources::{DeviceId, ResourceReport};
 
+mod audio;
 mod consumers;
 mod cpu;
 mod graphics;
@@ -83,6 +84,7 @@ pub fn build_resource_report(
         meters.devices.graphics_busy(DeviceId::Graphics),
         meters.devices.damage_history(DeviceId::Graphics),
     ));
+    devices.push(audio::device(sample));
     devices.push(machine::identity(sample));
     devices.push(machine::sessions(sample));
     devices.push(machine::authority(sample, authority));

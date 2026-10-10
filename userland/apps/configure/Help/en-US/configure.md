@@ -101,6 +101,16 @@ never changes a result.
   click. A worn switch can report a second press a few milliseconds after the
   release that it meant as one click. Set it to `0` for a mouse whose
   rapid-fire mode sends deliberate click pairs.
+- `audio.output`, `audio.input` — `auto` by default, or an endpoint's
+  location as `audioctl` lists it (sixteen hex digits, a dot, and the
+  endpoint's index): the sink and the source this machine prefers as its
+  defaults. A session's own choice comes first; this is the choice before
+  anyone signs in and on a machine with no desktop. `auto` is the first
+  device found.
+- `audio.level` — decibels, `0dB` by default, or an attenuation such as
+  `-12dB` or `-6.5dB`, to at most two decimals: the level every sink and
+  source starts at. Never above `0dB`. The audio service takes a changed
+  value at the next boot; `audioctl` changes the running machine.
 
 A key that is not in the list above is read against a second registry:
 the per-interface settings of the network store at

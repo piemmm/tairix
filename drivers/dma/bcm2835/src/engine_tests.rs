@@ -4,9 +4,10 @@ use core::num::NonZeroU32;
 use std::vec::Vec;
 
 use tairix_abi::driver::dmaengine::{
-    CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine,
-    DmaRequestLine, Halted, DMA_CONTROLLER_ENDPOINTS,
+    CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine, Halted,
+    DMA_CONTROLLER_ENDPOINTS,
 };
+use tairix_abi::hwlink::LinkRequest;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey, RegisterBlock};
 
 use crate::engine::{Bcm2835Dma, MAX_BLOCKS};
@@ -28,8 +29,8 @@ const PERIODS: u32 = 4;
 const M2D: DmaDirection = DmaDirection::MemoryToDevice;
 const D2M: DmaDirection = DmaDirection::DeviceToMemory;
 
-fn line(cell: u32) -> DmaRequestLine {
-    DmaRequestLine::new(DMA_CONTROLLER_ENDPOINTS.endpoint(3), 0, &[cell], b"tx").expect("valid")
+fn line(cell: u32) -> LinkRequest {
+    LinkRequest::new(DMA_CONTROLLER_ENDPOINTS.endpoint(3), 0, &[cell], b"tx").expect("valid")
 }
 
 fn transfer(period_bytes: u32, periods: u32, direction: DmaDirection) -> CyclicTransfer {
@@ -208,7 +209,7 @@ fn a_specifier_the_binding_does_not_define_refuses_the_line() {
     assert_eq!(engine.accept(&line(0)), Err(DriverError::Unsupported));
     let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(3);
     for cells in [&[][..], &[2, 0][..]] {
-        let odd = DmaRequestLine::new(endpoint, 0, cells, b"").expect("valid record");
+        let odd = LinkRequest::new(endpoint, 0, cells, b"").expect("valid record");
         assert_eq!(engine.accept(&odd), Err(DriverError::Unsupported));
     }
 }

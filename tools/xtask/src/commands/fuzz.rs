@@ -76,6 +76,16 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_clock",
+        description: "lib/abi clock-v1 surface (clock-controller requests naming a clock link, and their replies)",
+    },
+    Target {
+        package: "tairix-abi",
+        test: "fuzz_codec",
+        description: "lib/abi codec-v1 surface (codec requests naming a codec link, and their replies)",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_desktop_layer",
         description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",
     },
@@ -352,6 +362,12 @@ pub const TARGETS: &[Target] = &[
             "raster-image decode (untrusted PNG + JPEG bytes: chunk framing, filters, interlace, marker segments, Huffman scans)",
     },
     Target {
+        package: "tairix-sound",
+        test: "fuzz_sound",
+        description:
+            "sound-file decode (untrusted AU + WAVE bytes: headers, chunk walks, RF64, ADPCM blocks, decode retried through a miss)",
+    },
+    Target {
         package: "tairix-virtio",
         test: "fuzz_virtqueue",
         description:
@@ -556,7 +572,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-sandbox",
         test: "fuzz_sandbox",
-        description: "lib/sandbox decode seam (hostile input files and NTP replies through the sandboxed decode/timesync services, and hostile worker replies into the fail-closed client decoders)",
+        description: "lib/sandbox decode seam (hostile input files and NTP replies through the sandboxed decode/timesync services, sound files through the audio decode worker against an in-process decode, and hostile worker replies into the fail-closed client decoders)",
     },
     Target {
         package: "tairix-wintersun-net",
@@ -1128,6 +1144,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-image");
+    }
+
+    #[test]
+    fn sound_file_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_sound"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-sound");
     }
 
     /// Collects the harness names (`fuzz_<name>` integration-test files) a

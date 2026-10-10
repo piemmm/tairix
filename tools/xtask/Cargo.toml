@@ -212,10 +212,12 @@ tairix-drv-network-virtio-net = { path = "../../drivers/network/virtio_net", ver
 # `image_drivers` pipeline cross-compiles from the same crate, so the shipped
 # bundle and the driver cannot drift.
 tairix-drv-audio-virtio-snd = { path = "../../drivers/audio/virtio_snd", version = "=0.0.0" }
+tairix-drv-audio-usb-uac = { path = "../../drivers/audio/usb_uac", version = "=0.0.0" }
+tairix-drv-audio-hda = { path = "../../drivers/audio/hda", version = "=0.0.0" }
 # The one definition of the audio verticals' signal and the host-side WAV
 # reader that checks the emulated card received exactly it, shared with the
 # guest fixture so the two ends cannot drift.
-tairix-test-audio-wire = { path = "../../tests/integration/audio_wire", version = "=0.0.0" }
+tairix-test-audio-wire = { path = "../../tests/integration/audio_wire", version = "=0.0.0", features = ["flac"] }
 # The GENET link-layer driver's canonical bind table and the BCM2711
 # register base its shipped `network.conf` default binds the interface by: the
 # `image_drivers` pipeline signs `BIND_KEYS` into the bundle it cross-compiles
@@ -242,6 +244,16 @@ tairix-drv-bus-i2c-bcm2835 = { path = "../../drivers/bus/i2c/bcm2835", version =
 # The legacy DMA engine driver's bind table and capabilities, for the flashable
 # Pi image.
 tairix-drv-dma-bcm2835 = { path = "../../drivers/dma/bcm2835", version = "=0.0.0" }
+# The clock manager driver's bind table and capabilities, for the flashable Pi
+# image.
+tairix-drv-clock-bcm2711-cprman = { path = "../../drivers/clock/bcm2711_cprman", version = "=0.0.0" }
+# The headphone jack's driver, for the flashable Pi image.
+tairix-drv-audio-bcm2711-pwm = { path = "../../drivers/audio/bcm2711_pwm", version = "=0.0.0" }
+# The I2S interface's driver, for the flashable Pi image.
+tairix-drv-audio-bcm2711-i2s = { path = "../../drivers/audio/bcm2711_i2s", version = "=0.0.0" }
+# The two I2S HAT codecs' drivers, for the flashable Pi image.
+tairix-drv-audio-pcm5102a = { path = "../../drivers/audio/pcm5102a", version = "=0.0.0" }
+tairix-drv-audio-pcm5122 = { path = "../../drivers/audio/pcm5122", version = "=0.0.0" }
 # The three I2C clock-chip drivers' bind tables, on the same
 # single-source-of-truth basis. Which one binds is the board's HAT; all three
 # ship so any of them works with no rebuild.

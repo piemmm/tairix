@@ -92,6 +92,12 @@ The queries:
   and group, its owner's generation and state, how many streams it masters
   through, and its domain's mappings and the bytes they map (needs
   `CAP_SYSINFO_HW`).
+- `audio`, `sound` — the sound devices: one row per sink and source — its
+  id, whether it is its direction's default, its level and mute, the rate
+  its clock is measured at while it plays, the frames it has lost, its
+  location, and its name — then one row per sound stream of your own — its
+  device, direction, role and state, its position, its glitches, and who
+  holds it.
 - `show <resource-ref>` — read one `info:`/`state:`/`stats:` resource
   reference and print its value. Those namespaces are typed values served
   through this API, never byte streams, so this is how one is read — `cat`
@@ -109,6 +115,8 @@ With no query, the short help is shown.
 - `--all, -a` — with `processes`: list every process on the system
   rather than only your own; the service grants this view only to a
   caller holding `CAP_SYSINFO_GLOBAL`.
+  With `audio`, every sound stream on the machine, under the same
+  capability.
 - `-h, -?` — show this command's own short help.
 
 ## EXAMPLES

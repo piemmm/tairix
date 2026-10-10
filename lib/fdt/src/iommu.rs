@@ -159,8 +159,8 @@ fn parent_cells(fdt: &Fdt<'_>, phandle: u32) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{each_iommu_address, iommu_cells, stream_id, IommuAddress};
-    use crate::fixture::DtbBuilder;
     use crate::specifier::phandle_args;
+    use crate::write::FdtWriter;
     use crate::{Fdt, FdtError, Node};
     use alloc::vec::Vec;
 
@@ -176,7 +176,7 @@ mod tests {
     /// A display controller under a one-cell bus whose firmware scans out of
     /// `scanout` through its unit, and another master on a two-cell bus.
     fn tree(regions: &[u32], addresses: &[u32], scanout_reg: bool) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);

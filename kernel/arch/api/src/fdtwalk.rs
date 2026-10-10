@@ -24,9 +24,9 @@
 //! it before the walk rather than per node.
 //!
 //! The generic DMA binding is read here for every port: a node with
-//! `#dma-cells` is a controller carrying a [`DmaControllerDuty`] and its
+//! `#dma-cells` is a controller carrying a [`LinkDuty`] and its
 //! bus's DMA windows, and each `dmas` entry of a consumer becomes a
-//! [`DmaRequestLine`] naming the controller's endpoint (`plans/SOUND.md`
+//! [`LinkRequest`] naming the controller's endpoint (`plans/SOUND.md`
 //! SND5).
 //!
 //! So is the generic IOMMU binding (`plans/IOMMU.md` IOM14): a node with
@@ -39,11 +39,11 @@
 //! disabled, reserved or failed node, and everything below it, is spliced out
 //! with the nodes the matcher could never bind.
 
-use tairix_abi::driver::dmaengine::{
-    DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS, DMA_REQUEST_NAME_MAX,
-    DMA_SPECIFIER_MAX_CELLS,
-};
+use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
+use tairix_abi::driver::codec::{ClockInversion, DaiFormat, DaiLink, CODEC_ENDPOINTS};
+use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
+use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_NAME_MAX, LINK_SELECTOR_MAX_CELLS};
 use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
 use tairix_abi::{
     DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource, IommuStreams,
@@ -52,7 +52,7 @@ use tairix_abi::{
 use tairix_fdt::iommu::{iommu_cells, stream_id};
 use tairix_fdt::{
     bus_level, dma_reach, name_stem, phandle_args, phandle_ref, read_cells, reg_entry_count,
-    translated_reg, BusLevel, Fdt, Node, OperationalNodes, MAX_WALK_DEPTH,
+    translated_reg, BusLevel, Fdt, Node, OperationalNodes, Property, MAX_WALK_DEPTH,
 };
 
 use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
@@ -353,13 +353,24 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
         }
         if class == HwDeviceClass::Dma {
             let channels = self.platform.dma_channel_mask(node, depth, levels);
-            masters = DmaControllerDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(id), channels)
-                .is_ok_and(|duty| hw.push_resource(HwResource::dma_controller(&duty)).is_ok());
+            masters = LinkDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(id), channels)
+                .is_ok_and(|duty| hw.push_resource(HwResource::duty(&duty)).is_ok());
         }
         if masters && translation != MasterTranslation::Refused {
             push_dma_windows(depth, levels, coherence, &mut hw);
         }
-        push_dma_requests(&self.fdt, node, &mut hw);
+        if node.property(CLOCK_BINDING.cells).is_some()
+            && !node.is_compatible(FIXED_CLOCK_COMPATIBLE)
+        {
+            if let Ok(duty) = LinkDuty::new(CLOCK_CONTROLLER_ENDPOINTS.endpoint(id), None) {
+                let _ = hw.push_resource(HwResource::duty(&duty));
+            }
+        }
+        push_link_requests(&self.fdt, node, DMA_BINDING, &mut hw);
+        push_link_requests(&self.fdt, node, CLOCK_BINDING, &mut hw);
+        if node.property("#sound-dai-cells").is_some() {
+            push_codec_links(&self.fdt, node, id, &mut hw);
+        }
 
         self.platform
             .augment(node, depth, levels, coherence, &mut hw);
@@ -481,68 +492,374 @@ pub fn push_dma_windows(
     }
 }
 
-/// Push one [`DmaRequestLine`] per `dmas` entry, each naming the endpoint of
-/// the controller its phandle resolves to and paired with the `dma-names`
-/// string in the same position.
+/// A devicetree binding naming link suppliers: the list a consumer names them
+/// in, the names paired with its entries, and the property stating how many
+/// cells a supplier's specifier takes.
+#[derive(Copy, Clone)]
+struct LinkBinding {
+    role: LinkRole,
+    list: &'static str,
+    names: &'static str,
+    cells: &'static str,
+}
+
+/// The generic DMA binding.
+const DMA_BINDING: LinkBinding = LinkBinding {
+    role: LinkRole::Dma,
+    list: "dmas",
+    names: "dma-names",
+    cells: "#dma-cells",
+};
+
+/// The generic clock binding.
+const CLOCK_BINDING: LinkBinding = LinkBinding {
+    role: LinkRole::Clock,
+    list: "clocks",
+    names: "clock-names",
+    cells: "#clock-cells",
+};
+
+/// The `compatible` of a fixed-rate clock: no driver serves one, its rate
+/// being its whole description.
+const FIXED_CLOCK_COMPATIBLE: &[u8] = b"fixed-clock";
+
+/// What an entry of a consumer's list resolves to.
+#[derive(Copy, Clone)]
+enum Supplier {
+    /// A node the walk emits, by the id it gives it.
+    Emitted(u32),
+    /// A fixed-rate clock, at its rate in Hz.
+    Fixed(u64),
+    /// A node no consumer may use, or one the walk does not describe.
+    Absent,
+}
+
+/// Push what each entry of `node`'s `binding` list names: a [`LinkRequest`]
+/// to the supplier the entry's phandle resolves to, paired with the name in
+/// the same position, or the rate of a fixed clock.
 ///
-/// An entry is as wide as its controller's `#dma-cells`, so an entry whose
-/// controller cannot be resolved ends the list: nothing after it can be
-/// found. An entry wider than a record carries is dropped whole, never
-/// truncated, and a name longer than a record holds leaves its line unnamed.
-fn push_dma_requests(fdt: &Fdt<'_>, node: &Node<'_>, hw: &mut HwNode) {
-    let Some(dmas) = node.property("dmas") else {
+/// An entry is as wide as its supplier's cell count, so one whose supplier
+/// node cannot be found ends the list: nothing after it can be framed. One
+/// naming a supplier no consumer may use is framed and skipped. An entry
+/// wider than a record carries is dropped whole, never truncated, and a name
+/// longer than a record holds leaves its request unnamed.
+fn push_link_requests(fdt: &Fdt<'_>, node: &Node<'_>, binding: LinkBinding, hw: &mut HwNode) {
+    let Some(entries) = node.property(binding.list) else {
         return;
     };
-    let mut names = node.property("dma-names").map(|p| p.iter_strings());
-    // A node's entries usually all name one controller, so the last
+    let mut names = node.property(binding.names).map(|p| p.iter_strings());
+    // A node's entries usually all name one supplier, so the last
     // resolution is kept rather than replayed.
-    let mut last: Option<(u32, (u32, u32))> = None;
-    let controller = |phandle: u32| {
-        if let Some((_, controller)) = last.filter(|&(known, _)| known == phandle) {
-            return Some(controller);
+    let mut last: Option<(u32, (Supplier, u32))> = None;
+    let supplier = |phandle: u32| {
+        if let Some((_, known)) = last.filter(|&(seen, _)| seen == phandle) {
+            return Some(known);
         }
-        let controller = dma_controller(fdt, phandle)?;
-        last = Some((phandle, controller));
-        Some(controller)
+        let resolved = link_supplier(fdt, binding, phandle)?;
+        last = Some((phandle, resolved));
+        Some(resolved)
     };
-    for (index, entry) in (0..=u8::MAX).zip(phandle_args(dmas.value(), controller)) {
-        let Ok((id, specifier)) = entry else {
+    for (index, entry) in (0..=u8::MAX).zip(phandle_args(entries.value(), supplier)) {
+        let Ok((supplier, specifier)) = entry else {
             return;
         };
         let name = names
             .as_mut()
             .and_then(Iterator::next)
-            .filter(|name| name.len() <= DMA_REQUEST_NAME_MAX)
+            .filter(|name| name.len() <= LINK_NAME_MAX)
             .unwrap_or_default();
-        if specifier.len() > DMA_SPECIFIER_MAX_CELLS {
-            continue;
-        }
-        let mut cells = [0u32; DMA_SPECIFIER_MAX_CELLS];
-        for (slot, cell) in cells.iter_mut().zip(specifier.cells()) {
-            *slot = cell;
-        }
-        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(id);
-        let Ok(line) = DmaRequestLine::new(endpoint, index, &cells[..specifier.len()], name) else {
-            continue;
+        let record = match supplier {
+            Supplier::Emitted(id) => {
+                if specifier.len() > LINK_SELECTOR_MAX_CELLS {
+                    continue;
+                }
+                let mut cells = [0u32; LINK_SELECTOR_MAX_CELLS];
+                for (slot, cell) in cells.iter_mut().zip(specifier.cells()) {
+                    *slot = cell;
+                }
+                let endpoint = binding.role.endpoints().endpoint(id);
+                match LinkRequest::new(endpoint, index, &cells[..specifier.len()], name) {
+                    Ok(request) => HwResource::request(&request),
+                    Err(_) => continue,
+                }
+            }
+            Supplier::Fixed(hz) => match HwResource::fixed_clock_rate(index, hz) {
+                Some(fact) => fact,
+                None => continue,
+            },
+            Supplier::Absent => continue,
         };
-        if hw.push_resource(HwResource::dma_request(&line)).is_err() {
+        if hw.push_resource(record).is_err() {
             return;
         }
     }
 }
 
-/// The id the walk gives the DMA controller `phandle` names, and its
-/// `#dma-cells`. A controller the walk does not emit has no id, and a node
-/// with no `#dma-cells` is no controller.
-fn dma_controller(fdt: &Fdt<'_>, phandle: u32) -> Option<(u32, u32)> {
-    let Provider::Emitted(id, node) = provider(fdt, phandle)? else {
-        return None;
+/// What `phandle` names under `binding`, and the cell count its specifiers
+/// take: [`None`] where no node carries the phandle or it states no single
+/// cell count, so no entry naming it can be framed.
+fn link_supplier(fdt: &Fdt<'_>, binding: LinkBinding, phandle: u32) -> Option<(Supplier, u32)> {
+    let (id, node) = match provider(fdt, phandle)? {
+        Provider::Emitted(id, node) => (Some(id), node),
+        Provider::Unusable(node) | Provider::Undescribed(node) => (None, node),
     };
-    let cells = node.property("#dma-cells")?;
+    let cells = node.property(binding.cells)?;
     if cells.value().len() != CELL_BYTES {
         return None;
     }
-    Some((id, cells.read_be_u32(0).ok()?))
+    let count = cells.read_be_u32(0).ok()?;
+    let supplier = match id {
+        None => Supplier::Absent,
+        Some(_)
+            if binding.role == LinkRole::Clock && node.is_compatible(FIXED_CLOCK_COMPATIBLE) =>
+        {
+            fixed_clock_hz(&node).map_or(Supplier::Absent, Supplier::Fixed)
+        }
+        Some(id) => Supplier::Emitted(id),
+    };
+    Some((supplier, count))
+}
+
+/// A fixed clock's `clock-frequency`, one cell or two.
+fn fixed_clock_hz(node: &Node<'_>) -> Option<u64> {
+    let frequency = node.property("clock-frequency")?.value();
+    match frequency.len() {
+        4 => read_cells(frequency, 0, 1),
+        8 => read_cells(frequency, 0, 2),
+        _ => None,
+    }
+}
+
+/// The `compatible` of the generic sound card binding, which describes the
+/// links between digital audio interfaces rather than a device of its own.
+const SIMPLE_AUDIO_CARD: &[u8] = b"simple-audio-card";
+
+/// One end of a sound card link: the `sound-dai` entry of a `cpu` or `codec`
+/// sub-node, and the sub-node's own phandle, which the card's
+/// `bitclock-master` and `frame-master` name.
+#[derive(Copy, Clone)]
+struct DaiEnd {
+    target: u32,
+    dai: u32,
+    sub_node: Option<u32>,
+    claims_bit_clock: bool,
+    claims_frame_clock: bool,
+    /// The legacy binding's inversions, stated on the sub-node.
+    inversion: ClockInversion,
+}
+
+/// One link a sound card describes between a CPU's digital audio interface
+/// and a codec's.
+#[derive(Copy, Clone)]
+struct CardLink {
+    cpu: DaiEnd,
+    codec: DaiEnd,
+    format: DaiFormat,
+    bit_clock_master: Option<u32>,
+    frame_clock_master: Option<u32>,
+    inversion: ClockInversion,
+}
+
+impl CardLink {
+    /// The selector the CPU side's request carries, or [`None`] for a CPU
+    /// interface index past what it holds.
+    fn selector(&self) -> Option<DaiLink> {
+        let codec_drives = |master: Option<u32>, claimed: bool| match master {
+            Some(phandle) => self.codec.sub_node == Some(phandle),
+            None => claimed,
+        };
+        // Without a link-level master the binding is the legacy one, whose
+        // codec sub-node may state the inversions too, as Linux reads it.
+        let legacy = self.bit_clock_master.is_none() && self.frame_clock_master.is_none();
+        let codec = if legacy {
+            self.codec.inversion
+        } else {
+            ClockInversion::Normal
+        };
+        Some(DaiLink {
+            format: self.format,
+            codec_drives_bit_clock: codec_drives(
+                self.bit_clock_master,
+                self.codec.claims_bit_clock,
+            ),
+            codec_drives_frame_clock: codec_drives(
+                self.frame_clock_master,
+                self.codec.claims_frame_clock,
+            ),
+            inversion: ClockInversion::of(
+                self.inversion.bit_clock() || codec.bit_clock(),
+                self.inversion.frame_clock() || codec.frame_clock(),
+            ),
+            cpu_dai: u8::try_from(self.cpu.dai).ok()?,
+            codec_dai: self.codec.dai,
+        })
+    }
+}
+
+/// The two ends a link node's `cpu` and `codec` children name, as far as
+/// they have been read.
+#[derive(Copy, Clone, Default)]
+struct LinkReading {
+    cpu: Option<DaiEnd>,
+    codec: Option<DaiEnd>,
+}
+
+/// Visit every link the operational `simple-audio-card` nodes describe: the
+/// card's own `cpu`/`codec` pair, and each `dai-link` sub-node's.
+fn for_each_card_link(fdt: &Fdt<'_>, mut visit: impl FnMut(&CardLink)) {
+    let mut nodes = fdt.operational_nodes();
+    while let Some(Ok(card)) = nodes.next() {
+        if !card.is_compatible(SIMPLE_AUDIO_CARD) {
+            continue;
+        }
+        let depth = card.depth();
+        let mut own = LinkReading::default();
+        let mut sub: Option<(Node<'_>, LinkReading)> = None;
+        let finish = |link: Option<(Node<'_>, LinkReading)>, visit: &mut dyn FnMut(&CardLink)| {
+            if let Some((node, reading)) = link {
+                emit_card_link(&node, "", reading, visit);
+            }
+        };
+        let mut subtree = nodes.clone();
+        while let Some(Ok(child)) = subtree.next() {
+            if child.depth() <= depth {
+                break;
+            }
+            let stem = name_stem(child.name());
+            if child.depth() == depth + 1 {
+                finish(sub.take(), &mut visit);
+                match stem {
+                    b"simple-audio-card,cpu" => own.cpu = dai_end(fdt, &child),
+                    b"simple-audio-card,codec" => own.codec = dai_end(fdt, &child),
+                    b"simple-audio-card,dai-link" => sub = Some((child, LinkReading::default())),
+                    _ => {}
+                }
+            } else if child.depth() == depth + 2 {
+                if let Some((_, reading)) = sub.as_mut() {
+                    match stem {
+                        b"cpu" => reading.cpu = dai_end(fdt, &child),
+                        b"codec" => reading.codec = dai_end(fdt, &child),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        finish(sub.take(), &mut visit);
+        emit_card_link(&card, "simple-audio-card,", own, &mut visit);
+    }
+}
+
+/// Visit the link `reading` holds, its format and clock masters read from
+/// `node`'s properties under `prefix`. A link missing either end, or with no
+/// format the binding names, describes nothing.
+fn emit_card_link(
+    node: &Node<'_>,
+    prefix: &str,
+    reading: LinkReading,
+    visit: &mut dyn FnMut(&CardLink),
+) {
+    let (Some(cpu), Some(codec)) = (reading.cpu, reading.codec) else {
+        return;
+    };
+    let format = link_property(node, prefix, "format")
+        .and_then(|value| value.iter_strings().next())
+        .map_or(Some(DaiFormat::I2s), DaiFormat::from_binding);
+    let Some(format) = format else {
+        return;
+    };
+    let master =
+        |key: &str| link_property(node, prefix, key).and_then(|value| value.read_be_u32(0).ok());
+    let stated = |key: &str| link_property(node, prefix, key).is_some();
+    visit(&CardLink {
+        cpu,
+        codec,
+        format,
+        bit_clock_master: master("bitclock-master"),
+        frame_clock_master: master("frame-master"),
+        inversion: ClockInversion::of(stated("bitclock-inversion"), stated("frame-inversion")),
+    });
+}
+
+/// `node`'s property `key` under `prefix`, or [`None`] where it has none or
+/// the joined name is longer than any the binding defines.
+fn link_property<'a>(node: &Node<'a>, prefix: &str, key: &str) -> Option<Property<'a>> {
+    let mut buffer = [0u8; 40];
+    let total = prefix.len().checked_add(key.len())?;
+    let name = buffer.get_mut(..total)?;
+    name[..prefix.len()].copy_from_slice(prefix.as_bytes());
+    name[prefix.len()..].copy_from_slice(key.as_bytes());
+    node.property(core::str::from_utf8(name).ok()?)
+}
+
+/// The `sound-dai` a `cpu` or `codec` sub-node names: the interface node, by
+/// phandle, and which of its interfaces, as its `#sound-dai-cells` frames it.
+/// The legacy `bitclock-master`/`frame-master` flags on a codec sub-node say
+/// it drives those clocks.
+fn dai_end(fdt: &Fdt<'_>, sub_node: &Node<'_>) -> Option<DaiEnd> {
+    let value = sub_node.property("sound-dai")?.value();
+    let cells = |phandle: u32| {
+        let target = fdt.node_by_phandle(phandle)?;
+        let cells = target.property("#sound-dai-cells")?;
+        (cells.value().len() == CELL_BYTES)
+            .then(|| cells.read_be_u32(0).ok())
+            .flatten()
+            .map(|count| ((), count))
+    };
+    let ((), args) = phandle_args(value, cells).next()?.ok()?;
+    let dai = match args.len() {
+        0 => 0,
+        1 => args.cell(0)?,
+        _ => return None,
+    };
+    Some(DaiEnd {
+        target: args.phandle,
+        dai,
+        sub_node: sub_node.phandle(),
+        claims_bit_clock: sub_node.property("bitclock-master").is_some(),
+        claims_frame_clock: sub_node.property("frame-master").is_some(),
+        inversion: ClockInversion::of(
+            sub_node.property("bitclock-inversion").is_some(),
+            sub_node.property("frame-inversion").is_some(),
+        ),
+    })
+}
+
+/// Push what the sound cards say of `node`, a digital audio interface the walk
+/// gives `id`: a codec [`LinkRequest`] for each link it is the CPU side of,
+/// naming the codec's endpoint and carrying the link's selector, and the
+/// codec duty when any link names it as the codec.
+fn push_codec_links(fdt: &Fdt<'_>, node: &Node<'_>, id: u32, hw: &mut HwNode) {
+    let Some(own) = node.phandle() else {
+        return;
+    };
+    let mut is_codec = false;
+    let mut index = 0u8;
+    for_each_card_link(fdt, |link| {
+        is_codec |= link.codec.target == own;
+        if link.cpu.target != own {
+            return;
+        }
+        let Some(Provider::Emitted(codec, _)) = provider(fdt, link.codec.target) else {
+            return;
+        };
+        let Some(selector) = link.selector() else {
+            return;
+        };
+        if let Ok(request) = LinkRequest::new(
+            CODEC_ENDPOINTS.endpoint(codec),
+            index,
+            &selector.to_cells(),
+            b"",
+        ) {
+            let _ = hw.push_resource(HwResource::request(&request));
+        }
+        index = index.saturating_add(1);
+    });
+    if is_codec {
+        if let Ok(duty) = LinkDuty::new(CODEC_ENDPOINTS.endpoint(id), None) {
+            let _ = hw.push_resource(HwResource::duty(&duty));
+        }
+    }
 }
 
 /// What a master's `iommus` says of its DMA.
@@ -1023,15 +1340,16 @@ mod tests {
     use super::{FdtDiscovery, FdtPlatform};
     use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
     use std::vec::Vec;
-    use tairix_abi::driver::dmaengine::{
-        DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
-    };
+    use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
+    use tairix_abi::driver::codec::{ClockInversion, DaiFormat, DaiLink, CODEC_ENDPOINTS};
+    use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+    use tairix_abi::hwlink::{LinkDuty, LinkRequest};
     use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
     use tairix_abi::{
         DmaCoherence, HwDeviceClass, HwNode, HwResource, HwResourceKind, IommuStreams,
         HW_NODE_MAX_RESOURCES,
     };
-    use tairix_fdt::fixture::DtbBuilder;
+    use tairix_fdt::write::FdtWriter;
     use tairix_fdt::{BusLevel, Fdt, Node};
 
     /// The phandle every fixture gives its root interrupt controller.
@@ -1119,7 +1437,7 @@ mod tests {
     fn a_line_the_port_cannot_represent_shifts_no_other_lines_place() {
         let cells =
             |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1179,7 +1497,7 @@ mod tests {
     /// children plus, optionally, `extra` further children at successive
     /// addresses (to overrun the node's resource capacity).
     fn i2c_tree(extra: u32) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1234,7 +1552,7 @@ mod tests {
     /// discovery can tell it apart from an unmodelled device.
     #[test]
     fn an_offload_engine_node_is_classed_as_an_accelerator() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1366,7 +1684,7 @@ mod tests {
     fn a_cpu_node_is_not_a_bus_child() {
         // `/cpus` spells itself with the same cell counts an addressed bus
         // does, so a CPU must not be handed a transfer endpoint.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1391,7 +1709,7 @@ mod tests {
         // No `compatible` on the bus, so no driver could ever serve it and
         // the walk splices it out; its children must not be left calling an
         // endpoint nothing will bind.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1413,7 +1731,7 @@ mod tests {
         // The look-ahead must splice out exactly what the walk does: a
         // child with no representable match key consumes no id, and one
         // nested deeper consumes one without being a duty of this bus.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1464,7 +1782,7 @@ mod tests {
     fn an_ordinary_memory_mapped_child_is_untouched() {
         // A `#size-cells = <1>` bus is a memory-mapped one: its children
         // keep their windows and gain no endpoint.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1519,7 +1837,7 @@ mod tests {
 
     /// A device carrying `interrupts = <line>` and, optionally, its own
     /// `interrupt-parent`.
-    fn device(b: &mut DtbBuilder, name: &str, compatible: &str, line: u32, parent: Option<u32>) {
+    fn device(b: &mut FdtWriter, name: &str, compatible: &str, line: u32, parent: Option<u32>) {
         b.begin_node(name);
         b.prop_str("compatible", compatible);
         b.prop("interrupts", &line.to_be_bytes());
@@ -1532,7 +1850,7 @@ mod tests {
     /// A tree whose root names the root controller, with a nested
     /// one-cell controller (phandle 2) that has devices of its own.
     fn nested_interrupt_tree() -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1583,7 +1901,7 @@ mod tests {
 
     #[test]
     fn a_tree_that_names_no_interrupt_parent_maps_no_specifier() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1601,7 +1919,7 @@ mod tests {
     fn dma_tree() -> Vec<u8> {
         let cells =
             |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 1);
@@ -1671,11 +1989,225 @@ mod tests {
         b.build()
     }
 
-    fn requests(node: &HwNode) -> Vec<DmaRequestLine> {
+    fn requests(node: &HwNode) -> Vec<LinkRequest> {
         node.resources()
             .iter()
-            .filter_map(|r| r.dma_request_line().ok())
+            .filter_map(|r| r.link_request().ok())
             .collect()
+    }
+
+    /// A clock manager over a fixed oscillator and a disabled clock source,
+    /// and two consumers, one of whose `clocks` names the disabled source
+    /// first.
+    fn clock_tree() -> Vec<u8> {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("osc");
+        b.prop_str("compatible", "fixed-clock");
+        b.prop_u32("#clock-cells", 0);
+        b.prop_u32("clock-frequency", 54_000_000);
+        b.prop_u32("phandle", 3);
+        b.end_node();
+        b.begin_node("dsi@1000");
+        b.prop_str("compatible", "test,dsi");
+        b.prop_str("status", "disabled");
+        b.prop_u32("#clock-cells", 1);
+        b.prop_u32("phandle", 4);
+        b.end_node();
+        b.begin_node("cprman@2000");
+        b.prop_str("compatible", "brcm,bcm2711-cprman");
+        b.prop_u32("#clock-cells", 1);
+        b.prop("clocks", &cells(&[3, 4, 0]));
+        b.prop_u32("phandle", 8);
+        b.end_node();
+        b.begin_node("pwm@3000");
+        b.prop_str("compatible", "brcm,bcm2835-pwm");
+        b.prop("clocks", &cells(&[8, 0x1e]));
+        b.prop("clock-names", b"pwm\0");
+        b.end_node();
+        b.begin_node("i2s@4000");
+        b.prop_str("compatible", "brcm,bcm2835-i2s");
+        b.prop("clocks", &cells(&[4, 0, 8, 0x1f]));
+        b.prop("clock-names", b"dsi\0pcm\0");
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    #[test]
+    fn a_clock_supplier_carries_its_duty_and_each_consumer_its_clocks_or_their_fixed_rates() {
+        let nodes = discover(&clock_tree());
+        let cprman = by_key(&nodes, b"brcm,bcm2711-cprman");
+        let endpoint = CLOCK_CONTROLLER_ENDPOINTS.endpoint(cprman.id());
+        let duties: Vec<LinkDuty> = cprman
+            .resources()
+            .iter()
+            .filter_map(|r| r.link_duty().ok())
+            .collect();
+        assert_eq!(
+            duties,
+            std::vec![LinkDuty::new(endpoint, None).expect("valid")]
+        );
+        let fixed: Vec<(u8, u64)> = cprman
+            .resources()
+            .iter()
+            .filter_map(HwResource::fixed_clock)
+            .collect();
+        assert_eq!(
+            fixed,
+            [(0, 54_000_000)],
+            "the oscillator is a fact, not a link"
+        );
+        assert!(
+            requests(cprman).is_empty(),
+            "the disabled source is no supplier"
+        );
+        assert!(
+            by_key(&nodes, b"fixed-clock")
+                .resources()
+                .iter()
+                .all(|r| r.link_duty().is_err()),
+            "no driver serves a fixed clock"
+        );
+        assert_eq!(
+            requests(by_key(&nodes, b"brcm,bcm2835-pwm")),
+            std::vec![LinkRequest::new(endpoint, 0, &[0x1e], b"pwm").expect("valid")]
+        );
+        assert_eq!(
+            requests(by_key(&nodes, b"brcm,bcm2835-i2s")),
+            std::vec![LinkRequest::new(endpoint, 1, &[0x1f], b"pcm").expect("valid")],
+            "an entry naming an unusable supplier is framed and skipped"
+        );
+        assert!(nodes.iter().all(|n| n
+            .match_keys()
+            .iter()
+            .all(|k| k.compatible_bytes() != b"test,dsi")));
+    }
+
+    /// Two sound cards: one described on the card itself, its codec driving
+    /// both clocks and its bit clock inverted, and one by a `dai-link`
+    /// sub-node, left justified, on the second interface of a two-interface
+    /// CPU, its codec claiming the bit clock and inverting the frame clock by
+    /// the legacy flags. The first card's codec states a legacy inversion its
+    /// link-level masters override.
+    fn sound_tree() -> Vec<u8> {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        for (name, compatible, cells_count, phandle) in [
+            ("i2s@1000", "brcm,bcm2835-i2s", 0, 0x20),
+            ("dac", "ti,pcm5102a", 0, 0x21),
+            ("tdm@2000", "test,tdm", 1, 0x22),
+            ("adc", "ti,pcm5122", 0, 0x23),
+        ] {
+            b.begin_node(name);
+            b.prop_str("compatible", compatible);
+            b.prop_u32("#sound-dai-cells", cells_count);
+            b.prop_u32("phandle", phandle);
+            b.end_node();
+        }
+        b.begin_node("sound");
+        b.prop_str("compatible", "simple-audio-card");
+        b.prop("simple-audio-card,format", b"i2s\0");
+        b.prop_u32("simple-audio-card,bitclock-master", 0x30);
+        b.prop_u32("simple-audio-card,frame-master", 0x30);
+        b.prop("simple-audio-card,bitclock-inversion", b"");
+        b.begin_node("simple-audio-card,cpu");
+        b.prop("sound-dai", &cells(&[0x20]));
+        b.end_node();
+        b.begin_node("simple-audio-card,codec");
+        b.prop("sound-dai", &cells(&[0x21]));
+        b.prop_u32("phandle", 0x30);
+        b.prop("frame-inversion", b"");
+        b.end_node();
+        b.end_node();
+        b.begin_node("sound-2");
+        b.prop_str("compatible", "simple-audio-card");
+        b.begin_node("simple-audio-card,dai-link@0");
+        b.prop("format", b"left_j\0");
+        b.begin_node("cpu");
+        b.prop("sound-dai", &cells(&[0x22, 1]));
+        b.end_node();
+        b.begin_node("codec");
+        b.prop("sound-dai", &cells(&[0x23]));
+        b.prop("bitclock-master", b"");
+        b.prop("frame-inversion", b"");
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    #[test]
+    fn a_sound_card_links_each_cpu_interface_to_its_codec_and_gives_the_codec_its_duty() {
+        let nodes = discover(&sound_tree());
+        let codec_duties = |key: &[u8]| -> Vec<LinkDuty> {
+            by_key(&nodes, key)
+                .resources()
+                .iter()
+                .filter_map(|r| r.link_duty().ok())
+                .collect()
+        };
+        let dac = by_key(&nodes, b"ti,pcm5102a").id();
+        let adc = by_key(&nodes, b"ti,pcm5122").id();
+        assert_eq!(
+            codec_duties(b"ti,pcm5102a"),
+            std::vec![LinkDuty::new(CODEC_ENDPOINTS.endpoint(dac), None).expect("valid")]
+        );
+        assert_eq!(
+            codec_duties(b"ti,pcm5122"),
+            std::vec![LinkDuty::new(CODEC_ENDPOINTS.endpoint(adc), None).expect("valid")]
+        );
+        assert!(
+            codec_duties(b"brcm,bcm2835-i2s").is_empty(),
+            "a CPU side is no codec"
+        );
+        let link = |key: &[u8]| -> (u64, DaiLink) {
+            let found = requests(by_key(&nodes, key));
+            let [request] = found.as_slice() else {
+                panic!("one codec link, got {found:?}");
+            };
+            (
+                request.endpoint(),
+                DaiLink::from_cells(request.selector()).expect("a link"),
+            )
+        };
+        assert_eq!(
+            link(b"brcm,bcm2835-i2s"),
+            (
+                CODEC_ENDPOINTS.endpoint(dac),
+                DaiLink {
+                    format: DaiFormat::I2s,
+                    codec_drives_bit_clock: true,
+                    codec_drives_frame_clock: true,
+                    inversion: ClockInversion::BitClock,
+                    cpu_dai: 0,
+                    codec_dai: 0,
+                }
+            )
+        );
+        assert_eq!(
+            link(b"test,tdm"),
+            (
+                CODEC_ENDPOINTS.endpoint(adc),
+                DaiLink {
+                    format: DaiFormat::LeftJustified,
+                    codec_drives_bit_clock: true,
+                    codec_drives_frame_clock: false,
+                    inversion: ClockInversion::FrameClock,
+                    cpu_dai: 1,
+                    codec_dai: 0,
+                }
+            )
+        );
     }
 
     #[test]
@@ -1683,18 +2215,17 @@ mod tests {
         let nodes = discover(&dma_tree());
         let dma = by_key(&nodes, b"brcm,bcm2835-dma");
         assert_eq!(dma.class(), Some(HwDeviceClass::Dma));
-        let duties: Vec<DmaControllerDuty> = dma
+        let duties: Vec<LinkDuty> = dma
             .resources()
             .iter()
-            .filter_map(|r| r.dma_controller_duty().ok())
+            .filter_map(|r| r.link_duty().ok())
             .collect();
         assert_eq!(
             duties,
-            std::vec![DmaControllerDuty::new(
-                DMA_CONTROLLER_ENDPOINTS.endpoint(dma.id()),
-                Some(0x7f5)
-            )
-            .expect("valid")]
+            std::vec![
+                LinkDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(dma.id()), Some(0x7f5))
+                    .expect("valid")
+            ]
         );
         let windows: Vec<HwResource> = dma
             .resources()
@@ -1755,7 +2286,7 @@ mod tests {
     fn a_controller_below_an_identity_bus_reaches_memory_through_the_soc_above_it() {
         let cells =
             |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 1);
@@ -1807,8 +2338,8 @@ mod tests {
         assert_eq!(
             requests(i2s),
             std::vec![
-                DmaRequestLine::new(endpoint, 0, &[2], b"tx").expect("valid"),
-                DmaRequestLine::new(endpoint, 1, &[3], b"rx").expect("valid"),
+                LinkRequest::new(endpoint, 0, &[2], b"tx").expect("valid"),
+                LinkRequest::new(endpoint, 1, &[3], b"rx").expect("valid"),
             ]
         );
         // A name longer than a record holds leaves the line unnamed rather
@@ -1816,7 +2347,7 @@ mod tests {
         let mmc = by_key(&nodes, b"brcm,bcm2835-sdhost");
         assert_eq!(
             requests(mmc),
-            std::vec![DmaRequestLine::new(endpoint, 0, &[0x2000_000d], b"").expect("valid")]
+            std::vec![LinkRequest::new(endpoint, 0, &[0x2000_000d], b"").expect("valid")]
         );
     }
 
@@ -1828,13 +2359,13 @@ mod tests {
         // and its own name.
         assert_eq!(
             requests(by_key(&nodes, b"test,mixed")),
-            std::vec![DmaRequestLine::new(endpoint, 1, &[6], b"narrow").expect("valid")]
+            std::vec![LinkRequest::new(endpoint, 1, &[6], b"narrow").expect("valid")]
         );
         // Past an unresolvable phandle nothing can be found, not even the
         // well-formed entry after it.
         assert_eq!(
             requests(by_key(&nodes, b"test,dangling")),
-            std::vec![DmaRequestLine::new(endpoint, 0, &[7], b"").expect("valid")]
+            std::vec![LinkRequest::new(endpoint, 0, &[7], b"").expect("valid")]
         );
         // The wide controller is still a controller, with its own duty.
         let wide = by_key(&nodes, b"test,wide-dma");
@@ -1866,7 +2397,7 @@ mod tests {
     }
 
     /// A DMA controller `name` whose own node states `statements`.
-    fn stating_controller(b: &mut DtbBuilder, name: &str, statements: &[&str]) {
+    fn stating_controller(b: &mut FdtWriter, name: &str, statements: &[&str]) {
         b.begin_node(name);
         b.prop_str("compatible", &std::format!("test,{name}"));
         b.prop_u32("#dma-cells", 1);
@@ -1879,7 +2410,7 @@ mod tests {
     /// A tree stating coherence at every level a master inherits it from,
     /// the root stating `root`.
     fn coherence_tree(root: &[&str]) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -1985,7 +2516,7 @@ mod tests {
 
     #[test]
     fn a_controller_off_any_translating_bus_reaches_memory_untranslated() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -2034,14 +2565,14 @@ mod tests {
         let duty = by_key(&nodes, b"test,top-dma")
             .resources()
             .iter()
-            .find_map(|r| r.dma_controller_duty().ok())
+            .find_map(|r| r.link_duty().ok())
             .expect("a duty");
         assert_eq!(duty.channels(), None);
     }
 
     #[test]
     fn the_generic_channel_mask_reads_one_cell_per_thirty_two_channels() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         for (name, value) in [
             ("one", &[0u8, 0, 0x07, 0xf5][..]),
@@ -2072,7 +2603,7 @@ mod tests {
     /// still proving the address decode reads exactly one cell.
     #[test]
     fn a_bus_child_address_is_one_cell_wide() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop("reg", &[0x00, 0x00, 0x00, 0x68, 0xDE, 0xAD, 0xBE, 0xEF]);
         b.end_node();
@@ -2093,13 +2624,13 @@ mod tests {
     fn iommu_tree() -> Vec<u8> {
         let cells =
             |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let master = |b: &mut DtbBuilder, name: &str, compatible: &str, iommus: &[u32]| {
+        let master = |b: &mut FdtWriter, name: &str, compatible: &str, iommus: &[u32]| {
             b.begin_node(name);
             b.prop_str("compatible", compatible);
             b.prop("iommus", &cells(iommus));
             b.end_node();
         };
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -2257,10 +2788,7 @@ mod tests {
         // A controller keeps its duty, so its consumers can still find it,
         // but may carve nothing.
         let controller = by_key(&nodes, b"test,refused-dma");
-        assert!(controller
-            .resources()
-            .iter()
-            .any(|r| r.dma_controller_duty().is_ok()));
+        assert!(controller.resources().iter().any(|r| r.link_duty().is_ok()));
         assert_eq!(dma_windows(controller), 0);
     }
 
@@ -2268,7 +2796,7 @@ mod tests {
     fn a_spliced_subtree_shifts_no_id_a_request_a_duty_or_a_stream_names() {
         let cells =
             |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 1);
@@ -2321,7 +2849,7 @@ mod tests {
         let consumer = by_key(&nodes, b"test,consumer");
         assert_eq!(
             requests(consumer),
-            std::vec![DmaRequestLine::new(
+            std::vec![LinkRequest::new(
                 DMA_CONTROLLER_ENDPOINTS.endpoint(controller.id()),
                 0,
                 &[3],
@@ -2364,7 +2892,7 @@ mod tests {
             Some(super::Provider::Unusable(_))
         ));
         assert!(super::provider(&fdt, 0x99).is_none());
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("bare");
         b.prop_u32("phandle", 3);
@@ -2382,7 +2910,7 @@ mod tests {
     /// enters, so a provider after it is still found.
     #[test]
     fn a_provider_after_a_deep_disabled_subtree_is_found() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("off");
         b.prop_str("status", "disabled");
@@ -2438,7 +2966,7 @@ mod tests {
     fn a_line_its_specifier_raises_by_edges_is_granted_as_one() {
         let cells =
             |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("interrupt-parent", ROOT_INTC);
         b.begin_node("intc");

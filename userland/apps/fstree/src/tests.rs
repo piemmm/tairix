@@ -13,7 +13,7 @@ use core::cell::{Cell as CoreCell, RefCell};
 
 use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RxePermission, Segment,
+    CapabilityId, Errno, FileKind, LoadHeader, ManifestHeader, RenameFlags, RxePermission, Segment,
     LOAD_FLAG_PIE, LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
 };
 use tairix_appdata::fake::FakeService;
@@ -74,6 +74,9 @@ struct FakeFs {
     /// The target every symbolic link in the tree stores, keyed by link
     /// path — the only thing a link holds.
     links: BTreeMap<String, String>,
+    /// A file another program creates at its path just before the next
+    /// rename reaches it — after every look the app took.
+    appears_at_rename: Option<(String, Vec<u8>)>,
 }
 
 impl FakeFs {
@@ -98,7 +101,15 @@ impl FakeFs {
             volumes: Vec::new(),
             attrs: BTreeMap::new(),
             attrs_unsupported: false,
+            appears_at_rename: None,
         }
+    }
+
+    /// Have another program create `path` holding `bytes` just before the
+    /// next rename.
+    fn appears_at_rename(mut self, path: &str, bytes: &[u8]) -> Self {
+        self.appears_at_rename = Some((path.to_owned(), bytes.to_vec()));
+        self
     }
 
     /// Register the volumes `list_volumes` reports.
@@ -455,9 +466,16 @@ impl Fs for FakeFs {
         Ok(())
     }
 
-    fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno> {
+    fn rename(&mut self, src: &str, dst: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno> {
         if self.volume_of(src) != self.volume_of(dst) {
             return Ok(RenameOutcome::CrossDevice);
+        }
+        if let Some((path, bytes)) = self.appears_at_rename.take() {
+            self.files.insert(path, bytes);
+        }
+        if flags.refuses_replace() && (self.files.contains_key(dst) || self.links.contains_key(dst))
+        {
+            return Err(Errno::AlreadyExists);
         }
         if self.dirs.contains_key(dst) {
             // The kernel refuses renaming onto an existing directory.
@@ -1351,6 +1369,26 @@ fn rename_onto_an_existing_file_asks_first() {
     handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
     assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
     assert_eq!(fs.contents("/b.txt"), Some(vec![b'x'; 10]));
+}
+
+/// The name was free when the user typed it; a file another program creates
+/// before the rename lands is asked about, never replaced unasked.
+#[test]
+fn a_rename_asks_about_a_name_created_after_it_was_typed() {
+    let mut fs = fixture().appears_at_rename("/new.rs", b"theirs");
+    let mut m = model(&mut fs);
+    m.pane = Pane::Files;
+    m.file_cursor = 2; // a.rs
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('r'));
+    for _ in 0.."a.rs".len() {
+        handle_event(&mut m, &mut fs, &mut decode(), &Event::Backspace);
+    }
+    type_text(&mut m, &mut fs, "new.rs");
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Enter);
+    assert!(matches!(m.prompt, Some(Prompt::Overwrite(_))));
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::Char('s'));
+    assert_eq!(fs.contents("/new.rs"), Some(b"theirs".to_vec()));
+    assert_eq!(fs.contents("/a.rs"), Some(vec![b'x'; 30]));
 }
 
 #[test]
@@ -2447,7 +2485,12 @@ impl Fs for SparseFs {
         Err(Errno::PermissionDenied)
     }
 
-    fn rename(&mut self, _src: &str, _dst: &str) -> Result<RenameOutcome, Errno> {
+    fn rename(
+        &mut self,
+        _src: &str,
+        _dst: &str,
+        _flags: RenameFlags,
+    ) -> Result<RenameOutcome, Errno> {
         Err(Errno::PermissionDenied)
     }
 }

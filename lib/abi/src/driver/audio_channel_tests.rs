@@ -525,6 +525,10 @@ fn every_notification_round_trips() {
             endpoint: 2,
             jack: JackState::Present,
         },
+        AudioChannelNotify::Faulted {
+            endpoint: 3,
+            reason: Errno::NoBandwidth,
+        },
     ] {
         assert_eq!(
             AudioChannelNotify::decode(&notification.encode()),
@@ -627,6 +631,29 @@ fn a_notification_refuses_a_field_its_kind_does_not_define() {
         corrupt[dirty] = 1;
         assert_eq!(AudioChannelNotify::decode(&corrupt), Err(Errno::BadMagic));
     }
+
+    let faulted = AudioChannelNotify::Faulted {
+        endpoint: 1,
+        reason: Errno::DeviceFault,
+    }
+    .encode();
+    for dirty in [
+        notify::REASON + 4,
+        notify::JACK,
+        notify::LOST_FRAMES,
+        notify::SAMPLED_AT,
+    ] {
+        let mut corrupt = faulted;
+        corrupt[dirty] = 1;
+        assert_eq!(AudioChannelNotify::decode(&corrupt), Err(Errno::BadMagic));
+    }
+    let mut unknown = faulted;
+    put_i32(&mut unknown, notify::REASON, 9_999);
+    assert_eq!(
+        AudioChannelNotify::decode(&unknown),
+        Err(Errno::OutOfRange),
+        "a reason no errno carries"
+    );
 }
 
 /// Every reply buffer in the contract is sized to one constant, and the

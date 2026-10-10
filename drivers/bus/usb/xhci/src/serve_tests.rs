@@ -12,17 +12,15 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{attach_transport_grants, Reach, UrbOutcome, UrbService};
+use super::{attach_transport_grants, Reach, UrbOutcome, UrbReply, UrbService};
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
+use tairix_abi::reply::decode_status_reply;
 use tairix_abi::usb_urb::{
-    decode_completion, UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN,
+    decode_completion, IsoGrant, UrbRequest, UsbDirection, UsbSpeed, UsbTransferType,
 };
-use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode};
+use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, ProcId, PROC_ID_LEN};
+use tairix_inline::BitSet256;
 use tairix_usb::transport::{UrbEngine, UrbScope};
-
-/// An arbitrary shared-buffer handle the URB names; the state machine uses the
-/// `shm` slice it is handed, not this value.
-const BUFFER_HANDLE: u64 = 0x0BAD_F00D_0000_0001;
 
 /// A controllable [`UrbEngine`] double: control-IN copies a fixed response,
 /// interrupt-IN delivers queued reports once each, then "nothing pending",
@@ -81,14 +79,17 @@ impl UrbEngine for MockEngine {
     }
 
     fn scope(&self) -> Option<UrbScope> {
+        let mut interfaces = BitSet256::new();
+        interfaces.insert(0);
         Some(UrbScope {
-            interface: 0,
+            interfaces,
             endpoints: u32::MAX << 2,
         })
     }
 
     fn interrupt_in(
         &mut self,
+        _endpoint: u8,
         _request: usize,
         data: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
@@ -130,19 +131,15 @@ impl UrbEngine for MockEngine {
     }
 }
 
-/// Encode an interrupt-IN URB on `endpoint` reading `length` bytes.
-fn interrupt_urb(endpoint: u8, length: u32) -> Vec<u8> {
-    let urb = UrbRequest {
+/// An interrupt-IN URB on `endpoint` reading `length` bytes.
+fn interrupt_urb(endpoint: u8, length: u32) -> UrbRequest {
+    UrbRequest {
         endpoint,
         transfer_type: UsbTransferType::Interrupt,
         direction: UsbDirection::In,
-        buffer: BUFFER_HANDLE,
         length,
         setup: [0; 8],
-    };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
-    buf[..n].to_vec()
+    }
 }
 
 /// Decode the completion carried by a [`UrbOutcome::Reply`].
@@ -182,19 +179,15 @@ fn an_interrupt_in_is_held_until_a_controller_event_completes_it() {
     assert!(!service.is_busy());
 }
 
-/// Encode a bulk-IN URB on `endpoint` reading `length` bytes.
-fn bulk_in_urb(endpoint: u8, length: u32) -> Vec<u8> {
-    let urb = UrbRequest {
+/// A bulk-IN URB on `endpoint` reading `length` bytes.
+fn bulk_in_urb(endpoint: u8, length: u32) -> UrbRequest {
+    UrbRequest {
         endpoint,
         transfer_type: UsbTransferType::Bulk,
         direction: UsbDirection::In,
-        buffer: BUFFER_HANDLE,
         length,
         setup: [0; 8],
-    };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
-    buf[..n].to_vec()
+    }
 }
 
 #[test]
@@ -225,19 +218,15 @@ fn a_bulk_in_is_held_until_a_controller_event_completes_it() {
     assert!(!service.is_busy());
 }
 
-/// Encode a `GET_DESCRIPTOR(device)` control-IN URB reading `length` bytes.
-fn control_in_urb(length: u8) -> Vec<u8> {
-    let urb = UrbRequest {
+/// A `GET_DESCRIPTOR(device)` control-IN URB reading `length` bytes.
+fn control_in_urb(length: u8) -> UrbRequest {
+    UrbRequest {
         endpoint: 0,
         transfer_type: UsbTransferType::Control,
         direction: UsbDirection::In,
-        buffer: BUFFER_HANDLE,
         length: u32::from(length),
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, length, 0x00],
-    };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
-    buf[..n].to_vec()
+    }
 }
 
 #[test]
@@ -378,14 +367,11 @@ fn an_illegal_urb_is_replied_fail_closed_without_reaching_the_engine() {
         endpoint: 0,
         transfer_type: UsbTransferType::Bulk,
         direction: UsbDirection::In,
-        buffer: BUFFER_HANDLE,
         length: 8,
         setup: [0; 8],
     };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
 
-    let outcome = service.on_submit(Reach::Served, 0x33, &buf[..n], &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x33, &urb, &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::OutOfRange));
     assert!(!service.is_busy());
     assert_eq!(engine.control_calls, 0);
@@ -574,13 +560,23 @@ fn a_failed_reset_answers_a_held_transfer_reissuably() {
 }
 
 #[test]
-fn a_malformed_urb_during_recovery_is_refused_fail_closed() {
-    let mut engine = MockEngine::new();
-    let mut shm = vec![0u8; 8];
-    let mut service = UrbService::new();
-
-    let truncated = &interrupt_urb(1, 8)[..URB_REQUEST_LEN - 1];
-    let outcome = service.on_submit(Reach::Recovering, 0x61, truncated, &mut shm, &mut engine);
-    assert_eq!(reply_result(&outcome), Err(Errno::LengthOutOfRange));
-    assert!(!service.is_busy());
+fn an_operation_answers_with_its_status_or_its_grant() {
+    let ok = UrbReply::status(7, Ok(()));
+    assert_eq!(ok.ticket, 7);
+    assert_eq!(decode_status_reply(&ok.bytes[..ok.len]), Ok(()));
+    let refused = UrbReply::status(8, Err(Errno::NoBandwidth));
+    assert_eq!(
+        decode_status_reply(&refused.bytes[..refused.len]),
+        Err(Errno::NoBandwidth)
+    );
+    let grant = IsoGrant {
+        region_grant: 3,
+        grantor: ProcId::from_raw([0x77; PROC_ID_LEN]),
+        notify: 0x5553_0000_0000_2A81,
+        interval_microframes: 8,
+        speed: UsbSpeed::Full,
+        stream: core::num::NonZeroU32::MIN,
+    };
+    let reply = UrbReply::grant(9, &grant);
+    assert_eq!(IsoGrant::decode(&reply.bytes[..reply.len]), Ok(grant));
 }

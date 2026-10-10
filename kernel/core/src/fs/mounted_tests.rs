@@ -23,7 +23,8 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{
-    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, UnlinkFlags, FS_OWNER_UNCHANGED,
+    CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, RenameFlags, UnlinkFlags,
+    FS_OWNER_UNCHANGED,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, UserId, UserRecord};
@@ -527,8 +528,14 @@ fn a_listing_whose_directory_is_replaced_between_batches_is_stale() {
         &mut |_| DirVisit::Stop,
     )
     .expect("the first batch fixes the listing to d");
-    svc.rename(TEST_UID, &caps, &path("d"), &path("old"))
-        .expect("rename away");
+    svc.rename(
+        TEST_UID,
+        &caps,
+        &path("d"),
+        &path("old"),
+        RenameFlags::empty(),
+    )
+    .expect("rename away");
     svc.mkdir(TEST_UID, &caps, &path("d")).expect("a new d");
     create("d/c");
     assert_eq!(
@@ -937,7 +944,8 @@ fn rename_moves_a_file_under_the_attested_identity() {
     .expect("create");
     svc.write(TEST_UID, &caps, &src, 0, false, b"hi")
         .expect("write");
-    svc.rename(TEST_UID, &caps, &src, &dst).expect("rename");
+    svc.rename(TEST_UID, &caps, &src, &dst, RenameFlags::empty())
+        .expect("rename");
     let mut buf = [0u8; 2];
     assert_eq!(
         svc.read(TEST_UID, &caps, &src, 0, &mut buf),
@@ -947,12 +955,134 @@ fn rename_moves_a_file_under_the_attested_identity() {
     assert_eq!(&buf, b"hi");
 }
 
+/// Create `name` holding `body` on `svc`.
+fn file_with(svc: &MountedFilesystemService<RwMockFs>, name: &str, body: &[u8]) {
+    let caps = caps();
+    svc.open(
+        TEST_UID,
+        &caps,
+        &path(name),
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    svc.write(TEST_UID, &caps, &path(name), 0, false, body)
+        .expect("write");
+}
+
+/// The names the mounted volume's root lists.
+fn root_names(svc: &MountedFilesystemService<RwMockFs>) -> Vec<Vec<u8>> {
+    let mut at = Listing::default();
+    let mut names = Vec::new();
+    svc.readdir(
+        TEST_UID,
+        &caps(),
+        MOUNT,
+        FinalLink::Follow,
+        &mut at,
+        &mut |entry| {
+            names.push(entry.name.to_vec());
+            DirVisit::Take
+        },
+    )
+    .expect("list");
+    names
+}
+
+#[test]
+fn a_no_replace_rename_refuses_an_occupied_destination_and_keeps_both() {
+    let svc = ready();
+    let caps = caps();
+    file_with(&svc, "a", b"aa");
+    file_with(&svc, "b", b"bb");
+    assert_eq!(
+        svc.rename(
+            TEST_UID,
+            &caps,
+            &path("a"),
+            &path("b"),
+            RenameFlags::NO_REPLACE
+        ),
+        Err(Errno::AlreadyExists)
+    );
+    let mut buf = [0u8; 2];
+    assert_eq!(svc.read(TEST_UID, &caps, &path("a"), 0, &mut buf), Ok(2));
+    assert_eq!(&buf, b"aa");
+    assert_eq!(svc.read(TEST_UID, &caps, &path("b"), 0, &mut buf), Ok(2));
+    assert_eq!(&buf, b"bb");
+}
+
+#[test]
+fn a_no_replace_rename_to_a_free_name_moves_the_file() {
+    let svc = ready();
+    let caps = caps();
+    file_with(&svc, "a", b"aa");
+    svc.rename(
+        TEST_UID,
+        &caps,
+        &path("a"),
+        &path("c"),
+        RenameFlags::NO_REPLACE,
+    )
+    .expect("rename");
+    assert_eq!(root_names(&svc), [b"c".to_vec()]);
+}
+
+/// On a volume that ignores letter case, `B` names the sibling `b`: a
+/// no-replace move onto it is a clash, not a new name.
+#[test]
+fn a_no_replace_rename_refuses_a_sibling_differing_only_in_case() {
+    let svc = ready();
+    let caps = caps();
+    file_with(&svc, "a", b"aa");
+    file_with(&svc, "b", b"bb");
+    assert_eq!(
+        svc.rename(
+            TEST_UID,
+            &caps,
+            &path("a"),
+            &path("B"),
+            RenameFlags::NO_REPLACE
+        ),
+        Err(Errno::AlreadyExists)
+    );
+    let mut buf = [0u8; 2];
+    assert_eq!(svc.read(TEST_UID, &caps, &path("b"), 0, &mut buf), Ok(2));
+    assert_eq!(&buf, b"bb");
+}
+
+/// A re-spelling of a name on a folding volume names the entry itself, so it
+/// is renamed — under either flag — rather than reported done while nothing
+/// changed.
+#[test]
+fn a_rename_respells_its_own_entry_on_a_folding_volume() {
+    for flags in [RenameFlags::empty(), RenameFlags::NO_REPLACE] {
+        let svc = ready();
+        let caps = caps();
+        file_with(&svc, "Foo.txt", b"ff");
+        svc.rename(TEST_UID, &caps, &path("Foo.txt"), &path("foo.txt"), flags)
+            .expect("re-spell");
+        assert_eq!(root_names(&svc), [b"foo.txt".to_vec()]);
+        let mut buf = [0u8; 2];
+        assert_eq!(
+            svc.read(TEST_UID, &caps, &path("foo.txt"), 0, &mut buf),
+            Ok(2)
+        );
+        assert_eq!(&buf, b"ff");
+    }
+}
+
 #[test]
 fn rename_of_a_missing_source_fails_closed() {
     let svc = ready();
     let caps = caps();
     assert_eq!(
-        svc.rename(TEST_UID, &caps, &path("nope"), &path("x")),
+        svc.rename(
+            TEST_UID,
+            &caps,
+            &path("nope"),
+            &path("x"),
+            RenameFlags::empty()
+        ),
         Err(Errno::NotFound)
     );
 }
@@ -963,7 +1093,13 @@ fn rename_on_a_read_only_mount_fails_closed() {
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
-        svc.rename(TEST_UID, &caps, &path("a"), &path("b")),
+        svc.rename(
+            TEST_UID,
+            &caps,
+            &path("a"),
+            &path("b"),
+            RenameFlags::empty()
+        ),
         Err(Errno::PermissionDenied)
     );
 }
@@ -1029,7 +1165,13 @@ fn rename_before_a_mount_is_installed_fails_closed() {
     let svc = service(false, true, false);
     let caps = caps();
     assert_eq!(
-        svc.rename(TEST_UID, &caps, &path("a"), &path("b")),
+        svc.rename(
+            TEST_UID,
+            &caps,
+            &path("a"),
+            &path("b"),
+            RenameFlags::empty()
+        ),
         Err(Errno::NotImplemented)
     );
 }
@@ -1470,7 +1612,7 @@ fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
     )
     .expect("create");
     assert_eq!(
-        svc.rename(TEST_UID, &caps, &src, "/Apps/b"),
+        svc.rename(TEST_UID, &caps, &src, "/Apps/b", RenameFlags::empty()),
         Err(Errno::NotFound)
     );
 }
@@ -2665,6 +2807,7 @@ mod watch {
             &caps(),
             "/Storage/vol/new.txt",
             "/Storage/vol/old.txt",
+            RenameFlags::empty(),
         )
         .expect("rename");
         assert_eq!(drained(), ["new.txt", "old.txt"]);

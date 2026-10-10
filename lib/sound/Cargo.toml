@@ -1,0 +1,38 @@
+[package]
+name = "tairix-sound"
+description = "First-party TAIRiX sound files: complete, fail-closed AU and WAV decoders for untrusted audio — every sampled encoding, G.711, G.721/G.722/G.723 ADPCM, MS and IMA ADPCM, RF64 — read a block at a time through a random-access input, so a long recording decodes in the memory of one block (`lib/`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The FLAC encoder: the asset build converts the shipped sound masters with
+# it. Off for every crate that runs on the machine, which decodes only.
+encode = []
+
+[dependencies]
+# The PCM vocabulary a decoded stream is stated in: its rate, channel layout
+# and sample format, the same words the mixer and every device use.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one shared fallible-allocation reservation: a block's scratch and a
+# file's metadata are sized by the file, bounded by the decode limits, so a
+# machine short of memory refuses one and the decode reports that.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The bounded inline string a tag's key is held in, so a key costs a fixed
+# charge against the metadata budget and no allocation.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fuzz harness draws its inputs through the shared seed/budget seam: one
+# place picks the per-run seed, logs it, and bounds the smoke/soak loop. Test
+# scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed" }
+# The fuzz target emits FLAC through the encoder, so its tests build the
+# crate with it.
+tairix-sound = { path = ".", features = ["encode"] }

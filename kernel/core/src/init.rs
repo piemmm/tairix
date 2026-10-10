@@ -2219,8 +2219,9 @@ fn run_phases<A: KernelArch>(
         consoles,
         log_sink,
     );
+    let dma_reaches = crate::hwtree::dma_reaches(hw_tree);
     let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
-        FrameAllocator::new(memory_map).map_err(InitError::Mem)?,
+        FrameAllocator::with_dma_reaches(memory_map, &dma_reaches).map_err(InitError::Mem)?,
     ));
     // Activate growable kernel-heap backing at the first point every
     // required component exists. Scheduler/runtime initialization allocates
@@ -4554,6 +4555,12 @@ mod tests {
             Err(tairix_abi::Errno::Busy)
         }
         fn node(&self, _: u32) -> Result<Option<tairix_abi::HwNode>, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn for_each_node(
+            &self,
+            _: &mut dyn FnMut(&tairix_abi::HwNode),
+        ) -> Result<(), tairix_abi::Errno> {
             Err(tairix_abi::Errno::Busy)
         }
     }

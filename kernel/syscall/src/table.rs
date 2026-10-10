@@ -14,8 +14,8 @@ use tairix_abi::{
     i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
     CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
     MapFlags, OpenFlags, PeerWatchOp, PortWidth, PowerAction, RandomFlags, RealpathMode,
-    SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
-    ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
+    RenameFlags, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags,
+    WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
     SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
@@ -2568,8 +2568,8 @@ pub trait SyscallHandlers {
     /// absolute `dst` (`dst_len` bytes) (`PREREQUISITES.md` P-A rename).
     ///
     /// The dispatcher has already checked the caller holds
-    /// [`CapabilityId::FS_ACCESS`] and that both `src` and `dst` are
-    /// non-null `UserPtr`s.
+    /// [`CapabilityId::FS_ACCESS`], that both `src` and `dst` are non-null
+    /// `UserPtr`s, and rejected any reserved [`RenameFlags`] bit.
     ///
     /// The default implementation fails closed with [`Errno::NotImplemented`].
     fn fs_rename(
@@ -2579,6 +2579,7 @@ pub trait SyscallHandlers {
         _src_len: usize,
         _dst: u64,
         _dst_len: usize,
+        _flags: RenameFlags,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -2912,6 +2913,35 @@ pub trait SyscallHandlers {
         _max_payload: usize,
         _capacity: usize,
     ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Admit the process instance serving call endpoint `server` as the only
+    /// one whose messages the caller's port `port` takes, replacing any
+    /// admitted before.
+    ///
+    /// The implementation refuses a port the caller does not own, so a
+    /// process narrows only its own mailbox.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn port_admit(&self, _caller: &CallerContext<'_>, _port: u64, _server: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Whether the caller holds the controlling (foreground) ownership of the
+    /// terminal behind readable descriptor `fd` (`foreground_held`): `Ok(1)`
+    /// when it owns the terminal, `Ok(0)` when the terminal is unowned or
+    /// another task owns it.
+    ///
+    /// The dispatcher has already checked [`CapabilityId::CONSOLE_READ`]. The
+    /// implementation resolves `fd` against the caller's own descriptor table
+    /// exactly as `console_foreground` does — a non-readable or unbacked
+    /// descriptor fails closed with [`Errno::NotFound`] — and changes nothing.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`]:
+    /// a kernel build with no console list wired has no terminal to ask
+    /// about. The real handler is installed in `kernel/core`.
+    fn foreground_held(&self, _caller: &CallerContext<'_>, _fd: u32) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -3971,10 +4001,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.fs_unlink(caller, args.0[0], path_len, flags)
             }
             SyscallNumber::FS_RENAME => {
+                // args[4] is the `RenameFlags` bits, rejected here for any
+                // reserved bit.
                 let src_len = decode_len(args.0[1])?;
                 let dst_len = decode_len(args.0[3])?;
+                let flags = RenameFlags::from_bits(decode_u32(args.0[4]))?;
                 self.handlers
-                    .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len)
+                    .fs_rename(caller, args.0[0], src_len, args.0[2], dst_len, flags)
             }
             SyscallNumber::FS_SYMLINK => {
                 let target_len = decode_len(args.0[1])?;
@@ -4090,6 +4123,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let capacity = decode_len(args.0[2])?;
                 self.handlers
                     .port_bind(caller, args.0[0], max_payload, capacity)
+            }
+            SyscallNumber::PORT_ADMIT => self.handlers.port_admit(caller, args.0[0], args.0[1]),
+            SyscallNumber::FOREGROUND_HELD => {
+                // args[0] is the descriptor naming the terminal;
+                // `validate_arg` guarantees it fits `u32`.
+                self.handlers.foreground_held(caller, decode_u32(args.0[0]))
             }
             SyscallNumber::PORT_RESOLVE => {
                 // args[0] is the non-null name `UserPtr`
@@ -5603,6 +5642,7 @@ mod tests {
             _src_len: usize,
             _dst: u64,
             _dst_len: usize,
+            _flags: RenameFlags,
         ) -> SyscallResult {
             self.record("fs_rename");
             Ok(0)
@@ -5787,6 +5827,16 @@ mod tests {
             _capacity: usize,
         ) -> SyscallResult {
             self.record("port_bind");
+            Ok(0)
+        }
+
+        fn port_admit(&self, _c: &CallerContext<'_>, _port: u64, _server: u64) -> SyscallResult {
+            self.record("port_admit");
+            Ok(0)
+        }
+
+        fn foreground_held(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+            self.record("foreground_held");
             Ok(0)
         }
 

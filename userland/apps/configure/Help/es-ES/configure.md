@@ -100,6 +100,17 @@ afectado — nunca cambia un resultado.
   desgastado puede notificar una segunda pulsación unos milisegundos después
   de soltarlo cuando pretendía un solo clic. Ponga `0` en un ratón cuyo modo
   de disparo rápido envía pares de clics a propósito.
+- `audio.output`, `audio.input` — `auto` por defecto, o la ubicación de un
+  extremo tal como la muestra `audioctl` (dieciséis dígitos hexadecimales,
+  un punto y el índice del extremo): la salida y la entrada que esta
+  máquina prefiere por defecto. La elección propia de una sesión va
+  primero; esta es la elección antes de que nadie inicie sesión y en una
+  máquina sin escritorio. `auto` es el primer dispositivo encontrado.
+- `audio.level` — en decibelios, `0dB` por defecto, o una atenuación como
+  `-12dB` o `-6.5dB`, con dos decimales como máximo: el nivel con el que
+  empieza cada salida y entrada. Nunca por encima de `0dB`. El servicio de
+  audio toma un valor cambiado en el siguiente arranque; `audioctl` cambia
+  la máquina en marcha.
 
 La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
 la pila vuelve a aplicar su configuración.

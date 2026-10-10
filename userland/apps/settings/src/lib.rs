@@ -36,6 +36,7 @@ mod registry;
 mod renders;
 mod saver;
 mod shell;
+mod sound;
 mod statement;
 mod volumes;
 
@@ -56,6 +57,7 @@ pub use registry::{
 pub use renders::Renders;
 pub use saver::SaverOption;
 pub use shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
+pub use sound::SoundReading;
 pub use volumes::{Readings, VolumeReading};
 
 #[cfg(test)]

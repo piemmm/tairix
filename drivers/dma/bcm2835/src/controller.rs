@@ -18,12 +18,14 @@ use core::num::NonZeroU32;
 use tairix_abi::driver::dmaengine::{
     encode_done_reply, encode_error_reply, encode_open_reply, encode_position_reply,
     encode_prepare_reply, encode_wait_reply, CyclicParams, CyclicTransfer, DmaBufferGrant,
-    DmaChannel, DmaChannelEvent, DmaEngine, DmaEngineOp, DmaEngineRequest, DmaRequestLine, Halted,
-    WaitEnd, WaitReport, DMA_ENGINE_MAX_REPLY, DMA_MAX_CHANNELS,
+    DmaChannel, DmaChannelEvent, DmaEngine, DmaEngineOp, DmaEngineRequest, Halted, WaitEnd,
+    WaitReport, DMA_ENGINE_MAX_REPLY, DMA_MAX_CHANNELS,
 };
+use tairix_abi::hwlink::LinkRequest;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
 use tairix_abi::{DriverError, Errno, ProcId};
+use tairix_drvrt::SupplierHost;
 
 use crate::CHANNEL_SLOTS;
 
@@ -98,22 +100,9 @@ pub enum Record {
     },
 }
 
-/// What the endpoint needs from the kernel, about the call being served.
-pub trait ControllerHost {
-    /// The instance whose call `ticket` is in service.
-    ///
-    /// # Errors
-    ///
-    /// The kernel's refusal, for a call no longer in service.
-    fn caller(&self, ticket: u64) -> Result<ProcId, Errno>;
-
-    /// Whether that caller holds a grant covering `record`.
-    ///
-    /// # Errors
-    ///
-    /// The kernel's refusal, other than the answer "no".
-    fn caller_holds(&self, ticket: u64, record: &HwResource) -> Result<bool, Errno>;
-
+/// What the endpoint needs from the kernel beyond what every link supplier
+/// asks about the call being served.
+pub trait ControllerHost: SupplierHost {
     /// Carve a buffer of `bytes` the controller reaches.
     ///
     /// # Errors
@@ -130,23 +119,6 @@ pub trait ControllerHost {
     ///
     /// The kernel's refusal.
     fn grant(&mut self, buffer: &Buffer, ticket: u64) -> Result<u64, Errno>;
-
-    /// Answer the call `ticket` with `frame`.
-    ///
-    /// # Errors
-    ///
-    /// The kernel's refusal; a caller that has ended cannot be answered.
-    fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno>;
-
-    /// Be told when `peer` ends. Idempotent.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::NotFound`] when it already has.
-    fn watch(&mut self, peer: ProcId) -> Result<(), Errno>;
-
-    /// Stop being told when `peer` ends.
-    fn unwatch(&mut self, peer: ProcId);
 
     /// The monotonic clock.
     fn now(&self) -> Duration64;
@@ -182,7 +154,7 @@ struct Posted {
 
 struct Slot {
     owner: ProcId,
-    line: DmaRequestLine,
+    line: LinkRequest,
     buffer: Option<Buffer>,
     shape: Option<Shape>,
     running: bool,
@@ -191,7 +163,7 @@ struct Slot {
 }
 
 impl Slot {
-    const fn new(owner: ProcId, line: DmaRequestLine) -> Self {
+    const fn new(owner: ProcId, line: LinkRequest) -> Self {
         Self {
             owner,
             line,
@@ -471,19 +443,11 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
         self.slots.get_mut(usize::from(channel))?.as_mut()
     }
 
-    fn open(
-        &mut self,
-        ticket: u64,
-        caller: ProcId,
-        line: &DmaRequestLine,
-    ) -> Result<Answer, Errno> {
+    fn open(&mut self, ticket: u64, caller: ProcId, line: &LinkRequest) -> Result<Answer, Errno> {
         if line.endpoint() != self.endpoint {
             return Err(Errno::OutOfRange);
         }
-        if !self
-            .host
-            .caller_holds(ticket, &HwResource::dma_request(line))?
-        {
+        if !self.host.caller_holds(ticket, &HwResource::request(line))? {
             return Err(Errno::PermissionDenied);
         }
         self.engine.accept(line).map_err(refusal)?;

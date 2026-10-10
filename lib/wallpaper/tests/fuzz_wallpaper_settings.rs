@@ -17,9 +17,10 @@
 //!    list, so the two readings agree on every document the strict one
 //!    accepts.
 //!
-//! The generator emits whole setting lines and mutates them at a low rate,
-//! so most documents are accepted and the round-trip invariant is genuinely
-//! exercised. The second test hammers the reader with arbitrary ASCII.
+//! The generator emits whole setting lines and poisons one line of one
+//! document in four, so most documents are accepted and the round-trip
+//! invariant is genuinely exercised. The second test hammers the reader with
+//! arbitrary ASCII.
 //!
 //! The fixed sweep runs under plain `cargo test`; under `cargo xtask fuzz`
 //! the same seeded stream keeps being drawn until the budget elapses.
@@ -35,10 +36,6 @@ const SMOKE_ITERATIONS: u64 = 5_000;
 /// so no `set_field`/`field_value` arm is left unfuzzed. The names are
 /// asserted against `SettingsKey::ALL` below, so a key added without a row here
 /// fails rather than silently going uncovered.
-///
-/// Refused values are drawn at a fixed low rate per key, so the share of
-/// documents accepted whole — and with it the round trip's coverage — does not
-/// fall as the registry grows.
 const KEYS: &[(&str, &[&str], &[&str])] = &[
     (
         "wallpaper",
@@ -245,36 +242,78 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["never", "1", "15", "1440"],
         &["0", "later"],
     ),
+    (
+        "audio.output",
+        &["\"\"", "0000000000000051.0", "ffffffffffffffff.31"],
+        &["speakers", "51.0", "0000000000000051.32"],
+    ),
+    (
+        "audio.input",
+        &["\"\"", "00a1b2c3d4e5f607.1"],
+        &["0000000000000000.0", "00A1B2C3D4E5F607.1"],
+    ),
+    (
+        "audio.levels",
+        &[
+            "\"\"",
+            "0000000000000051.0:-6.5dB",
+            "0000000000000051.0:-3dB 0000000000000052.1:-12.25dB",
+        ],
+        &[
+            "0000000000000051.0:3dB",
+            "0000000000000051.0:-6",
+            "0000000000000051.0:-1dB 0000000000000051.0:-2dB",
+        ],
+    ),
+    (
+        "audio.muted",
+        &[
+            "\"\"",
+            "0000000000000051.0",
+            "0000000000000051.0 0000000000000052.0",
+        ],
+        &["0000000000000051.0 0000000000000051.0", "muted"],
+    ),
 ];
 const BAD_TOKENS: &[&str] = &["", " ", "has space", "bogus", "relative/path.png"];
 
-fn value_for(rng: &mut Prng, key: &str) -> &'static str {
-    if rng.below(32) == 0 {
-        return rng.pick(BAD_TOKENS);
-    }
+/// One document in this many carries a value drawn to be refused.
+const POISONED_ONE_IN: usize = 4;
+
+/// A value `key` accepts or, to `refuse`, one it should refuse: its own, or a
+/// token few keys take.
+fn value_for(rng: &mut Prng, key: &str, refuse: bool) -> &'static str {
     let Some(&(_, accepted, refused)) = KEYS.iter().find(|(name, _, _)| *name == key) else {
         unreachable!("every generated key comes from the table");
     };
-    if !refused.is_empty() && rng.below(16) == 0 {
-        return rng.pick(refused);
+    if !refuse {
+        return rng.pick(accepted);
     }
-    rng.pick(accepted)
+    if refused.is_empty() || rng.below(2) == 0 {
+        return rng.pick(BAD_TOKENS);
+    }
+    rng.pick(refused)
 }
 
+/// A document of distinct keys, one line of which is poisoned in one document
+/// of every [`POISONED_ONE_IN`]. Poisoning a document rather than each line
+/// keeps the share accepted whole, and with it the round trip's coverage,
+/// from falling as the registry grows.
 fn document(rng: &mut Prng) -> String {
     use std::fmt::Write as _;
 
     let mut out = String::new();
     let mut keys: Vec<&str> = KEYS.iter().map(|(name, _, _)| *name).collect();
     let n = rng.below(keys.len() + 1);
-    for _ in 0..n {
+    let poisoned = (n > 0 && rng.below(POISONED_ONE_IN) == 0).then(|| rng.below(n));
+    for line in 0..n {
         let index = rng.below(keys.len());
         let key = keys.swap_remove(index);
 
         if rng.below(10) == 0 {
             out.push_str("# comment\n");
         }
-        let value = value_for(rng, key);
+        let value = value_for(rng, key, poisoned == Some(line));
         let _ = writeln!(out, "{key} = {value}");
     }
     out
@@ -391,7 +430,7 @@ fn the_generator_produces_accepted_documents() {
         .filter(|_| check_round_trip(&document(&mut rng)))
         .count();
     assert!(
-        u64::try_from(accepted).expect("count fits") * 4 >= DRAWS,
+        u64::try_from(accepted).expect("count fits") * 2 >= DRAWS,
         "only {accepted} of {DRAWS} generated documents parsed; the corpus is degenerate"
     );
 }

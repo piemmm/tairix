@@ -10,27 +10,30 @@
 //! reason `lib/netchan` is separate from `lib/net`: a driver process must not
 //! link the mixer.
 //!
-//! Two layers:
+//! Three layers:
 //!
 //! * [`AudioChannelServer`] — the pure, host-testable per-request handler:
 //!   per-endpoint configuration and attach state, geometry validation, and
-//!   the service logic. No I/O, so the whole control plane is exercised on
-//!   the host against a mock device.
+//!   the service logic.
+//! * [`Dispatcher`] — the serve loop's work without its syscalls: a call
+//!   answered or a device event serviced over an injected [`ChannelIo`], so
+//!   the interrupt path and the region lifecycle are host-tested too.
 //! * `serve` — the freestanding process loop the driver binary hands its
 //!   opened device to: claim a reserved device-channel endpoint, publish the
 //!   [`AUDIOCHAN_NODE_COMPATIBLE`](tairix_abi::driver::audio_channel::AUDIOCHAN_NODE_COMPATIBLE)
-//!   hardware-tree node carrying it, and park on a wait set over {call
-//!   endpoint, device interrupt} for the life of the driver. Compiled only
-//!   for the bare-metal targets a driver binary is built for; the host build
-//!   carries just the pure handler.
+//!   hardware-tree node carrying it, and park on a wait set over the call
+//!   endpoint and the device's event sources — its interrupt line, or the
+//!   ports a bus driver reports its progress on — for the life of the driver.
+//!   Compiled only for the bare-metal targets a driver binary is built for;
+//!   the host build carries the server and the dispatcher.
 //!
 //! # Nothing spins
 //!
-//! Between doorbells the driver parks on its device interrupt. A period
+//! Between doorbells the driver parks on its device's event sources. A period
 //! boundary wakes it, it moves that period between the shared ring and the
 //! device, and it sends one notify carrying the clock pair the mixer's linear
 //! fit is built from. There is no audio tick and no poll loop: the device's
-//! own period interrupt is the only timer in the stack.
+//! own period events are the only timer in the stack.
 //!
 //! # Fail closed
 //!
@@ -45,13 +48,19 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod cyclic;
+mod dispatch;
 mod server;
+pub use dispatch::{ChannelIo, Dispatcher, MappedRegion};
 pub use server::{AudioChannelServer, Serviced};
+
+#[cfg(test)]
+mod mock_audio;
 
 #[cfg(target_os = "none")]
 mod serve;
 #[cfg(target_os = "none")]
-pub use serve::{fail, serve};
+pub use serve::{fail, serve, Wake};
 
 /// The reserved, fail-closed process exit codes an audio driver binary ends
 /// with when it cannot serve its device.
@@ -71,10 +80,11 @@ pub mod exit {
     /// unbound, mis-provisioned, or malformed node.
     pub const NO_RESOURCES: i32 = 81;
     /// Device bring-up failed: a window could not be mapped, the device is
-    /// not the one the node claimed, it rejected its init sequence, or the
-    /// granted interrupt line could not be bound (the serve loop parks on
-    /// it, so a driver that cannot bind it would degrade into the busy
-    /// re-poll the charter forbids).
+    /// not the one the node claimed, it rejected its init sequence, or an
+    /// event source — the granted interrupt line, or a port its bus reports
+    /// progress on — could not be bound (the serve loop parks on them, so a
+    /// driver without one would degrade into the busy re-poll the charter
+    /// forbids).
     pub const BRINGUP_FAILED: i32 = 82;
     /// The device channel could not be stood up: no free reserved endpoint
     /// id, the bind was refused, the `audiochan` node could not be published,

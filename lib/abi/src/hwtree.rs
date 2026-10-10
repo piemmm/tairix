@@ -33,8 +33,8 @@
 
 use crate::blkio::{BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
-use crate::driver::dmaengine::{DmaControllerDuty, DmaRequestLine, DMA_SPECIFIER_MAX_CELLS};
 use crate::driver::net::MAC_ADDRESS_LEN;
+use crate::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_SELECTOR_MAX_CELLS};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::{CapabilityId, Errno};
 
@@ -102,8 +102,8 @@ pub const HW_NODE_MAX_RESOURCES: usize = 16;
 
 /// Bytes the fixed [`HwNode`] header occupies on the wire, before the
 /// match-key and resource arrays: `id`, `parent`, `address`, `class`, the two
-/// array counts, and the fault-domain health byte.
-pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1;
+/// array counts, the fault-domain health byte, and the served link roles.
+pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1 + 1;
 
 /// Device class of a hardware-tree node.
 ///
@@ -575,22 +575,22 @@ pub enum HwResourceKind {
     /// because the two facts must arrive paired, and because `Endpoint` means
     /// "may submit to", never "must serve".
     BusChild = 9,
-    /// The **duty to serve a DMA controller's endpoint**: `base` is the
-    /// endpoint id, `len` is `1`, and `xlate` holds the channels the tree
-    /// left to this system, numbered from the node's own first channel, when
-    /// `flags` bit 0 says the tree stated them. Recovered through
-    /// [`HwResource::dma_controller_duty`].
-    DmaController = 10,
-    /// One entry of a consumer's `dmas`: the **right to call** the controller
-    /// endpoint in `base` for the request line it names. `xlate` holds the
-    /// specifier cells, the first in its low half; `len` the entry's
-    /// `dma-names` string NUL-padded into eight bytes; `flags` the entry's
-    /// position (bits 0–7) and cell count (bits 8–15). Recovered through
-    /// [`HwResource::dma_request_line`].
+    /// A link supplier's **duty to serve its role's endpoint**: `base` is the
+    /// endpoint id, whose block names the role, and `len` is `1`; a DMA
+    /// controller's `xlate` holds the channels the tree left to this system,
+    /// numbered from the node's own first channel, when `flags` bit 0 says
+    /// the tree stated them. Recovered through [`HwResource::link_duty`].
+    LinkDuty = 10,
+    /// One link a consumer's description names: the **right to call** the
+    /// supplier endpoint in `base` for the selector it carries. `xlate` holds
+    /// the selector cells, the first in its low half; `len` the entry's name
+    /// NUL-padded into eight bytes; `flags` the entry's position (bits 0–7)
+    /// and cell count (bits 8–15). Recovered through
+    /// [`HwResource::link_request`].
     ///
     /// It covers calling that endpoint and never binding it, so no consumer
-    /// can serve the rendezvous every other consumer of its controller calls.
-    DmaRequest = 11,
+    /// can serve the rendezvous every other consumer of its supplier calls.
+    LinkRequest = 11,
     /// The node **masters DMA through a translation unit**: `base` is the
     /// unit's node id, `xlate` the first stream id the unit knows the device
     /// by, and `len` how many consecutive ids it uses. Recovered through
@@ -653,13 +653,27 @@ pub enum HwProperty {
     /// and its registers are never a grant. The value is `1`; only discovery
     /// states it, a driver never publishes it.
     KernelDriven = 3,
+    /// The node is a USB interface: the bus speed its device runs at, as
+    /// [`UsbSpeed`](crate::usb_urb::UsbSpeed)'s wire byte, which fixes how
+    /// long each of its endpoints' service intervals is.
+    UsbSpeed = 4,
+    /// An entry of the node's `clocks` names a fixed-rate clock, which no
+    /// driver serves: the entry's position in bits 48–55 and its rate in Hz
+    /// below. Built and read through [`HwResource::fixed_clock_rate`] and
+    /// [`HwResource::fixed_clock`].
+    FixedClockRate = 5,
 }
 
 impl HwProperty {
     /// Every key, so the C view is generated from the ABI rather than a
     /// hand-kept list.
-    pub const ALL: &'static [Self] =
-        &[Self::UsbInterface, Self::FaultInterrupt, Self::KernelDriven];
+    pub const ALL: &'static [Self] = &[
+        Self::UsbInterface,
+        Self::FaultInterrupt,
+        Self::KernelDriven,
+        Self::UsbSpeed,
+        Self::FixedClockRate,
+    ];
 
     /// Raw on-wire key.
     #[must_use]
@@ -674,10 +688,15 @@ impl HwProperty {
             1 => Some(Self::UsbInterface),
             2 => Some(Self::FaultInterrupt),
             3 => Some(Self::KernelDriven),
+            4 => Some(Self::UsbSpeed),
+            5 => Some(Self::FixedClockRate),
             _ => None,
         }
     }
 }
+
+/// The bits of a [`HwProperty::FixedClockRate`] value holding the rate.
+const FIXED_CLOCK_RATE_BITS: u32 = 48;
 
 /// A reserved block of call-endpoint ids, one per hardware-tree node id.
 ///
@@ -699,6 +718,8 @@ impl NodeEndpointBlock {
     pub const ALL: &'static [Self] = &[
         BUS_CHILD_ENDPOINTS,
         crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS,
+        crate::driver::clock::CLOCK_CONTROLLER_ENDPOINTS,
+        crate::driver::codec::CODEC_ENDPOINTS,
     ];
 
     /// The block whose ids' two high bytes spell `tag`.
@@ -718,6 +739,14 @@ impl NodeEndpointBlock {
     #[must_use]
     pub const fn contains(self, id: u64) -> bool {
         id >= self.base && id - self.base < Self::SPAN
+    }
+
+    /// The node `id` is reserved for, or [`None`] for an id outside the
+    /// block.
+    #[must_use]
+    pub fn node_of(self, id: u64) -> Option<u32> {
+        id.checked_sub(self.base)
+            .and_then(|offset| u32::try_from(offset).ok())
     }
 }
 
@@ -776,8 +805,8 @@ impl HwResourceKind {
         Self::Framebuffer,
         Self::LinkAddress,
         Self::BusChild,
-        Self::DmaController,
-        Self::DmaRequest,
+        Self::LinkDuty,
+        Self::LinkRequest,
         Self::IommuStream,
         Self::IommuReserved,
         Self::Property,
@@ -806,8 +835,8 @@ impl HwResourceKind {
             7 => Some(Self::Framebuffer),
             8 => Some(Self::LinkAddress),
             9 => Some(Self::BusChild),
-            10 => Some(Self::DmaController),
-            11 => Some(Self::DmaRequest),
+            10 => Some(Self::LinkDuty),
+            11 => Some(Self::LinkRequest),
             12 => Some(Self::IommuStream),
             13 => Some(Self::IommuReserved),
             14 => Some(Self::Property),
@@ -835,7 +864,7 @@ impl HwResourceKind {
             // generic per-endpoint call-IPC capability; the per-endpoint
             // grant (this resource, or a DMA request line naming its
             // controller) scopes it to one endpoint id.
-            Self::Endpoint | Self::DmaRequest => CapabilityId::IPC_ENDPOINT,
+            Self::Endpoint | Self::LinkRequest => CapabilityId::IPC_ENDPOINT,
             // Mapping a granted shared-memory region is gated by the generic
             // shared-memory capability; the per-region grant (this resource)
             // scopes it to one region id.
@@ -851,7 +880,7 @@ impl HwResourceKind {
             | Self::MsiDoorbell => return None,
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
-            Self::BusChild | Self::DmaController => CapabilityId::IPC_BIND_PRIVILEGED,
+            Self::BusChild | Self::LinkDuty => CapabilityId::IPC_BIND_PRIVILEGED,
         })
     }
 }
@@ -1391,16 +1420,16 @@ impl HwResource {
         (self.kind() == Some(HwResourceKind::BusChild)).then_some((self.base, self.xlate))
     }
 
-    /// The duty to serve a DMA controller's endpoint
-    /// ([`HwResourceKind::DmaController`]).
+    /// A link supplier's duty to serve its role's endpoint
+    /// ([`HwResourceKind::LinkDuty`]).
     #[must_use]
-    pub fn dma_controller(duty: &DmaControllerDuty) -> Self {
+    pub fn duty(duty: &LinkDuty) -> Self {
         let (flags, channels) = match duty.channels() {
             Some(mask) => (Self::DMA_CHANNELS_STATED, mask),
             None => (0, 0),
         };
         Self::new_xlate(
-            HwResourceKind::DmaController,
+            HwResourceKind::LinkDuty,
             duty.endpoint(),
             1,
             flags,
@@ -1408,17 +1437,17 @@ impl HwResource {
         )
     }
 
-    /// The duty a [`HwResourceKind::DmaController`] resource carries.
+    /// The duty a [`HwResourceKind::LinkDuty`] resource carries.
     ///
     /// # Errors
     ///
     /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
     /// field the kind does not define: a capability other than the kind's
     /// own, a length other than one endpoint, an unknown flag, channels the
-    /// flags say were never stated, or an endpoint outside the controller
-    /// block.
-    pub fn dma_controller_duty(&self) -> Result<DmaControllerDuty, Errno> {
-        if self.kind() != Some(HwResourceKind::DmaController) {
+    /// flags say were never stated or stated for a role that has none, or an
+    /// endpoint in no role's block.
+    pub fn link_duty(&self) -> Result<LinkDuty, Errno> {
+        if self.kind() != Some(HwResourceKind::LinkDuty) {
             return Err(Errno::OutOfRange);
         }
         let stated = self.flags == Self::DMA_CHANNELS_STATED;
@@ -1428,16 +1457,16 @@ impl HwResource {
         {
             return Err(Errno::BadMagic);
         }
-        DmaControllerDuty::new(self.base, stated.then_some(self.xlate)).map_err(|_| Errno::BadMagic)
+        LinkDuty::new(self.base, stated.then_some(self.xlate)).map_err(|_| Errno::BadMagic)
     }
 
-    /// The right to call a DMA controller for one request line
-    /// ([`HwResourceKind::DmaRequest`]).
+    /// A consumer's right to call its supplier for one link
+    /// ([`HwResourceKind::LinkRequest`]).
     #[must_use]
-    pub fn dma_request(line: &DmaRequestLine) -> Self {
-        let [low, high] = line.specifier_cells();
+    pub fn request(line: &LinkRequest) -> Self {
+        let [low, high] = line.selector_cells();
         Self::new_xlate(
-            HwResourceKind::DmaRequest,
+            HwResourceKind::LinkRequest,
             line.endpoint(),
             u64::from_le_bytes(line.name_bytes()),
             u32::from(line.index()) | (u32::from(line.cell_count()) << 8),
@@ -1445,11 +1474,11 @@ impl HwResource {
         )
     }
 
-    /// The request line a [`HwResourceKind::DmaRequest`] resource carries.
+    /// The link a [`HwResourceKind::LinkRequest`] resource carries.
     ///
-    /// Only the canonical encoding [`Self::dma_request`] produces decodes, so
-    /// an accepted record re-encodes to exactly its own bytes — the record a
-    /// controller asks the kernel whether its caller holds.
+    /// Only the canonical encoding [`Self::request`] produces decodes, so an
+    /// accepted record re-encodes to exactly its own bytes — the record a
+    /// supplier asks the kernel whether its caller holds.
     ///
     /// # Errors
     ///
@@ -1457,16 +1486,16 @@ impl HwResource {
     /// non-canonical field: a capability other than the kind's own, a flag
     /// outside the position and cell count, more than two cells, a set bit in
     /// an unused cell, a name that is not a NUL-free prefix of zero padding,
-    /// or an endpoint outside the controller block.
-    pub fn dma_request_line(&self) -> Result<DmaRequestLine, Errno> {
-        if self.kind() != Some(HwResourceKind::DmaRequest) {
+    /// or an endpoint in no role's block.
+    pub fn link_request(&self) -> Result<LinkRequest, Errno> {
+        if self.kind() != Some(HwResourceKind::LinkRequest) {
             return Err(Errno::OutOfRange);
         }
         let index = (self.flags & 0xFF) as u8;
         let cells = usize::from(((self.flags >> 8) & 0xFF) as u8);
         if self.capability != CapabilityId::IPC_ENDPOINT.as_u16()
             || self.flags >> 16 != 0
-            || cells > DMA_SPECIFIER_MAX_CELLS
+            || cells > LINK_SELECTOR_MAX_CELLS
         {
             return Err(Errno::BadMagic);
         }
@@ -1479,7 +1508,7 @@ impl HwResource {
         if name[name_len..].iter().any(|&b| b != 0) {
             return Err(Errno::BadMagic);
         }
-        DmaRequestLine::new(self.base, index, &specifier[..cells], &name[..name_len])
+        LinkRequest::new(self.base, index, &specifier[..cells], &name[..name_len])
             .map_err(|_| Errno::BadMagic)
     }
 
@@ -1688,6 +1717,31 @@ impl HwResource {
             .and_then(HwProperty::from_u32)
             .ok_or(Errno::BadMagic)?;
         Ok((key, self.xlate))
+    }
+
+    /// The fact that entry `index` of the node's `clocks` is a fixed clock
+    /// running at `hz` ([`HwProperty::FixedClockRate`]), or [`None`] for a
+    /// rate past what the record carries.
+    #[must_use]
+    pub fn fixed_clock_rate(index: u8, hz: u64) -> Option<Self> {
+        (hz >> FIXED_CLOCK_RATE_BITS == 0).then(|| {
+            Self::property(
+                HwProperty::FixedClockRate,
+                hz | (u64::from(index) << FIXED_CLOCK_RATE_BITS),
+            )
+        })
+    }
+
+    /// The `clocks` entry and rate a [`HwProperty::FixedClockRate`] fact
+    /// states, or [`None`] for any other resource or a value no
+    /// [`Self::fixed_clock_rate`] produces.
+    #[must_use]
+    pub fn fixed_clock(&self) -> Option<(u8, u64)> {
+        let (HwProperty::FixedClockRate, value) = self.property_value().ok()? else {
+            return None;
+        };
+        let index = u8::try_from(value >> FIXED_CLOCK_RATE_BITS).ok()?;
+        Some((index, value & ((1 << FIXED_CLOCK_RATE_BITS) - 1)))
     }
 
     /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
@@ -1961,8 +2015,8 @@ impl HwResource {
     ///   larger extent, a `0` declaring none being the widest of either. A
     ///   translated window's child must also lie within its
     ///   CPU side, `[base - len, base)`, with the identical CPU↔bus offset.
-    /// * [`DmaController`](HwResourceKind::DmaController) and
-    ///   [`DmaRequest`](HwResourceKind::DmaRequest) cover only themselves,
+    /// * [`DmaController`](HwResourceKind::LinkDuty) and
+    ///   [`DmaRequest`](HwResourceKind::LinkRequest) cover only themselves,
     ///   and a request line also covers an [`Endpoint`](HwResourceKind::Endpoint)
     ///   naming its controller: calling it, never binding it.
     /// * [`IommuStream`](HwResourceKind::IommuStream) and
@@ -2055,13 +2109,13 @@ impl HwResource {
                 // containment — the geometry adds description, never reach.
                 self.flags == 0 && interval_contains(self.base, self.len, child.base, child.len)
             }
-            (HwResourceKind::DmaController, HwResourceKind::DmaController)
-            | (HwResourceKind::DmaRequest, HwResourceKind::DmaRequest) => {
+            (HwResourceKind::LinkDuty, HwResourceKind::LinkDuty)
+            | (HwResourceKind::LinkRequest, HwResourceKind::LinkRequest) => {
                 // Granted whole: another mask or another request line is a
                 // different authority, never a part of this one.
                 self.base == child.base && self.len == child.len && self.xlate == child.xlate
             }
-            (HwResourceKind::DmaRequest, HwResourceKind::Endpoint) => {
+            (HwResourceKind::LinkRequest, HwResourceKind::Endpoint) => {
                 child.flags == 0 && interval_contains(self.base, 1, child.base, child.len)
             }
             (HwResourceKind::IommuStream, HwResourceKind::IommuStream)
@@ -2417,9 +2471,30 @@ pub struct HwNode {
     /// for the generated C view; the [`fault_health`](Self::fault_health)
     /// accessor decodes it fail-closed.
     fault_health: u8,
+    /// The link roles whose endpoint for this node is live, one bit each
+    /// ([`serves`](Self::serves)). The kernel keeps it, from the endpoint
+    /// registry, so the device manager binds a consumer only once its
+    /// supplier is serving rather than merely loaded.
+    served: u8,
     match_keys: [HwMatchKey; HW_NODE_MAX_MATCH_KEYS],
     resources: [HwResource; HW_NODE_MAX_RESOURCES],
 }
+
+/// The bit of [`HwNode`]'s served set standing for `role`.
+const fn served_bit(role: LinkRole) -> u8 {
+    1 << (role as u8 - 1)
+}
+
+/// Every bit of [`HwNode`]'s served set that names a role.
+const SERVED_DEFINED: u8 = {
+    let mut mask = 0;
+    let mut index = 0;
+    while index < LinkRole::ALL.len() {
+        mask |= served_bit(LinkRole::ALL[index]);
+        index += 1;
+    }
+    mask
+};
 
 impl HwNode {
     /// Encoded size on the wire: a [`HW_NODE_HEADER_LEN`]-byte header
@@ -2439,6 +2514,7 @@ impl HwNode {
             match_key_count: 0,
             resource_count: 0,
             fault_health: FaultDomainState::Healthy.as_u8(),
+            served: 0,
             match_keys: [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS],
             resources: [HwResource::EMPTY; HW_NODE_MAX_RESOURCES],
         }
@@ -2583,6 +2659,22 @@ impl HwNode {
         self.fault_health = health.as_u8();
     }
 
+    /// Whether this node's endpoint for `role` is live: its supplier driver
+    /// has bound it under the node's duty and is serving.
+    #[must_use]
+    pub const fn serves(&self, role: LinkRole) -> bool {
+        self.served & served_bit(role) != 0
+    }
+
+    /// Record whether this node's endpoint for `role` is live.
+    pub fn set_serves(&mut self, role: LinkRole, live: bool) {
+        if live {
+            self.served |= served_bit(role);
+        } else {
+            self.served &= !served_bit(role);
+        }
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -2594,6 +2686,7 @@ impl HwNode {
         out[14] = self.match_key_count;
         out[15] = self.resource_count;
         out[16] = self.fault_health;
+        out[17] = self.served;
         let mut off = HW_NODE_HEADER_LEN;
         for key in &self.match_keys {
             out[off..off + HwMatchKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
@@ -2633,6 +2726,9 @@ impl HwNode {
         // corrupt snapshot can never present a faulted subtree as healthy: an
         // unknown discriminant is stored as Offline.
         let fault_health = FaultDomainState::from_u8_fail_closed(bytes[16]).as_u8();
+        // A bit naming no role is dropped: it can only ever read as "not
+        // serving", the side that holds a consumer back.
+        let served = bytes[17] & SERVED_DEFINED;
         let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
         let mut off = HW_NODE_HEADER_LEN;
         for slot in &mut match_keys {
@@ -2652,6 +2748,7 @@ impl HwNode {
             match_key_count,
             resource_count,
             fault_health,
+            served,
             match_keys,
             resources,
         })
@@ -3828,20 +3925,27 @@ mod tests {
             for id in [0u32, 1, 4096, u32::MAX] {
                 let endpoint = block.endpoint(id);
                 assert!(block.contains(endpoint));
+                assert_eq!(block.node_of(endpoint), Some(id));
                 // Squatting one would let a bystander answer that node's
                 // clients with forgeries, so the whole block is reserved.
                 assert!(crate::ipc::is_reserved_endpoint(endpoint));
             }
             assert!(!block.contains(block.base - 1));
             assert!(!block.contains(block.base + NodeEndpointBlock::SPAN));
+            assert_eq!(block.node_of(block.base - 1), None);
+            assert_eq!(block.node_of(block.base + NodeEndpointBlock::SPAN), None);
             // No block swallows another service's rendezvous.
             assert!(!block.contains(crate::rtc_ipc::RTC_ENDPOINT));
             assert!(!block.contains(crate::mailbox_ipc::MAILBOX_ENDPOINT));
             assert!(!block.contains(crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE));
         }
-        for id in [0u32, u32::MAX] {
-            assert!(!DMA_CONTROLLER_ENDPOINTS.contains(BUS_CHILD_ENDPOINTS.endpoint(id)));
-            assert!(!BUS_CHILD_ENDPOINTS.contains(DMA_CONTROLLER_ENDPOINTS.endpoint(id)));
+        for (at, &one) in NodeEndpointBlock::ALL.iter().enumerate() {
+            for &other in &NodeEndpointBlock::ALL[at + 1..] {
+                for id in [0u32, u32::MAX] {
+                    assert!(!one.contains(other.endpoint(id)));
+                    assert!(!other.contains(one.endpoint(id)));
+                }
+            }
         }
     }
 
@@ -3849,39 +3953,36 @@ mod tests {
         crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS.endpoint(12)
     }
 
-    fn request_line() -> DmaRequestLine {
-        DmaRequestLine::new(controller_endpoint(), 1, &[0x2000_000D], b"rx-tx").expect("valid line")
+    fn request_line() -> LinkRequest {
+        LinkRequest::new(controller_endpoint(), 1, &[0x2000_000D], b"rx-tx").expect("valid line")
     }
 
     #[test]
     fn a_dma_controller_duty_round_trips_with_and_without_a_stated_mask() {
         for channels in [Some(0x7F5), Some(0), None] {
-            let duty = DmaControllerDuty::new(controller_endpoint(), channels).expect("valid");
-            let resource = HwResource::dma_controller(&duty);
-            assert_eq!(resource.kind(), Some(HwResourceKind::DmaController));
+            let duty = LinkDuty::new(controller_endpoint(), channels).expect("valid");
+            let resource = HwResource::duty(&duty);
+            assert_eq!(resource.kind(), Some(HwResourceKind::LinkDuty));
             assert_eq!(
                 resource.required_capability(),
                 Ok(Some(CapabilityId::IPC_BIND_PRIVILEGED))
             );
             let back = HwResource::from_bytes(&resource.to_le_bytes()).expect("decodes");
-            assert_eq!(back.dma_controller_duty(), Ok(duty));
+            assert_eq!(back.link_duty(), Ok(duty));
         }
         // A mask of zero is stated and distinct from no mask at all.
-        let none = HwResource::dma_controller(
-            &DmaControllerDuty::new(controller_endpoint(), None).expect("valid"),
-        );
-        let empty = HwResource::dma_controller(
-            &DmaControllerDuty::new(controller_endpoint(), Some(0)).expect("valid"),
-        );
+        let none = HwResource::duty(&LinkDuty::new(controller_endpoint(), None).expect("valid"));
+        let empty =
+            HwResource::duty(&LinkDuty::new(controller_endpoint(), Some(0)).expect("valid"));
         assert_ne!(none, empty);
     }
 
     #[test]
     fn a_dma_controller_duty_decode_refuses_every_undefined_field() {
-        let duty = DmaControllerDuty::new(controller_endpoint(), None).expect("valid");
-        let good = HwResource::dma_controller(&duty);
+        let duty = LinkDuty::new(controller_endpoint(), None).expect("valid");
+        let good = HwResource::duty(&duty);
         assert_eq!(
-            HwResource::endpoint(controller_endpoint()).dma_controller_duty(),
+            HwResource::endpoint(controller_endpoint()).link_duty(),
             Err(Errno::OutOfRange)
         );
         let mut unstated_mask = good;
@@ -3897,40 +3998,40 @@ mod tests {
         let mut capability = good;
         capability.capability = CapabilityId::MMIO_MAP.as_u16();
         for bad in [unstated_mask, unknown_flag, wide, foreign, capability] {
-            assert_eq!(bad.dma_controller_duty(), Err(Errno::BadMagic), "{bad:?}");
+            assert_eq!(bad.link_duty(), Err(Errno::BadMagic), "{bad:?}");
         }
     }
 
     #[test]
     fn a_dma_request_line_round_trips_through_its_resource() {
         let line = request_line();
-        let resource = HwResource::dma_request(&line);
-        assert_eq!(resource.kind(), Some(HwResourceKind::DmaRequest));
+        let resource = HwResource::request(&line);
+        assert_eq!(resource.kind(), Some(HwResourceKind::LinkRequest));
         assert_eq!(
             resource.required_capability(),
             Ok(Some(CapabilityId::IPC_ENDPOINT))
         );
         let back = HwResource::from_bytes(&resource.to_le_bytes()).expect("decodes");
-        let decoded = back.dma_request_line().expect("canonical");
+        let decoded = back.link_request().expect("canonical");
         assert_eq!(decoded, line);
-        assert_eq!(decoded.specifier(), &[0x2000_000D]);
+        assert_eq!(decoded.selector(), &[0x2000_000D]);
         assert_eq!(decoded.name(), b"rx-tx");
         assert_eq!(decoded.index(), 1);
-        assert_eq!(HwResource::dma_request(&decoded), resource);
+        assert_eq!(HwResource::request(&decoded), resource);
 
-        let wide = DmaRequestLine::new(controller_endpoint(), 0, &[1, 2], b"audio-rx")
+        let wide = LinkRequest::new(controller_endpoint(), 0, &[1, 2], b"audio-rx")
             .expect("two cells and an eight-byte name fit");
-        let back = HwResource::dma_request(&wide).dma_request_line();
+        let back = HwResource::request(&wide).link_request();
         assert_eq!(back, Ok(wide));
-        let bare = DmaRequestLine::new(controller_endpoint(), 3, &[], b"").expect("no cells");
-        assert_eq!(HwResource::dma_request(&bare).dma_request_line(), Ok(bare));
+        let bare = LinkRequest::new(controller_endpoint(), 3, &[], b"").expect("no cells");
+        assert_eq!(HwResource::request(&bare).link_request(), Ok(bare));
     }
 
     #[test]
     fn a_dma_request_line_decode_refuses_every_non_canonical_field() {
-        let good = HwResource::dma_request(&request_line());
+        let good = HwResource::request(&request_line());
         assert_eq!(
-            HwResource::endpoint(controller_endpoint()).dma_request_line(),
+            HwResource::endpoint(controller_endpoint()).link_request(),
             Err(Errno::OutOfRange)
         );
         let mut capability = good;
@@ -3953,31 +4054,29 @@ mod tests {
             ragged_name,
             foreign,
         ] {
-            assert_eq!(bad.dma_request_line(), Err(Errno::BadMagic), "{bad:?}");
+            assert_eq!(bad.link_request(), Err(Errno::BadMagic), "{bad:?}");
         }
     }
 
     #[test]
     fn a_dma_request_covers_calling_its_controller_and_never_serving_it() {
-        let request = HwResource::dma_request(&request_line());
-        let duty = HwResource::dma_controller(
-            &DmaControllerDuty::new(controller_endpoint(), Some(0x7F5)).expect("valid"),
-        );
+        let request = HwResource::request(&request_line());
+        let duty =
+            HwResource::duty(&LinkDuty::new(controller_endpoint(), Some(0x7F5)).expect("valid"));
         assert!(request.covers(&request));
         assert!(request.covers(&HwResource::endpoint(controller_endpoint())));
         assert!(!request.covers(&HwResource::endpoint(controller_endpoint() + 1)));
         assert!(!request.covers(&duty));
         assert!(!HwResource::endpoint(controller_endpoint()).covers(&request));
         let other_line =
-            DmaRequestLine::new(controller_endpoint(), 0, &[0x2000_000D], b"rx-tx").expect("valid");
-        assert!(!request.covers(&HwResource::dma_request(&other_line)));
+            LinkRequest::new(controller_endpoint(), 0, &[0x2000_000D], b"rx-tx").expect("valid");
+        assert!(!request.covers(&HwResource::request(&other_line)));
 
         assert!(duty.covers(&duty));
         assert!(!duty.covers(&HwResource::endpoint(controller_endpoint())));
         assert!(!duty.covers(&request));
-        let narrower = HwResource::dma_controller(
-            &DmaControllerDuty::new(controller_endpoint(), Some(0x001)).expect("valid"),
-        );
+        let narrower =
+            HwResource::duty(&LinkDuty::new(controller_endpoint(), Some(0x001)).expect("valid"));
         assert!(!duty.covers(&narrower));
     }
 
@@ -4514,8 +4613,8 @@ mod tests {
         assert_eq!(GrantedResource::WIRE_LEN, 40);
         // The fixed node header followed by the fixed match-key and resource
         // arrays.
-        assert_eq!(HW_NODE_HEADER_LEN, 17);
-        assert_eq!(HwNode::WIRE_LEN, 833);
+        assert_eq!(HW_NODE_HEADER_LEN, 18);
+        assert_eq!(HwNode::WIRE_LEN, 834);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
     }
 
@@ -4596,6 +4695,26 @@ mod tests {
             assert_eq!(decoded.fault_health(), health);
             assert_eq!(decoded, node);
         }
+    }
+
+    #[test]
+    fn each_served_role_round_trips_alone_and_an_undefined_bit_is_dropped() {
+        let fresh = sample_node();
+        assert!(LinkRole::ALL.iter().all(|&role| !fresh.serves(role)));
+        for &role in LinkRole::ALL {
+            let mut node = fresh;
+            node.set_serves(role, true);
+            let decoded = HwNode::from_bytes(&node.to_le_bytes()).expect("decodes");
+            assert_eq!(decoded, node);
+            for &other in LinkRole::ALL {
+                assert_eq!(decoded.serves(other), other == role);
+            }
+            node.set_serves(role, false);
+            assert_eq!(node, fresh);
+        }
+        let mut bytes = fresh.to_le_bytes();
+        bytes[17] = !SERVED_DEFINED;
+        assert_eq!(HwNode::from_bytes(&bytes), Ok(fresh));
     }
 
     #[test]

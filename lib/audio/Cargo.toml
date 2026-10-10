@@ -1,6 +1,6 @@
 [package]
 name = "tairix-audio"
-description = "TAIRiX audio engine: everything that decides what samples come out. Saturating format conversion through an f32 pivot with narrowing-only dither, the one polyphase windowed-sinc resampler with exact rational stepping, explicit channel matrices with the ITU-R BS.775 downmix, the per-device linear clock fit, the pure routing policy, the one-multiply volume model, the mixer, and the client half of audio-v1. no_std, no I/O, no syscall, no unsafe."
+description = "TAIRiX audio engine: everything that decides what samples come out. Saturating format conversion through an f32 pivot with narrowing-only dither, the one polyphase windowed-sinc resampler with exact rational stepping, explicit channel matrices with the ITU-R BS.775 downmix, the per-device linear clock fit, the pure routing policy, the one-multiply volume model, the mixer, and the client half of audio-v1, whose live transport (feature `rt`) is the one piece that performs I/O. no_std, no unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,13 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# The live transport (`live`): the audio service's rendezvous, a stream's
+# notify mailbox, and its shared ring, over the userland runtime. Enabled only
+# by a freestanding program's target-gated dependency, so the engine itself
+# stays free of I/O and host-testable.
+rt = ["dep:tairix-rt"]
 
 [dependencies]
 # The PCM vocabulary, the shared ring, and the `audio-v1` wire surface every
@@ -25,11 +32,13 @@ tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = fal
 # PRNG here would be duplication, and dither needs decorrelation rather than
 # unpredictability.
 tairix-rng = { path = "../rng", version = "=0.0.0" }
-# The seat vocabulary the routing policy arbitrates in, so a sink's lease and
-# a display's are the same identity rather than two spellings of one idea.
-tairix-seat = { path = "../seat", version = "=0.0.0" }
+# The one resource-reference grammar an `audio:` target is read through.
+tairix-resref = { path = "../resref", version = "=0.0.0" }
 # The set-once cell holding the resolved conversion kernel for the process.
 tairix-sync = { path = "../sync", version = "=0.0.0" }
+# The runtime the live transport issues its IPC, mailbox and region syscalls
+# through (feature `rt` only).
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # `mathf` is the one home for `no_std` transcendental maths, so the filter
 # kernel and the decibel curve use the same `sin`/`exp` every other crate does;
 # `fallible` is how a working buffer is sized without panicking on exhaustion.

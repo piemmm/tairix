@@ -1,0 +1,212 @@
+//! Configuration descriptors the host tests describe functions with: QEMU's
+//! own `usb-audio` device byte for byte, and version 2.0 functions in the
+//! shapes real high-speed devices take.
+
+use alloc::vec::Vec;
+
+/// A configuration descriptor wrapping `body`, its total length stated.
+pub fn configuration(body: &[&[u8]]) -> Vec<u8> {
+    let mut bytes = alloc::vec![9, 0x02, 0, 0, 3, 1, 0, 0x80, 50];
+    for descriptor in body {
+        bytes.extend_from_slice(descriptor);
+    }
+    let total = u16::try_from(bytes.len()).expect("fits");
+    bytes[2..4].copy_from_slice(&total.to_le_bytes());
+    bytes
+}
+
+/// An interface descriptor.
+pub fn interface(number: u8, alternate: u8, endpoints: u8, class24: u32) -> [u8; 9] {
+    let [_, class, subclass, protocol] = class24.to_be_bytes();
+    [
+        9, 0x04, number, alternate, endpoints, class, subclass, protocol, 0,
+    ]
+}
+
+/// A version 1.0 (nine-byte) audio endpoint descriptor.
+pub fn endpoint_v1(
+    address: u8,
+    attributes: u8,
+    max_packet: u16,
+    interval: u8,
+    synch: u8,
+) -> [u8; 9] {
+    let [low, high] = max_packet.to_le_bytes();
+    [9, 0x05, address, attributes, low, high, interval, 0, synch]
+}
+
+/// A standard (seven-byte) endpoint descriptor, as version 2.0 uses.
+pub fn endpoint(address: u8, attributes: u8, max_packet: u16, interval: u8) -> [u8; 7] {
+    let [low, high] = max_packet.to_le_bytes();
+    [7, 0x05, address, attributes, low, high, interval]
+}
+
+/// QEMU 11's `usb-audio` (hw/usb/dev-audio.c) in its default stereo shape:
+/// a 1.0 function whose control interface 0 carries a USB-streaming input
+/// terminal, a feature unit with master mute and per-channel volume, and a
+/// speaker; streaming interface 1 offers 48 kHz `s16` stereo on a
+/// synchronous OUT endpoint of exactly 192 bytes a frame.
+pub fn qemu_usb_audio() -> Vec<u8> {
+    configuration(&[
+        &interface(0, 0, 0, 0x01_01_00),
+        &[9, 0x24, 0x01, 0x00, 0x01, 0x2B, 0x00, 0x01, 0x01],
+        &[
+            12, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
+        ],
+        &[
+            13, 0x24, 0x06, 0x02, 0x01, 0x02, 0x01, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00,
+        ],
+        &[9, 0x24, 0x03, 0x03, 0x01, 0x03, 0x00, 0x02, 0x00],
+        &interface(1, 0, 0, 0x01_02_00),
+        &interface(1, 1, 1, 0x01_02_00),
+        &[7, 0x24, 0x01, 0x01, 0x00, 0x01, 0x00],
+        &[
+            11, 0x24, 0x02, 0x01, 0x02, 0x02, 0x10, 0x01, 0x80, 0xBB, 0x00,
+        ],
+        &endpoint_v1(0x01, 0x0D, 192, 1, 0),
+        &[7, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00],
+    ])
+}
+
+/// A version 2.0 interface association for interfaces `0..count`.
+pub fn association(count: u8) -> [u8; 8] {
+    [8, 0x0B, 0, count, 0x01, 0x00, 0x20, 0]
+}
+
+/// A high-speed 2.0 headset: an internal programmable clock behind a
+/// selector, a playback path (USB streaming → feature → headphones) and a
+/// capture path (microphone → feature → USB streaming), playback on an
+/// asynchronous OUT endpoint paced by an explicit feedback endpoint, capture
+/// on an asynchronous IN endpoint.
+pub fn headset_v2() -> Vec<u8> {
+    configuration(&[
+        &association(3),
+        &interface(0, 0, 0, 0x01_01_20),
+        &[9, 0x24, 0x01, 0x00, 0x02, 0x04, 0x00, 0x00, 0x00],
+        // Clock source 0x29: internal programmable, frequency settable,
+        // validity readable.
+        &[8, 0x24, 0x0A, 0x29, 0x03, 0x07, 0x00, 0x00],
+        // Clock selector 0x28 over 0x29, its pin settable.
+        &[8, 0x24, 0x0B, 0x28, 0x01, 0x29, 0x03, 0x00],
+        // Playback: USB streaming input terminal 1, stereo, on clock 0x28.
+        &[
+            17, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x28, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        // Feature unit 2: master mute and volume, channel volumes.
+        &[
+            18, 0x24, 0x06, 0x02, 0x01, 0x0F, 0, 0, 0, 0x0C, 0, 0, 0, 0x0C, 0, 0, 0, 0,
+        ],
+        // Headphones 3.
+        &[12, 0x24, 0x03, 0x03, 0x02, 0x03, 0x00, 0x02, 0x28, 0, 0, 0],
+        // Capture: microphone 4, mono, on clock 0x29.
+        &[
+            17, 0x24, 0x02, 0x04, 0x01, 0x02, 0x00, 0x29, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        // Feature unit 5: master mute only.
+        &[14, 0x24, 0x06, 0x05, 0x04, 0x03, 0, 0, 0, 0, 0, 0, 0, 0],
+        // USB streaming output terminal 6.
+        &[12, 0x24, 0x03, 0x06, 0x01, 0x01, 0x00, 0x05, 0x29, 0, 0, 0],
+        &interface(1, 0, 0, 0x01_02_20),
+        &interface(1, 1, 2, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 0x02, 0x03, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x03, 0x18],
+        &endpoint(0x01, 0x05, 42, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &endpoint(0x81, 0x11, 4, 4),
+        &interface(2, 0, 0, 0x01_02_20),
+        &interface(2, 1, 1, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x06, 0x00, 0x01, 0x01, 0, 0, 0, 0x01, 0, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x02, 0x10],
+        &endpoint(0x82, 0x05, 14, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ])
+}
+
+/// A full-speed 2.0 interface whose playback endpoint is asynchronous with no
+/// feedback endpoint of its own, paced instead by its capture endpoint's
+/// implicit-feedback data.
+pub fn implicit_v2() -> Vec<u8> {
+    configuration(&[
+        &association(3),
+        &interface(0, 0, 0, 0x01_01_20),
+        &[9, 0x24, 0x01, 0x00, 0x02, 0x04, 0x00, 0x00, 0x00],
+        &[8, 0x24, 0x0A, 0x29, 0x03, 0x07, 0x00, 0x00],
+        &[
+            17, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x29, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        &[12, 0x24, 0x03, 0x03, 0x03, 0x06, 0x00, 0x01, 0x29, 0, 0, 0],
+        &[
+            17, 0x24, 0x02, 0x04, 0x03, 0x06, 0x00, 0x29, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        &[12, 0x24, 0x03, 0x06, 0x01, 0x01, 0x00, 0x04, 0x29, 0, 0, 0],
+        &interface(1, 0, 0, 0x01_02_20),
+        &interface(1, 1, 1, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 0x02, 0x03, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x02, 0x10],
+        &endpoint(0x01, 0x05, 196, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &interface(2, 0, 0, 0x01_02_20),
+        &interface(2, 1, 1, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x06, 0x00, 0x01, 0x01, 0, 0, 0, 0x02, 0x03, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x02, 0x10],
+        &endpoint(0x82, 0x25, 196, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ])
+}
+
+/// A high-speed 2.0 function whose playback and capture terminals both run
+/// from one selector over two oscillators, so steering it for one retunes
+/// the other; playback offers a 24-bit and a 16-bit setting.
+pub fn shared_clock_v2() -> Vec<u8> {
+    configuration(&[
+        &association(3),
+        &interface(0, 0, 0, 0x01_01_20),
+        &[9, 0x24, 0x01, 0x00, 0x02, 0x04, 0x00, 0x00, 0x00],
+        // Oscillators 0x29 and 0x2A, each programmable and validity-readable.
+        &[8, 0x24, 0x0A, 0x29, 0x03, 0x07, 0x00, 0x00],
+        &[8, 0x24, 0x0A, 0x2A, 0x03, 0x07, 0x00, 0x00],
+        // Clock selector 0x28 over both, its pin settable.
+        &[9, 0x24, 0x0B, 0x28, 0x02, 0x29, 0x2A, 0x03, 0x00],
+        &[
+            17, 0x24, 0x02, 0x01, 0x01, 0x01, 0x00, 0x28, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        &[12, 0x24, 0x03, 0x03, 0x02, 0x03, 0x00, 0x01, 0x28, 0, 0, 0],
+        &[
+            17, 0x24, 0x02, 0x04, 0x01, 0x02, 0x00, 0x28, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        &[12, 0x24, 0x03, 0x06, 0x01, 0x01, 0x00, 0x04, 0x28, 0, 0, 0],
+        &interface(1, 0, 0, 0x01_02_20),
+        &interface(1, 1, 2, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 0x02, 0x03, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x03, 0x18],
+        &endpoint(0x01, 0x05, 42, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &endpoint(0x81, 0x11, 4, 4),
+        &interface(1, 2, 2, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x01, 0x00, 0x01, 0x01, 0, 0, 0, 0x02, 0x03, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x02, 0x10],
+        &endpoint(0x01, 0x05, 28, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &endpoint(0x81, 0x11, 4, 4),
+        &interface(2, 0, 0, 0x01_02_20),
+        &interface(2, 1, 1, 0x01_02_20),
+        &[
+            16, 0x24, 0x01, 0x06, 0x00, 0x01, 0x01, 0, 0, 0, 0x01, 0, 0, 0, 0, 0,
+        ],
+        &[6, 0x24, 0x02, 0x01, 0x02, 0x10],
+        &endpoint(0x82, 0x05, 14, 1),
+        &[8, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ])
+}

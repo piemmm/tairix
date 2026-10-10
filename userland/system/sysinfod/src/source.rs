@@ -12,6 +12,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::audio::{AudioDeviceDescriptor, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
@@ -555,4 +556,25 @@ pub trait SysinfoSource {
     /// list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn gpu_device_stats(&self, caller: &Caller) -> Result<Vec<DisplayStats>, Errno>;
+
+    /// Return every sound device the audio service holds, sinks first, in
+    /// the order it enumerates them.
+    ///
+    /// On a running system the source asks the audio service. A machine
+    /// with no audio service fails closed with the transport's typed error,
+    /// never a fabricated empty table: "none" would be a claim about the
+    /// hardware, which the hardware tree answers. The owned list is returned
+    /// whole and [`crate::serve`] applies the paging; ordering must be stable
+    /// across paged calls.
+    fn audio_devices(&self, caller: &Caller) -> Result<Vec<AudioDeviceDescriptor>, Errno>;
+
+    /// Return every sound stream the audio service holds open, whoever
+    /// holds it, ascending by stream id.
+    ///
+    /// The dispatcher, not the source, keeps only the caller's own for the
+    /// self-scoped query, so the scope is decided in one place. On a running
+    /// system the source asks the audio service, on the authority it holds
+    /// as the scoping broker; a machine with no audio service fails closed
+    /// with the transport's typed error.
+    fn audio_streams(&self, caller: &Caller) -> Result<Vec<StreamDescriptor>, Errno>;
 }

@@ -33,8 +33,8 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverError;
 use tairix_abi::fs::{
-    OpenFlags, RealpathMode, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT, FS_SETUID_BIT,
-    FS_SYMLINK_MAX,
+    OpenFlags, RealpathMode, RenameFlags, FS_GROUP_EXEC_BIT, FS_OWNER_UNCHANGED, FS_SETGID_BIT,
+    FS_SETUID_BIT, FS_SYMLINK_MAX,
 };
 use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
@@ -1699,8 +1699,16 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// itself is additionally required (POSIX). A capability gate on either
     /// end is honoured too, so a gated name cannot be moved aside or replaced
     /// by a caller that does not hold it — not even within one parent, where
-    /// POSIX authorises nothing against the moved node. The structural move — the existence, kind-compatibility, empty-target, and
+    /// POSIX authorises nothing against the moved node. The structural move —
+    /// the existence, kind-compatibility, empty-target, and
     /// directory-into-its-own-subtree checks — is performed by the driver.
+    ///
+    /// Under [`RenameFlags::NO_REPLACE`] a destination naming any entry but
+    /// the source's own refuses the move. The caller holds the volume's lock
+    /// across the whole call, so the answer cannot go stale before the driver
+    /// moves the name. The source's own entry is the same name in the same
+    /// directory under the volume's matching rule, which on a folding volume
+    /// takes in a re-spelling of it.
     ///
     /// Returns the directory the move replaced at the destination, if it
     /// replaced one, so the caller can retire the listings bound to it.
@@ -1710,6 +1718,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// * [`VfsError::InvalidPath`] if either path is empty (names the mount
     ///   point itself).
     /// * [`VfsError::NotFound`] if the source does not exist.
+    /// * [`VfsError::AlreadyExists`] if the destination is occupied under
+    ///   [`RenameFlags::NO_REPLACE`].
     /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory.
     /// * [`VfsError::DirectoryCycle`] if the move would place a directory
     ///   inside its own subtree.
@@ -1722,6 +1732,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         cred: &Credentials<'_>,
         src_components: &[String],
         dst_components: &[String],
+        flags: RenameFlags,
     ) -> Result<Option<NodeId>, VfsError> {
         let src = self.place_for_write(cred, src_components, FinalLink::Keep)?;
         let dst = self.place_for_write(cred, dst_components, FinalLink::Keep)?;
@@ -1730,6 +1741,14 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         // destination is destroyed by it.
         Self::authorize_name_mutation(cred, Some(&src_meta))?;
         Self::authorize_name_mutation(cred, dst.found.as_ref().map(|(_, _, meta)| meta))?;
+        let onto_itself = src.parent == dst.parent
+            && self
+                .fs
+                .name_matching()
+                .matches(src.name.as_bytes(), dst.name.as_bytes());
+        if flags.refuses_replace() && dst.found.is_some() && !onto_itself {
+            return Err(VfsError::AlreadyExists);
+        }
 
         // A directory moved to a different parent has its `..` rewritten, so
         // write permission on the directory itself is required as well.

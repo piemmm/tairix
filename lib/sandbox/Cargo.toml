@@ -69,6 +69,12 @@ tairix-wallpaper = { path = "../wallpaper", version = "=0.0.0" }
 # validation run here, in the capability-empty worker, never in the editor.
 tairix-syntax = { path = "../syntax", version = "=0.0.0" }
 tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The sound-file decoders the sandboxed audio service runs, so a player never
+# parses a byte of an untrusted sound file in its own process.
+tairix-sound = { path = "../sound", version = "=0.0.0" }
+# The keyed hash the audio worker's page cache is indexed under: a file
+# chooses which offsets it reads, so the cache's key is drawn by the owner.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 
 # The `program`-feature transport links the freestanding userland runtime
 # for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and

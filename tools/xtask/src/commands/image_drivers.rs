@@ -101,6 +101,30 @@ pub const VIRTIO_NET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"virtio_n
 /// above the leaf names what the device *is*, never who made it.
 pub const VIRTIO_SND_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"virtio_snd", b"Run"];
 
+/// Store path of the USB Audio Class driver bundle: class `audio`, the
+/// `usb_uac` leaf naming the class it serves.
+pub const USB_UAC_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"usb_uac", b"Run"];
+
+/// Store path of the HD Audio driver bundle: class `audio`, the `hda` leaf
+/// naming the controller class it serves.
+pub const HDA_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"hda", b"Run"];
+
+/// Store path of the Raspberry Pi 4 headphone-jack driver bundle: class
+/// `audio`, the part leaf `bcm2711_pwm`.
+pub const PWM_AUDIO_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"bcm2711_pwm", b"Run"];
+
+/// Store path of the BCM2711 PCM/I2S interface driver bundle: class
+/// `audio`, the part leaf `bcm2711_i2s`.
+pub const I2S_AUDIO_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"bcm2711_i2s", b"Run"];
+
+/// Store path of the PCM5102A codec driver bundle: class `audio`, the part
+/// leaf `pcm5102a`.
+pub const PCM5102A_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"pcm5102a", b"Run"];
+
+/// Store path of the PCM5122 codec driver bundle: class `audio`, the part
+/// leaf `pcm5122`.
+pub const PCM5122_STORE_PATH: &[&[u8]] = &[b"Drivers", b"audio", b"pcm5122", b"Run"];
+
 /// `/System`-volume-relative store path of the GENET link-layer driver
 /// bundle (the Raspberry Pi 4B's on-board gigabit Ethernet).
 pub const GENET_STORE_PATH: &[&[u8]] = &[b"Drivers", b"network", b"genet", b"Run"];
@@ -156,6 +180,10 @@ pub const I2C_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_i2c", b"bcm2835
 /// Store path of the Broadcom legacy DMA engine driver bundle: class `dma`,
 /// the leaf `bcm2835` its binding is named for.
 pub const DMA_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"dma", b"bcm2835", b"Run"];
+
+/// Store path of the BCM2711 clock manager driver bundle: class `clock`, the
+/// part leaf `bcm2711_cprman`.
+pub const CPRMAN_BCM2711_STORE_PATH: &[&[u8]] = &[b"Drivers", b"clock", b"bcm2711_cprman", b"Run"];
 
 /// Store path of the DS3231 / DS1307 real-time-clock driver bundle: class
 /// `rtc`, the chip leaf `ds3231`.
@@ -709,6 +737,168 @@ pub fn build_virtio_snd_bundle(
     )
 }
 
+/// Build and sign the USB Audio Class driver bundle.
+///
+/// It reaches its function only through the URB transport the host
+/// controller serves: it maps its interface's shared buffer and its streams'
+/// regions (`CAP_SHM`), calls its URB endpoint and binds its stream ports
+/// (`CAP_IPC_ENDPOINT`), claims and binds the reserved device-channel endpoint
+/// (`CAP_IPC_BIND_PRIVILEGED`), publishes its `audiochan` node (`CAP_HW_EMIT`),
+/// and emits its diagnostics (`CAP_LOG_EMIT`) — no register window, DMA or
+/// interrupt. Carries `tairix_drv_audio_usb_uac::BIND_KEYS`, so it autoloads
+/// against any audio function's control interface a host controller
+/// publishes.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_usb_uac_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-usb-uac",
+        tairix_drv_audio_usb_uac::REQUIRED_CAPS,
+        tairix_drv_audio_usb_uac::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the HD Audio driver bundle.
+///
+/// It maps its controller's register window (`CAP_MMIO_MAP`), carves its
+/// rings and stream buffers (`CAP_MEM_DMA`), parks on the controller's
+/// interrupt (`CAP_IRQ_BIND`), maps the mixer's regions (`CAP_SHM`), claims
+/// and binds the reserved device-channel endpoint (`CAP_IPC_ENDPOINT`,
+/// `CAP_IPC_BIND_PRIVILEGED`), publishes its `audiochan` node
+/// (`CAP_HW_EMIT`), and reports why it ends (`CAP_LOG_EMIT`). Carries
+/// `tairix_drv_audio_hda::BIND_KEYS`, so it autoloads against any HD Audio
+/// controller the kernel discovers.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_hda_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-hda",
+        tairix_drv_audio_hda::REQUIRED_CAPS,
+        tairix_drv_audio_hda::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Raspberry Pi 4 headphone-jack driver bundle.
+///
+/// It maps the jack's PWM block (`CAP_MMIO_MAP`), calls the DMA controller and
+/// the clock manager its node's links name (`CAP_IPC_ENDPOINT`), maps the DMA
+/// buffer and the mixer's ring (`CAP_SHM`), claims and binds the reserved
+/// device-channel endpoint (`CAP_IPC_BIND_PRIVILEGED`), publishes its
+/// `audiochan` node (`CAP_HW_EMIT`), and reports why it ends
+/// (`CAP_LOG_EMIT`). Carries `tairix_drv_audio_bcm2711_pwm::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pwm_audio_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-bcm2711-pwm",
+        tairix_drv_audio_bcm2711_pwm::REQUIRED_CAPABILITIES,
+        tairix_drv_audio_bcm2711_pwm::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the BCM2711 PCM/I2S interface driver bundle.
+///
+/// It maps the block (`CAP_MMIO_MAP`), calls the DMA controller, the clock
+/// manager and the codec its node's links name (`CAP_IPC_ENDPOINT`), maps the
+/// DMA buffer and the mixer's ring (`CAP_SHM`), claims and binds the reserved
+/// device-channel endpoint (`CAP_IPC_BIND_PRIVILEGED`), publishes its
+/// `audiochan` node (`CAP_HW_EMIT`), and reports why it ends
+/// (`CAP_LOG_EMIT`). Carries `tairix_drv_audio_bcm2711_i2s::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_i2s_audio_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-bcm2711-i2s",
+        tairix_drv_audio_bcm2711_i2s::REQUIRED_CAPABILITIES,
+        tairix_drv_audio_bcm2711_i2s::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the PCM5102A codec driver bundle.
+///
+/// The part has no control port, so the driver needs only to bind its codec
+/// endpoint (`CAP_IPC_BIND_PRIVILEGED`) and record its refusals
+/// (`CAP_LOG_EMIT`). Carries `tairix_drv_audio_pcm5102a::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pcm5102a_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-pcm5102a",
+        tairix_drv_audio_pcm5102a::REQUIRED_CAPABILITIES,
+        tairix_drv_audio_pcm5102a::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the PCM5122 codec driver bundle.
+///
+/// Like the I2C clock chips it holds no register window: it calls the
+/// transfer endpoint its node's grant names (`CAP_IPC_ENDPOINT`), binds its
+/// codec endpoint (`CAP_IPC_BIND_PRIVILEGED`) and records its refusals
+/// (`CAP_LOG_EMIT`). Carries `tairix_drv_audio_pcm5122::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_pcm5122_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-audio-pcm5122",
+        tairix_drv_audio_pcm5122::REQUIRED_CAPABILITIES,
+        tairix_drv_audio_pcm5122::BIND_KEYS,
+        profile,
+    )
+}
+
 /// Build and sign the GENET link-layer driver bundle.
 ///
 /// The Raspberry Pi 4B's on-board gigabit NIC: it maps its granted register
@@ -941,6 +1131,31 @@ pub fn build_dma_bcm2835_bundle(
     )
 }
 
+/// Build and sign the BCM2711 clock manager driver bundle.
+///
+/// It is the one process that maps the clock manager's registers
+/// (`CAP_MMIO_MAP`) and binds the node's endpoint under its clock duty
+/// (`CAP_IPC_BIND_PRIVILEGED`). Carries
+/// `tairix_drv_clock_bcm2711_cprman::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_cprman_bcm2711_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-clock-bcm2711-cprman",
+        tairix_drv_clock_bcm2711_cprman::REQUIRED_CAPABILITIES,
+        tairix_drv_clock_bcm2711_cprman::BIND_KEYS,
+        profile,
+    )
+}
+
 /// Build and sign the DS3231 / DS1307 clock-chip driver bundle.
 ///
 /// Like every I2C clock chip it requests no `CAP_MMIO_MAP`: it owns no
@@ -1086,6 +1301,65 @@ pub fn audio_driver_store_files(
                 VIRTIO_SND_STORE_PATH,
                 build_virtio_snd_bundle(ctx, arch, profile)?,
             )])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The signed **HD Audio driver bundle alone**, paired with its store path:
+/// the `/System/Drivers/` set the HD Audio verticals plant, with no display
+/// or input driver, so the console stays the text console the serial script
+/// drives. Built once per xtask process and memoised.
+///
+/// # Errors
+///
+/// As [`build_hda_bundle`].
+pub fn hda_audio_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            Ok(vec![store_file(
+                HDA_STORE_PATH,
+                build_hda_bundle(ctx, arch, profile)?,
+            )])
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The signed **USB audio driver pair** — the xHCI host-controller driver and
+/// the USB Audio Class driver — each paired with its store path: the
+/// `/System/Drivers/` set the USB audio verticals plant. As for the virtio
+/// audio set, no display or input driver rides with them, so the console
+/// stays the text console the serial script drives. Built once per xtask
+/// process and memoised.
+///
+/// # Errors
+///
+/// As [`build_usb_uac_bundle`].
+pub fn usb_audio_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            Ok(vec![
+                store_file(USB_XHCI_STORE_PATH, build_xhci_bundle(ctx, arch, profile)?),
+                store_file(
+                    USB_UAC_STORE_PATH,
+                    build_usb_uac_bundle(ctx, arch, profile)?,
+                ),
+            ])
         })
         .as_ref()
         .map(Vec::as_slice)

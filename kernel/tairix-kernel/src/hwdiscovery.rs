@@ -18,7 +18,7 @@
 //! the block probe differs (a different resource shape) and stays separate.
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
-use tairix_abi::driver::pci::PciAddress;
+use tairix_abi::driver::pci::{PciAddress, CLASS_HD_AUDIO, CLASS_OFFSET, CLASS_USB_XHCI};
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
 use tairix_abi::driver::virtio_pci::{
     virtio_pci_window_resource, VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
@@ -755,6 +755,97 @@ pub fn observe_virtio_pci_audio_devices(
     observe_virtio_pci_devices(walk, dev_irq, sink, log, kind)
 }
 
+/// A class of PCI function a driver binds by its class code: the code, the
+/// BAR its registers decode at, and the class of node it is published as.
+#[derive(Copy, Clone, Debug)]
+pub struct PciClass {
+    code: u32,
+    bar: u8,
+    node: HwDeviceClass,
+}
+
+/// xHCI USB host controllers, their registers at BAR 0 (xHCI §5.2.1).
+pub const XHCI_CONTROLLERS: PciClass = PciClass {
+    code: CLASS_USB_XHCI,
+    bar: 0,
+    node: HwDeviceClass::Bus,
+};
+
+/// HD Audio controllers, their registers at BAR 0 (HDA 1.0a §3.3).
+pub const HD_AUDIO_CONTROLLERS: PciClass = PciClass {
+    code: CLASS_HD_AUDIO,
+    bar: 0,
+    node: HwDeviceClass::Audio,
+};
+
+/// Emit each function of `class` that `walk` found as a node keyed by its PCI
+/// identity and class code, carrying the part of its register BAR a driver
+/// may hold, an unconstrained DMA reach, the interrupt `dev_irq` routed for it
+/// and, behind a unit, its DMA identity.
+///
+/// The register window stops short of the function's MSI-X table and
+/// pending-bit array, which only this kernel programs: a driver able to
+/// rewrite them could aim the function's messages at any address. A function
+/// whose window, line or node cannot be resolved is left undiscovered.
+///
+/// # Errors
+///
+/// [`DriverError::BufferTooSmall`] for a full sink.
+pub fn observe_pci_class_functions(
+    walk: &PciWalk<'_>,
+    bus: &dyn HostBus,
+    class: PciClass,
+    dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
+    sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
+) -> Result<(), DriverError> {
+    for device in walk.functions {
+        let bdf = device.address;
+        let Ok(code) = bus.read_config(bdf, CLASS_OFFSET).map(|dword| dword >> 8) else {
+            continue;
+        };
+        if code != class.code {
+            continue;
+        }
+        let Ok((base, len)) = bus.driver_window(bdf, class.bar) else {
+            continue;
+        };
+        let (Some(id), Ok(vendor), Ok(product)) = (
+            walk.segment.node_id(bdf),
+            u16::try_from(device.vendor),
+            u16::try_from(device.device),
+        ) else {
+            continue;
+        };
+        let Some(function) = PciFunction::admit(walk, device, log) else {
+            continue;
+        };
+        let Some(interrupt) = dev_irq(bdf)
+            .filter(|interrupt| interrupt.line.kind() == Some(tairix_abi::HwResourceKind::Irq))
+        else {
+            continue;
+        };
+        let mut node = HwNode::new(id, HW_NODE_ROOT_ID, class.node);
+        if node
+            .push_match_key(HwMatchKey::pci(vendor, product, code))
+            .is_ok()
+            && [
+                HwResource::mmio(base, len),
+                HwResource::dma(0, 0, walk.coherence),
+                interrupt.line,
+            ]
+            .into_iter()
+            .chain(interrupt.doorbell)
+            .all(|resource| node.push_resource(resource).is_ok())
+            && function.describe(&mut node)
+        {
+            sink.emit(node)
+                .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
+        }
+    }
+    Ok(())
+}
+
 /// Which virtio functions a PCI class probe emits, and as which class of
 /// node.
 #[derive(Clone, Copy)]
@@ -1384,7 +1475,7 @@ mod tests {
     /// `virtio,mmio` nodes alone.
     #[test]
     fn a_slot_is_found_by_its_base_while_it_is_operational() {
-        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        let mut b = tairix_fdt::write::FdtWriter::new();
         b.begin_node("");
         for (base, compatible, status) in [
             (0x0A00_0000u64, "virtio,mmio", "okay"),
@@ -1554,6 +1645,220 @@ mod tests {
     /// The node a function at configuration `address` on [`SEGMENT`] gets.
     fn node_of(address: u64) -> u32 {
         SEGMENT.node_id(address).unwrap()
+    }
+
+    /// An xHCI function at [`Self::XHCI`] and an EHCI one at [`Self::EHCI`],
+    /// on a host resolving the xHCI's register window as `driver_window`
+    /// does; `window` is what that resolution answers.
+    struct UsbHosts {
+        functions: [BusDevice; 3],
+        window: Result<(u64, u64), DriverError>,
+    }
+
+    impl UsbHosts {
+        const XHCI: u64 = 0x0000_2000;
+        const EHCI: u64 = 0x0000_2800;
+        const HDA: u64 = 0x0000_1800;
+
+        fn with(window: Result<(u64, u64), DriverError>) -> Self {
+            let function = |address, device, class| BusDevice {
+                vendor: 0x1B36,
+                device,
+                class,
+                reserved0: 0,
+                address,
+            };
+            Self {
+                functions: [
+                    function(Self::XHCI, 0x000D, 0x0C03),
+                    function(Self::EHCI, 0x000D, 0x0C03),
+                    function(Self::HDA, 0x2668, 0x0403),
+                ],
+                window,
+            }
+        }
+    }
+
+    impl Bus for UsbHosts {
+        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+            let slots = out.get_mut(..3).ok_or(DriverError::BufferTooSmall)?;
+            slots.copy_from_slice(&self.functions);
+            Ok(3)
+        }
+    }
+
+    impl VirtioPciBus for UsbHosts {
+        fn virtio_window_region(&self, _: u64, _: u8) -> Result<(u64, usize), DriverError> {
+            Err(DriverError::NotFound)
+        }
+
+        fn notify_off_multiplier(&self, _: u64) -> Result<u32, DriverError> {
+            Err(DriverError::NotFound)
+        }
+    }
+
+    impl tairix_abi::driver::msix::MsixBus for UsbHosts {
+        fn route_msix(
+            &self,
+            _: u64,
+            _: u16,
+            _: tairix_abi::driver::msix::MsiMessage,
+            _: &dyn MmioMapper,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn msix_entries(&self, _: u64) -> Result<u16, DriverError> {
+            Ok(16)
+        }
+
+        fn mask_msix(&self, _: u64, _: bool) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    impl tairix_abi::driver::pci::PciBus for UsbHosts {
+        fn map_bar_window(
+            &self,
+            _: u64,
+            _: u8,
+            _: &dyn MmioMapper,
+        ) -> Result<tairix_abi::RegisterWindow, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn driver_window(&self, bdf: u64, bar_index: u8) -> Result<(u64, u64), DriverError> {
+            if (bdf == Self::XHCI || bdf == Self::HDA) && bar_index == 0 {
+                self.window
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+
+        fn enable_memory_space(&self, _: u64) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn set_bus_master(&self, _: u64, _: bool) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn set_intx(&self, _: u64, _: bool) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn assign_bar(&self, _: u64, _: u8, _: u64, _: u64) -> Result<u64, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, DriverError> {
+            Ok(match (bdf, offset) {
+                (Self::XHCI, tairix_abi::driver::pci::CLASS_OFFSET) => 0x0C03_3001,
+                (Self::EHCI, tairix_abi::driver::pci::CLASS_OFFSET) => 0x0C03_2001,
+                (Self::HDA, tairix_abi::driver::pci::CLASS_OFFSET) => 0x0403_0001,
+                _ => 0,
+            })
+        }
+
+        fn capability_header(&self, _: u64, _: u8) -> Result<u32, DriverError> {
+            Err(DriverError::NotFound)
+        }
+
+        fn describe_function(&self, _: u64) -> Result<HwNode, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+    }
+
+    fn observe_usb_hosts(
+        hosts: &UsbHosts,
+        dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
+    ) -> alloc::vec::Vec<HwNode> {
+        observe_hosts(hosts, XHCI_CONTROLLERS, dev_irq)
+    }
+
+    fn observe_hosts(
+        hosts: &UsbHosts,
+        class: PciClass,
+        dev_irq: &dyn Fn(u64) -> Option<DeviceInterrupt>,
+    ) -> alloc::vec::Vec<HwNode> {
+        let walk = PciWalk {
+            segment: SEGMENT,
+            functions: &hosts.functions,
+            bus: hosts,
+            registers: &NoRegisters,
+            dma: &|_| None,
+            coherence: DmaCoherence::Snooped,
+        };
+        let mut sink = CollectingSink::default();
+        observe_pci_class_functions(&walk, hosts, class, dev_irq, &mut sink, &NullSink)
+            .expect("enumerate");
+        sink.nodes
+    }
+
+    #[test]
+    fn an_xhci_function_is_published_with_its_window_below_its_msix_state() {
+        let hosts = UsbHosts::with(Ok((0xFE00_0000, 0x3000)));
+        let line = HwResource::message_irq(u64::from(TEST_PCI_INTID), 0);
+        let nodes = observe_usb_hosts(&hosts, &|_| Some(DeviceInterrupt::line(line)));
+        assert_eq!(nodes.len(), 1, "the EHCI function is no xHCI");
+        let node = &nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Bus));
+        assert_eq!(node.id(), node_of(UsbHosts::XHCI));
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::pci(0x1B36, 0x000D, CLASS_USB_XHCI)]
+        );
+        assert_eq!(
+            node.resources(),
+            &[
+                HwResource::mmio(0xFE00_0000, 0x3000),
+                HwResource::dma(0, 0, DmaCoherence::Snooped),
+                line,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_hd_audio_controller_is_published_as_an_audio_node() {
+        let hosts = UsbHosts::with(Ok((0xFE10_0000, 0x4000)));
+        let line = HwResource::message_irq(u64::from(TEST_PCI_INTID), 0);
+        let nodes = observe_hosts(&hosts, HD_AUDIO_CONTROLLERS, &|_| {
+            Some(DeviceInterrupt::line(line))
+        });
+        assert_eq!(
+            nodes.len(),
+            1,
+            "only the audio function is an HD Audio controller"
+        );
+        let node = &nodes[0];
+        assert_eq!(node.class(), Some(HwDeviceClass::Audio));
+        assert_eq!(node.id(), node_of(UsbHosts::HDA));
+        assert_eq!(
+            node.match_keys(),
+            &[HwMatchKey::pci(0x1B36, 0x2668, CLASS_HD_AUDIO)]
+        );
+        assert_eq!(
+            node.resources(),
+            &[
+                HwResource::mmio(0xFE10_0000, 0x4000),
+                HwResource::dma(0, 0, DmaCoherence::Snooped),
+                line,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_xhci_function_with_no_window_or_no_line_is_left_undiscovered() {
+        let line = HwResource::message_irq(u64::from(TEST_PCI_INTID), 0);
+        let windowless = UsbHosts::with(Err(DriverError::NotFound));
+        assert!(observe_usb_hosts(&windowless, &|_| Some(DeviceInterrupt::line(line))).is_empty());
+        let unrouted = UsbHosts::with(Ok((0xFE00_0000, 0x3000)));
+        assert!(observe_usb_hosts(&unrouted, &|_| None).is_empty());
+        let mmio_line = HwResource::mmio(0x1000, 0x1000);
+        assert!(
+            observe_usb_hosts(&unrouted, &|_| Some(DeviceInterrupt::line(mmio_line))).is_empty(),
+            "only an interrupt is a line"
+        );
     }
 
     #[test]

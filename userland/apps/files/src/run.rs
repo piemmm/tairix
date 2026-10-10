@@ -127,9 +127,9 @@ mod program {
         WindowSizing,
     };
     use tairix_abi::{
-        load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, SpawnAttach,
-        UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX, STDIN,
-        STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
+        SpawnAttach, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus,
+        APPINFO_WIRE_MAX, STDIN, STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::document;
@@ -2897,9 +2897,11 @@ mod program {
         Pending(u64),
     }
 
-    /// Move `from` to `to` under the user's own identity.
+    /// Move `from` to `to` under the user's own identity. The name was
+    /// checked against a listing the volume may have moved on from, so the
+    /// kernel refuses rather than replaces whatever holds it now.
     fn rename_now(from: &str, to: &str) -> Result<(), Errno> {
-        match tairix_rt::fs_rename(from.as_bytes(), to.as_bytes()) {
+        match tairix_rt::fs_rename(from.as_bytes(), to.as_bytes(), RenameFlags::NO_REPLACE) {
             0 => Ok(()),
             ret => Err(Errno::from_syscall(ret)),
         }
@@ -4900,6 +4902,7 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
             // A drag's reports are answered where every window is.
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
@@ -5876,14 +5879,19 @@ mod program {
     }
 
     /// Move a same-volume item with a single `fs_rename` from its source to its
-    /// destination path, under the user's own identity.
+    /// destination path, under the user's own identity. The destination was
+    /// chosen free when the run began, so one taken since refuses the move
+    /// rather than being replaced.
     fn rename_item(source: &[String], dest: &[String]) -> Result<(), &'static str> {
         let from = spell_path(source)?;
         let to = spell_path(dest)?;
-        if tairix_rt::fs_rename(from.as_bytes(), to.as_bytes()) != 0 {
-            return Err("a source item could not be moved");
+        match tairix_rt::fs_rename(from.as_bytes(), to.as_bytes(), RenameFlags::NO_REPLACE) {
+            0 => Ok(()),
+            ret if Errno::from_syscall(ret) == Errno::AlreadyExists => {
+                Err("an item with that name appeared at the destination")
+            }
+            _ => Err("a source item could not be moved"),
         }
-        Ok(())
     }
 
     /// A paste in progress: a captured plan carried out one bounded unit of

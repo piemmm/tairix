@@ -39,6 +39,7 @@ pub mod font_ipc;
 pub mod fs;
 pub(crate) mod hex;
 pub mod home;
+pub mod hwlink;
 pub mod hwtree;
 pub mod i2c_ipc;
 pub mod input;
@@ -127,10 +128,10 @@ pub use filelock::{
 };
 pub use fs::{
     DirChange, DirChangeBatch, DirChanges, DirEntry, DirWatchStatus, FileId, FileKind, FileStat,
-    LinkFlags, OpenFlags, ReaddirFrom, RealpathMode, UnlinkFlags, DIR_WATCH_LATENCY_MAX_NS,
-    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_GROUP_EXEC_BIT, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX,
-    FS_OWNER_UNCHANGED, FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
-    READDIR_BATCH_MAX,
+    LinkFlags, OpenFlags, ReaddirFrom, RealpathMode, RenameFlags, UnlinkFlags,
+    DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_GROUP_EXEC_BIT, FS_IO_MAX,
+    FS_MODE_MASK, FS_NAME_MAX, FS_OWNER_UNCHANGED, FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT,
+    FS_SYMLINK_MAX, READDIR_BATCH_MAX,
 };
 pub use hwtree::{
     snapshot_nodes, DmaCoherence, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty,
@@ -220,8 +221,8 @@ pub use stdinfo::{
     STDINFO_VERSION_V1,
 };
 pub use syscall::{
-    IrqHandle, SyscallNumber, WaitFlags, GRANT_EXTENT_INHERIT, RESOURCE_REF_MAX,
-    SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
+    IrqHandle, SyscallNumber, WaitFlags, FD_GRANT_PENDING_MAX, GRANT_EXTENT_INHERIT,
+    RESOURCE_REF_MAX, SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
 };
 pub use syscalls::{
     encoded_table, i32_from_register, i32_register_is_canonical, i64_from_register, spec_for,

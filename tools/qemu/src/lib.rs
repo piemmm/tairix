@@ -760,8 +760,39 @@ impl Arch {
     }
 }
 
-/// The `-audiodev`/`-device` pair that attaches a virtio sound device behind
-/// QEMU's `wav` backend, or nothing when the run asked for no capture.
+/// The emulated sound card a capture records what it received from.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum SoundCard {
+    /// A virtio sound device on the port's own transport.
+    #[default]
+    Virtio,
+    /// QEMU's USB Audio Class 1.0 speaker (`usb-audio`) behind a `qemu-xhci`
+    /// controller.
+    Usb,
+    /// QEMU's Intel High Definition Audio controller (`intel-hda`) with an
+    /// output-only codec (`hda-output`).
+    Hda,
+}
+
+/// The rate QEMU's `wav` backend states in its header when it may not be
+/// told one: its own default.
+const WAV_DEFAULT_HZ: u32 = 44_100;
+
+impl SoundCard {
+    /// The rate the card's capture header states. The USB card records with
+    /// the mixing engine off, where QEMU refuses a stated rate and labels the
+    /// device's unconverted stream with its default.
+    #[must_use]
+    pub const fn capture_label_hz(self) -> u32 {
+        match self {
+            Self::Virtio | Self::Hda => tairix_test_audio_wire::RATE_HZ,
+            Self::Usb => WAV_DEFAULT_HZ,
+        }
+    }
+}
+
+/// The `-audiodev`/`-device` arguments that attach the spec's sound card
+/// behind QEMU's `wav` backend, or nothing when the run asked for no capture.
 ///
 /// One definition for all three ports: the backend's rate, channel count and
 /// sample format are the vertical's own, so the recording needs no conversion
@@ -780,6 +811,13 @@ impl Arch {
 /// query classes — it implements neither. They therefore exercise the
 /// driver's tolerance of a device that will not describe itself, which is
 /// the behaviour of the one sound card this vertical can actually run.
+///
+/// The USB card records with QEMU's mixing engine off: `usb-audio` applies
+/// its emulated volume — 240 of 255 at its own 0 dB — in that engine, so the
+/// capture would be the device's analogue stage rather than the samples the
+/// bus delivered. With the engine off the file carries the device's own
+/// stream unconverted, under a header rate QEMU will not let be stated
+/// ([`SoundCard::capture_label_hz`]).
 #[must_use]
 pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
     let Some(path) = spec.audio_wav_path.as_ref() else {
@@ -787,13 +825,44 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
     };
     let mut backend = OsString::from("wav,id=snd0,path=");
     backend.push(path.as_os_str());
-    backend.push(",out.frequency=48000,out.channels=2,out.format=s16");
-    vec![
-        OsString::from("-audiodev"),
-        backend,
-        OsString::from("-device"),
-        OsString::from(format!("{device},audiodev=snd0,streams=1,chmaps=2,jacks=1")),
-    ]
+    let geometry = format!(
+        ",out.frequency={},out.channels={},out.format=s16",
+        tairix_test_audio_wire::RATE_HZ,
+        tairix_test_audio_wire::CHANNELS
+    );
+    match spec.sound_card {
+        SoundCard::Virtio => {
+            backend.push(geometry);
+            vec![
+                OsString::from("-audiodev"),
+                backend,
+                OsString::from("-device"),
+                OsString::from(format!("{device},audiodev=snd0,streams=1,chmaps=2,jacks=1")),
+            ]
+        }
+        SoundCard::Hda => {
+            backend.push(geometry);
+            vec![
+                OsString::from("-audiodev"),
+                backend,
+                OsString::from("-device"),
+                OsString::from("intel-hda,id=hda0"),
+                OsString::from("-device"),
+                OsString::from("hda-output,audiodev=snd0,bus=hda0.0"),
+            ]
+        }
+        SoundCard::Usb => {
+            backend.push(",out.mixing-engine=off");
+            vec![
+                OsString::from("-audiodev"),
+                backend,
+                OsString::from("-device"),
+                OsString::from("qemu-xhci,id=usbaudio"),
+                OsString::from("-device"),
+                OsString::from("usb-audio,bus=usbaudio.0,audiodev=snd0"),
+            ]
+        }
+    }
 }
 
 /// The `-device` arguments for the virtio-input devices `spec` drives — or,
@@ -1174,10 +1243,12 @@ pub struct Spec {
     /// vertical without an RTC driver wants.
     pub rtc_base_unix_secs: Option<i64>,
     /// Where QEMU's `wav` audio backend writes what the emulated sound card
-    /// received. `Some` attaches a virtio sound device behind that backend;
+    /// received. `Some` attaches [`Self::sound_card`] behind that backend;
     /// `None` attaches no sound device at all — the path *is* the request,
     /// so a device with nowhere to record to cannot be configured.
     pub audio_wav_path: Option<PathBuf>,
+    /// The sound card a capture records from.
+    pub sound_card: SoundCard,
     /// Extra arguments appended verbatim to the QEMU command line after the
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
@@ -1353,6 +1424,7 @@ impl Spec {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1516,6 +1588,7 @@ impl Spec {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1551,6 +1624,7 @@ impl Spec {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -1657,15 +1731,16 @@ impl Spec {
         self
     }
 
-    /// Attach a virtio sound device behind QEMU's `wav` audio backend,
-    /// recording what the emulated card receives into `path`.
+    /// Attach `card` behind QEMU's `wav` audio backend, recording what the
+    /// emulated card receives into `path`.
     ///
     /// Any file already at `path` is left alone here — the caller removes a
     /// stale capture before the run, exactly as it does for a screendump, so
     /// an assertion can never read the previous run's bytes.
     #[must_use]
-    pub fn with_audio_wav(mut self, path: impl Into<PathBuf>) -> Self {
+    pub fn with_audio_capture(mut self, path: impl Into<PathBuf>, card: SoundCard) -> Self {
         self.audio_wav_path = Some(path.into());
+        self.sound_card = card;
         self
     }
 
@@ -5415,6 +5490,7 @@ mod tests {
             interrupts: InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),

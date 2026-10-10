@@ -998,6 +998,14 @@ mod program {
             let _ = tairix_rt::shm_unmap(base, region_len);
             return Err(Errno::AlreadyExists);
         }
+        // The port's id is derived from this service's pid, so only the
+        // driver serving the channel is admitted: no one else may forge a
+        // link change or a back-pressure claim into it, and the admission
+        // discards whatever another sent before it.
+        if let Err(err) = tairix_rt::port_admit(notify, endpoint_id) {
+            let _ = tairix_rt::shm_unmap(base, region_len);
+            return Err(err);
+        }
 
         // Attach hands the region and notify port to the driver; on refusal
         // the mapping is released (the driver never saw a usable channel).

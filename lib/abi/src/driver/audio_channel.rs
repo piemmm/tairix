@@ -910,6 +910,8 @@ mod notify {
     pub const JACK: usize = 10;
     pub const RESERVED1: usize = 11;
     pub const POSITION: usize = 12;
+    /// A fault's reason, in the bytes a position takes in other kinds.
+    pub const REASON: usize = 12;
     pub const LOST_FRAMES: usize = 20;
     pub const SAMPLED_AT: usize = 28;
     pub const LEN: usize = SAMPLED_AT + Time64::WIRE_LEN;
@@ -926,6 +928,8 @@ const NOTIFY_XRUN: u8 = 2;
 const NOTIFY_JACK: u8 = 3;
 /// Wire byte for a drain-completed notification.
 const NOTIFY_DRAINED: u8 = 4;
+/// Wire byte for an endpoint-faulted notification.
+const NOTIFY_FAULTED: u8 = 5;
 
 /// The driver → mixer wake.
 ///
@@ -975,6 +979,16 @@ pub enum AudioChannelNotify {
         /// Its new state.
         jack: JackState,
     },
+    /// The driver could not go on serving the endpoint: its device faulted
+    /// while it was being serviced, or a transfer the hardware ended could not
+    /// be started again. The mixer hears it at once, since the endpoint will
+    /// raise no further period on its own.
+    Faulted {
+        /// The endpoint that faulted.
+        endpoint: u16,
+        /// Why.
+        reason: Errno,
+    },
 }
 
 impl AudioChannelNotify {
@@ -1019,6 +1033,11 @@ impl AudioChannelNotify {
                 put_u16(&mut out, notify::ENDPOINT, *endpoint);
                 out[notify::JACK] = jack.as_u8();
             }
+            Self::Faulted { endpoint, reason } => {
+                out[notify::KIND] = NOTIFY_FAULTED;
+                put_u16(&mut out, notify::ENDPOINT, *endpoint);
+                put_i32(&mut out, notify::REASON, reason.as_i32());
+            }
         }
         out
     }
@@ -1038,7 +1057,8 @@ impl AudioChannelNotify {
     /// * [`Errno::AbiVersionUnsupported`] — not
     ///   [`AUDIO_CHANNEL_VERSION_V1`].
     /// * [`Errno::OutOfRange`] — an unknown kind byte, an endpoint past
-    ///   [`MAX_DEVICE_ENDPOINTS`], or an undefined jack state.
+    ///   [`MAX_DEVICE_ENDPOINTS`], an undefined jack state, or a fault reason
+    ///   no [`Errno`] carries.
     pub fn decode(bytes: &[u8]) -> Result<Self, Errno> {
         // Exactly the frame, so the "nothing past this kind's fields" checks
         // cannot read a caller's longer buffer.
@@ -1092,6 +1112,20 @@ impl AudioChannelNotify {
                 Ok(Self::JackChanged {
                     endpoint,
                     jack: JackState::from_u8(bytes[notify::JACK])?,
+                })
+            }
+            NOTIFY_FAULTED => {
+                if read_u32(bytes, notify::REASON + 4) != 0
+                    || lost_frames != 0
+                    || bytes[notify::JACK] != 0
+                    || !sampled_at_clean
+                {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Faulted {
+                    endpoint,
+                    reason: Errno::from_i32(read_i32(bytes, notify::REASON))
+                        .ok_or(Errno::OutOfRange)?,
                 })
             }
             _ => Err(Errno::OutOfRange),

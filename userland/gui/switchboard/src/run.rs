@@ -76,7 +76,7 @@ mod program {
         command_endpoint_for, decode_publish_reply, MachineReport, SwitchboardCommand,
         SwitchboardRequest, TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
-    use tairix_abi::window_ipc::{AppMenu, WindowEvent, WindowRegion};
+    use tairix_abi::window_ipc::{AppMenu, WindowEvent, WindowRegion, WINDOW_ENDPOINT};
     use tairix_abi::{
         CapabilityId, CapabilityQuery, Errno, NoticeTopic, PowerAction, ProcId, SchedPriority,
         Signal, SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
@@ -630,6 +630,12 @@ mod program {
                 DegradedField::HardwareTree => {
                     "notice: the hardware tree is unavailable; the graphics device is not named"
                 }
+                DegradedField::AudioDevices => {
+                    "notice: the sound devices are unavailable; they are not shown"
+                }
+                DegradedField::AudioStreams => {
+                    "notice: the sound streams are unavailable; they are not shown"
+                }
                 DegradedField::VolumeHealth => {
                     "notice: volume I/O health is unavailable; a failing disk cannot be reported"
                 }
@@ -791,6 +797,7 @@ mod program {
             // file association, so no open target can name anything here.
             | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
@@ -804,12 +811,11 @@ mod program {
     /// Drain every window event the session has delivered, applying each in
     /// turn.
     ///
-    /// The mailbox is open to any sender that can name the endpoint, so the
-    /// kernel-attested origin is the authentication and a frame from anyone
-    /// but the session serving this window never leaves the drain (fail
-    /// closed — no forged input reaches the panel). It is dropped silently:
-    /// one stderr line per refused frame is a flooding channel any process
-    /// could drive.
+    /// The mailbox admits only the session serving windows, and the
+    /// kernel-attested origin of each frame is still checked against the
+    /// session serving this one, so no forged input reaches the panel. A
+    /// refused frame is dropped silently, so no sender can turn refusals into
+    /// a stream of stderr lines.
     ///
     /// Every rejection below still takes its message with it. A drain that
     /// returned with the mailbox non-empty would be woken for it again at
@@ -1234,7 +1240,9 @@ mod program {
     ///
     /// Both are derived from this process's own kernel-attested identity, and
     /// a reserved endpoint is refused before the bind is attempted, so no
-    /// instance can claim a well-known name.
+    /// instance can claim a well-known name. Since any process can derive them
+    /// too, each admits only the session serving windows, which is the one
+    /// sender either takes.
     fn bind_mailboxes(pid: u64) -> Result<(u64, u64), i32> {
         let commands = command_endpoint_for(pid);
         if tairix_abi::ipc::is_reserved_endpoint(commands)
@@ -1259,6 +1267,15 @@ mod program {
                 EXIT_NO_WAIT_SOURCE,
                 "window event mailbox bind refused",
             ));
+        }
+        for mailbox in [commands, events] {
+            if let Err(err) = tairix_rt::port_admit(mailbox, WINDOW_ENDPOINT) {
+                return Err(app::fail(
+                    APP_NAME,
+                    EXIT_NO_WAIT_SOURCE,
+                    format_args!("mailbox admission refused: {err}"),
+                ));
+            }
         }
         Ok((commands, events))
     }

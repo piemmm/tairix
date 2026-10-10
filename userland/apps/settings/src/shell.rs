@@ -48,7 +48,9 @@ use crate::pictures::{Chooser, PictureWanted};
 use crate::registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
 };
+use crate::sound::SoundReading;
 use crate::volumes::VolumeReading;
+use tairix_audio::stream::DeviceControl;
 
 /// The trail's leading crumb: the surface itself, and — once the strip is
 /// shed — the way back to the category list.
@@ -71,6 +73,8 @@ enum Reading {
     Accounts,
     /// The sources the desktop says have notified.
     NotifySources,
+    /// The sound devices and what is recording.
+    Sound,
 }
 
 impl Reading {
@@ -323,6 +327,17 @@ pub enum ShellOutcome {
     /// document as the pane shows them, for the caller to hand the desktop
     /// session, which previews it and keeps none of it.
     PreviewScreensaver(String),
+    /// The reader changed a sound device's control, for the caller to ask
+    /// of the audio service: live while a level is dragged, `settled` where
+    /// it rests.
+    Sound {
+        /// The device.
+        device_id: u32,
+        /// What to change.
+        control: DeviceControl,
+        /// Whether the interaction has ended.
+        settled: bool,
+    },
 }
 
 impl ShellOutcome {
@@ -350,7 +365,8 @@ impl ShellOutcome {
             | Self::Changed
             | Self::Elevate(_)
             | Self::LockScreen
-            | Self::PreviewScreensaver(_) => None,
+            | Self::PreviewScreensaver(_)
+            | Self::Sound { .. } => None,
         }
     }
 }
@@ -411,6 +427,13 @@ pub struct Shell {
     /// The sources the desktop said have notified, or `None` while it has not
     /// said — or would not.
     notify_sources: Option<Vec<BundleId>>,
+    /// What the audio service answered.
+    sound: Option<SoundReading>,
+    /// A level being dragged on the Sound pane, so a reading landing meanwhile
+    /// waits for it to settle rather than rebuilding the slider under it.
+    sound_dragging: bool,
+    /// A reading that landed during the drag.
+    sound_deferred: bool,
     /// Why the desktop last would not lock the screen, held here so a refusal
     /// landing while another pane is on show is stated once the pane that
     /// asked is shown again.
@@ -492,6 +515,9 @@ impl Shell {
             network: NetworkFacts::default(),
             accounts: AccountFacts::default(),
             notify_sources: None,
+            sound: None,
+            sound_dragging: false,
+            sound_deferred: false,
             lock_refusal: None,
             preview_refusal: None,
             salt: None,
@@ -761,6 +787,41 @@ impl Shell {
         self.body
             .composition()
             .is_some_and(Composition::reads_notify_sources)
+    }
+
+    /// Whether the pane on show is the Sound pane.
+    fn states_sound(&self) -> bool {
+        self.body.composition() == Some(Composition::Sound)
+    }
+
+    /// Whether the caller should read the sound devices.
+    #[must_use]
+    pub const fn sound_wanted(&self) -> bool {
+        self.wanted.holds(Reading::Sound)
+    }
+
+    /// The audio service announced that a device, a control or a recording
+    /// moved: read it again if the pane that states it is on show.
+    pub fn sound_moved(&mut self) {
+        if self.states_sound() {
+            self.wanted.arm(Reading::Sound);
+        }
+    }
+
+    /// Adopt what the audio service answered.
+    pub fn adopt_sound(&mut self, reading: Option<SoundReading>) {
+        self.sound = reading;
+        self.wanted.landed(Reading::Sound);
+        if !self.states_sound() {
+            return;
+        }
+        if self.sound_dragging {
+            self.sound_deferred = true;
+            return;
+        }
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_sound(self.sound.as_ref());
+        }
     }
 
     /// Whether the caller should ask the desktop which sources have
@@ -1035,6 +1096,7 @@ impl Shell {
     fn restate_body(&mut self) {
         let listed = matches!(self.body, Body::Volumes(_));
         let resolved = self.states_resolvers();
+        let sounded = self.states_sound();
         // A pane that is not discovered from the capture drops it before
         // it is built: the machine's address book is a privileged reading,
         // and one held while the reader browses elsewhere is one this
@@ -1068,6 +1130,7 @@ impl Shell {
             accounts: &self.accounts,
             staged_accounts: &staged_accounts,
             notify_sources: self.notify_sources.as_deref(),
+            sound: self.sound.as_ref(),
             lock_refusal: self.lock_refusal,
             preview_refusal: self.preview_refusal,
         };
@@ -1088,6 +1151,11 @@ impl Shell {
         // causes.
         if !resolved && self.states_resolvers() {
             self.wanted.arm(Reading::Resolvers);
+        }
+        // What the devices hold moves under other hands — the icon bar, a
+        // terminal — so it is re-read whenever the pane comes on show.
+        if !sounded && self.states_sound() {
+            self.wanted.arm(Reading::Sound);
         }
         // The directories move on their own too, so they are re-read when
         // the pane that lists them *comes* on show — not on the rebuild
@@ -1795,6 +1863,25 @@ impl Shell {
             self.restate_staged(frame, viewport, scale, theme, damage);
         }
         self.refit(viewport, scale, theme, damage);
+        self.concluded(acted)
+    }
+
+    /// The shell outcome a form's answer implies. A sound reading that landed
+    /// while a level was dragged is adopted once the drag settles.
+    fn concluded(&mut self, acted: FormOutcome) -> ShellOutcome {
+        if let FormOutcome::Sound {
+            control: DeviceControl::Level(_),
+            settled,
+            ..
+        } = acted
+        {
+            self.sound_dragging = !settled;
+            if settled && core::mem::take(&mut self.sound_deferred) {
+                if let Some(form) = self.body.form_mut() {
+                    form.adopt_sound(self.sound.as_ref());
+                }
+            }
+        }
         outcome_of(acted)
     }
 
@@ -2053,7 +2140,7 @@ impl Shell {
                     // to.
                     let frame = self.frame(viewport, scale, theme);
                     self.reveal_cursor(&frame, viewport, scale, theme, damage);
-                    return outcome_of(acted);
+                    return self.concluded(acted);
                 }
                 let Some(rect) = frame.scrollbar else {
                     return ShellOutcome::Idle;
@@ -2965,6 +3052,12 @@ impl Shell {
         self.body.form_mut()
     }
 
+    /// Conclude a form's answer as a routed event would, for a test.
+    #[cfg(test)]
+    pub(crate) fn conclude_for_test(&mut self, acted: FormOutcome) -> ShellOutcome {
+        self.concluded(acted)
+    }
+
     /// The volume cards the pane on show draws, for a test that asks what
     /// the machine reported.
     #[cfg(test)]
@@ -3232,6 +3325,15 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
         FormOutcome::Apply(document) => ShellOutcome::Apply(document),
         FormOutcome::LockScreen => ShellOutcome::LockScreen,
         FormOutcome::PreviewScreensaver(document) => ShellOutcome::PreviewScreensaver(document),
+        FormOutcome::Sound {
+            device_id,
+            control,
+            settled,
+        } => ShellOutcome::Sound {
+            device_id,
+            control,
+            settled,
+        },
     }
 }
 

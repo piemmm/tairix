@@ -342,6 +342,7 @@ impl FilesystemService for MemFs {
         _caps: &dyn CapabilityQuery,
         _src: &str,
         _dst: &str,
+        _flags: tairix_abi::RenameFlags,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }

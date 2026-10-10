@@ -30,6 +30,11 @@ tairix-arch-aarch64 = { path = "../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0.0" }
+# The headphone jack's binding, which the image's PWM-audio overlay names its
+# PWM block with, so the overlay and the driver's bind table cannot drift.
+tairix-drv-audio-bcm2711-pwm = { path = "../../drivers/audio/bcm2711_pwm", version = "=0.0.0" }
+# The tree writer the image's device-tree overlays are written with.
+tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0", features = ["writer"] }
 # The per-installation log-attestation key file is authored through the one
 # `tairix_log::LogAttestationKey` on-disk format, so the image author and the
 # journal principal that later reads it cannot drift.

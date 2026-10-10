@@ -6,6 +6,7 @@
 extern crate alloc;
 
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,7 +24,7 @@ use tairix_abi::window_ipc::{
     MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
     SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
     APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -2877,6 +2878,126 @@ fn the_chosen_name_is_the_owners_to_take_once() {
     client.pick_file(window, OPEN).expect("pick accepted");
     conclude(&loopback, &mut sink, window, None).expect("cancelled");
     assert_eq!(client.take_picked_name(window), Err(Errno::NotFound));
+}
+
+/// The files a folder pick delegated, each named and handled.
+fn folder(files: &[(u64, &str)]) -> VecDeque<tairix_abi::window_ipc::PickedFile> {
+    files
+        .iter()
+        .map(|&(handle, name)| tairix_abi::window_ipc::PickedFile {
+            handle,
+            name: DocumentName::new(name).expect("a valid name"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_folder_pick_concludes_with_its_files_for_the_owner_to_take_in_order() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut sink = QueueSink::default();
+
+    client
+        .pick_file(window, PickPurpose::Folder)
+        .expect("pick accepted");
+    assert_eq!(
+        loopback.borrow().host.picks,
+        alloc::vec![(window, PickPurpose::Folder)]
+    );
+    assert_eq!(
+        conclude(&loopback, &mut sink, window, Some((9, "a.flac", false))),
+        Err(Errno::OutOfRange),
+        "a folder pick is not answered with one file"
+    );
+    let files = folder(&[(3, "01.flac"), (4, "02.flac")]);
+    loopback
+        .borrow_mut()
+        .server
+        .conclude_folder_pick(&mut sink, window, files, 5)
+        .expect("concluded");
+    assert_eq!(
+        sink.delivered
+            .back()
+            .map(|(_, event)| WindowEvent::from_bytes(event)),
+        Some(Ok(WindowEvent::FolderPicked {
+            window_id: window,
+            files: 2,
+            left_out: 5
+        }))
+    );
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.take_picked_file(window).map(|file| file.handle),
+        Err(Errno::NotFound),
+        "another client cannot take what this window was handed"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        client.pick_file(window, OPEN),
+        Err(Errno::AlreadyExists),
+        "a further pick waits until the delegated files are taken"
+    );
+    let first = client.take_picked_file(window).expect("the first file");
+    assert_eq!((first.handle, first.name.as_str()), (3, "01.flac"));
+    let second = client.take_picked_file(window).expect("the second file");
+    assert_eq!((second.handle, second.name.as_str()), (4, "02.flac"));
+    assert_eq!(
+        client.take_picked_file(window).map(|file| file.handle),
+        Err(Errno::NotFound)
+    );
+    client
+        .pick_file(window, PickPurpose::Folder)
+        .expect("taken, a new pick is accepted");
+    conclude(&loopback, &mut sink, window, None).expect("a folder pick may be cancelled");
+}
+
+#[test]
+fn a_folder_conclusion_is_refused_unless_a_folder_was_asked_for_and_is_honest() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut sink = QueueSink::default();
+    let server = |sink: &mut QueueSink, files, left_out| {
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_folder_pick(sink, window, files, left_out)
+    };
+    assert_eq!(
+        server(&mut sink, folder(&[(3, "a.flac")]), 0),
+        Err(Errno::OutOfRange)
+    );
+    client.pick_file(window, OPEN).expect("pick accepted");
+    assert_eq!(
+        server(&mut sink, folder(&[(3, "a.flac")]), 0),
+        Err(Errno::OutOfRange),
+        "a file pick is not answered with a folder"
+    );
+    conclude(&loopback, &mut sink, window, None).expect("cancelled");
+    client
+        .pick_file(window, PickPurpose::Folder)
+        .expect("pick accepted");
+    assert_eq!(
+        server(&mut sink, folder(&[(0, "a.flac")]), 0),
+        Err(Errno::OutOfRange),
+        "the reserved handle delegates nothing"
+    );
+    let names: Vec<String> = (0..=WINDOW_FOLDER_PICK_MAX)
+        .map(|at| format!("{at}.flac"))
+        .collect();
+    let over: Vec<(u64, &str)> = names
+        .iter()
+        .zip(1..)
+        .map(|(name, handle)| (handle, name.as_str()))
+        .collect();
+    assert_eq!(server(&mut sink, folder(&over), 0), Err(Errno::OutOfRange));
+    assert_eq!(
+        server(&mut sink, folder(&over[1..]), 1),
+        Ok(()),
+        "the bound is met"
+    );
 }
 
 /// One openable file named `notes.txt`.

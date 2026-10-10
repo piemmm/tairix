@@ -224,7 +224,7 @@ pub fn seed(
                     node,
                     requester,
                     |message| {
-                        bus.route_msix(bdf, MSIX_ENTRY, message, &PortRegisters(port))
+                        crate::pci_host::route_message(bus, bdf, message, &PortRegisters(port))
                             .is_ok()
                     },
                     || pin_line(bdf),
@@ -246,6 +246,13 @@ pub fn seed(
         let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(&walk, &irq, sink, log);
         let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(&walk, &irq, sink, log);
         let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(&walk, &irq, sink, log);
+        for class in [
+            crate::hwdiscovery::XHCI_CONTROLLERS,
+            crate::hwdiscovery::HD_AUDIO_CONTROLLERS,
+        ] {
+            let _ =
+                crate::hwdiscovery::observe_pci_class_functions(&walk, bus, class, &irq, sink, log);
+        }
     };
     let owned = crate::pci_probe::probe(segments, &mut units, &external, &mut publish, sink, log);
     crate::pci_host::publish(owned, Box::new(PortRegisters(port)), log);

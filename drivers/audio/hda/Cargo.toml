@@ -1,0 +1,27 @@
+[package]
+name = "tairix-drv-audio-hda"
+description = "TAIRiX Intel High Definition Audio driver (plans/SOUND.md SND11): the controller's command rings and stream descriptors, and a codec's graph walked from what the codec itself states, serving every sink and source through the `Audio` class trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# A `lib` — the bind table and capability set the image builder authors the
+# signed manifest from, and the host-testable controller and codec engine —
+# and the `Run` binary devmgr autoloads.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# Orders descriptor and buffer writes before the doorbell that hands them to
+# the controller, and its writes before the reads they announce.
+tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

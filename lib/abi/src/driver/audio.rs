@@ -306,6 +306,46 @@ impl ChannelMap {
         map
     };
 
+    /// The conventional layout for `channels` channels: what a device that
+    /// states a channel count and no positions has said.
+    ///
+    /// Mono and stereo are unambiguous; wider counts follow the interleave
+    /// order every consumer format uses. A count with no conventional
+    /// reading is refused rather than guessed at.
+    #[must_use]
+    pub fn conventional(channels: u8) -> Option<Self> {
+        use ChannelPosition::{
+            FrontCentre, FrontLeft, FrontRight, LowFrequency, Mono, RearLeft, RearRight, SideLeft,
+            SideRight,
+        };
+        let positions: &[ChannelPosition] = match channels {
+            1 => &[Mono],
+            2 => &[FrontLeft, FrontRight],
+            3 => &[FrontLeft, FrontRight, FrontCentre],
+            4 => &[FrontLeft, FrontRight, RearLeft, RearRight],
+            6 => &[
+                FrontLeft,
+                FrontRight,
+                FrontCentre,
+                LowFrequency,
+                RearLeft,
+                RearRight,
+            ],
+            8 => &[
+                FrontLeft,
+                FrontRight,
+                FrontCentre,
+                LowFrequency,
+                RearLeft,
+                RearRight,
+                SideLeft,
+                SideRight,
+            ],
+            _ => return None,
+        };
+        Self::new(positions).ok()
+    }
+
     /// A map of `count` slots whose every slot holds `position`, for the
     /// `const` constructors above to refine.
     const fn filled(count: u8, position: ChannelPosition) -> Self {
@@ -438,6 +478,31 @@ impl Rate {
         self.0
     }
 }
+
+/// The standard rate family, ascending: the 8 kHz telephony series, the
+/// 44.1 kHz CD series and the 48 kHz series, each up to 768 kHz.
+///
+/// What a clock offering ranges rather than a list is read against: a device
+/// that can run anywhere in a range runs every standard rate inside it, and
+/// those are the rates a mixer is ever asked for.
+pub const STANDARD_RATES: [Rate; MAX_DEVICE_RATES] = [
+    Rate(8_000),
+    Rate(11_025),
+    Rate(16_000),
+    Rate(22_050),
+    Rate(32_000),
+    Rate(44_100),
+    Rate(48_000),
+    Rate(64_000),
+    Rate(88_200),
+    Rate(96_000),
+    Rate(176_400),
+    Rate(192_000),
+    Rate(352_800),
+    Rate(384_000),
+    Rate(705_600),
+    Rate(768_000),
+];
 
 /// Wire length of a [`RateSupport`]: kind, entry count, a reserved pair, then
 /// the fixed-width entry array.
@@ -603,18 +668,22 @@ impl RateSet {
     ///   [`MAX_DEVICE_RATES`].
     /// * [`Errno::OutOfRange`] — not strictly ascending, which also rejects
     ///   duplicates.
-    pub fn new(rates: &[Rate]) -> Result<Self, Errno> {
+    pub const fn new(rates: &[Rate]) -> Result<Self, Errno> {
         if rates.is_empty() || rates.len() > MAX_DEVICE_RATES {
             return Err(Errno::LengthOutOfRange);
         }
-        if rates.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Errno::OutOfRange);
-        }
         let mut set = Self {
-            count: u8::try_from(rates.len()).map_err(|_| Errno::LengthOutOfRange)?,
+            count: 0,
             rates: [Rate::HZ_48000; MAX_DEVICE_RATES],
         };
-        set.rates[..rates.len()].copy_from_slice(rates);
+        while (set.count as usize) < rates.len() {
+            let index = set.count as usize;
+            if index > 0 && rates[index - 1].0 >= rates[index].0 {
+                return Err(Errno::OutOfRange);
+            }
+            set.rates[index] = rates[index];
+            set.count += 1;
+        }
         Ok(set)
     }
 
@@ -1251,7 +1320,10 @@ pub trait Audio {
     /// * [`DriverError::OutOfRange`] for a period the driver's own buffering
     ///   cannot carry.
     /// * [`DriverError::Busy`] if the endpoint is clocking — a
-    ///   reconfiguration happens at a period boundary, on a stopped endpoint.
+    ///   reconfiguration happens at a period boundary, on a stopped endpoint —
+    ///   or the configuration would retune a clock another endpoint runs from.
+    /// * [`DriverError::NoBandwidth`] if the bus the device hangs off cannot
+    ///   carry the configuration's stream beside the ones it already does.
     /// * [`DriverError::DeviceFault`] if the hardware refused its own
     ///   programming.
     fn configure(
@@ -1262,6 +1334,12 @@ pub trait Audio {
 
     /// Begin clocking `endpoint`, with its first frame at stream position
     /// `at`.
+    ///
+    /// A playback endpoint begins on the frames a [`service`](Self::service)
+    /// before the start took, so the mixer primes it that way. One started
+    /// with nothing taken begins on a period of silence, counted lost: a
+    /// device with nothing in flight finishes nothing, and so never raises the
+    /// period that would have it serviced.
     ///
     /// # Errors
     ///
@@ -1299,7 +1377,9 @@ pub trait Audio {
     /// A playback endpoint reads frames out of the ring into its own buffer;
     /// a capture endpoint writes frames into it. Either way the copy is the
     /// driver's, because the alternative is publishing the driver's DMA
-    /// window to another process.
+    /// window to another process. Before its start a playback endpoint takes
+    /// only whole periods, held for the start; once clocking it pads with
+    /// counted silence only when the device would otherwise run dry.
     ///
     /// # Errors
     ///
@@ -1339,8 +1419,10 @@ pub trait Audio {
 
     /// Read and clear the device's interrupt causes.
     ///
-    /// Called from the driver process's interrupt path after the line fires.
-    /// A shared line the device did not raise answers
+    /// Called after the line fires, and after every call, since a call that
+    /// waited on the device may have taken the wake its interrupt raised. It
+    /// therefore reports only what happened: a transfer still in flight is no
+    /// period boundary. A shared line the device did not raise answers
     /// [`AudioInterrupt::NONE`], which the serve loop reports to nobody.
     ///
     /// # Errors

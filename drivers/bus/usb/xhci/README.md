@@ -25,8 +25,11 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 
 ## What lives here
 
-- `BIND_KEYS` — the §18.3 bind table: one `compatible(usb,xhci)` key, so it
-  autoloads against the `usb,xhci` node the VL805 bus driver emits.
+- `BIND_KEYS` — the bind table: the `compatible(usb,xhci)` key the VL805 bus
+  driver's emitted node carries, and the xHCI PCI class code (`0x0C0330`), so
+  it also autoloads against a function the kernel discovered on a PCI host it
+  owns. The class key binds below a driver naming the exact part, which brings
+  that function up first.
 - `bringup` — `derive_controller_resources` + `bring_up_controller[_diagnostic]`:
   derive the BAR/DMA bounds from the granted resources, carve+aperture-check
   the DMA region (fail-closed `OutOfRange`, §5.4), map the BAR, and bring the
@@ -40,7 +43,8 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   outstanding interrupt-IN URB (a second concurrent submit fails closed
   `AlreadyExists`), driven on submit/IRQ through `tairix_usb::drive_urb` /
   `frame_completion`; a retracted node's parked URB is answered `NotFound`, as
-  is any submit on an endpoint carrying no node. While the controller is
+  is any submit on an endpoint carrying no node. `UrbReply` frames each answer:
+  a URB's completion, an operation's status, or a stream's grant. While the controller is
   recovering nothing is driven: a report poll is held for the next reset and
   any other transfer is answered with the reissuable `WouldBlock`
   (`reissue_held_transfer` does the same for a transfer already held when a
@@ -57,6 +61,21 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
   that no longer reads counts as another device. `serve_submit`, `drive_busy`,
   and `recover` hold the URB and recovery sequencing, including recovery after
   a transfer fault proves an unplug on either the submit or the interrupt path.
+  `serve_submit` decodes each request — a malformed frame is answered
+  fail-closed before anything else runs — and answers an interface or stream
+  operation at once. A started stream rides a region of its own, created for
+  it and delegated (`shm_grant_peer`) to the caller that started it, and its
+  notifications go to the port the caller's attested pid names, so a class
+  driver can neither map another's region nor aim the HCD's wakes at another
+  process. Each stream takes a number of its own, which its grant and every
+  notification carry, so a notification a stopped stream left behind is never
+  read as one about its successor. `deliver_streams` runs after every
+  controller interrupt and every
+  served request: each finished slot becomes an `IsoNotify::SlotDone`, and a
+  stream that halted, or whose notification its port refused, is stopped and
+  told why. A departing device's streams end `NotFound` before its node is
+  retracted; a controller reset ends every stream with the reissuable
+  `WouldBlock`, and the node governs its own interface alone again.
 - `domain` — `ControllerHealth`, the controller's interior fault domain (the
   recovery grace window) and the one deferred re-attach owed a port the
   bring-up walk skipped.
@@ -123,22 +142,27 @@ lib/*` only; the USB analogue of `lib/virtio` ↔ `drivers/bus/virtio`).
 ## Least privilege (`AGENTS.md` §5.4)
 
 `CAP_MMIO_MAP` (register BAR), `CAP_MEM_DMA` (controller DMA ring), `CAP_IRQ_BIND`
-(completion interrupt), `CAP_SHM` (the URB data buffer), `CAP_IPC_BIND_PRIVILEGED`
+(completion interrupt), `CAP_SHM` (the URB data buffer and each stream's
+region), `CAP_IPC_BIND_PRIVILEGED`
 (the restricted-sender URB endpoint), `CAP_HW_EMIT` (publish the interface
 node), `CAP_LOG_EMIT` (one-shot diagnostic). It runs in user space and does not
 request `CAP_DRV_KERNEL`. The class driver it serves holds **none** of these —
-only the right to submit URBs on its one interface and map its one buffer.
+only the right to submit requests on its one interface and map its one buffer
+and the stream regions delegated to it.
 
 ## Supported hardware
 
 | Platform | Controller                    | Status |
 |----------|-------------------------------|--------|
 | Pi 4     | VL805 PCIe xHCI (USB-A ports) | protocol + bring-up + URB-serve logic host-proven; live enumerate/serve is the metal acceptance item (`plans/USB.md` U5) |
+| QEMU (x86_64, aarch64, riscv64) | `qemu-xhci` on the kernel-owned PCI host | enumerates and serves `usb-audio` end to end (`tests/integration/audio_qemu_*`) |
 
-The register window and DMA constraint arrive as grants on the matched
-`usb,xhci` node — never a compiled-in base (`AGENTS.md` §18.1). QEMU models no
-Pi USB timing, so the emulation artefact is the host test suite and the live
-controller behaviour is a metal checklist (`plans/PI.md` §0.4).
+The register window and DMA constraint arrive as grants on the matched node —
+never a compiled-in base (`AGENTS.md` §18.1). On a kernel-owned PCI host the
+window stops short of the MSI-X table and pending bits, which only the kernel
+programs (`PciBus::driver_window`), and the function's DMA grant states no
+constraint (`HwResource::dma(0, 0, …)`). QEMU models no Pi USB timing, so the
+Pi's live controller behaviour stays a metal checklist (`plans/PI.md` §0.4).
 
 ## Limitations
 

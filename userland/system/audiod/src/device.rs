@@ -24,21 +24,29 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use tairix_abi::audio::{AudioNotify, StreamGrant, StreamRole, StreamState, AUDIO_NOTIFY_LEN};
-use tairix_abi::driver::audio::{AudioEndpointFacts, Frames, Rate, SampleFormat, StreamDirection};
+use tairix_abi::appinfo::BundleId;
+use tairix_abi::audio::{
+    AudioGain, AudioLocation, AudioNotify, StreamGrant, StreamRole, StreamState, AUDIO_NOTIFY_LEN,
+};
+use tairix_abi::driver::audio::{
+    AudioEndpointFacts, Frames, GainRange, Rate, SampleFormat, StreamDirection,
+};
 use tairix_abi::driver::audio_channel::{AttachParams, ConfigureGrant, ConfigureParams};
 use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_audio::channel::ChannelMatrix;
 use tairix_audio::clock::ClockModel;
 use tairix_audio::convert;
 use tairix_audio::mix::{Mixer, SinkFormat, StreamMix};
 use tairix_audio::resample::{FilterBank, Ratio, Resampler};
+use tairix_audio::volume::EndpointLevel;
+use tairix_log::{Field, FieldValue, Level, Sink};
 use tairix_util::fallible;
 
 use crate::channel::{AudioChannelClient, AudioChannelTransport};
+use crate::events;
 use crate::region::{RegionHost, RegionId};
-use crate::service::Notifier;
+use crate::service::{audit, Notifier};
 
 /// The encoding a resampled contribution is staged in for the mixer.
 ///
@@ -86,8 +94,18 @@ pub(crate) struct Endpoint {
     pub(crate) index: u16,
     /// The service-assigned identity a client opens a stream against.
     pub(crate) device_id: u32,
+    /// Where it is, across boots.
+    pub(crate) location: AudioLocation,
     /// What the endpoint said it can do.
     pub(crate) facts: AudioEndpointFacts,
+    /// Its own control, until the driver refuses to program it; then the
+    /// mixer takes the whole level.
+    pub(crate) control: Option<GainRange>,
+    /// Its own level as delivered: the control's setting and the mixer's
+    /// remainder.
+    pub(crate) level: EndpointLevel,
+    /// Frames the device reported losing on it since it was bound.
+    pub(crate) lost_frames: u64,
     /// Present once a stream has caused the endpoint to be programmed.
     pub(crate) active: Option<Active>,
 }
@@ -194,6 +212,10 @@ pub(crate) struct Stream {
     /// The caller's kernel-attested pid; a request naming this stream from
     /// any other process is refused.
     pub(crate) owner_pid: u64,
+    /// The user it runs as.
+    pub(crate) owner_uid: u32,
+    /// The application it belongs to, where the kernel attests one.
+    pub(crate) owner_app: Option<BundleId>,
     /// Index of the device it landed on.
     pub(crate) device: usize,
     /// Index of the endpoint within that device.
@@ -202,6 +224,9 @@ pub(crate) struct Stream {
     pub(crate) direction: StreamDirection,
     /// What the sound is for.
     pub(crate) role: StreamRole,
+    /// The login session the owner lies within, which the seat's room is
+    /// arbitrated on.
+    pub(crate) session: Option<ProcId>,
     /// What the client was told.
     pub(crate) grant: StreamGrant,
     /// The client ring's shape.
@@ -231,15 +256,20 @@ pub(crate) struct Stream {
     covered: usize,
     /// Client-rate frames pulled per top-up.
     want_in: usize,
-    /// This stream's own gain.
-    pub(crate) gain_millibel: i32,
+    /// This stream's own level.
+    pub(crate) gain: AudioGain,
     /// Whether it is muted, independently of its gain.
     pub(crate) muted: bool,
     /// The multiply the mix applies, resolved from every gain in force.
     pub(crate) software_gain: f32,
-    /// Where it stands.
+    /// Where the client's own requests leave it; never
+    /// [`StreamState::SeatInactive`], which is the room's word, not the
+    /// client's.
     pub(crate) state: StreamState,
-    /// The position it entered that state at.
+    /// The seat's room is not its owner's, so it moves no frames whatever
+    /// its own state, and a client with anything in flight is told so.
+    pub(crate) held: bool,
+    /// The position the state it was last told of took effect at.
     pub(crate) state_at: Frames,
     /// The frame a scheduled stop settles on, where one was named ahead of
     /// the position the stream had reached.
@@ -258,6 +288,10 @@ pub(crate) struct StreamOpen {
     pub(crate) id: u64,
     /// The caller's kernel-attested pid.
     pub(crate) owner_pid: u64,
+    /// The user it runs as.
+    pub(crate) owner_uid: u32,
+    /// The application it belongs to, where the kernel attests one.
+    pub(crate) owner_app: Option<BundleId>,
     /// Index of the device the router chose.
     pub(crate) device: usize,
     /// Index of the endpoint within it.
@@ -266,6 +300,10 @@ pub(crate) struct StreamOpen {
     pub(crate) direction: StreamDirection,
     /// What the sound is for.
     pub(crate) role: StreamRole,
+    /// The owner's login session.
+    pub(crate) session: Option<ProcId>,
+    /// Whether the room holds it from the moment it opens.
+    pub(crate) held: bool,
     /// What the client is being told, which fixes its rate, format, layout
     /// and ring.
     pub(crate) grant: StreamGrant,
@@ -337,10 +375,13 @@ impl Stream {
         let stream = Self {
             id: params.id,
             owner_pid: params.owner_pid,
+            owner_uid: params.owner_uid,
+            owner_app: params.owner_app,
             device: params.device,
             endpoint: params.endpoint,
             direction: params.direction,
             role: params.role,
+            session: params.session,
             grant: params.grant,
             geometry: params.geometry,
             region: None,
@@ -354,10 +395,11 @@ impl Stream {
             staged: bytes(staged_frames * channels * RESAMPLED_FORMAT.bytes_per_sample())?,
             covered: 0,
             want_in,
-            gain_millibel: 0,
+            gain: AudioGain::UNITY,
             muted: false,
             software_gain: 1.0,
             state: StreamState::Idle,
+            held: params.held,
             state_at: Frames::ZERO,
             stop_at: None,
             position: Frames::ZERO,
@@ -372,12 +414,29 @@ impl Stream {
     /// A draining stream still is: it is playing out what it queued, and the
     /// difference is only that the pump stops padding for it.
     pub(crate) fn is_live(&self) -> bool {
-        matches!(self.state, StreamState::Running | StreamState::Draining) && self.region.is_some()
+        self.moving() && !self.held && self.region.is_some()
+    }
+
+    /// Whether its own requests have it moving frames, room or not.
+    fn moving(&self) -> bool {
+        matches!(self.state, StreamState::Running | StreamState::Draining)
     }
 
     /// Whether the stream is playing out what it has and then stopping.
-    fn is_draining(&self) -> bool {
+    pub(crate) fn is_draining(&self) -> bool {
         self.state == StreamState::Draining
+    }
+
+    /// The state its client sees: its own, unless the room holds a stream
+    /// that is moving or would resume — an idle stream has nothing in flight,
+    /// and a lost or faulted one never moves again.
+    pub(crate) fn reported(&self) -> StreamState {
+        let in_flight = self.moving() || self.state == StreamState::Paused;
+        if self.held && in_flight {
+            StreamState::SeatInactive
+        } else {
+            self.state
+        }
     }
 
     /// Frames this stream may still take before a scheduled stop settles it,
@@ -408,17 +467,31 @@ impl Stream {
     }
 
     /// Move the stream to `state` at `at`, and tell the client the exact
-    /// frame it changed on.
+    /// frame what it sees changed on.
     pub(crate) fn set_state(
         &mut self,
         state: StreamState,
         at: Frames,
         notifier: &mut dyn Notifier,
     ) {
-        if self.state == state {
+        let told = self.reported();
+        self.state = state;
+        self.tell(told, at, notifier);
+    }
+
+    /// Hold the stream for the room, or release it, at `at`.
+    pub(crate) fn set_held(&mut self, held: bool, at: Frames, notifier: &mut dyn Notifier) {
+        let told = self.reported();
+        self.held = held;
+        self.tell(told, at, notifier);
+    }
+
+    /// Tell the client what it now sees, if that is not `told`.
+    fn tell(&mut self, told: StreamState, at: Frames, notifier: &mut dyn Notifier) {
+        let state = self.reported();
+        if state == told {
             return;
         }
-        self.state = state;
         self.state_at = at;
         send(
             notifier,
@@ -428,6 +501,33 @@ impl Stream {
                 state,
                 at,
             },
+        );
+    }
+
+    /// Stop moving a stream whose ring its client corrupted, tell the client,
+    /// and record whose it was. Every other stream, and the device, carry on.
+    fn fault(&mut self, err: Errno, notifier: &mut dyn Notifier, sink: &dyn Sink) {
+        let at = self.position;
+        self.set_state(StreamState::Faulted, at, notifier);
+        audit(
+            sink,
+            events::STREAM_FAULTED,
+            Level::Warn,
+            "a client's ring broke the protocol; its stream alone was stopped",
+            &[
+                Field {
+                    key: "pid",
+                    value: FieldValue::UnsignedInt(self.owner_pid),
+                },
+                Field {
+                    key: "stream",
+                    value: FieldValue::UnsignedInt(self.id),
+                },
+                Field {
+                    key: "error",
+                    value: FieldValue::Error(err),
+                },
+            ],
         );
     }
 
@@ -552,6 +652,7 @@ impl Device {
     /// malformed emission, not a silent sink.
     pub(crate) fn bind(
         channel_endpoint: u64,
+        location: u64,
         notify_endpoint: u64,
         transport: Box<dyn AudioChannelTransport>,
         first_device_id: u32,
@@ -570,7 +671,11 @@ impl Device {
                 device_id: first_device_id
                     .checked_add(u32::from(index))
                     .ok_or(Errno::OutOfRange)?,
+                location: AudioLocation::new(location, index)?,
+                control: endpoint_facts.gain,
                 facts: endpoint_facts,
+                level: EndpointLevel::UNITY,
+                lost_frames: 0,
                 active: None,
             });
         }
@@ -696,11 +801,13 @@ pub(crate) struct Pumped {
 
 /// Move frames for one endpoint: refill a sink, or harvest a source.
 ///
+/// A stream whose own ring fails is faulted alone and never fails the pump.
+///
 /// # Errors
 ///
-/// A corrupt ring state or a region the host no longer holds, as a typed
-/// [`Errno`]. The caller treats a fault as the device being lost rather than
-/// retrying into it.
+/// A corrupt device ring or a device region the host no longer holds, as a
+/// typed [`Errno`]. The caller treats a fault as the device being lost rather
+/// than retrying into it.
 pub(crate) fn pump_endpoint<H: RegionHost>(
     device: &mut Device,
     device_index: usize,
@@ -708,19 +815,30 @@ pub(crate) fn pump_endpoint<H: RegionHost>(
     streams: &mut [Stream],
     regions: &mut H,
     notifier: &mut dyn Notifier,
+    sink: &dyn Sink,
 ) -> Result<Pumped, Errno> {
     let endpoint = device.endpoints.get_mut(slot).ok_or(Errno::NotFound)?;
     let Some(active) = endpoint.active.as_mut() else {
         return Ok(Pumped::default());
     };
+    let pump = Pump {
+        device_index,
+        slot,
+        notifier,
+        sink,
+    };
     match endpoint.facts.direction {
-        StreamDirection::Playback => {
-            refill_sink(active, device_index, slot, streams, regions, notifier)
-        }
-        StreamDirection::Capture => {
-            harvest_source(active, device_index, slot, streams, regions, notifier)
-        }
+        StreamDirection::Playback => refill_sink(active, streams, regions, pump),
+        StreamDirection::Capture => harvest_source(active, streams, regions, pump),
     }
+}
+
+/// Which endpoint a pump serves, and where what it does is told.
+struct Pump<'a> {
+    device_index: usize,
+    slot: usize,
+    notifier: &'a mut dyn Notifier,
+    sink: &'a dyn Sink,
 }
 
 /// Move what the ring now holds onto the device, and adopt what the driver
@@ -746,16 +864,45 @@ pub(crate) fn prime_endpoint(device: &mut Device, slot: usize) -> Result<(), Err
     Ok(())
 }
 
+/// Drop everything a source captured that the mixer has not taken.
+///
+/// # Errors
+///
+/// A corrupt device ring or a region the host no longer holds: the device's
+/// fault.
+pub(crate) fn discard_captured<H: RegionHost>(
+    device: &mut Device,
+    slot: usize,
+    regions: &mut H,
+) -> Result<(), Errno> {
+    let Some(active) = device
+        .endpoints
+        .get_mut(slot)
+        .and_then(|endpoint| endpoint.active.as_mut())
+    else {
+        return Ok(());
+    };
+    let bytes = regions.bytes(active.region)?;
+    let mut ring = PcmRing::bind(bytes, active.geometry)?;
+    let captured = ring.readable_frames()?;
+    ring.discard(captured)?;
+    Ok(())
+}
+
 /// Fill the device ring with mixed periods while it has room and a live
 /// stream has something to say.
 fn refill_sink<H: RegionHost>(
     active: &mut Active,
-    device_index: usize,
-    slot: usize,
     streams: &mut [Stream],
     regions: &mut H,
-    notifier: &mut dyn Notifier,
+    pump: Pump<'_>,
 ) -> Result<Pumped, Errno> {
+    let Pump {
+        device_index,
+        slot,
+        notifier,
+        sink,
+    } = pump;
     let mut pumped = Pumped::default();
     loop {
         let room = ring_room(active, regions)?;
@@ -770,12 +917,17 @@ fn refill_sink<H: RegionHost>(
             if !stream.on(device_index, slot) || !stream.is_live() {
                 continue;
             }
-            live = true;
             // A stream stopping at a named frame takes no more than the
             // frames left before it, so the stop lands exactly there.
             let cap = stream.stop_limit().map_or(chunk, |limit| limit.min(chunk));
-            all_draining &= stream.is_draining() || cap < chunk;
-            covered_max = covered_max.max(pull_playback(stream, active, regions, cap)?);
+            match pull_playback(stream, active, regions, cap) {
+                Ok(covered) => {
+                    live = true;
+                    all_draining &= stream.is_draining() || cap < chunk;
+                    covered_max = covered_max.max(covered);
+                }
+                Err(err) => stream.fault(err, notifier, sink),
+            }
         }
         if !live {
             break;
@@ -828,12 +980,16 @@ fn refill_sink<H: RegionHost>(
 /// stream on the endpoint.
 fn harvest_source<H: RegionHost>(
     active: &mut Active,
-    device_index: usize,
-    slot: usize,
     streams: &mut [Stream],
     regions: &mut H,
-    notifier: &mut dyn Notifier,
+    pump: Pump<'_>,
 ) -> Result<Pumped, Errno> {
+    let Pump {
+        device_index,
+        slot,
+        notifier,
+        sink,
+    } = pump;
     let mut pumped = Pumped::default();
     loop {
         let period_bytes = active.period_frames() as usize * active.sink.frame_bytes();
@@ -856,7 +1012,9 @@ fn harvest_source<H: RegionHost>(
             if !stream.on(device_index, slot) || !stream.is_live() {
                 continue;
             }
-            push_capture(stream, active, regions, decoded, notifier)?;
+            if let Err(err) = push_capture(stream, active, regions, decoded, notifier) {
+                stream.fault(err, notifier, sink);
+            }
         }
         if streams
             .iter()

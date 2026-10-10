@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Expose the modelled DMA channel (`cyclic::mock`) to consumers' host tests,
+# so every cyclic-DMA audio driver proves itself against one definition
+# rather than a private copy. Dev-dependency use only; never enabled by a
+# production build.
+mock-dma = []
+
 [lints]
 workspace = true
 
@@ -36,3 +43,6 @@ tairix-rt = { path = "../rt", version = "=0.0.0" }
 # Structured audit logging over the `log_emit` syscall: the one-shot
 # "device channel published, serving" readiness beacon.
 tairix-log = { path = "../log", version = "=0.0.0" }
+# The DMA client a cyclic stream's production channel (`cyclic::LinkDma`)
+# drives over the device's link.
+tairix-linkclient = { path = "../linkclient", version = "=0.0.0" }

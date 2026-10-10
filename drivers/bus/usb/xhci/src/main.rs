@@ -97,9 +97,9 @@ fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::hwtree::HW_NODE_ROOT;
-    use tairix_abi::usb_urb::{URB_COMPLETION_LEN, URB_REQUEST_LEN};
+    use tairix_abi::usb_urb::{IsoNotify, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-    use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, RegisterWindow};
+    use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, ProcId, RegisterWindow};
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_usb::bringup::{
         bring_up_controller_diagnostic, derive_controller_resources, BringupPhase, ControllerDevice,
@@ -217,14 +217,6 @@ mod program {
     /// the first block on its first try).
     const URB_ENDPOINT_BLOCKS: u64 = 64;
 
-    /// Bytes of shared buffer per interface node: one bulk chunk
-    /// ([`tairix_usb::device::BULK_BUF_LEN`], the engine's per-TD ceiling —
-    /// one definition, never a second constant), which also comfortably
-    /// holds a boot report and any control-IN descriptor a class driver
-    /// reads. One page, so the mass-storage data path costs the keyboard
-    /// path nothing extra.
-    const SHM_LEN: usize = tairix_usb::device::BULK_BUF_LEN;
-
     /// The engine's parked event-wait seam on metal: waits park on the
     /// controller's bound interrupt line with the remaining wall-clock
     /// budget as the deadline, so a completion wakes the wait early, a
@@ -277,6 +269,10 @@ mod program {
         );
     }
 
+    /// Diagnostic event id: an isochronous stream ended other than at its
+    /// class driver's word.
+    const HCD_STREAM_ENDED: EventId = EventId(4251);
+
     fn reply_to_urb(endpoint_id: u64, reply: UrbReply) {
         let ret = tairix_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
         if ret == 0 {
@@ -319,6 +315,8 @@ mod program {
         set: u64,
         /// This controller's endpoint block ([`claim_urb_block`]).
         urb_base: u64,
+        /// This process's instance, the grantor of every stream region.
+        instance: ProcId,
     }
 
     impl<'h> Seam for Live<'_, 'h> {
@@ -410,8 +408,28 @@ mod program {
             true
         }
 
-        fn create_buffer(&mut self) -> Option<NodeBuffer> {
-            SharedRegion::create(SHM_LEN).map(NodeBuffer)
+        fn create_buffer(&mut self, len: usize) -> Option<NodeBuffer> {
+            SharedRegion::create(len).map(NodeBuffer)
+        }
+
+        fn caller_pid(&mut self, endpoint: u64, ticket: u64) -> Result<u64, Errno> {
+            tairix_rt::peer_origin(endpoint, ticket).map(|origin| origin.pid())
+        }
+
+        fn grant_peer(&mut self, region: u64, endpoint: u64, ticket: u64) -> Result<u64, Errno> {
+            let handle = tairix_rt::shm_grant_peer(region, endpoint, ticket);
+            u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
+        }
+
+        fn self_instance(&self) -> ProcId {
+            self.instance
+        }
+
+        fn notify(&mut self, port: u64, notice: &IsoNotify) -> Result<(), Errno> {
+            match tairix_rt::ipc_send(port, &notice.encode()) {
+                0 => Ok(()),
+                ret => Err(Errno::from_syscall(ret)),
+            }
         }
 
         fn receive(
@@ -501,6 +519,34 @@ mod program {
                     errno as u64,
                 ),
                 Note::Domain { event, owner } => log_domain_event(event, owner),
+                Note::StreamEnded {
+                    index,
+                    endpoint,
+                    reason,
+                } => {
+                    log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Info,
+                            id: HCD_STREAM_ENDED,
+                            message: "usb-hcd: isochronous stream ended",
+                            fields: &[
+                                Field {
+                                    key: "index",
+                                    value: tairix_log::FieldValue::UnsignedInt(index as u64),
+                                },
+                                Field {
+                                    key: "endpoint",
+                                    value: tairix_log::FieldValue::UnsignedInt(u64::from(endpoint)),
+                                },
+                                Field {
+                                    key: "errno",
+                                    value: tairix_log::FieldValue::UnsignedInt(reason as u64),
+                                },
+                            ],
+                        },
+                    );
+                }
             }
         }
     }
@@ -664,8 +710,8 @@ mod program {
             id,
             &send_caps,
             &recv_caps,
-            URB_REQUEST_LEN,
-            URB_COMPLETION_LEN,
+            USB_REQUEST_MAX_LEN,
+            USB_REPLY_MAX_LEN,
             ENDPOINT_CAPACITY,
         ) == 0
     }
@@ -1230,11 +1276,15 @@ mod program {
         let Some(urb_base) = claim_urb_block() else {
             return EXIT_NO_TRANSPORT;
         };
+        let Ok(origin) = tairix_rt::self_origin() else {
+            return EXIT_NO_TRANSPORT;
+        };
         let mut live = Live {
             device: &mut device,
             delay,
             set,
             urb_base,
+            instance: origin.proc_id(),
         };
         let mut interfaces = Interfaces::new();
         publish_initial_interfaces(&mut live, &mut interfaces);
@@ -1462,6 +1512,9 @@ mod program {
         // satisfy any transport. A transfer fault that proves an unplug
         // recovers the controller its teardown may have halted.
         interfaces.drive_busy(health, live);
+        if !health.is_recovering() && !health.is_failed_closed() {
+            interfaces.deliver_streams(live);
+        }
     }
 
     tairix_rt::entry!(main);

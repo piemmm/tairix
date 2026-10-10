@@ -295,8 +295,9 @@ pub fn watch_wake(set: u64, wake: &tairix_rt::sync::WorkerWake, token: u64) -> R
     }
 }
 
-/// Bind this process's event mailbox and add it, with the memory-pressure
-/// band, to a fresh wait-set.
+/// Bind this process's event mailbox, admitting to it only the desktop
+/// session serving windows, and add it, with the memory-pressure band, to a
+/// fresh wait-set.
 ///
 /// Fails closed rather than degrading into a re-poll: an app that cannot be
 /// woken by its own events has no correct way to carry on.
@@ -326,6 +327,10 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
             Errno::NotFound,
         ));
     }
+    // The id is derived from this process's pid, so any process could
+    // otherwise fill the mailbox and starve the session's deliveries.
+    tairix_rt::port_admit(endpoint, WINDOW_ENDPOINT)
+        .map_err(|err| ShellError::new(EXIT_NO_EVENTS, "event mailbox admission refused", err))?;
     let set = tairix_rt::waitset_create();
     if set < 0 {
         return Err(ShellError::new(

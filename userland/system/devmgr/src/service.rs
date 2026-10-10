@@ -24,11 +24,12 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, HwNode, HwTreeHeader};
+use tairix_abi::waitset::WaitSourceKind;
+use tairix_abi::{Errno, HwNode, HwTreeHeader, NoticeTopic};
 use tairix_devmatch::DriverCandidate;
 use tairix_log::{log as log_event, Event, Level, Sink};
 
-use crate::audiobind::{self, AudioBindState, AudiodBind};
+use crate::audiobind::{self, AudioBaselineSource, AudioBindState, AudiodBind};
 use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
 use crate::events;
 use crate::netbind::{bind_new_channels, NetBindState, NetstackBind};
@@ -52,12 +53,13 @@ pub trait HwTreeService {
     /// buffer is [`Errno::BufferTooSmall`], never a truncated read.
     fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
 
-    /// Block until the store's generation advances past `last_generation`
-    /// (reactive re-match and hotplug), or until `timeout_ns` elapses;
-    /// `u64::MAX` waits indefinitely. Returns once the tree has changed,
-    /// [`Errno::TimedOut`] if the deadline elapsed with it unchanged, or
-    /// fails closed with the reported [`Errno`].
-    fn wait_for_change(&mut self, last_generation: u64, timeout_ns: u64) -> Result<(), Errno>;
+    /// Block until the hardware tree moves (reactive re-match and hotplug)
+    /// or the mount table does — the root volume being mounted is when the
+    /// administrator's configuration becomes readable — or until
+    /// `timeout_ns` elapses; `u64::MAX` waits indefinitely. Returns once
+    /// either moved, [`Errno::TimedOut`] if the deadline elapsed with neither
+    /// moving, or fails closed with the reported [`Errno`].
+    fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno>;
 
     /// Report the decoded snapshot header (its generation and node count)
     /// after a read.
@@ -66,6 +68,18 @@ pub trait HwTreeService {
     /// Report one decoded node of the snapshot, in wire order.
     fn on_node(&mut self, node: &HwNode);
 }
+
+/// What the device manager's wait is woken by, as wait-set members: the
+/// hardware tree, and the mount table — the root volume being mounted is
+/// when the administrator's configuration on it becomes readable, and no
+/// tree move marks it.
+pub const WAKE_SOURCES: [(WaitSourceKind, u64); 2] = [
+    (WaitSourceKind::HardwareTree, 0),
+    (
+        WaitSourceKind::SystemNotice,
+        NoticeTopic::Mounts.as_u32() as u64,
+    ),
+];
 
 /// Deadline [`run`] waits under while any deferred milestone is outstanding.
 ///
@@ -183,6 +197,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     store: &mut C,
     netstack: &mut dyn NetstackBind,
     audiod: &mut dyn AudiodBind,
+    audiocfg: &mut dyn AudioBaselineSource,
     netcfg: &mut dyn NetworkConfigSource,
     netifcfg: &mut dyn NetworkInterfaceConfigSource,
     netbind: &mut NetBindState,
@@ -194,7 +209,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     tree_buf: &mut Vec<u8>,
     reply_buf: &mut [u8],
     sink: &dyn Sink,
-) -> Result<u64, Errno> {
+) -> Result<(), Errno> {
     let mut catalogue_arrived = false;
     if catalogue.is_none() {
         match fetch_catalogue(store, reply_buf) {
@@ -266,6 +281,7 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     // construction. Fail-soft: an unreadable store (pre-unlock) or a stack
     // not yet up is retried on the next generation bump.
     deliver_network_settings(netcfg, netconfig, netstack, sink);
+    audiobind::deliver_audio_baseline(audiocfg, audiobind, audiod, sink);
     if restructured {
         // Hand each newly-discovered NIC and sound device channel (a
         // `netchan` / `audiochan` node a bound driver emitted) to its
@@ -277,10 +293,10 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     // Deliver each managed interface's `network.conf` configuration to the
     // network stack. Runs *after* the channel hand-off so an interface that
     // just bound this cycle can be matched (by MAC) and configured in the
-    // same reaction; an interface not yet bound is retried on the next bump.
+    // same reaction; an interface not yet bound is retried at the next reaction.
     deliver_interface_configs(netifcfg, netifconfig, netstack, sink);
     state.observed = present;
-    Ok(header.generation())
+    Ok(())
 }
 
 /// The ids of `nodes`, ascending.
@@ -333,6 +349,7 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     store: &mut C,
     netstack: &mut dyn NetstackBind,
     audiod: &mut dyn AudiodBind,
+    audiocfg: &mut dyn AudioBaselineSource,
     netcfg: &mut dyn NetworkConfigSource,
     netifcfg: &mut dyn NetworkInterfaceConfigSource,
     sink: &dyn Sink,
@@ -364,11 +381,12 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     // (no caller-picked ceiling).
     let mut tree_buf: Vec<u8> = Vec::new();
 
-    let mut last_generation = react_once(
+    react_once(
         tree,
         store,
         netstack,
         audiod,
+        audiocfg,
         netcfg,
         netifcfg,
         &mut netbind,
@@ -402,17 +420,18 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         } else {
             u64::MAX
         };
-        match tree.wait_for_change(last_generation, timeout_ns) {
+        match tree.wait_for_change(timeout_ns) {
             // Changed, or the deadline elapsed with work still outstanding:
             // either way re-react so the deferred milestone is retried.
             Ok(()) | Err(Errno::TimedOut) => {}
             Err(err) => return Err(err),
         }
-        last_generation = react_once(
+        react_once(
             tree,
             store,
             netstack,
             audiod,
+            audiocfg,
             netcfg,
             netifcfg,
             &mut netbind,
@@ -466,7 +485,7 @@ mod tests {
     struct ScriptedTree {
         snapshots: Vec<Vec<u8>>,
         next: usize,
-        waited_on: Vec<u64>,
+        waits: usize,
         /// The deadline each wait was asked to hold for, so a test can
         /// assert the loop never parks indefinitely on an outstanding fetch.
         waited_under: Vec<u64>,
@@ -479,7 +498,7 @@ mod tests {
             Self {
                 snapshots,
                 next: 0,
-                waited_on: Vec::new(),
+                waits: 0,
                 waited_under: Vec::new(),
                 reported_nodes: Vec::new(),
                 wait_error: None,
@@ -498,11 +517,11 @@ mod tests {
             Ok(snapshot.len())
         }
 
-        fn wait_for_change(&mut self, last_generation: u64, timeout_ns: u64) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno> {
             if let Some(err) = self.wait_error {
                 return Err(err);
             }
-            self.waited_on.push(last_generation);
+            self.waits += 1;
             self.waited_under.push(timeout_ns);
             Ok(())
         }
@@ -647,8 +666,28 @@ mod tests {
     /// itself is tested directly in `crate::audiobind`.
     struct NoAudiod;
     impl AudiodBind for NoAudiod {
-        fn bind_driver(&mut self, _endpoint_id: u64) -> Result<(), Errno> {
+        fn bind_driver(&mut self, _endpoint_id: u64, _location: u64) -> Result<(), Errno> {
             Ok(())
+        }
+
+        fn unbind_driver(&mut self, _endpoint_id: u64) -> Result<(), Errno> {
+            Ok(())
+        }
+
+        fn deliver_baseline(
+            &mut self,
+            _baseline: tairix_abi::audio::AudioBaseline,
+        ) -> Result<(), Errno> {
+            Ok(())
+        }
+    }
+
+    /// A no-op [`AudioBaselineSource`] for the loop tests: it never yields a
+    /// baseline. The delivery policy itself is tested in `crate::audiobind`.
+    struct NoAudioBaseline;
+    impl AudioBaselineSource for NoAudioBaseline {
+        fn load(&mut self) -> Option<tairix_abi::audio::AudioBaseline> {
+            None
         }
     }
 
@@ -696,6 +735,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -735,6 +775,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -776,6 +817,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -831,6 +873,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -842,7 +885,7 @@ mod tests {
         // The keyboard (bundle 7) is loaded only once across both cycles;
         // the appeared network node loads bundle 8 on the reaction.
         assert_eq!(store.loads().as_slice(), &[(7, 2), (8, 3)]);
-        assert_eq!(tree.waited_on, vec![1]);
+        assert_eq!(tree.waits, 1);
     }
 
     #[test]
@@ -870,6 +913,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -911,6 +955,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -949,6 +994,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -995,6 +1041,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1028,6 +1075,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1077,6 +1125,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1124,6 +1173,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1167,6 +1217,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1194,6 +1245,7 @@ mod tests {
                 &mut store,
                 &mut NoNetstack,
                 &mut NoAudiod,
+                &mut NoAudioBaseline,
                 &mut NoConfig,
                 &mut NoIfConfig,
                 &sink,
@@ -1202,7 +1254,7 @@ mod tests {
             ),
             Err(Errno::NotFound)
         );
-        assert!(tree.waited_on.is_empty());
+        assert_eq!(tree.waits, 0);
     }
 
     #[test]
@@ -1219,6 +1271,7 @@ mod tests {
                 &mut store,
                 &mut NoNetstack,
                 &mut NoAudiod,
+                &mut NoAudioBaseline,
                 &mut NoConfig,
                 &mut NoIfConfig,
                 &sink,
@@ -1249,11 +1302,7 @@ mod tests {
             Ok(self.snapshot.len())
         }
 
-        fn wait_for_change(
-            &mut self,
-            _last_generation: u64,
-            _timeout_ns: u64,
-        ) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, _timeout_ns: u64) -> Result<(), Errno> {
             Ok(())
         }
 
@@ -1272,11 +1321,7 @@ mod tests {
             Err(self.0)
         }
 
-        fn wait_for_change(
-            &mut self,
-            _last_generation: u64,
-            _timeout_ns: u64,
-        ) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, _timeout_ns: u64) -> Result<(), Errno> {
             Ok(())
         }
 
@@ -1347,6 +1392,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1392,7 +1438,7 @@ mod tests {
             Ok(self.snapshot.len())
         }
 
-        fn wait_for_change(&mut self, _last_generation: u64, timeout_ns: u64) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno> {
             if timeout_ns == u64::MAX {
                 return Err(Errno::WouldBlock);
             }
@@ -1474,6 +1520,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1525,6 +1572,7 @@ mod tests {
             &mut store,
             &mut NoNetstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1614,6 +1662,7 @@ mod tests {
             &mut store,
             &mut netstack,
             &mut NoAudiod,
+            &mut NoAudioBaseline,
             &mut NoConfig,
             &mut NoIfConfig,
             &sink,
@@ -1627,5 +1676,16 @@ mod tests {
             &[DEFERRED_RETRY_NS, u64::MAX],
             "bounded while the channel was unbound, indefinite once it bound"
         );
+    }
+
+    /// Configuration on the root volume is read once that volume is mounted,
+    /// which moves the mount table and no hardware-tree node (D246).
+    #[test]
+    fn the_wait_wakes_on_the_mount_table_as_well_as_the_tree() {
+        assert!(WAKE_SOURCES.contains(&(WaitSourceKind::HardwareTree, 0)));
+        assert!(WAKE_SOURCES.contains(&(
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Mounts.as_u32())
+        )));
     }
 }

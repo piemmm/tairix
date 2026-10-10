@@ -10,9 +10,10 @@ use core::num::NonZeroU32;
 
 use tairix_abi::driver::dma::{DmaHost, DmaReach, DmaSlab};
 use tairix_abi::driver::dmaengine::{
-    CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine,
-    DmaRequestLine, Halted, DMA_CYCLIC_MIN_PERIODS,
+    CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine, Halted,
+    DMA_CYCLIC_MIN_PERIODS,
 };
+use tairix_abi::hwlink::LinkRequest;
 use tairix_abi::{DriverError, RegisterBlock, PAGE_SIZE};
 
 use crate::CHANNEL_SLOTS;
@@ -102,8 +103,8 @@ pub const REACH: DmaReach = DmaReach::of::<32>();
 struct Serving(u32);
 
 impl Serving {
-    fn decode(line: &DmaRequestLine) -> Result<Self, DriverError> {
-        let &[cell] = line.specifier() else {
+    fn decode(line: &LinkRequest) -> Result<Self, DriverError> {
+        let &[cell] = line.selector() else {
             return Err(DriverError::Unsupported);
         };
         // An unpaced request would run the chain flat out forever.
@@ -341,7 +342,7 @@ impl<S: BlockStore> Channel<'_, S> {
 impl<S: BlockStore> DmaChannel for Channel<'_, S> {
     fn prepare(
         &mut self,
-        line: &DmaRequestLine,
+        line: &LinkRequest,
         transfer: &CyclicTransfer,
     ) -> Result<(), DriverError> {
         if self.running {
@@ -540,11 +541,11 @@ impl<'a, S: BlockStore> DmaEngine for Bcm2835Dma<'a, S> {
         self.channels.get_mut(usize::from(index))
     }
 
-    fn accept(&self, line: &DmaRequestLine) -> Result<(), DriverError> {
+    fn accept(&self, line: &LinkRequest) -> Result<(), DriverError> {
         Serving::decode(line).map(|_| ())
     }
 
-    fn admit(&self, line: &DmaRequestLine, params: &CyclicParams) -> Result<u32, DriverError> {
+    fn admit(&self, line: &LinkRequest, params: &CyclicParams) -> Result<u32, DriverError> {
         let serving = Serving::decode(line)?;
         serving.shape(params.period_bytes, params.periods)?;
         let access = serving.peripheral_access(params.direction);

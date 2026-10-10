@@ -102,6 +102,7 @@ use crate::picker::{
     slot_has_picker, PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
 use crate::repaint::TaskbarRepaint;
+use crate::sound::{PanelOutcome, SoundAction, VOLUME_SIGNAL};
 use crate::taskbar::Taskbar;
 use crate::tasks::TaskId;
 
@@ -125,6 +126,9 @@ pub enum TaskbarResponse {
     Ignored,
     /// The Library button opened the program-library popup.
     OpenLibrary,
+    /// The volume panel asks the embedder to change the default sink's
+    /// controls.
+    Sound(SoundAction),
     /// The program-library popup closed without launching anything — the
     /// Library button toggled it shut, a press outside dismissed it, or
     /// `Escape` was pressed.
@@ -419,7 +423,7 @@ impl TaskbarInput {
             // picker underneath it would show a surface the user cannot
             // reach. A menu never reaches here at all — the desktop's chain
             // holds the seat while one is up.
-            if !taskbar.library().is_open() {
+            if !taskbar.modal_open() {
                 // A grid drag in progress belongs to the scrollbar, not to
                 // the cell the pointer happens to be over.
                 if taskbar.scroll_picker(&event, self.pointer, scale) {
@@ -432,6 +436,9 @@ impl TaskbarInput {
         }
         if taskbar.library().is_open() {
             return self.route_to_popup(event, taskbar, scale);
+        }
+        if taskbar.sound().is_open() {
+            return self.route_to_sound(event, taskbar, scale);
         }
         // The picker is non-modal too, and takes a press that lands on it
         // before the bar beneath does: choosing a window is what a press on
@@ -575,12 +582,24 @@ impl TaskbarInput {
                 TaskbarResponse::OpenLibrary
             }
             Hit::App(index) => Self::activate_app(taskbar, index),
-            // A status signal and the clock are live readouts, not action
-            // targets: the press is claimed so it never falls through to
-            // the window beneath, but it does nothing. The clock's menu is
-            // a secondary press's to ask for (`press_secondary`) — a left
-            // click that pops a menu up is a menu nobody asked for.
-            Hit::Notification(_) | Hit::Clock => TaskbarResponse::Ignored,
+            // The volume signal opens its panel. Every other status signal
+            // and the clock are live readouts, not action targets: the press
+            // is claimed so it never falls through to the window beneath,
+            // but it does nothing. The clock's menu is a secondary press's
+            // to ask for (`press_secondary`) — a left click that pops a menu
+            // up is a menu nobody asked for.
+            Hit::Notification(slot) => {
+                let volume = taskbar
+                    .notifications()
+                    .signals()
+                    .get(slot)
+                    .is_some_and(|signal| signal.id == VOLUME_SIGNAL);
+                if volume {
+                    taskbar.open_sound();
+                }
+                TaskbarResponse::Ignored
+            }
+            Hit::Clock => TaskbarResponse::Ignored,
             Hit::Switchboard => {
                 self.capsule_press = Some(CapsulePress {
                     started_ns: now_ns,
@@ -971,6 +990,63 @@ impl TaskbarInput {
     /// A primary press on the Library button toggles the popup shut before
     /// the popup sees the event — the button is the popup's own invoker, so
     /// it is the one bar region a modal popup does not swallow.
+    /// Route one event to the open volume panel, which takes the whole
+    /// stream while it is open: a press on its signal or outside it closes
+    /// it, and what its controls report is asked of the embedder.
+    fn route_to_sound(
+        &mut self,
+        event: InputEvent,
+        taskbar: &mut Taskbar,
+        scale: Scale,
+    ) -> TaskbarResponse {
+        let Some(layout) = taskbar.sound_layout(scale) else {
+            taskbar.close_sound();
+            return TaskbarResponse::Ignored;
+        };
+        if matches!(event, InputEvent::PointerPressed { .. })
+            && matches!(
+                taskbar.hit_test(self.pointer, scale),
+                Some(Hit::Notification(_))
+            )
+        {
+            taskbar.close_sound();
+            return TaskbarResponse::Ignored;
+        }
+        let theme = taskbar.theme().clone();
+        // The panel owes its whole plate on any change, so what its controls
+        // report ends here.
+        let mut reported = damage::sink();
+        let outcome = match event {
+            InputEvent::KeyPressed { key, .. } => {
+                taskbar.sound_mut().on_key(key, &layout, &mut reported)
+            }
+            InputEvent::KeyReleased { .. } => PanelOutcome::Ignored,
+            ref pointer_event => taskbar.sound_mut().on_pointer(
+                pointer_event,
+                self.pointer,
+                &layout,
+                scale,
+                &theme,
+                &mut reported,
+            ),
+        };
+        match outcome {
+            PanelOutcome::Ignored => TaskbarResponse::Ignored,
+            PanelOutcome::Changed => {
+                taskbar.request_repaint(TaskbarRepaint::SOUND);
+                TaskbarResponse::Ignored
+            }
+            PanelOutcome::Act(action) => {
+                taskbar.request_repaint(TaskbarRepaint::SOUND);
+                TaskbarResponse::Sound(action)
+            }
+            PanelOutcome::Dismiss => {
+                taskbar.close_sound();
+                TaskbarResponse::Ignored
+            }
+        }
+    }
+
     fn route_to_popup(
         &mut self,
         event: InputEvent,

@@ -2,11 +2,11 @@
 //! event stream.
 //!
 //! Every windowed app binds one endpoint for the whole process and reads the
-//! session's deliveries from it. The mailbox is open to any sender capable of
-//! naming the endpoint, so the kernel-attested origin of each frame — not its
-//! content — is the authentication: a frame of the wrong length, or from any
-//! sender other than the session the create reply named, is dropped rather
-//! than delivered.
+//! session's deliveries from it. The kernel admits only the session serving
+//! windows to it, and the kernel-attested origin of each frame — not its
+//! content — is still the authentication: a frame of the wrong length, or
+//! from any sender other than the session the create reply named, is dropped
+//! rather than delivered.
 //!
 //! That rule lives here so it has one definition rather than one per app.
 

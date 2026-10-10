@@ -2,8 +2,9 @@
 
 `lib/audio` is the **audio engine**: everything that decides *what samples
 come out* (`plans/SOUND.md`). It is `no_std`, carries no `unsafe`, and
-performs no I/O, opens no window and issues no syscall, so every decision the
-stack makes about a sample is testable on a host with no machine attached.
+performs no I/O, opens no window and issues no syscall — bar the live
+transport a program enables with feature `rt` — so every decision the stack
+makes about a sample is testable on a host with no machine attached.
 
 ## Why it exists, and why it is not the service
 
@@ -160,39 +161,54 @@ per million, so a fit that says otherwise is measuring something else.
 
 ## The routing policy
 
-A pure function from (role, who holds the sink, which sink was asked for) to
-what happens to a stream, so it is host-tested over the whole cross-product
-rather than discovered by experiment. A program says what its sound is *for*
-and nothing else; no process names appear anywhere.
+A pure function from (role, whose room the device serves, which sink was
+asked for) to what happens to a stream, so it is host-tested over the whole
+cross-product rather than discovered by experiment. A program says what its
+sound is *for* and nothing else; no process names appear anywhere.
 
-- A sink no seat has claimed plays for anybody, which is the headless case.
-- A session holding the sink's lease has its streams mixed.
-- A session that does not gets **paused at a frame boundary and told so**,
-  holding its position, so a switch back resumes on the frame it stopped on. A
-  departing user's music does not play into the arriving user's room, and it
-  does not silently vanish either.
-- A `Notification` from an inactive session is **dropped, not queued**: one
-  that arrives ten minutes late is noise, and the role is what says so.
+`Room` is whose room a seat's devices serve, derived from the seat's
+`DisplayLease` (`Room::from`): `Unclaimed` while no presenter holds the seat,
+`Session` for the login session its holder lies within, and `Withheld` while it
+changes hands. `admit` decides what the room does with a stream, for sinks and
+sources alike:
+
+- An unclaimed room is anybody's, which is the headless case.
+- A stream whose login session holds the seat is mixed.
+- Any other is **held at a frame boundary and told so** (`Admission::Hold`),
+  keeping its position, so a switch back resumes on the frame it stopped on. A
+  departing user's music does not play into the arriving user's room, their
+  recorder does not hear it, and neither silently vanishes.
+- A playback `Notification` from outside the room is **dropped, not queued**
+  (`Admission::Drop`): one that arrives ten minutes late is noise, and the role
+  is what says so. Captured audio is never dropped for being late.
 - A named sink that does not exist, and a machine with no configured default,
   are refusals rather than a sink picked arbitrarily.
 
 Media steps aside for speech — a `Communication` or `Accessibility` stream on
-the same sink attenuates it by 20 dB — and nothing else ducks.
+the same sink attenuates it by 20 dB — and nothing else ducks. The rule reads
+only which roles are live beside a stream, so it takes a `Roles` set rather
+than a list of streams, and resolving an endpoint's gains allocates nothing.
 
 ## The volume model
 
-Four independent gains — per stream, per application, per sink, and the
-router's ducking — in hundredths of a decibel, which is the unit a codec's own
-amplifier capability word converts into without a scale factor. Decibels
-compose by addition, so they sum, and the sum is split once between the
-hardware control the device has and the one multiply the mixer applies.
+Three gains — a stream's own, the router's ducking, and the endpoint's level —
+in hundredths of a decibel, which is the unit a codec's own amplifier
+capability word converts into without a scale factor. Each arrives as the
+ABI's `AudioGain`, never above unity.
 
-The hardware setting is rounded to the step *above* the target, so the
+An endpoint's level is split once, by `endpoint_level`, between the device's
+own control and a software remainder. The hardware setting is rounded to the
+step *above* the target and never past the control's 0 dB point, so the
 remainder software applies is always attenuation: rounding the other way would
 leave software making the difference up with gain, on a path with no headroom
-to spare. Where the target lands on the device's own grid — every whole
-decibel on most codecs — the software remainder is zero and the multiply is
-exactly one, which is how a volume setting and the bit-exact path coexist.
+to spare. `stream_multiply` then folds the stream's gain, its duck and that
+remainder into the one multiply the mixer applies to the stream; a mute is
+zero. Where the level lands on the device's own grid — every whole decibel on
+most codecs — the remainder is zero and, at unity, the multiply is exactly
+one, which is how a volume setting and the bit-exact path coexist.
+
+`typed_level` reads a level as a person types it — `-6`, `-3.5`, `-12dB` —
+where configuration keeps to `AudioGain::parse`'s one spelling.
 
 ## The stream client
 
@@ -202,6 +218,39 @@ state, close, and park on the notify mailbox. It holds no capability, opens no
 endpoint and issues no syscall — the IPC round trip and the park are the
 caller's, supplied through the `AudioTransport` seam, which keeps the client
 host-testable against a mock service and keeps this crate free of I/O.
+`devices` walks the sinks or sources the caller may see by id, `streams` walks
+every stream for the System Information service, and `set_control` makes a
+device its direction's default or sets its level or mute. `ControlQueue` paces
+those for an interactive surface: one round trip in flight, and a control asked
+meanwhile replacing a waiting one of its kind for its device and going to the
+back, so the default chosen last is the one applied last.
+
+A program supplies that seam with `live` (feature `rt`): `RtAudio` is the
+service's rendezvous and the stream's notify mailbox — bound the first time a
+grant names it, and admitted to the audio service alone, so nobody else can
+forge a stream's state into it — and `LiveStream` is an open stream with its
+shared ring, opened and attached in one step that closes the stream again if
+the ring cannot follow. A program parking on a wait-set of its own takes
+notifications with `take_notify`, which never parks.
+
+The service's notifications are best effort: one is dropped only when the
+mailbox is full, so a dropped one always leaves a full mailbox behind it, and
+the drain that empties it takes at least a mailbox's worth. `NotifyDrain`
+counts that, and the drain that may have lost something — a stream's `Idle`
+or `DeviceLost` included — ends with the state read back from the service and
+handed over as a `StateChanged`. Any shorter drain asks the service nothing.
+
+## `audio:` targets
+
+`target::AudioTarget` reads the references `plans/ALIAS.md` reserves for
+audio: `audio:sink/default` and `audio:source/default`, which the stream ABI
+spells as device zero; `audio:sink/<id>` or `audio:source/<id>` for the
+identity `Enumerate` reported this boot; and `audio:sink/<location>` or
+`audio:source/<location>` for a device wherever it is, which is the form a
+setting keeps. `AudioTarget::at` spells a device by its location and `resolve`
+finds the device a target names among those listed now. An identity and a
+location each have one spelling, and a guard, facet or query names no device,
+so each is refused rather than ignored.
 
 A client names the **frame** its samples belong at. Where that is ahead of
 what the ring already carries, the distance is closed with the format's own

@@ -161,6 +161,8 @@ extern "C" {
 #define TAIRIX_SYS_TOUCH_READ 135u
 #define TAIRIX_SYS_FS_WATCH 136u
 #define TAIRIX_SYS_FS_WATCH_READ 137u
+#define TAIRIX_SYS_PORT_ADMIT 138u
+#define TAIRIX_SYS_FOREGROUND_HELD 139u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -272,6 +274,13 @@ typedef struct tairix_spawn_attach {
 * name is given to what it names (the linkat(AT_SYMLINK_FOLLOW) posture). The new
 * name is never followed under either. */
 #define TAIRIX_LINK_FLAG_FOLLOW 0x1u
+
+/* fs_rename() flag bits (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX rename(): an existing destination is
+* replaced. With the NO_REPLACE bit the move is refused with
+* TAIRIX_E_ALREADY_EXISTS when the destination names any entry but the source's
+* own, decided under the volume's lock (the renameat2(RENAME_NOREPLACE) posture). */
+#define TAIRIX_RENAME_FLAG_NO_REPLACE 0x1u
 
 /* fs_realpath() mode (uint32_t). The three readings are alternatives, so this is
 * one value rather than bits, and any other value is rejected with
@@ -432,6 +441,8 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_STREAM_ROOM 11u
 #define TAIRIX_WAIT_SOURCE_PEER_EXIT 12u
 #define TAIRIX_WAIT_SOURCE_DIR_WATCH 13u
+#define TAIRIX_WAIT_SOURCE_FOREGROUND 14u
+#define TAIRIX_WAIT_SOURCE_HARDWARE_TREE 15u
 
 /* System notice topics (the `topic` argument of notice_read() and
 * notice_publish(), uint32_t) and each topic's exact payload length. A topic
@@ -447,7 +458,11 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_NOTICE_TOPIC_MEMORY_PRESSURE 2u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_MEMORY_PRESSURE 1u
 #define TAIRIX_NOTICE_TOPIC_DISPLAY_LEASE 3u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DISPLAY_LEASE 8u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DISPLAY_LEASE 24u
+#define TAIRIX_NOTICE_TOPIC_AUDIO_CAPTURE 4u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_AUDIO_CAPTURE 4u
+#define TAIRIX_NOTICE_TOPIC_AUDIO_DEVICES 5u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_AUDIO_DEVICES 8u
 
 /* latency_watch() — declare the calling thread's interactive frame budget in
 * nanoseconds. Returns the budget actually armed: the value clamped up to
@@ -541,7 +556,7 @@ int32_t tairix_sys_fs_sync(uint32_t a0);
 int32_t tairix_sys_fs_mkdir(void * a0, uintptr_t a1);
 int32_t tairix_sys_fs_unlink(void * a0, uintptr_t a1, uint32_t a2);
 int32_t tairix_sys_dma_free(uint64_t a0, uint64_t a1);
-int32_t tairix_sys_fs_rename(void * a0, uintptr_t a1, void * a2, uintptr_t a3);
+int32_t tairix_sys_fs_rename(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
 uint64_t tairix_sys_call_peer_origin(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_wall_time_get(void * a0, uintptr_t a1);
 int32_t tairix_sys_wall_time_set(void * a0, uintptr_t a1, uint32_t a2);
@@ -622,6 +637,8 @@ uint64_t tairix_sys_touch_inject(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_touch_read(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_fs_watch(uint32_t a0, uint64_t a1);
 uint64_t tairix_sys_fs_watch_read(uint32_t a0, void * a1, uintptr_t a2);
+int32_t tairix_sys_port_admit(uint64_t a0, uint64_t a1);
+uint64_t tairix_sys_foreground_held(uint32_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

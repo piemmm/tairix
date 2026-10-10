@@ -48,9 +48,11 @@ mod program {
 
     use alloc::vec::Vec;
 
+    use tairix_abi::audio::{AudioDeviceDescriptor, StreamDescriptor};
     use tairix_abi::display_ipc::{
         decode_stats_reply, DisplayRequest, DisplayStats, DISPLAY_ENDPOINT, DISPLAY_STATS_REPLY_LEN,
     };
+    use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
         NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
@@ -73,6 +75,8 @@ mod program {
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, ProcId, PROC_ID_LEN};
+    use tairix_audio::live::RtAudio;
+    use tairix_audio::stream::{devices, streams};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
     use tairix_sysinfod::lists::{page_peer, read_whole};
@@ -447,6 +451,21 @@ mod program {
 
         fn gpu_device_stats(&self, _caller: &Caller) -> Result<Vec<DisplayStats>, Errno> {
             read_graphics_devices()
+        }
+
+        fn audio_devices(&self, _caller: &Caller) -> Result<Vec<AudioDeviceDescriptor>, Errno> {
+            let mut transport = RtAudio::new();
+            let mut listed = devices(&mut transport, StreamDirection::Playback)?;
+            let sources = devices(&mut transport, StreamDirection::Capture)?;
+            listed
+                .try_reserve_exact(sources.len())
+                .map_err(|_| Errno::OutOfMemory)?;
+            listed.extend(sources);
+            Ok(listed)
+        }
+
+        fn audio_streams(&self, _caller: &Caller) -> Result<Vec<StreamDescriptor>, Errno> {
+            streams(&mut RtAudio::new())
         }
 
         fn resource_limits(

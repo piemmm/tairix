@@ -161,6 +161,24 @@ cadence instead of busy-polling; an elapsed bound arrives as
 `Error::Os(Errno::TimedOut)` and is therefore distinguishable from a dead
 console.
 
+## The keyboard beside other wakes
+
+A console-backed standard input cannot join a wait-set, so a program that must
+wait on its keyboard and on anything else at once — a connection, an audio
+stream — starts `keys::KeyRelay`. Its detached thread blocks in a read of
+standard input and posts what arrived to a private mailbox the program's
+wait-set watches; `take` hands back `Keys::Typed` or `Keys::Ended`, and
+believes a message only from this process. Refused for want of the
+foreground, the reader parks on the terminal's foreground edge and reads again
+when the hands next change, so a program sent to the background keeps running
+and takes its keyboard back when it returns. A full mailbox is waited on, not
+polled. The input discipline is set before the relay starts, since a keystroke
+read under the cooked one is already echoed.
+
+`stop_self` stops the process as a terminal's suspend key would, returning once
+it is continued: a full-screen program receives that key as a byte while its
+input is raw, gives its terminal back, and then stops itself.
+
 ## Not a log path, not a C `stdio`
 
 Structured and audited log *records* travel through `lib/log`, never these

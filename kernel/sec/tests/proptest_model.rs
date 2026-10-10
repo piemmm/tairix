@@ -591,7 +591,7 @@ fn admit_in_both(
     )
     .with_proc_id(instance);
     let placed = table
-        .resolve_placement(spawner_id, request)
+        .resolve_placement(spawner_id, request, false)
         .and_then(|placement| table.admit(record, placement));
     prop_assert_eq!(
         placed,

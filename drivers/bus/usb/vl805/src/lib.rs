@@ -61,6 +61,7 @@
 #![deny(missing_docs)]
 
 use tairix_abi::driver::mailbox::MailboxChannel;
+use tairix_abi::driver::pci::CLASS_USB_XHCI;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 
 use tairix_vcmailbox::{
@@ -85,14 +86,6 @@ pub const VL805_PCI_VENDOR: u16 = 0x1106;
 /// The VL805's PCI device id (VL805 USB 3.0 host controller).
 pub const VL805_PCI_DEVICE: u16 = 0x3483;
 
-/// The 24-bit PCI class code of an xHCI USB host controller
-/// (`base 0x0C` serial bus, `sub 0x03` USB, `prog-if 0x30` xHCI). The
-/// VL805 presents its USB function with this class; the bind key fixes it
-/// (the class is matched exactly, never wildcarded — see
-/// [`HwMatchKey::matches`]) so an EHCI/OHCI function on the same device id
-/// could not bind this driver.
-pub const VL805_PCI_CLASS: u32 = 0x0C_03_30;
-
 /// The bind priority [`BIND_KEYS`] carries.
 ///
 /// An exact vendor:device match ranks **above** the generic xHCI
@@ -108,7 +101,9 @@ const BIND_PRIORITY: u16 = 20;
 /// resolves a discovered node against.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
-    HwMatchKey::pci(VL805_PCI_VENDOR, VL805_PCI_DEVICE, VL805_PCI_CLASS),
+    // The class is matched exactly, so an EHCI or OHCI function on the same
+    // device id could not bind this driver.
+    HwMatchKey::pci(VL805_PCI_VENDOR, VL805_PCI_DEVICE, CLASS_USB_XHCI),
 )];
 
 /// The Pi firmware's encoded VL805 PCI address

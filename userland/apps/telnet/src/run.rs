@@ -12,22 +12,11 @@
 //!
 //! Telnet must carry the keyboard and the connection at the same time. The
 //! stack delivers a socket's stream events to an async **port**, which joins a
-//! wait-set; a *console-backed* standard input cannot join one, because the
-//! wait-set's stream source admits only a pipe or pty backing and a
-//! console-backed standard stream is not in the process's open-file table at
-//! all. So the two sides cannot be multiplexed by one wait.
-//!
-//! Both sides do have a genuine wake source, though, and a blocking read is
-//! one of them — it just needs its own flow of control. So a second thread does
-//! nothing but block in `Stdin::read` and forward what it read to a second
-//! port; the main thread parks on a wait-set holding *both* ports and sees one
-//! ordered event stream. Neither thread ever spins, and no timer is armed.
-//!
-//! The keyboard port carries a one-byte tag ahead of the bytes, so the reader
-//! can report end-of-input without an empty message. It is process-local
-//! plumbing between two threads of one program, not an interface: the port's
-//! sender origin is checked against this process, exactly as the socket port's
-//! is checked against the network stack, so neither inbox is trusted.
+//! wait-set; a console-backed standard input cannot join one, so the keyboard
+//! is read by the runtime's key relay (`tairix_rt::keys::KeyRelay`), a thread
+//! forwarding it to a private port the same wait-set watches. The main thread
+//! parks on both and sees one ordered event stream. Neither thread spins, and
+//! no timer is armed.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -49,10 +38,11 @@ mod program {
     };
     use tairix_abi::net_ipc::NetAddrFamily;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, InputMode, Origin, Signal, TerminalSize};
+    use tairix_abi::{Errno, InputMode, TerminalSize};
     use tairix_help::BundleHelp;
     use tairix_net::IpAddr;
-    use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::keys::{KeyRelay, Keys};
     use tairix_telnet::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
     use tairix_telnet::{parse, run, Command, Output, FALLBACK_TERM, USAGE};
 
@@ -66,16 +56,6 @@ mod program {
     /// the connection's own receive window bounds the true in-flight volume.
     const PORT_CAPACITY: usize = 64;
 
-    /// Largest keyboard read, and so the keyboard port's message size (the tag
-    /// byte plus the bytes read). A terminal delivers keystrokes a few at a
-    /// time; this is ample and bounds the reader's stack buffer.
-    const KEYBOARD_CHUNK: usize = 512;
-
-    /// The keyboard message tag: bytes follow.
-    const KEY_TAG_DATA: u8 = 1;
-    /// The keyboard message tag: standard input reached end of file.
-    const KEY_TAG_EOF: u8 = 2;
-
     /// How many times to retry `connect` while the interface is still coming up
     /// at boot (the NIC driver may not be bound to the stack yet, so the stack
     /// has no egress and answers `NetworkUnreachable`).
@@ -88,11 +68,6 @@ mod program {
     /// Bytes offered per `stream_send` call, so one marshalled request stays
     /// modest however much the operator pasted.
     const SEND_CHUNK: usize = 4096;
-
-    /// How many times the reader will wait for mailbox room before giving up on
-    /// a port that is evidently never going to drain. A bound, so a wedged
-    /// relay ends the reader instead of leaving it parked forever.
-    const POST_ATTEMPTS: u32 = 64;
 
     /// One park slice while awaiting the handshake's `Connected` event.
     const HANDSHAKE_PARK_NANOS: u64 = 100_000_000;
@@ -138,12 +113,10 @@ mod program {
         set: u64,
         /// The process-private port the stack delivers stream events to.
         deliver: u64,
-        /// The process-private port the keyboard-reader thread posts to.
-        keyboard: u64,
+        /// The keyboard, read on a thread of its own.
+        keys: KeyRelay,
         /// The connected socket, when there is one.
         socket: Option<SocketId>,
-        /// This process's own origin, for authenticating the keyboard port.
-        own: Origin,
         /// A local address to bind before connecting (`-b`).
         bind: Option<SocketAddr>,
         /// Decode buffer for one delivery message.
@@ -151,15 +124,14 @@ mod program {
     }
 
     impl RtTelnetIo {
-        /// Bind both ports, create the wait-set, and register both on it.
-        fn open(bind: Option<SocketAddr>) -> Result<Self, Errno> {
-            let own = tairix_rt::self_origin().map_err(Errno::from_syscall)?;
+        /// Bind the delivery port, create the wait-set, and register it and
+        /// the keyboard's on it.
+        fn open(bind: Option<SocketAddr>, keys: KeyRelay) -> Result<Self, Errno> {
             let deliver =
                 tairix_rt::bind_private_port(SocketStreamEvent::MAX_WIRE_LEN, PORT_CAPACITY)?;
-            let keyboard = tairix_rt::bind_private_port(KEYBOARD_CHUNK + 1, PORT_CAPACITY)?;
             let set =
                 u64::try_from(tairix_rt::waitset_create()).map_err(|_| Errno::NotImplemented)?;
-            for (port, token) in [(deliver, DELIVER_TOKEN), (keyboard, KEYBOARD_TOKEN)] {
+            for (port, token) in [(deliver, DELIVER_TOKEN), (keys.port(), KEYBOARD_TOKEN)] {
                 if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, port, token)
                     != 0
                 {
@@ -169,9 +141,8 @@ mod program {
             Ok(Self {
                 set,
                 deliver,
-                keyboard,
+                keys,
                 socket: None,
-                own,
                 bind,
                 buf: alloc::vec![0u8; SocketStreamEvent::MAX_WIRE_LEN],
             })
@@ -185,25 +156,10 @@ mod program {
 
         /// Drain one keyboard message, or [`None`] if the mailbox was empty.
         fn drain_keyboard(&mut self) -> Option<Result<IoEvent, Errno>> {
-            let mut sender = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-            let Ok(len) = tairix_rt::ipc_recv(self.keyboard, &mut self.buf, &mut sender) else {
-                return None;
-            };
-            // The keyboard port is an inbox like any other: only this process's
-            // own reader thread may fill it (fail closed).
-            match Origin::from_bytes(&sender) {
-                Ok(origin) if origin.pid() == self.own.pid() => {}
-                _ => return None,
-            }
-            match self.buf.get(..len) {
-                Some([KEY_TAG_EOF, ..]) => Some(Ok(IoEvent::KeyboardClosed)),
-                Some([KEY_TAG_DATA, rest @ ..]) if !rest.is_empty() => {
-                    Some(Ok(IoEvent::Keyboard(rest.to_vec())))
-                }
-                // A tag byte alone, or an unknown tag, carries nothing to act
-                // on; dropping it is the fail-closed reading.
-                _ => None,
-            }
+            Some(Ok(match self.keys.take()? {
+                Keys::Typed(typed) => IoEvent::Keyboard(typed.to_vec()),
+                Keys::Ended => IoEvent::KeyboardClosed,
+            }))
         }
 
         /// Drain one stream event, or [`None`] if the mailbox was empty or the
@@ -364,13 +320,7 @@ mod program {
         }
 
         fn suspend(&mut self) -> Result<(), Errno> {
-            let origin = tairix_rt::self_origin().map_err(Errno::from_syscall)?;
-            let pid = i64::try_from(origin.pid()).map_err(|_| Errno::OutOfRange)?;
-            let ret = tairix_rt::signal(pid, Signal::Stop);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            Ok(())
+            tairix_rt::stop_self()
         }
 
         fn shutdown_write(&mut self) -> Result<(), Errno> {
@@ -410,54 +360,6 @@ mod program {
             addr: endpoint.addr,
             port: 0,
         })
-    }
-
-    /// The keyboard-reader thread: block in `Stdin::read`, forward what arrived
-    /// to the keyboard port, repeat.
-    ///
-    /// It ends on end-of-input; otherwise the process exit that follows the
-    /// relay tears it down, since `exit` is a thread-group exit. Its own
-    /// wait-set holds the port's *room* source, so a mailbox the relay has not
-    /// drained yet is waited on rather than polled and no keystroke is dropped.
-    fn read_keyboard(keyboard: u64) {
-        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
-            let _ = tairix_rt::ipc_send(keyboard, &[KEY_TAG_EOF]);
-            return;
-        };
-        let room_armed = tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::PortRoom,
-            keyboard,
-            KEYBOARD_TOKEN,
-        ) == 0;
-        let mut buf = [0u8; KEYBOARD_CHUNK + 1];
-        buf[0] = KEY_TAG_DATA;
-        // A zero-length or refused read is end of input as far as the relay is
-        // concerned: there is no further keystroke to carry.
-        while let Ok(read @ 1..) = Stdin.read(&mut buf[1..]) {
-            if !post(set, room_armed, keyboard, &buf[..=read]) {
-                break;
-            }
-        }
-        let _ = tairix_rt::ipc_send(keyboard, &[KEY_TAG_EOF]);
-    }
-
-    /// Post one keyboard message, waiting for mailbox room rather than
-    /// dropping a keystroke. Returns `false` when the port is unusable, so the
-    /// reader ends instead of spinning on a destination that can never drain.
-    fn post(set: u64, room_armed: bool, keyboard: u64, message: &[u8]) -> bool {
-        for _ in 0..POST_ATTEMPTS {
-            if tairix_rt::ipc_send(keyboard, message) >= 0 {
-                return true;
-            }
-            if !room_armed {
-                return false;
-            }
-            let mut token = 0u64;
-            let _ = tairix_rt::waitset_wait(set, u64::MAX, &mut token);
-        }
-        false
     }
 
     /// Program entry point. Exit codes: `0` for a session that ran, `1` for a
@@ -528,29 +430,26 @@ mod program {
             Command::Help => None,
         };
 
-        let mut io = match RtTelnetIo::open(bind) {
+        // The raw discipline is taken *before* the keyboard's reader exists: a
+        // keystroke it consumed under the cooked one would be echoed by the
+        // console and held to the end of a line. `run` takes it again, which is
+        // idempotent, and is what restores the cooked default on every exit
+        // path.
+        let _ = tairix_rt::set_input_mode(InputMode::Raw);
+        let keys = match KeyRelay::start() {
+            Ok(keys) => keys,
+            Err(errno) => {
+                write_stderr_line(&format!("telnet: cannot start the input reader: {errno}"));
+                return 1;
+            }
+        };
+        let mut io = match RtTelnetIo::open(bind, keys) {
             Ok(io) => io,
             Err(errno) => {
                 write_stderr_line(&format!("telnet: cannot set up the session: {errno}"));
                 return 1;
             }
         };
-        // The raw discipline is taken *before* the reader thread exists: a
-        // keystroke it consumed under the cooked one would be echoed by the
-        // console and held to the end of a line. `run` takes it again, which is
-        // idempotent, and is what restores the cooked default on every exit
-        // path.
-        io.set_input_mode(InputMode::Raw);
-        // The reader thread is detached: it has no value to hand back, and the
-        // process exit below is what ends it.
-        let keyboard = io.keyboard;
-        match tairix_rt::thread::Thread::spawn(move || read_keyboard(keyboard)) {
-            Ok(handle) => handle.detach(),
-            Err(errno) => {
-                write_stderr_line(&format!("telnet: cannot start the input reader: {errno}"));
-                return 1;
-            }
-        }
 
         match run(command, locale, term, &mut io, &help, &RtOutput, &RtErrors) {
             Ok(()) => 0,

@@ -69,10 +69,8 @@ rather than pretending otherwise.
 
 A category this system cannot serve says so plainly and names what would have
 to exist before it could. A control that would change nothing is never shown —
-which is why Sound says the audio service offers nothing to set there yet
-rather than drawing a volume slider, and why Theme, for which the desktop has
-no themes to choose among, points to where the appearance and the picture are
-set instead.
+which is why Theme, for which the desktop has no themes to choose among,
+points to where the appearance and the picture are set instead.
 
 The window is titled with the pane it is showing.
 
@@ -87,6 +85,12 @@ It is launched from the *Settings…* row of the desktop's system menu, from the
 desktop's Program Library, or by name from a shell. It requires a running
 graphical session: without one the window channel is unreachable and it
 reports the refusal on the standard error stream and exits.
+
+Sound shows each output and input with its default choice, level and mute, and
+what is recording: your own recordings by name, and how many of anyone else's.
+Its controls change the device at once, and only while your session holds the
+room the device serves; a device another session's room holds is shown and
+cannot be changed here. Your desktop remembers what you set.
 
 ## EXIT STATUS
 

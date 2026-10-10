@@ -44,6 +44,7 @@ use tairix_abi::seat::{DisplayLease, ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::touch::TouchFrame;
+use tairix_abi::ProcId;
 use tairix_abi::{DriverError, Errno};
 use tairix_fbcon::Surface;
 use tairix_inline::SecretRing;
@@ -217,6 +218,9 @@ struct SeatSlot {
     /// rather than in each driver — and a driver holds no configuration
     /// authority to read the operator's window with.
     debounce: SpinLock<ClickDebounce>,
+    /// The seat is unowned and held cleared for a handover, written under
+    /// `state`'s lock with every transition and read under it.
+    handover: AtomicBool,
 }
 
 impl SeatSlot {
@@ -228,6 +232,7 @@ impl SeatSlot {
             pointer: PointerChannel::new(),
             touch: TouchChannel::new(),
             debounce: SpinLock::new(ClickDebounce::new()),
+            handover: AtomicBool::new(false),
         }
     }
 
@@ -256,6 +261,20 @@ impl SeatSlot {
             generation: state.generation(),
             foreground_console: state.foreground_console().0,
             flags,
+        }
+    }
+
+    /// The seat's lease as its notice carries it, the holder's login session
+    /// named by `session_of`. Taken under the state lock, so the lease and its
+    /// holder are one observation.
+    fn lease(&self, session_of: &dyn Fn(SeatOwner) -> ProcId) -> DisplayLease {
+        let state = self.state.lock();
+        match state.owner() {
+            Some(owner) => DisplayLease::held(state.generation(), session_of(owner)),
+            None if self.handover.load(Ordering::Relaxed) => {
+                DisplayLease::ended(state.generation(), ReleaseSurface::Handover)
+            }
+            None => DisplayLease::ended(state.generation(), ReleaseSurface::Text),
         }
     }
 }
@@ -444,6 +463,8 @@ impl SeatRegistry {
     /// another graphical presenter passes [`Surface::Blank`] instead, so the
     /// gap before that presenter's first frame shows neither the outgoing
     /// session's pixels nor a replay of a text screen nobody is returning to.
+    /// `slot` records which of the two an unowned seat is in, because its
+    /// lease reports it.
     ///
     /// The kernel's framebuffer text console paints the surface the
     /// architecture port brought up at boot, which is the **boot seat's**; a
@@ -458,7 +479,15 @@ impl SeatRegistry {
     /// with the loser's answer. The console's own render lock is a leaf
     /// (nothing it guards takes another lock), so the nesting cannot
     /// deadlock.
-    fn apply_boot_surface(&self, seat_id: u64, state: &SeatState, unowned: Surface) {
+    fn apply_boot_surface(
+        &self,
+        slot: &SeatSlot,
+        seat_id: u64,
+        state: &SeatState,
+        unowned: Surface,
+    ) {
+        let handing_over = state.owner().is_none() && unowned == Surface::Blank;
+        slot.handover.store(handing_over, Ordering::Relaxed);
         if seat_id != SEAT_PRIMARY {
             return;
         }
@@ -511,7 +540,7 @@ impl SeatRegistry {
         // read a record it did not produce, and the text console gives the
         // display surface up before the new owner presents its first frame.
         slot.purge_channels();
-        self.apply_boot_surface(seat_id, &state, Surface::Shown);
+        self.apply_boot_surface(&slot, seat_id, &state, Surface::Shown);
         drop(state);
         announce_lease(seat_id);
         Ok(lease)
@@ -551,11 +580,14 @@ impl SeatRegistry {
             // only a `NotOwner` refusal changed nothing.
             if !matches!(outcome, Err(SeatError::NotOwner)) {
                 slot.purge_channels();
-                let unowned = match next {
-                    ReleaseSurface::Text => Surface::Shown,
-                    ReleaseSurface::Handover => Surface::Blank,
+                // An evicted presenter acknowledging its revocation hands
+                // nothing over: the eviction gave the screen to the text
+                // console, and a wedged presenter must not take it back dark.
+                let unowned = match (next, &outcome) {
+                    (ReleaseSurface::Handover, Ok(())) => Surface::Blank,
+                    _ => Surface::Shown,
                 };
-                self.apply_boot_surface(seat_id, &state, unowned);
+                self.apply_boot_surface(&slot, seat_id, &state, unowned);
             }
             outcome.map_err(seat_errno)
         };
@@ -927,8 +959,15 @@ impl SeatRegistry {
         }
         let slot = self.resolve(seat_id)?;
         let mut state = slot.state.lock();
+        let ends_handover = slot.handover.load(Ordering::Relaxed);
         state.set_foreground_console(console);
-        self.apply_boot_surface(seat_id, &state, Surface::Shown);
+        self.apply_boot_surface(&slot, seat_id, &state, Surface::Shown);
+        drop(state);
+        // The text console has the screen back, so whoever was waiting out
+        // the handover learns the room is nobody's.
+        if ends_handover {
+            announce_lease(seat_id);
+        }
         Ok(())
     }
 
@@ -956,7 +995,7 @@ impl SeatRegistry {
                 // are wiped — an eviction must not hand its keystrokes to
                 // whoever takes the seat next.
                 slot.purge_channels();
-                self.apply_boot_surface(seat_id, &state, Surface::Shown);
+                self.apply_boot_surface(&slot, seat_id, &state, Surface::Shown);
             }
             outcome.map_err(seat_errno)
         };
@@ -1002,7 +1041,7 @@ impl SeatRegistry {
                 return;
             }
             slot.purge_channels();
-            self.apply_boot_surface(seat_id, &state, Surface::Shown);
+            self.apply_boot_surface(slot, seat_id, &state, Surface::Shown);
             drop(state);
             announce_lease(seat_id);
             reclaimed = true;
@@ -1038,11 +1077,18 @@ impl SeatRegistry {
     }
 
     /// The boot seat's display lease, as the `DisplayLease` system notice
-    /// carries it.
+    /// carries it, the holder's login session named by `session_of` — which
+    /// reads a table its caller locked before any seat's, never after.
     #[must_use]
-    pub fn boot_lease(&self) -> DisplayLease {
-        let state = self.primary.state.lock();
-        DisplayLease::new(state.generation(), state.owner().is_some())
+    pub fn boot_lease(&self, session_of: &dyn Fn(SeatOwner) -> ProcId) -> DisplayLease {
+        self.primary.lease(session_of)
+    }
+
+    /// The boot seat's lease word alone: the notice's generation, which every
+    /// transition it reports moves and which names no holder.
+    #[must_use]
+    pub fn boot_lease_epoch(&self) -> u64 {
+        self.primary.lease(&|_| ProcId::KERNEL).epoch()
     }
 
     /// The live lease `owner` currently holds on seat `seat_id`
@@ -1257,6 +1303,93 @@ mod tests {
 
     const WM: SeatOwner = SeatOwner(7);
     const INTRUDER: SeatOwner = SeatOwner(9);
+
+    /// The lease names the holder's login session as its resolver does, and
+    /// a handover's cleared gap is a phase of its own until the next presenter
+    /// takes the seat or the text console takes it back.
+    #[test]
+    fn the_lease_names_the_holders_login_and_how_it_ended() {
+        let (seat, _) = registry_with_surface();
+        let desktop = ProcId::from_raw([0x7D; 16]);
+        let session_of = |owner: SeatOwner| {
+            if owner == WM {
+                desktop
+            } else {
+                ProcId::KERNEL
+            }
+        };
+        let lease = |seat: &SeatRegistry| seat.boot_lease(&session_of);
+        assert_eq!(lease(&seat), DisplayLease::UNHELD);
+
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        let held = lease(&seat);
+        assert_eq!(held.live_generation(), Some(1));
+        assert_eq!(held.session(), Some(desktop));
+        assert_eq!(held.epoch(), seat.boot_lease_epoch());
+
+        seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Handover)
+            .expect("seat released");
+        let gap = lease(&seat);
+        assert_eq!(gap.released_to(), Some(ReleaseSurface::Handover));
+        assert_eq!(gap.session(), None);
+        assert!(gap.epoch() > held.epoch());
+
+        seat.acquire(SEAT_PRIMARY, INTRUDER).expect("reacquired");
+        let next = lease(&seat);
+        assert_eq!(next.live_generation(), Some(2));
+        assert_eq!(next.session(), None, "no login encloses this holder");
+        assert!(next.epoch() > gap.epoch());
+
+        seat.release(SEAT_PRIMARY, INTRUDER, ReleaseSurface::Text)
+            .expect("seat released");
+        assert_eq!(lease(&seat).released_to(), Some(ReleaseSurface::Text));
+        assert_eq!(lease(&seat).epoch(), seat.boot_lease_epoch());
+    }
+
+    /// An administrator's console switch during a handover gives the screen
+    /// back to the text console, and the lease moves with it: a service
+    /// waiting out the gap would otherwise wait for a presenter that is not
+    /// coming.
+    #[test]
+    fn a_console_switch_that_ends_a_handover_moves_the_lease() {
+        let (seat, console) = registry_with_surface();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Handover)
+            .expect("seat released");
+        let gap = seat.boot_lease_epoch();
+
+        seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(0))
+            .expect("console switched");
+        assert!(shown(console));
+        let after = seat.boot_lease(&|_| ProcId::KERNEL);
+        assert_eq!(after.released_to(), Some(ReleaseSurface::Text));
+        assert!(after.epoch() > gap);
+
+        // With no handover to end, a switch moves nothing.
+        seat.switch_foreground(SEAT_PRIMARY, ConsoleIndex(0))
+            .expect("console switched");
+        assert_eq!(seat.boot_lease_epoch(), after.epoch());
+    }
+
+    /// An evicted presenter acknowledging its revocation cannot ask for the
+    /// handover's cleared screen: the eviction gave the screen to the text
+    /// console, and it stays there.
+    #[test]
+    fn an_evicted_presenter_cannot_hand_the_screen_over_cleared() {
+        let (seat, console) = registry_with_surface();
+        seat.acquire(SEAT_PRIMARY, WM).expect("seat acquired");
+        assert_eq!(seat.revoke(SEAT_PRIMARY), Ok(WM));
+        let evicted = seat.boot_lease_epoch();
+
+        assert_eq!(
+            seat.release(SEAT_PRIMARY, WM, ReleaseSurface::Handover),
+            Err(Errno::SeatRevoked)
+        );
+        assert!(shown(console), "the text console keeps the screen");
+        let lease = seat.boot_lease(&|_| ProcId::KERNEL);
+        assert_eq!(lease.released_to(), Some(ReleaseSurface::Text));
+        assert_eq!(lease.epoch(), evicted);
+    }
 
     fn press_char(c: char) -> KeyInput {
         KeyInput::Pressed {

@@ -5,13 +5,17 @@
 //! to carry a `proptest`-style stateful model alongside its unit tests and the
 //! fuzz harness (`tests/fuzz_port.rs`). Where the fuzz harness hammers
 //! raw `(caps, payload)` bytes for crashes, this model generates a *structured*
-//! sequence of `send` / `recv` / `destroy` commands and replays it against an
-//! independent reference model, letting proptest **shrink** any counterexample
-//! to a minimal failing program. The invariants checked after every command:
+//! sequence of `send` / `recv` / `admit` / `destroy` commands and replays it
+//! against an independent reference model, letting proptest **shrink** any
+//! counterexample to a minimal failing program. The invariants checked after
+//! every command:
 //!
 //! * `send` is **fail-closed** in the exact `Port::send` precedence — closed
-//!   port, then capabilities, then size, then capacity — checked against a
-//!   mirror that never consults the live port.
+//!   port, then capabilities, then size, then the admitted sender, then
+//!   capacity — checked against a mirror that never consults the live port.
+//! * once a sender is admitted, no other instance's message is taken, a
+//!   refused one occupies no room, and whatever another instance had queued
+//!   is discarded with the admission.
 //! * a delivered message round-trips through `recv` byte-for-byte in FIFO
 //!   order, so a sender cannot mutate an accepted payload.
 //! * occupancy equals the model and never exceeds the declared capacity.
@@ -32,7 +36,7 @@ use std::collections::VecDeque;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{CapabilityId, Errno, ProcId, PROC_ID_LEN};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{EndpointId, Port};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
@@ -75,6 +79,13 @@ fn task_with(task_id: u64, caps: &CapabilitySet) -> TaskCapabilities {
     TaskCapabilities::derive(ProcessId(task_id), UserId(1), *caps, *caps, &NullSink)
 }
 
+/// Process instances a sender may be, and the one an `Admit` may name.
+const INSTANCES: u8 = 2;
+
+fn instance(index: u8) -> ProcId {
+    ProcId::from_raw([0xA0 + index; PROC_ID_LEN])
+}
+
 fn authorised_port() -> Port {
     let creator = task_with(
         1,
@@ -100,16 +111,23 @@ enum Cmd {
     Send {
         cap_mask: u8,
         len: usize,
+        sender: u8,
     },
     Recv,
+    /// Admit instance `sender` as the port's only sender.
+    Admit {
+        sender: u8,
+    },
     Destroy,
 }
 
 fn command() -> impl Strategy<Value = Cmd> {
     prop_oneof![
         // Weight sends heavily so the mailbox actually fills.
-        6 => (0u8..8u8, 0usize..=24).prop_map(|(cap_mask, len)| Cmd::Send { cap_mask, len }),
+        6 => (0u8..8u8, 0usize..=24, 0..INSTANCES)
+            .prop_map(|(cap_mask, len, sender)| Cmd::Send { cap_mask, len, sender }),
         3 => Just(Cmd::Recv),
+        1 => (0..INSTANCES).prop_map(|sender| Cmd::Admit { sender }),
         1 => Just(Cmd::Destroy),
     ]
 }
@@ -133,26 +151,33 @@ fn port_lifecycle_tracks_reference_model() {
         move |cmds| {
             let sink = NullSink;
             let port = authorised_port();
-            // Reference model: queued payloads (FIFO) and the closed flag.
-            let mut expected: VecDeque<Vec<u8>> = VecDeque::new();
+            // Reference model: queued `(sender, payload)` pairs (FIFO) and
+            // the closed flag.
+            let mut expected: VecDeque<(u8, Vec<u8>)> = VecDeque::new();
             let mut closed = false;
+            let mut admitted: Option<u8> = None;
 
             for c in &cmds {
                 match c {
-                    Cmd::Send { cap_mask, len } => {
+                    Cmd::Send {
+                        cap_mask,
+                        len,
+                        sender: from,
+                    } => {
                         let mut sender_caps = CapabilitySet::empty();
                         for (bit, cap) in CAP_UNIVERSE.iter().enumerate() {
                             if cap_mask & (1 << bit) != 0 {
                                 sender_caps.insert(*cap);
                             }
                         }
-                        let sender = task_with(0x100, &sender_caps);
+                        let sender = task_with(0x100 + u64::from(*from), &sender_caps)
+                            .with_proc_id(instance(*from));
                         let payload: Vec<u8> = (0..*len)
                             .map(|i| u8::try_from(i % 251).unwrap_or(0))
                             .collect();
 
                         // Mirror of `Port::send`'s precedence, never touching the
-                        // live port: closed → caps → size → capacity.
+                        // live port: closed → caps → size → admission → capacity.
                         let caps_ok =
                             caps_of(&[REQUIRED_SEND_CAP]).is_subset_of(sender.effective());
                         let size_ok = payload.len() <= effective_max;
@@ -163,6 +188,8 @@ fn port_lifecycle_tracks_reference_model() {
                             Err(Errno::PermissionDenied)
                         } else if !size_ok {
                             Err(Errno::MessageTooLarge)
+                        } else if admitted.is_some_and(|only| only != *from) {
+                            Err(Errno::PermissionDenied)
                         } else if !capacity_ok {
                             Err(Errno::WouldBlock)
                         } else {
@@ -172,18 +199,28 @@ fn port_lifecycle_tracks_reference_model() {
                         let got = port.send(&sender, &payload, &sink);
                         prop_assert_eq!(got, want);
                         if want.is_ok() {
-                            expected.push_back(payload);
+                            expected.push_back((*from, payload));
                         }
                     }
                     Cmd::Recv => match port.recv() {
                         Some(msg) => {
-                            let want = expected.pop_front().ok_or_else(|| {
+                            let (from, want) = expected.pop_front().ok_or_else(|| {
                                 TestCaseError::fail("recv returned an unmodelled message")
                             })?;
                             prop_assert_eq!(msg.payload.as_bytes(), want.as_slice());
+                            prop_assert_eq!(msg.origin.proc_id(), instance(from));
                         }
                         None => prop_assert!(expected.is_empty(), "recv empty but model was not"),
                     },
+                    Cmd::Admit { sender } => {
+                        let before = expected.len();
+                        expected.retain(|(from, _)| from == sender);
+                        prop_assert_eq!(
+                            port.admit(instance(*sender), &sink),
+                            expected.len() < before
+                        );
+                        admitted = Some(*sender);
+                    }
                     Cmd::Destroy => {
                         port.destroy(&sink);
                         closed = true;

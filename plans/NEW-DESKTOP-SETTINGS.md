@@ -62,6 +62,7 @@ dropped is a category the surface then has to lie about.
 | **DS24** | The ray tracer's scene detail: `screensaver.raytrace.detail`, `simple` (the default) or `maximum`, a *Detail* dropdown in its group on the pane reading *Simple* or *Maximum realism*, carried to the tracing host at launch and falling back to Simple where the memory band says Maximum's peak is not free | DS21, `plans/RAYTRACE.md` RT39 | DS24 | done |
 | **DS25** | Trackpad — tap to click, natural scrolling and the touchpad speed (`touchpad.*`), handed to the seat's gesture recogniser; the Touchscreen pane states what it would need to set anything | DS11 | §2, §3; `plans/POINTING.md` PO6 | done |
 | **DS26** | Text — the desktop font and its size (`font.family`, `font.size`, in points) on Appearance's TEXT group, resolved by the session against the font store and carried to every application in the desktop notice; the shipped base one point smaller (16 px, 10 pt of Inter) | DS3, `plans/FONT-SERVICE.md` | DS26 | done |
+| **DS27** | Sound — one plate per sink and source (default, level, mute) and a Recording plate, acting on `audio-v1` directly under the room the session holds | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -127,11 +128,9 @@ re-derived:
 **The honest shape of the deliverable.** Six of the categories the desktop
 should offer have no subsystem beneath them today: there is no Bluetooth stack,
 no print/scan stack, no touchpad or touch input driver, no 802.11 driver, and
-no file/screen sharing server anywhere in the tree. Sound has its stack but no
-device control — nothing sets a device's volume or the default device — so it
-is a seventh category with nothing to set. Theme is an eighth: the appearance
-and the picture it would gather are each set on their own panes, but nothing
-names them together and there is no accent palette to choose. Settings cannot
+no file/screen sharing server anywhere in the tree. Theme is a seventh: the
+appearance and the picture it would gather are each set on their own panes,
+but nothing names them together and there is no accent palette to choose. Settings cannot
 invent any of them,
 and it must not draw a volume slider that changes nothing — that is the
 fabricated-reading defect the whole desktop is built to avoid. So
@@ -192,8 +191,8 @@ write path on landing.
   path is refused states the refusal and changes nothing (`AGENTS.md` §2.24) —
   it never reports a success it did not get.
 
-- **Three write paths, and no fourth.** Every settable in this plan reaches
-  one of exactly three owners:
+- **Four write paths, and no fifth.** Every settable in this plan reaches
+  one of exactly four owners:
 
   1. **User scope → the desktop session.** Appearance, contrast, density,
      reduced motion, UI scale, cursor set, wallpaper and pinboard keys,
@@ -223,6 +222,14 @@ write path on landing.
      through `CAP_TIME_SET`. Both are reached by elevating the tool that owns
      them — the user-admin command family and `datetime.app` — never by
      Settings acquiring the capability.
+  4. **Device scope → the audio service.** A sound device's default choice,
+     level and mute are the service's own state, admitted for the login
+     session holding the room the device serves (`plans/SOUND.md` §Desktop
+     integration). Settings asks `audio-v1` directly on a worker and holds no
+     capability for it; a device another session's room holds is drawn
+     disabled. Nothing is persisted here: the desktop session follows the
+     service's `AudioDevices` notice and remembers its user's choices in its
+     own document, so a slider still acts durably only where it settles.
 
 - **A pane is a form, and the form family is shared.** A settings pane is a
   scrollable column of captioned groups of label/description/control rows.
@@ -413,7 +420,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` over each interface's own `dns.servers` (DS8) | reading renders unmeasured; a refused apply keeps the working copy and states why |
 | Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
-| Sound | — | — | pane states absence (§3) |
+| Sound | `audio-v1` `Enumerate` (each device as the service shows this session), the user's own `SELF_AUDIO_STREAMS` captures, the `AudioCapture` count; re-read on the `AudioDevices` and `AudioCapture` notices | `audio-v1` `SetDefault`, `SetLevel`, `SetMute`, admitted by the room's tenancy | another session's room: controls drawn disabled under an Authority Mark; a refused control stated |
 | Notifications | the session's published settings document (`notify.*`); the sources that have notified from the session's `QueryNotifySources`, answered to Settings alone | session apply | apply refused, stated |
 | Keyboard | the session's published settings document (`key.*`) | session apply (repeat) | layout, remap, shortcuts: no registry (§3), stated on the pane |
 | Mouse | the session's published settings document (`pointer.*`) | session apply | apply refused, stated |
@@ -442,7 +449,6 @@ would change nothing.
 
 | Pane | What is missing | Prerequisite |
 |---|---|---|
-| Sound | the stack plays — the `audiod` mixer and router over the first driver — but offers no control over a device's volume or over which device is the default | `plans/SOUND.md` SND15: the device control and the Settings pane over it |
 | Theme | nothing names an appearance, a wallpaper and an accent palette together, and the accents are fixed by the light and dark appearances | a new `plans/THEMES.md`: the desktop-theme model (appearance, catalog wallpaper, accent palette) and the palettes it chooses among |
 | Bluetooth | no HCI transport, no host stack, no pairing store | a new `plans/BLUETOOTH.md` |
 | Printers & Scanners | no print spooler, no scan API, no driver class | a new `plans/PRINTING.md` |
@@ -1196,7 +1202,8 @@ never be bound to a device, so it is saved and the refusal stated.
 
 **Devmgr's static-only caching is retired.** `deliver_interface_configs`
 read the plan once (`if state.plan.is_none()`) and cached it, so a runtime
-edit was never seen. It now re-reads on every generation bump, exactly as
+edit was never seen. It now re-reads each time it reacts — the hardware tree
+moving or a volume being mounted — exactly as
 the stack-wide policy does, and forgets a delivery mark only for an
 interface whose message changed — so an edit reaches the stack while an
 untouched interface is not re-pushed. An unreadable store leaves the plan

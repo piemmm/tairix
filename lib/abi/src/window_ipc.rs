@@ -120,6 +120,14 @@ pub const WINDOW_TITLE_MAX: usize = 64;
 /// a plate the width of the screen is not a tooltip.
 pub const TOOLTIP_TEXT_MAX: usize = 96;
 
+/// Most files one folder pick delegates ([`PickPurpose::Folder`]).
+///
+/// Every file is delegated before the pick concludes, so the bound is the
+/// most delegations one grantor may hold pending to one recipient: a folder is
+/// what a listener or a viewer opens at once — an album, a set of pictures —
+/// and the files past it are left out with their number stated.
+pub const WINDOW_FOLDER_PICK_MAX: usize = crate::FD_GRANT_PENDING_MAX;
+
 /// Most open targets one application may have queued for it at once
 /// ([`WindowRequest::TakeOpenTarget`]).
 ///
@@ -208,6 +216,11 @@ pub enum PickPurpose {
     /// signed manifest declares it edits documents, where the user may write
     /// the file, and read-only otherwise.
     Open,
+    /// A folder whose files to open: each regular file directly in it whose
+    /// content type the requester's signed manifest associates, delegated
+    /// read-only in name order, at most [`WINDOW_FOLDER_PICK_MAX`] of them.
+    /// The application never holds the folder itself.
+    Folder,
     /// Where to save a document, delegated write-only: an existing file the
     /// user agrees to replace, or a new one the session creates. Nothing is
     /// truncated on the way: the requester writes from the start and cuts the
@@ -226,7 +239,7 @@ impl PickPurpose {
     /// The suggested name's length on the wire: none for an open.
     const fn suggested_len_byte(&self) -> u8 {
         match self {
-            Self::Open => 0,
+            Self::Open | Self::Folder => 0,
             Self::Save { suggested, .. } => suggested.len_byte(),
         }
     }
@@ -234,7 +247,7 @@ impl PickPurpose {
     /// The endings it holds a name to: none for an open.
     const fn endings(&self) -> SaveEndings {
         match self {
-            Self::Open => SaveEndings::ANY,
+            Self::Open | Self::Folder => SaveEndings::ANY,
             Self::Save { endings, .. } => *endings,
         }
     }
@@ -2376,10 +2389,10 @@ pub enum WindowRequest {
     /// with a [`WindowEvent::FilePicked`] (carrying a one-shot `fd_redeem`
     /// handle for the chosen file, write-only to save, and to open read-only
     /// or — for an application whose signed manifest edits documents, where
-    /// the user may write it — read-write) or a [`WindowEvent::PickCancelled`]
-    /// delivered to the window's event
-    /// endpoint. One pick may be pending per window; a second request while
-    /// one is pending is refused (`AlreadyExists`).
+    /// the user may write it — read-write), a [`WindowEvent::FolderPicked`]
+    /// for a folder, or a [`WindowEvent::PickCancelled`] delivered to the
+    /// window's event endpoint. One pick may be pending per window; a second
+    /// request while one is pending is refused (`AlreadyExists`).
     PickFile {
         /// The requesting app's own window the pick concludes to.
         window_id: u64,
@@ -2394,6 +2407,15 @@ pub enum WindowRequest {
     /// before any pick concluded with a file.
     TakePickedName {
         /// The window whose pick concluded.
+        window_id: u64,
+    },
+    /// Take the next file window `window_id`'s last folder pick delegated,
+    /// once its [`WindowEvent::FolderPicked`] has arrived: the `fd_redeem`
+    /// handle and the file's name, together. The reply is a
+    /// [`decode_picked_file_reply`] frame, and `NotFound` once every file
+    /// is taken.
+    TakePickedFile {
+        /// The window whose folder pick concluded.
         window_id: u64,
     },
     /// Hand the session the drag the user began on `items` in window
@@ -2844,6 +2866,8 @@ const OP_PICK_FILE: u16 = 4;
 const OP_RESIZE: u16 = 5;
 /// Wire operation discriminant of [`WindowRequest::TakePickedName`].
 const OP_TAKE_PICKED_NAME: u16 = 6;
+/// Wire operation discriminant of [`WindowRequest::TakePickedFile`].
+const OP_TAKE_PICKED_FILE: u16 = 37;
 /// Wire operation discriminant of [`WindowRequest::BeginDrag`].
 const OP_BEGIN_DRAG: u16 = 7;
 /// Wire operation discriminant of [`WindowRequest::TakeDropTarget`].
@@ -2933,6 +2957,8 @@ const PICK_NAME_OFFSET: usize = PICK_NAME_LEN_OFFSET + 1;
 const PICK_PURPOSE_OPEN: u8 = 0;
 /// Wire value of [`PickPurpose::Save`].
 const PICK_PURPOSE_SAVE: u8 = 1;
+/// Wire value of [`PickPurpose::Folder`].
+const PICK_PURPOSE_FOLDER: u8 = 2;
 
 /// Encoded size of a [`WindowRequest::PickFile`] suggesting a `name`-byte
 /// name.
@@ -3358,6 +3384,7 @@ impl WindowRequest {
             Self::Present { ref damage, .. } => PRESENT_WIRE_LEN + damage.len() * PRESENT_RECT_LEN,
             Self::Close { .. }
             | Self::TakePickedName { .. }
+            | Self::TakePickedFile { .. }
             | Self::TakeDropTarget { .. }
             | Self::TakeTerrain { .. }
             | Self::ActivateWindow { .. } => WINDOW_ID_WIRE_LEN,
@@ -3479,6 +3506,7 @@ impl WindowRequest {
             Self::Close { .. } => OP_CLOSE,
             Self::PickFile { .. } => OP_PICK_FILE,
             Self::TakePickedName { .. } => OP_TAKE_PICKED_NAME,
+            Self::TakePickedFile { .. } => OP_TAKE_PICKED_FILE,
             Self::BeginDrag { .. } => OP_BEGIN_DRAG,
             Self::TakeDropTarget { .. } => OP_TAKE_DROP_TARGET,
             Self::DragVerdict { .. } => OP_DRAG_VERDICT,
@@ -3541,6 +3569,41 @@ impl WindowRequest {
         }
     }
 
+    /// Write the operands of a request setting one of a window's own
+    /// properties.
+    fn write_setting_operands(&self, out: &mut [u8]) {
+        match *self {
+            Self::SetSizing { window_id, sizing } => {
+                put_u64(out, 8, window_id);
+                write_sizing(out, SET_SIZING_OFFSET, sizing);
+            }
+            Self::SetSizeState { window_id, state } => {
+                put_u64(out, 8, window_id);
+                out[SET_SIZE_STATE_OFFSET] = state.wire();
+            }
+            Self::SetTitle { window_id, title } => encode_set_title(out, window_id, &title),
+            Self::SetTooltip {
+                window_id,
+                region,
+                text,
+            } => {
+                put_u64(out, 8, window_id);
+                region.write_to(out, SET_TOOLTIP_REGION_OFFSET);
+                out[SET_TOOLTIP_LEN_OFFSET] = text.len_byte();
+                out[SET_TOOLTIP_TEXT_OFFSET..SET_TOOLTIP_WIRE_LEN]
+                    .copy_from_slice(text.raw_bytes());
+            }
+            Self::SetBackdropBlur {
+                window_id,
+                radius_px,
+            } => {
+                put_u64(out, 8, window_id);
+                put_u16(out, 16, radius_px);
+            }
+            _ => {}
+        }
+    }
+
     /// Write `self`'s operand block into the already-headed frame `out`,
     /// which is exactly [`wire_len`](Self::wire_len) bytes long.
     fn write_operands(&self, out: &mut [u8]) {
@@ -3553,6 +3616,7 @@ impl WindowRequest {
             Self::Present { .. } => self.write_present_operands(out),
             Self::Close { window_id }
             | Self::TakePickedName { window_id }
+            | Self::TakePickedFile { window_id }
             | Self::TakeDropTarget { window_id }
             | Self::TakeTerrain { window_id }
             | Self::ActivateWindow { window_id } => {
@@ -3578,14 +3642,11 @@ impl WindowRequest {
                 put_u64(out, 8, window_id);
                 put_u64(out, 16, open_id);
             }
-            Self::SetSizing { window_id, sizing } => {
-                put_u64(out, 8, window_id);
-                write_sizing(out, SET_SIZING_OFFSET, sizing);
-            }
-            Self::SetSizeState { window_id, state } => {
-                put_u64(out, 8, window_id);
-                out[SET_SIZE_STATE_OFFSET] = state.wire();
-            }
+            Self::SetSizing { .. }
+            | Self::SetSizeState { .. }
+            | Self::SetTitle { .. }
+            | Self::SetTooltip { .. }
+            | Self::SetBackdropBlur { .. } => self.write_setting_operands(out),
             Self::SetCursor { .. } | Self::SetClipboard { .. } | Self::GetClipboard { .. } => {
                 self.write_input_operands(out);
             }
@@ -3593,25 +3654,6 @@ impl WindowRequest {
                 ref run_path,
                 ref document,
             } => write_hand_over_operands(out, run_path, document.as_ref()),
-            Self::SetTitle { window_id, title } => encode_set_title(out, window_id, &title),
-            Self::SetTooltip {
-                window_id,
-                region,
-                text,
-            } => {
-                put_u64(out, 8, window_id);
-                region.write_to(out, SET_TOOLTIP_REGION_OFFSET);
-                out[SET_TOOLTIP_LEN_OFFSET] = text.len_byte();
-                out[SET_TOOLTIP_TEXT_OFFSET..SET_TOOLTIP_WIRE_LEN]
-                    .copy_from_slice(text.raw_bytes());
-            }
-            Self::SetBackdropBlur {
-                window_id,
-                radius_px,
-            } => {
-                put_u64(out, 8, window_id);
-                put_u16(out, 16, radius_px);
-            }
             // The header-only operations: each names the caller, whose
             // identity the kernel attests, or the seat's own read-only
             // store, so none carries an operand.
@@ -3893,8 +3935,10 @@ impl WindowRequest {
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
-            OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_BEGIN_DRAG | OP_TAKE_DROP_TARGET
-            | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT => read_transfer_request(op, bytes),
+            OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_TAKE_PICKED_FILE | OP_BEGIN_DRAG
+            | OP_TAKE_DROP_TARGET | OP_DRAG_VERDICT | OP_QUERY_DRAG_SPOT => {
+                read_transfer_request(op, bytes)
+            }
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -3911,21 +3955,7 @@ impl WindowRequest {
                     depth: LayerDepth::from_u8(bytes[LAYER_PLACE_DEPTH])?,
                 })
             }
-            OP_RESIZE => {
-                exact_len(bytes, RESIZE_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                let shm_handle = read_u64(bytes, 16);
-                let layout = read_frame_layout(bytes)?;
-                Ok(Self::Resize {
-                    window_id,
-                    shm_handle,
-                    frame_count: layout.frame_count,
-                    width_px: layout.width_px,
-                    height_px: layout.height_px,
-                    stride_bytes: layout.stride_bytes,
-                    format: layout.format,
-                })
-            }
+            OP_RESIZE => read_resize(bytes),
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_SIZING => read_set_sizing(bytes),
             OP_SET_SIZE_STATE => read_set_size_state(bytes),
@@ -3973,6 +4003,23 @@ impl WindowRequest {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a [`WindowRequest::Resize`] frame.
+fn read_resize(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, RESIZE_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let shm_handle = read_u64(bytes, 16);
+    let layout = read_frame_layout(bytes)?;
+    Ok(WindowRequest::Resize {
+        window_id,
+        shm_handle,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+    })
 }
 
 /// Decode a [`WindowRequest::QueryWallpapers`] frame.
@@ -4057,6 +4104,7 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u64(out, 8, window_id);
             let (wire, name) = match purpose {
                 PickPurpose::Open => (PICK_PURPOSE_OPEN, ""),
+                PickPurpose::Folder => (PICK_PURPOSE_FOLDER, ""),
                 PickPurpose::Save { suggested, .. } => (PICK_PURPOSE_SAVE, suggested.as_str()),
             };
             out[PICK_PURPOSE_OFFSET] = wire;
@@ -4117,10 +4165,10 @@ fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> 
         _ => {
             exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
             let window_id = nonzero_id(read_u64(bytes, 8))?;
-            Ok(if op == OP_TAKE_PICKED_NAME {
-                WindowRequest::TakePickedName { window_id }
-            } else {
-                WindowRequest::TakeDropTarget { window_id }
+            Ok(match op {
+                OP_TAKE_PICKED_NAME => WindowRequest::TakePickedName { window_id },
+                OP_TAKE_PICKED_FILE => WindowRequest::TakePickedFile { window_id },
+                _ => WindowRequest::TakeDropTarget { window_id },
             })
         }
     }
@@ -4170,6 +4218,7 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, pick_file_wire_len(len, endings.wire_len()))?;
     let purpose = match bytes[PICK_PURPOSE_OFFSET] {
         PICK_PURPOSE_OPEN if name_len == 0 && endings.is_any() => PickPurpose::Open,
+        PICK_PURPOSE_FOLDER if name_len == 0 && endings.is_any() => PickPurpose::Folder,
         PICK_PURPOSE_SAVE => {
             let mut name = [0u8; crate::FS_NAME_MAX];
             name.get_mut(..len)
@@ -5592,6 +5641,86 @@ pub fn decode_picked_name_reply(bytes: &[u8]) -> Result<DocumentName, Errno> {
     DocumentName::from_wire(len, &name)
 }
 
+/// One file a folder pick delegated: what [`WindowRequest::TakePickedFile`]
+/// answers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PickedFile {
+    /// The `fd_redeem` handle minted to the requester; never zero.
+    pub handle: u64,
+    /// The file's own name, for the application to show it by.
+    pub name: DocumentName,
+}
+
+/// Longest reply to a [`WindowRequest::TakePickedFile`]: the status word, the
+/// handle, the name's length byte, and the widest name.
+pub const WINDOW_PICKED_FILE_REPLY_MAX: usize = PICKED_FILE_REPLY_TEXT_OFFSET + crate::FS_NAME_MAX;
+/// Byte offset of the handle in a [`WindowRequest::TakePickedFile`] reply.
+const PICKED_FILE_REPLY_HANDLE_OFFSET: usize = 4;
+/// Byte offset of the name's length.
+const PICKED_FILE_REPLY_LEN_OFFSET: usize = PICKED_FILE_REPLY_HANDLE_OFFSET + 8;
+/// Byte offset of the name.
+const PICKED_FILE_REPLY_TEXT_OFFSET: usize = PICKED_FILE_REPLY_LEN_OFFSET + 1;
+
+/// Encode a [`WindowRequest::TakePickedFile`] outcome into `out`, answering
+/// the number of bytes written: only as long as the name, and a refusal is
+/// the shared status frame.
+#[must_use]
+pub fn encode_picked_file_reply(
+    out: &mut [u8; WINDOW_PICKED_FILE_REPLY_MAX],
+    result: Result<&PickedFile, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_PICKED_FILE_REPLY_MAX];
+    let file = match result {
+        Ok(file) => file,
+        Err(err) => {
+            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+            return 4;
+        }
+    };
+    let text = file.name.as_str().as_bytes();
+    put_u64(out, PICKED_FILE_REPLY_HANDLE_OFFSET, file.handle);
+    out[PICKED_FILE_REPLY_LEN_OFFSET] = file.name.len_byte();
+    out[PICKED_FILE_REPLY_TEXT_OFFSET..PICKED_FILE_REPLY_TEXT_OFFSET + text.len()]
+        .copy_from_slice(text);
+    PICKED_FILE_REPLY_TEXT_OFFSET + text.len()
+}
+
+/// Decode a [`WindowRequest::TakePickedFile`] reply.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame shorter than its own header.
+/// * [`Errno::OutOfRange`] for the reserved handle zero, or a name that is
+///   not well-formed text.
+/// * [`Errno::LengthOutOfRange`] for a frame whose length is not the one its
+///   length byte states.
+pub fn decode_picked_file_reply(bytes: &[u8]) -> Result<PickedFile, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < PICKED_FILE_REPLY_TEXT_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let handle = read_u64(bytes, PICKED_FILE_REPLY_HANDLE_OFFSET);
+    if handle == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let len = bytes[PICKED_FILE_REPLY_LEN_OFFSET];
+    let text = &bytes[PICKED_FILE_REPLY_TEXT_OFFSET..];
+    if text.len() != usize::from(len) {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let mut name = [0u8; crate::FS_NAME_MAX];
+    name.get_mut(..text.len())
+        .ok_or(Errno::LengthOutOfRange)?
+        .copy_from_slice(text);
+    Ok(PickedFile {
+        handle,
+        name: DocumentName::from_wire(len, &name)?,
+    })
+}
+
 /// Byte offset of the entry kind in a [`WindowRequest::TakeOpenTarget`]
 /// reply.
 const OPEN_TARGET_REPLY_KIND_OFFSET: usize = 4;
@@ -6425,6 +6554,8 @@ const EV_CLOSE_REQUESTED: u16 = 4;
 const EV_FILE_PICKED: u16 = 5;
 /// Wire event discriminant of [`WindowEvent::PickCancelled`].
 const EV_PICK_CANCELLED: u16 = 6;
+/// Wire event discriminant of [`WindowEvent::FolderPicked`].
+const EV_FOLDER_PICKED: u16 = 24;
 /// Wire event discriminant of [`WindowEvent::Scrolled`].
 const EV_SCROLLED: u16 = 7;
 /// Wire event discriminant of [`WindowEvent::Minimized`].
@@ -6569,6 +6700,20 @@ pub enum WindowEvent {
     PickCancelled {
         /// The window whose pick was dismissed.
         window_id: u64,
+    },
+    /// The user chose a folder in the session's trusted picker (a
+    /// [`PickPurpose::Folder`] pick's conclusion). `files` of its files are
+    /// delegated and waiting to be taken with
+    /// [`WindowRequest::TakePickedFile`]; `left_out` more were not, the
+    /// pick's bound being reached. Zero files is an answer: the folder holds
+    /// nothing the application opens.
+    FolderPicked {
+        /// The window whose pick concluded.
+        window_id: u64,
+        /// Files delegated, at most [`WINDOW_FOLDER_PICK_MAX`].
+        files: u32,
+        /// Files the application opens that were not delegated.
+        left_out: u32,
     },
     /// Where the drag a [`WindowRequest::BeginDrag`] began now is, for its
     /// application to answer with a [`WindowRequest::DragVerdict`].
@@ -6957,6 +7102,7 @@ impl WindowEvent {
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
+            | Self::FolderPicked { window_id, .. }
             | Self::DragOver { window_id, .. }
             | Self::DragEnded { window_id, .. }
             | Self::PreviewRendered { window_id, .. }
@@ -6971,6 +7117,28 @@ impl WindowEvent {
             | Self::ToolMoved { window_id, .. }
             | Self::MenuClosed { window_id, .. } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } | Self::OpenRequested => None,
+        }
+    }
+
+    /// Write a pick's conclusion into the already-headed frame `out`.
+    fn write_pick(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        match *self {
+            Self::FilePicked {
+                handle, writable, ..
+            } => {
+                put_u16(out, 6, EV_FILE_PICKED);
+                put_u64(out, 16, handle);
+                out[24] = u8::from(writable);
+            }
+            Self::PickCancelled { .. } => put_u16(out, 6, EV_PICK_CANCELLED),
+            Self::FolderPicked {
+                files, left_out, ..
+            } => {
+                put_u16(out, 6, EV_FOLDER_PICKED);
+                put_u32(out, 16, files);
+                put_u32(out, 20, left_out);
+            }
+            _ => {}
         }
     }
 
@@ -7020,15 +7188,8 @@ impl WindowEvent {
             Self::AlternateCloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_ALTERNATE_CLOSE_REQUESTED);
             }
-            Self::FilePicked {
-                handle, writable, ..
-            } => {
-                put_u16(&mut out, 6, EV_FILE_PICKED);
-                put_u64(&mut out, 16, handle);
-                out[24] = u8::from(writable);
-            }
-            Self::PickCancelled { .. } => {
-                put_u16(&mut out, 6, EV_PICK_CANCELLED);
+            Self::FilePicked { .. } | Self::PickCancelled { .. } | Self::FolderPicked { .. } => {
+                self.write_pick(&mut out);
             }
             Self::PreviewRendered { .. } => self.write_preview_render(&mut out),
             Self::Scrolled { .. } => self.write_scrolled(&mut out),
@@ -7146,21 +7307,7 @@ impl WindowEvent {
                 Ok(Self::Key { window_id, key })
             }
             EV_POINTER => read_pointer_event(window_id, bytes),
-            EV_FILE_PICKED => {
-                event_reserved_zero(bytes, 25)?;
-                let handle = read_u64(bytes, 16);
-                // Handle 0 is the reserved invalid value the kernel never
-                // mints; a "picked" event without a redeemable delegation
-                // is refused rather than guessed at.
-                if handle == 0 {
-                    return Err(Errno::OutOfRange);
-                }
-                Ok(Self::FilePicked {
-                    window_id,
-                    handle,
-                    writable: flag_at(bytes, 24)?,
-                })
-            }
+            EV_FILE_PICKED | EV_FOLDER_PICKED => read_pick_event(kind, window_id, bytes),
             EV_PREVIEW_RENDERED => read_preview_render_event(window_id, bytes),
             EV_SCROLLED => read_scrolled_event(window_id, bytes),
             EV_PINCH => read_pinch_event(window_id, bytes),
@@ -7204,6 +7351,36 @@ impl WindowEvent {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a pick's conclusion carrying what was chosen: a file's delegation,
+/// or how many of a folder's files were delegated.
+fn read_pick_event(kind: u16, window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    if kind == EV_FOLDER_PICKED {
+        event_reserved_zero(bytes, 24)?;
+        let files = read_u32(bytes, 16);
+        if usize::try_from(files).map_or(true, |files| files > WINDOW_FOLDER_PICK_MAX) {
+            return Err(Errno::OutOfRange);
+        }
+        return Ok(WindowEvent::FolderPicked {
+            window_id,
+            files,
+            left_out: read_u32(bytes, 20),
+        });
+    }
+    event_reserved_zero(bytes, 25)?;
+    let handle = read_u64(bytes, 16);
+    // Handle 0 is the reserved invalid value the kernel never mints; a
+    // "picked" event without a redeemable delegation is refused rather than
+    // guessed at.
+    if handle == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(WindowEvent::FilePicked {
+        window_id,
+        handle,
+        writable: flag_at(bytes, 24)?,
+    })
 }
 
 /// Byte offset of a drag event's serial.
@@ -7713,6 +7890,11 @@ mod tests {
         WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
         WINDOW_WALLPAPERS_REPLY_MAX,
     };
+    use super::{
+        decode_picked_file_reply, encode_picked_file_reply, PickedFile,
+        PICKED_FILE_REPLY_HANDLE_OFFSET, PICK_PURPOSE_FOLDER, WINDOW_FOLDER_PICK_MAX,
+        WINDOW_PICKED_FILE_REPLY_MAX,
+    };
     use super::{PreviewOutcome, PreviewSubject};
     use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
@@ -8168,6 +8350,11 @@ mod tests {
             });
         }
         visit(WindowRequest::TakePickedName { window_id: 9 });
+        visit(WindowRequest::TakePickedFile { window_id: 9 });
+        visit(WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Folder,
+        });
         visit(WindowRequest::TakeDropTarget { window_id: 9 });
         for verdict in [None, Some(DropOperation::Copy), Some(DropOperation::Move)] {
             visit(WindowRequest::DragVerdict {
@@ -9774,6 +9961,87 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_pick_suggests_no_name_and_its_files_are_taken_with_their_names() {
+        let folder = WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Folder,
+        };
+        let frame = folder.frame();
+        let len = folder.wire_len();
+        assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(folder));
+        let named = WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Save {
+                suggested: DocumentName::new("album").expect("a valid name"),
+                endings: SaveEndings::ANY,
+            },
+        };
+        let mut lying = named.frame();
+        lying[PICK_PURPOSE_OFFSET] = PICK_PURPOSE_FOLDER;
+        assert_eq!(
+            WindowRequest::from_bytes(&lying[..named.wire_len()]),
+            Err(Errno::OutOfRange),
+            "a folder suggests no name"
+        );
+
+        let file = PickedFile {
+            handle: 7,
+            name: DocumentName::new("01 Overture.flac").expect("a valid name"),
+        };
+        let mut out = [0u8; WINDOW_PICKED_FILE_REPLY_MAX];
+        let written = encode_picked_file_reply(&mut out, Ok(&file));
+        assert_eq!(decode_picked_file_reply(&out[..written]), Ok(file));
+        assert_eq!(
+            decode_picked_file_reply(&out[..written - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut extra = out;
+        assert_eq!(
+            decode_picked_file_reply(&extra[..=written]),
+            Err(Errno::LengthOutOfRange)
+        );
+        extra[PICKED_FILE_REPLY_HANDLE_OFFSET..PICKED_FILE_REPLY_HANDLE_OFFSET + 8].fill(0);
+        assert_eq!(
+            decode_picked_file_reply(&extra[..written]),
+            Err(Errno::OutOfRange),
+            "the reserved handle delegates nothing"
+        );
+        let refused = encode_picked_file_reply(&mut out, Err(Errno::NotFound));
+        assert_eq!(
+            decode_picked_file_reply(&out[..refused]),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            decode_picked_file_reply(&out[..3]),
+            Err(Errno::BufferTooSmall)
+        );
+
+        let mut over = WindowEvent::FolderPicked {
+            window_id: 4,
+            files: 1,
+            left_out: 0,
+        }
+        .to_le_bytes();
+        let bound = u32::try_from(WINDOW_FOLDER_PICK_MAX).expect("a small bound");
+        over[16..20].copy_from_slice(&(bound + 1).to_le_bytes());
+        assert_eq!(WindowEvent::from_bytes(&over), Err(Errno::OutOfRange));
+        for event in [
+            WindowEvent::FolderPicked {
+                window_id: 4,
+                files: 0,
+                left_out: 0,
+            },
+            WindowEvent::FolderPicked {
+                window_id: 4,
+                files: bound,
+                left_out: u32::MAX,
+            },
+        ] {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+    }
+
+    #[test]
     fn pick_file_refuses_a_purpose_it_does_not_know_or_that_does_not_mean_what_it_says() {
         let save = WindowRequest::PickFile {
             window_id: 9,
@@ -9787,7 +10055,7 @@ mod tests {
         assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(save));
 
         let mut unknown = frame;
-        unknown[PICK_PURPOSE_OFFSET] = 2;
+        unknown[PICK_PURPOSE_OFFSET] = 3;
         assert_eq!(
             WindowRequest::from_bytes(&unknown[..len]),
             Err(Errno::OutOfRange)

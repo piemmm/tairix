@@ -1199,21 +1199,31 @@ fn exercise_dir_changes(bytes: &[u8]) {
     assert_eq!(&out[..at], bytes, "a batch round-trips byte for byte");
 }
 
-/// Drive the URB transport decoders on `bytes`.
+/// Drive the USB transport decoders on `bytes`.
 ///
 /// Split out of [`exercise`] so each helper stays a single, readable unit;
-/// the contract is identical (must not panic; an accepted decode round-trips
-/// through its encoder). The completion frame has no struct, so its decoder
-/// is exercised directly for the "must not panic" half of the contract.
+/// the contract is identical (must not panic; an accepted decode re-encodes
+/// to the very bytes that carried it). The completion frame has no struct,
+/// so its decoder is exercised directly for the "must not panic" half of the
+/// contract.
 fn exercise_usb_urb(bytes: &[u8]) {
-    use tairix_abi::usb_urb::{UrbRequest, URB_REQUEST_LEN};
-    if let Ok(req) = UrbRequest::decode(bytes) {
-        let mut buf = [0u8; URB_REQUEST_LEN];
-        req.encode(&mut buf)
-            .expect("an accepted URB request must re-encode");
-        let redecoded =
-            UrbRequest::decode(&buf).expect("round-trip of an accepted URB request must succeed");
-        assert_eq!(req, redecoded);
+    use tairix_abi::usb_urb::{IsoGrant, IsoNotify, UsbRequest, USB_REQUEST_MAX_LEN};
+    if let Ok(req) = UsbRequest::decode(bytes) {
+        let mut buf = [0u8; USB_REQUEST_MAX_LEN];
+        let n = req
+            .encode(&mut buf)
+            .expect("an accepted USB request must re-encode");
+        assert_eq!(
+            &buf[..n],
+            bytes,
+            "a request decodes only from its own bytes"
+        );
+    }
+    if let Ok(grant) = IsoGrant::decode(bytes) {
+        assert_eq!(&grant.encode()[..], bytes);
+    }
+    if let Ok(notify) = IsoNotify::decode(bytes) {
+        assert_eq!(&notify.encode()[..], bytes);
     }
     // The completion decoder accepts any byte slice and either reports the
     // transferred count or a fail-closed errno; the contract is that it never
@@ -2235,6 +2245,12 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         }
         .to_le_bytes(),
         WindowEvent::OpenRequested.to_le_bytes(),
+        WindowEvent::FolderPicked {
+            window_id: 3,
+            files: 2,
+            left_out: 1,
+        }
+        .to_le_bytes(),
         WindowEvent::ToolMoved {
             window_id: 3,
             over: ToolOver::Parent { x: 10, y: 20 },

@@ -18,7 +18,7 @@
 //! the node persists across every later generation bump while the driver
 //! lives, so a re-bind would provision a second, duplicate interface. A
 //! hand-off that fails (the stack is not up yet, or refuses) is fail-soft —
-//! logged and retried on the next bump, exactly like an unavailable driver
+//! logged and retried at the next reaction, exactly like an unavailable driver
 //! store — never fatal to the observe loop.
 
 use alloc::collections::BTreeSet;
@@ -54,7 +54,8 @@ pub trait NetstackBind {
     /// # Errors
     ///
     /// The stack's typed refusal, or a transport failure — treated
-    /// fail-soft by the caller (retried on the next generation bump).
+    /// fail-soft by the caller (retried when the tree next moves or a volume
+    /// is mounted).
     fn bind_driver(
         &mut self,
         endpoint_id: u64,
@@ -75,7 +76,8 @@ pub trait NetstackBind {
     /// # Errors
     ///
     /// The stack's typed refusal, or a transport failure — treated
-    /// fail-soft by the caller (retried on the next generation bump).
+    /// fail-soft by the caller (retried when the tree next moves or a volume
+    /// is mounted).
     fn apply_settings(&mut self, settings: NetworkSettings) -> Result<(), Errno>;
 
     /// Deliver one managed interface's declarative configuration to the

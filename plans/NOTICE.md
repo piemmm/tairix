@@ -49,10 +49,12 @@ filesystem's locks.
 
 | Topic | Payload | Publisher | Subscribers |
 |---|---|---|---|
-| `Desktop` | `DesktopInfo` (12 B) | the seat's **live display lease** holder | every windowed app, through `lib/window` |
+| `Desktop` | `DesktopInfo` (28 B) | the seat's **live display lease** holder | every windowed app, through `lib/window` |
 | `Mounts` | none — the generation *is* the news | the kernel, from every `MountTable` mutation | `files.app`'s places rail |
 | `MemoryPressure` | the band depth (1 B) | the kernel, from `MEM_STATS` | `lib/procinfo::pressure`, for every process holding a cache |
-| `DisplayLease` | the boot seat's lease word (8 B) | the kernel, from its seat registry | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark |
+| `DisplayLease` | the boot seat's lease word and its holder's login session (24 B) | the kernel, from its seat registry and capability table | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark; the audio service, to mix only the holder's session into the seat's speakers |
+| `AudioCapture` | the capture streams moving frames (4 B) | the audio service, by its reserved rendezvous | the session's recording indicator, the Settings Sound pane |
+| `AudioDevices` | how many times a device or its controls changed (8 B) | the audio service, by its reserved rendezvous | the session, which remembers its user's controls; the Settings Sound pane |
 
 Authority carries **no new capability**:
 
@@ -61,15 +63,19 @@ Authority carries **no new capability**:
   fact `WaitSourceKind::SeatInput` and the seat-scoped reserved-endpoint bind
   are gated on. A background session's publish is refused; it re-publishes when
   it re-acquires the lease on foreground wake.
+- `AudioCapture` and `AudioDevices` admit only the process bound to the
+  reserved `AUDIO_ENDPOINT` — the one principal that holds every stream and
+  every device, so no program can understate its own recording or fake a
+  change to the devices.
 - `Mounts`, `MemoryPressure` and `DisplayLease` are kernel-owned: a userland
   publish to any of them is refused outright.
 - *Reading* is ungated for every topic but `DisplayLease`. The others are
-  machine-wide facts no principal owns and each was already readable — the
-  desktop through the window channel's `QueryDesktop`, the band through the
-  ungated System Information query — so gating the read would only force
-  applications to guess. The lease's history is what `SEAT_LIST` reports under
-  `CAP_SYSINFO_HW`, so only the process bound to the reserved
-  `DISPLAY_ENDPOINT` may read it, subscribe to it, or be woken by it
+  machine-wide facts no principal owns, each already readable or, for the
+  capture count, as public as a device in use is on every system — so gating
+  the read would only force applications to guess. The lease's history is what
+  `SEAT_LIST` reports under `CAP_SYSINFO_HW`, so only the two services that own
+  the seat's devices — the processes bound to the reserved `DISPLAY_ENDPOINT`
+  and `AUDIO_ENDPOINT` — may read it, subscribe to it, or be woken by it
   (`notice::may_observe`, the one definition the read, the subscription and
   the readiness scan share).
 
@@ -100,9 +106,16 @@ copy:
   bespoke wait source used. A band that deepens and relaxes again before the
   waiter runs therefore correctly reports nothing to do.
 - `DisplayLease` — the boot seat's lease word, rendered from the seat registry
-  rather than copied: the generation doubled, its low bit set once that lease
-  has ended. It only grows, so it is its own generation, and every acquire,
-  release, revocation and dead owner's reclaim is one edge.
+  rather than copied: four times the generation, plus the lease's phase —
+  held, ended in a handover, or ended back to the text console. It only grows,
+  so it is its own generation, and every acquire, release, revocation, dead
+  owner's reclaim, and console switch that ends a handover is one edge. The
+  holder's login session is read from the capability table when the payload
+  is, taken before the seat's lock, never after; it changes only with the
+  holder, so it needs no edge of its own.
+- `AudioCapture` — a counter bumped only when the published count differs, as
+  `Desktop`'s is.
+- `AudioDevices` — bumped whenever the audio service's change count moves.
 
 ## The query/edge pairing
 

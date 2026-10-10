@@ -4,9 +4,11 @@
 //! It is the process half of `tairix_audiod`: it claims the reserved
 //! `audio-v1` rendezvous, binds one notify port per device channel it
 //! adopts, and parks on a wait set over {control endpoint, every device's
-//! notify port} for the life of the machine. Nothing spins: the device's own
-//! period interrupt reaches this loop as a driver notify, and there is no
-//! audio tick anywhere in the system.
+//! notify port, the seat's lease} for the life of the machine. Nothing spins:
+//! the device's own period interrupt reaches this loop as a driver notify,
+//! and there is no audio tick anywhere in the system. Whenever the number of
+//! capture streams moving frames changes, it publishes the count as the
+//! `AudioCapture` notice the session's recording indicator is drawn from.
 //!
 //! The three I/O seams the engine is written over are backed here, and
 //! nowhere else:
@@ -38,11 +40,12 @@ mod program {
         AudioRequest, AUDIO_ENDPOINT, AUDIO_MAX_REPLY, AUDIO_MAX_REQUEST, AUDIO_NOTIFY_LEN,
     };
     use tairix_abi::driver::audio_channel::AUDIO_CHANNEL_NOTIFY_LEN;
+    use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{CapabilityId, Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
     use tairix_audiod::events;
-    use tairix_audiod::{exit, AudioChannelTransport, AudioService, Caller, RegionHost, RegionId};
+    use tairix_audiod::{exit, AudioChannelTransport, AudioService, RegionHost, RegionId};
     use tairix_caps::CapabilitySet;
     use tairix_log::{log, Event, Level};
     use tairix_rt::{ClockDelay, LogSink};
@@ -54,6 +57,13 @@ mod program {
 
     /// Wait-set token of the control endpoint.
     const CONTROL_TOKEN: u64 = 0;
+
+    /// Wait-set token of the seat's lease notice; device tokens count up from
+    /// one, so the top of the range is free.
+    const LEASE_TOKEN: u64 = u64::MAX;
+
+    /// The engine over this process's live seams.
+    type Service = AudioService<RtRegions, RtNotifier, ClockDelay>;
 
     /// One buffer wide enough for either notify frame the serve loop can
     /// receive. Only a device-channel frame arrives on these ports today;
@@ -239,6 +249,18 @@ mod program {
         {
             return exit::NO_RESOURCES;
         }
+        // Readable only by the holder of the rendezvous just claimed: the
+        // speakers are the seat's, so this service follows its lease.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::DisplayLease.as_u32()),
+            LEASE_TOKEN,
+        ) != 0
+        {
+            return exit::NO_RESOURCES;
+        }
         // The mixing path must not be preempted by ordinary work, and an
         // audio buffer must never be paged out — releasing one under memory
         // pressure buys a few kibibytes and costs an audible glitch. Both are
@@ -287,14 +309,19 @@ mod program {
         }
     }
 
-    /// Park on the wait set and serve control requests and device notifies
-    /// for the life of the service.
+    /// Park on the wait set and serve control requests, device notifies and
+    /// the seat's lease for the life of the service.
     fn serve(set: u64, pid: u64) -> i32 {
         let mut service = AudioService::new(RtRegions::new(), RtNotifier, ClockDelay::new());
         let mut request = [0u8; AUDIO_MAX_REQUEST];
         let mut reply = [0u8; AUDIO_MAX_REPLY];
         let mut notify = [0u8; NOTIFY_BUF];
+        let mut published = None;
+        let mut announced = None;
+        follow_seat(&mut service);
         loop {
+            publish_captures(&service, &mut published);
+            publish_devices(&service, &mut announced);
             let mut token = 0u64;
             let woke = tairix_rt::waitset_wait(set, u64::MAX, &mut token);
             if woke < 0 {
@@ -304,21 +331,97 @@ mod program {
                 // A lapsed wake with no ready source; re-park.
                 continue;
             }
-            if token == CONTROL_TOKEN {
-                serve_control(&mut service, set, pid, &mut request, &mut reply);
-                continue;
-            }
-            let Some(index) = usize::try_from(token.saturating_sub(1)).ok() else {
-                continue;
-            };
-            let Some(port) = service.device_notify_endpoint(index) else {
-                continue;
-            };
-            let mut from = [0u8; ORIGIN_WIRE_LEN];
-            while let Ok(len) = tairix_rt::ipc_recv(port, &mut notify, &mut from) {
-                service.on_device_notify(index, &notify[..len], &LogSink);
+            match token {
+                CONTROL_TOKEN => serve_control(&mut service, set, pid, &mut request, &mut reply),
+                LEASE_TOKEN => follow_seat(&mut service),
+                device => drain_device(&mut service, device, &mut notify),
             }
         }
+    }
+
+    /// Hand every notify waiting on the device behind `token` to the engine.
+    fn drain_device(service: &mut Service, token: u64, notify: &mut [u8; NOTIFY_BUF]) {
+        let Some(index) = usize::try_from(token.saturating_sub(1)).ok() else {
+            return;
+        };
+        let Some(port) = service.device_notify_endpoint(index) else {
+            return;
+        };
+        let mut from = [0u8; ORIGIN_WIRE_LEN];
+        while let Ok(len) = tairix_rt::ipc_recv(port, notify, &mut from) {
+            service.on_device_notify(index, &notify[..len], &LogSink);
+        }
+    }
+
+    /// Adopt the seat's current lease. One that cannot be read leaves the room
+    /// nobody's, so no stream plays into a room it may not be in, and says
+    /// why.
+    fn follow_seat(service: &mut Service) {
+        let mut buf = [0u8; NOTICE_PAYLOAD_MAX];
+        let read = tairix_rt::notice_read(NoticeTopic::DisplayLease, &mut buf);
+        let lease = usize::try_from(read)
+            .ok()
+            .and_then(|len| buf.get(..len))
+            .map(|bytes| Notice::decode(NoticeTopic::DisplayLease, bytes));
+        if let Some(Ok(Notice::DisplayLease(lease))) = lease {
+            service.seat_changed(lease, &LogSink);
+            return;
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: events::NOTICE_UNAVAILABLE,
+                message: "audiod: the seat's lease is unreadable; no stream plays until it is",
+                fields: &[],
+            },
+        );
+    }
+
+    /// Publish the machine's capture count when it moved, so the recording
+    /// indicator follows every stream that starts or stops hearing the room.
+    /// Each count is offered once: a refusal is stated, not retried on every
+    /// period that follows.
+    fn publish_captures(service: &Service, published: &mut Option<u32>) {
+        let live = service.live_captures();
+        if *published == Some(live) {
+            return;
+        }
+        *published = Some(live);
+        if tairix_rt::notice_publish(&Notice::AudioCapture { live }) == 0 {
+            return;
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: events::NOTICE_UNAVAILABLE,
+                message: "audiod: the capture count could not be published; the indicator may lag",
+                fields: &[],
+            },
+        );
+    }
+
+    /// Publish the device-change count when it moved, so every surface that
+    /// shows a device or its controls reads them again.
+    fn publish_devices(service: &Service, announced: &mut Option<u64>) {
+        let changes = service.changes();
+        if *announced == Some(changes) {
+            return;
+        }
+        *announced = Some(changes);
+        if tairix_rt::notice_publish(&Notice::AudioDevices { changes }) == 0 {
+            return;
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: events::NOTICE_UNAVAILABLE,
+                message: "audiod: a device change could not be published; surfaces may lag",
+                fields: &[],
+            },
+        );
     }
 
     /// Serve one control-endpoint doorbell.
@@ -328,7 +431,7 @@ mod program {
     /// other request is the engine's, checked against the caller's
     /// kernel-attested origin.
     fn serve_control(
-        service: &mut AudioService<RtRegions, RtNotifier, ClockDelay>,
+        service: &mut Service,
         set: u64,
         pid: u64,
         request: &mut [u8; AUDIO_MAX_REQUEST],
@@ -347,42 +450,46 @@ mod program {
             );
             return;
         };
-        if let Ok(AudioRequest::BindDriver { endpoint_id }) = AudioRequest::decode(&request[..len])
+        if let Ok(AudioRequest::BindDriver {
+            endpoint_id,
+            location,
+        }) = AudioRequest::decode(&request[..len])
         {
-            let status = bind_driver(service, set, pid, &origin, endpoint_id);
+            let status = bind_driver(service, set, pid, &origin, endpoint_id, location);
             let _ = tairix_rt::call_reply(AUDIO_ENDPOINT, ticket, &encode_status_reply(status));
             return;
         }
-        let caller = Caller {
-            origin,
-            // Sinks are leased to seats by the seat integration; until it
-            // lands no sink is claimed and the router admits any principal.
-            seat: None,
-        };
-        let reply_len = service.handle(&caller, &request[..len], reply, &LogSink);
+        let reply_len = service.handle(&origin, &request[..len], reply, &LogSink);
         let _ = tairix_rt::call_reply(AUDIO_ENDPOINT, ticket, &reply[..reply_len]);
     }
 
     /// Adopt a driver's device channel, having checked the caller genuinely
     /// holds the authority to put a driver on this machine.
     fn bind_driver(
-        service: &mut AudioService<RtRegions, RtNotifier, ClockDelay>,
+        service: &mut Service,
         set: u64,
         pid: u64,
         origin: &Origin,
         endpoint_id: u64,
+        location: u64,
     ) -> Result<(), Errno> {
         if !origin.capabilities().holds_cap(CapabilityId::DRV_LOAD) {
             return Err(Errno::PermissionDenied);
         }
-        let index = service.device_count();
+        let index = service.bind_slot();
         let port = device_notify_endpoint(pid, index);
-        // A port already bound from an earlier adoption at this index is
-        // this service's own and is reused; anything else is a refusal.
+        // A slot a reaped device left keeps its port and its wake: both are
+        // this service's own and are reused. Anything else is a refusal.
+        let exists = -i64::from(Errno::AlreadyExists.as_i32().unsigned_abs());
         let bound = tairix_rt::port_bind(port, AUDIO_CHANNEL_NOTIFY_LEN, 16);
-        if bound != 0 && bound != -i64::from(Errno::AlreadyExists.as_i32().unsigned_abs()) {
+        if bound != 0 && bound != exists {
             return Err(Errno::from_syscall(bound));
         }
+        // The port's id is derived from this service's pid, so only the
+        // driver serving the channel is admitted: no one else may fill it or
+        // forge a period, a drain or a fault into it, and the admission
+        // discards whatever another sent before it.
+        tairix_rt::port_admit(port, endpoint_id)?;
         // A message port, not a call endpoint: the driver *notifies* this
         // side, it never calls it.
         let added = tairix_rt::waitset_ctl(
@@ -392,11 +499,12 @@ mod program {
             port,
             device_token(index),
         );
-        if added != 0 {
+        if added != 0 && added != exists {
             return Err(Errno::from_syscall(added));
         }
         service.bind_device(
             endpoint_id,
+            location,
             port,
             Box::new(RtChannel {
                 endpoint: endpoint_id,

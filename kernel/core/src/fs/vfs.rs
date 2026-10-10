@@ -16,7 +16,7 @@ use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
     NodeId, NodeKind as DriverNodeKind,
 };
-use tairix_abi::fs::{RealpathMode, FS_PATH_MAX};
+use tairix_abi::fs::{RealpathMode, RenameFlags, FS_PATH_MAX};
 use tairix_abi::CapabilityId;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -984,6 +984,8 @@ impl Vfs {
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::InvalidPath`] if `src` and `dst` are on different
     ///   mounts.
+    /// * [`VfsError::AlreadyExists`] if `dst` is occupied under
+    ///   [`RenameFlags::NO_REPLACE`].
     /// * [`VfsError::NotEmpty`], [`VfsError::PermissionDenied`],
     ///   [`VfsError::NotADirectory`], or [`VfsError::Io`].
     pub fn rename_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
@@ -992,9 +994,10 @@ impl Vfs {
         src: &Path,
         dst: &Path,
         fs: &mut F,
+        flags: RenameFlags,
     ) -> Result<Option<NodeId>, VfsError> {
         let (mount, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
-        DelegatedFs::new(fs, mount).rename(cred, &src_rem, &dst_rem)
+        DelegatedFs::new(fs, mount).rename(cred, &src_rem, &dst_rem, flags)
     }
 
     /// Per-inode counterpart of [`Vfs::rename_via`].
@@ -1008,9 +1011,10 @@ impl Vfs {
         src: &Path,
         dst: &Path,
         fs: &mut F,
+        flags: RenameFlags,
     ) -> Result<Option<NodeId>, VfsError> {
         let (mount, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
-        DelegatedFs::new_secured(fs, mount).rename(cred, &src_rem, &dst_rem)
+        DelegatedFs::new_secured(fs, mount).rename(cred, &src_rem, &dst_rem, flags)
     }
 
     /// Resolve the driver-backed mount covering *both* `first` and `second`

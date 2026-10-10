@@ -37,6 +37,8 @@ pub enum RailGroup {
     Network,
     /// The display path.
     Graphics,
+    /// The sound devices and their streams.
+    Sound,
     /// The machine itself: its identity, its seats, its authority.
     Machine,
     /// What broke: hung objects and their recovery actions.
@@ -53,6 +55,7 @@ impl RailGroup {
             RailGroup::Storage => "STORAGE",
             RailGroup::Network => "NETWORK",
             RailGroup::Graphics => "GRAPHICS",
+            RailGroup::Sound => "SOUND",
             RailGroup::Machine => "MACHINE",
             RailGroup::Recovery => "RECOVERY",
         }
@@ -96,6 +99,8 @@ pub enum DeviceId {
     Interface([u8; IF_NAME_LEN]),
     /// The display path.
     Graphics,
+    /// The sound devices.
+    Audio,
     /// The machine's identity and uptime.
     Identity,
     /// The machine's seats and its logged-in census.

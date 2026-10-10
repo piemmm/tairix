@@ -3634,6 +3634,33 @@ mod rename_model {
         assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
     }
 
+    /// The volume decides a clash under its own rule — a sibling spelled
+    /// differently in case only, where case is ignored — and refuses the
+    /// no-replace move; that is a clash to the user, not an opaque refusal.
+    #[test]
+    fn a_name_the_volume_finds_taken_is_a_clash() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let pending = browser.prepare_rename("STORAGE").expect("no exact clash");
+        assert_eq!(
+            browser.finish_rename(&pending, Err(Errno::AlreadyExists)),
+            Err(RenameError::Clash)
+        );
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    /// A re-spelling of the entry's own name is a real rename: the exact
+    /// pre-check passes it to the volume, which renames the entry itself.
+    #[test]
+    fn a_re_spelling_of_the_entry_s_own_name_is_offered_to_the_volume() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select(0).expect("select Apps");
+        let pending = browser
+            .prepare_rename("APPS")
+            .expect("a case change is a change");
+        assert!(pending.to().ends_with("/APPS"));
+    }
+
     #[test]
     fn an_empty_directory_reports_no_selection() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
@@ -3912,6 +3939,14 @@ mod create_model {
         let result = browser.create_entry("Downloads", |_| Err(Errno::PermissionDenied));
         assert_eq!(result, Err(CreateError::Refused(Errno::PermissionDenied)));
         // No refresh happened: the original listing stands.
+        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    }
+
+    #[test]
+    fn a_name_the_volume_finds_taken_is_a_clash() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        let result = browser.create_entry("SYSTEM", |_| Err(Errno::AlreadyExists));
+        assert_eq!(result, Err(CreateError::Clash));
         assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
     }
 

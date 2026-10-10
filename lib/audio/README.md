@@ -6,7 +6,8 @@ Everything that decides *what samples come out*. `lib/sound` decodes sound
 files and this crate moves samples, exactly as `lib/image` decodes pictures
 and `lib/raster` draws them — neither knows the other.
 
-`no_std`, `forbid(unsafe_code)`, no I/O, no window, no syscall. Every decision
+`no_std`, `forbid(unsafe_code)`, no I/O, no window, no syscall — bar the live
+transport (`live`, feature `rt`) a freestanding program enables. Every decision
 the stack makes about a sample is therefore testable on a host with no machine
 attached. The mixer service (`audiod`) and the device-channel serve loop
 (`lib/audiochan`) are separate crates, for the reason `lib/netchan` is separate
@@ -21,7 +22,7 @@ from `lib/net`: a driver process must not link the mixer.
 | `resample` | The one rate conversion in the system. |
 | `mix` | How live streams sum into one period of device frames. |
 | `clock` | What a device's rate actually is, and the map between its frames and the wall clock. |
-| `route` | Which sink a stream lands on, and what a seat switch does to it. |
+| `route` | Which sink a stream lands on, and what the seat's room does with it. |
 | `volume` | Four gains resolved into one multiply and one number to show. |
 | `stream` | The client half of `audio-v1` — the part a program links. |
 

@@ -11,9 +11,10 @@ use alloc::vec::Vec;
 
 use tairix_controls::DisclosureSet;
 
-use crate::form::Setting;
+use crate::form::{Composition, Setting};
 use crate::registry::{
-    strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, StripRow, CATEGORIES,
+    strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent, StripRow,
+    CATEGORIES,
 };
 
 /// Every category the enum names, so the totality test iterates the closed
@@ -176,14 +177,23 @@ fn the_theme_pane_points_to_where_appearance_and_wallpaper_are_set() {
     assert!(needs.contains("accent palette"), "{needs}");
 }
 
-/// The audio service exists, so Sound states the one thing it lacks — a
-/// control over the devices — rather than an absence the tree contradicts.
+/// The audio service offers its device controls, so Sound composes them
+/// rather than stating an absence the tree contradicts, and offers no Apply:
+/// its effect is its feedback.
 #[test]
-fn the_sound_pane_states_the_missing_control_not_a_missing_stack() {
-    let (missing, needs) = statement_of(Pane::Sound);
-    assert!(missing.contains("audio service"), "{missing}");
-    assert!(!missing.contains("no audio support"), "{missing}");
-    assert!(needs.contains("audio service"), "{needs}");
+fn the_sound_pane_composes_the_audio_services_controls() {
+    let Some((_, row)) = Pane::Sound.locate() else {
+        panic!("Sound is not listed");
+    };
+    assert_eq!(
+        row.backing,
+        PaneBacking::Composed(PaneContent::Form(Composition::Sound))
+    );
+    assert_eq!(row.action(), None);
+    assert!(
+        row.settings.contains(&"Volume"),
+        "a reader searching for volume finds it"
+    );
 }
 
 #[test]

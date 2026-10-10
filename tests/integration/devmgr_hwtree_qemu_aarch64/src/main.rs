@@ -203,6 +203,10 @@ mod kernel {
             HW_TREE_SOURCE.node(node_id)
         }
 
+        fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
+            HW_TREE_SOURCE.for_each_node(visit)
+        }
+
         fn publish(&self, parent_id: u32, node: HwNode) -> Result<u32, Errno> {
             HW_TREE_SOURCE.publish(parent_id, node)
         }

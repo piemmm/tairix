@@ -23,6 +23,10 @@ workspace = true
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The write barrier between building a chain and starting the channel on it.
 tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+# The supplier seam the endpoint asks the kernel about its callers through,
+# and in the driver process the grants the node was admitted with, its
+# register window and its carves.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 
 [dev-dependencies]
 # The endpoint walk draws its steps through the shared seed seam, so a failing
@@ -32,8 +36,6 @@ tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed host is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The grants the node was admitted with, its register window and its carves.
-tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # Every decision the endpoint takes, recorded with a stable event id.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # `_start`, the wait set, the call endpoint and the shared-region calls.

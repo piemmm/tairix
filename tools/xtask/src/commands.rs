@@ -1755,7 +1755,12 @@ type DriverBundleBuilder =
 /// own binding, so it binds there and can switch the display off, while an
 /// emulated boot's `ramfb` surface binds the generic service. The legacy DMA
 /// engine driver binds the discovered `brcm,bcm2835-dma` node and serves its
-/// channels to the peripheral drivers whose nodes name request lines on it.
+/// channels to the peripheral drivers whose nodes name request lines on it,
+/// as the clock manager driver serves the audio blocks' clocks to theirs; the
+/// headphone jack's and the I²S interface's drivers are those consumers, and
+/// a USB audio device behind the bus chain gets the USB Audio Class driver.
+/// Both codec drivers ship, so an I²S HAT carrying either part works with no
+/// rebuild.
 const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::VCMAILBOX_STORE_PATH,
@@ -1812,6 +1817,30 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::DMA_BCM2835_STORE_PATH,
         image_drivers::build_dma_bcm2835_bundle,
+    ),
+    (
+        image_drivers::CPRMAN_BCM2711_STORE_PATH,
+        image_drivers::build_cprman_bcm2711_bundle,
+    ),
+    (
+        image_drivers::PWM_AUDIO_STORE_PATH,
+        image_drivers::build_pwm_audio_bundle,
+    ),
+    (
+        image_drivers::I2S_AUDIO_STORE_PATH,
+        image_drivers::build_i2s_audio_bundle,
+    ),
+    (
+        image_drivers::USB_UAC_STORE_PATH,
+        image_drivers::build_usb_uac_bundle,
+    ),
+    (
+        image_drivers::PCM5102A_STORE_PATH,
+        image_drivers::build_pcm5102a_bundle,
+    ),
+    (
+        image_drivers::PCM5122_STORE_PATH,
+        image_drivers::build_pcm5122_bundle,
     ),
     (
         image_drivers::DS3231_STORE_PATH,
@@ -2322,6 +2351,25 @@ mod tests {
             assert!(
                 PLATFORM_IMAGE_DRIVER_STORE.iter().any(|(p, _)| *p == path),
                 "the image must ship the driver for every NIC it declares"
+            );
+        }
+    }
+
+    /// The shipped driver store carries the Pi's audio paths: the headphone
+    /// jack, an I2S HAT's interface and either codec, and a USB audio device
+    /// behind the bus chain.
+    #[test]
+    fn the_platform_driver_store_carries_the_pis_audio_drivers() {
+        for path in [
+            image_drivers::PWM_AUDIO_STORE_PATH,
+            image_drivers::I2S_AUDIO_STORE_PATH,
+            image_drivers::PCM5102A_STORE_PATH,
+            image_drivers::PCM5122_STORE_PATH,
+            image_drivers::USB_UAC_STORE_PATH,
+        ] {
+            assert!(
+                PLATFORM_IMAGE_DRIVER_STORE.iter().any(|(p, _)| *p == path),
+                "the image must ship every audio driver the board can use"
             );
         }
     }

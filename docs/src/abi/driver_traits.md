@@ -645,12 +645,17 @@ reaches the PCI driver through `&dyn PciBus`, never naming the concrete
 | Method                                | Capability gate                        |
 |---------------------------------------|----------------------------------------|
 | `map_bar_window(bdf, bar_index, mapper)` | `CAP_MMIO_MAP` (enforced by `mapper`). |
+| `driver_window(bdf, bar_index)`       | Configuration-space owner.             |
 | `enable_memory_space(bdf)`            | Configuration-space owner.             |
 | `set_bus_master(bdf, master)`         | Configuration-space owner.             |
 
 `map_bar_window` resolves the memory BAR's probed base/length and maps
 it through the `CAP_MMIO_MAP`-gated `MmioMapper` (refusing I/O-port and
-unused BARs). `enable_memory_space` turns on decoding of the function's
+unused BARs). `driver_window` answers the part of a memory BAR a driver may
+be granted: the BAR up to the first page holding the function's MSI-X table
+or pending-bit array, which only the owner programs — a driver able to write
+its own table could aim the function's messages anywhere. The kernel grants
+a discovered xHCI controller exactly that window. `enable_memory_space` turns on decoding of the function's
 BARs, and `set_bus_master` lets it issue upstream memory requests (its
 DMA, and the writes that deliver its MSIs) or stops it. Only the owner of
 the function's configuration space calls `set_bus_master`, as it hands

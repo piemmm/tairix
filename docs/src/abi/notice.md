@@ -46,7 +46,9 @@ blocking I/O an interactive surface may not perform.
 | `Desktop` | `DesktopInfo` (46 bytes) | the holder of a seat's live display lease | every windowed application |
 | `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation | the file manager's places rail |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
-| `DisplayLease` | the boot seat's lease word (`DisplayLease`, 8 bytes) | the kernel, from its seat registry | the display service alone |
+| `DisplayLease` | the boot seat's lease word and its holder's login session (`DisplayLease`, 24 bytes) | the kernel, from its seat registry | the display and audio services alone |
+| `AudioCapture` | the capture streams moving frames (`u32`, 4 bytes) | the audio service | the session's recording indicator |
+| `AudioDevices` | how many times a device or its controls changed (`u64`, 8 bytes) | the audio service | the session, which remembers its user's controls |
 
 The set is closed and deliberately small. A topic exists only where a *state*
 must be agreed; an occurrence a subscriber must witness individually — a
@@ -61,9 +63,9 @@ never reads a shape the publisher could not have meant. `Notice::encode` /
 
 `NOTICE_PAYLOAD_MAX` sizes a subscriber's buffer and the kernel's per-topic
 retention. It is a containment bound, not a capacity: it is what stops a
-topic's payload growing into a channel. It is the widest topic's own record,
-the desktop's, which carries the screen, the scale, the four theme axes and the
-double-click interval.
+topic's payload growing into a channel. It is derived from the closed topic set
+as the widest topic's own record — today the desktop's, which carries the
+screen, the scale, the four theme axes and the double-click interval.
 
 ## Authority
 
@@ -74,18 +76,25 @@ Publishing is authorised per topic, and no topic needed a new capability:
   fact a `SeatInput` wait-set member and the seat-scoped reserved-endpoint bind
   are gated on. A background session is refused and re-publishes when it
   re-acquires the lease on foreground wake.
+- **`AudioCapture`** and **`AudioDevices`** admit only the process bound to
+  the reserved `AUDIO_ENDPOINT` — the audio service, which holds every stream
+  and every device, so no program can hide its own recording from the
+  indicator or fake a change to the devices.
 - **`Mounts`**, **`MemoryPressure`** and **`DisplayLease`** are kernel-owned: a
   userland publish to any of them is refused with `PermissionDenied`.
 
-*Reading* is ungated for every topic but one. `Desktop`, `Mounts` and
-`MemoryPressure` are machine-wide facts no principal owns, each already
-readable through an existing query, so gating them would only force
-applications to guess at facts the system knows. `DisplayLease` is not such a
-fact: when a console lease is taken and given up is what the seat inventory
-reports only under `CAP_SYSINFO_HW`. It is read, subscribed to and woken for
-only by the process bound to the reserved `DISPLAY_ENDPOINT` — a bind only a
-privileged service can make — and anyone else is refused `PermissionDenied`.
-A member whose owner has since given the rendezvous up reports nothing more.
+*Reading* is ungated for every topic but one. `Desktop`, `Mounts`,
+`MemoryPressure`, `AudioCapture` and `AudioDevices` are machine-wide facts no
+principal owns —
+whether a sound device is in use is public on every system — so gating them
+would only force applications to guess at facts the system knows.
+`DisplayLease` is not such a fact: when a console lease is taken and given up
+is what the seat inventory reports only under `CAP_SYSINFO_HW`. It is read,
+subscribed to and woken for only by the two services that own the seat's
+devices, the processes bound to the reserved `DISPLAY_ENDPOINT` and
+`AUDIO_ENDPOINT` — binds only a privileged service can make — and anyone else
+is refused `PermissionDenied`. A member whose owner has since given the
+rendezvous up reports nothing more.
 
 ## Edges and generations
 
@@ -106,11 +115,18 @@ Each generation comes from its topic's own source of truth:
   no repaint — and never misses a real change.
 - `Mounts`' is a counter bumped by every mount-table mutation. A refused
   mutation changed nothing and bumps nothing.
-- `DisplayLease`'s is the lease word itself — the boot seat's lease
-  generation, doubled, with its low bit set once that lease has ended — which
-  only grows, so every acquire and every end is one edge. The display service
-  releases a configuration whose lease has ended, and lights the display it
-  left dark, without waiting for anyone to call it.
+- `DisplayLease`'s is the lease word itself — four times the boot seat's lease
+  generation, plus its phase: held, ended in a handover, or ended back to the
+  text console — which only grows, so every acquire, every end, and a console
+  switch that ends a handover is one edge. The payload adds the login session
+  the holder lies within (`DisplayLease::session`), which changes only with
+  the holder. The display service releases a configuration whose lease has
+  ended, and lights the display it left dark, without waiting for anyone to
+  call it; the audio service holds every stream outside the room the lease
+  describes.
+- `AudioCapture`'s is a counter bumped only when the published count differs,
+  as `Desktop`'s is, and `AudioDevices`' is bumped whenever the audio service's
+  change count moves.
 
 ## The query/edge pairing
 

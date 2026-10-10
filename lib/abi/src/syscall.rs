@@ -33,6 +33,16 @@ pub const SYSCALL_TABLE_HASH_LEN: usize = 32;
 /// program may write the file as the user could, and no further.
 pub const GRANT_EXTENT_INHERIT: u64 = u64::MAX;
 
+/// The most [`SyscallNumber::FD_GRANT`] delegations one grantor may have
+/// pending — minted and not yet redeemed — to one recipient.
+///
+/// A fixed containment bound, not a capacity: an honest hand-over is redeemed
+/// as it arrives, so only a grantor leaving them for the recipient to carry
+/// reaches it. Charging the grantor rather than the recipient keeps one from
+/// exhausting a recipient's table for every other, and a grantor's pending
+/// delegations end with it, so churning processes cannot accumulate them.
+pub const FD_GRANT_PENDING_MAX: usize = 64;
+
 /// Stable syscall identifier.
 ///
 /// Wraps a `u16` so it cannot be confused with raw integer arguments at call
@@ -1404,16 +1414,19 @@ impl SyscallNumber {
     /// descriptor of the **caller's own** table — the console it names is
     /// the one whose ownership changes, the same fd-scoped authority
     /// [`Self::STREAM_INPUT_MODE`] uses) and `pid: i64` (a **live child of
-    /// the caller** to make the owner, or `0` to release). While an owner
-    /// is recorded, **only the owner** drains the console's input
-    /// ([`Self::STREAM_READ`]) or changes its line discipline
-    /// ([`Self::STREAM_INPUT_MODE`]) — every other task is refused with
-    /// [`crate::Errno::NotForeground`] — and the cooked-mode line
-    /// discipline consumes `^C`/`^Z` and delivers
-    /// [`crate::Signal::Interrupt`] / [`crate::Signal::Stop`] to the owner
-    /// instead of queueing the byte. With no owner (or in raw/secret mode)
-    /// every byte flows to the reader unchanged. Returns an error code
-    /// (`Ok(0)` on success).
+    /// the caller** to make the owner, the caller's **own** pid to hold the
+    /// terminal itself, or `0` to release). While an owner is recorded,
+    /// **only the owner** drains the console's input ([`Self::STREAM_READ`],
+    /// re-checked before every byte is taken, so a reader parked before the
+    /// terminal changed hands takes nothing after) or changes its line
+    /// discipline ([`Self::STREAM_INPUT_MODE`]) — every other task is refused
+    /// with [`crate::Errno::NotForeground`]. The cooked-mode line discipline
+    /// consumes `^C`/`^Z` and delivers [`crate::Signal::Interrupt`] /
+    /// [`crate::Signal::Stop`] to a **job** — an owner the terminal was
+    /// handed to — instead of queueing the byte; a process holding its own
+    /// terminal (the shell at its prompt) is no job and reads the bytes.
+    /// With no owner (or in raw/secret mode) every byte flows to the reader
+    /// unchanged. Returns an error code (`Ok(0)` on success).
     ///
     /// Fails closed, with layered, capability-minimal authority: a
     /// non-readable or unbacked `fd` and an unknown console are refused
@@ -2763,6 +2776,41 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::FS_ACCESS`].
     pub const FS_WATCH_READ: Self = Self(137);
 
+    /// Admit one sender to a port the caller owns: the process instance
+    /// serving a call endpoint the caller names. From then on the port
+    /// refuses an [`Self::IPC_SEND`] from any other instance with
+    /// [`crate::Errno::PermissionDenied`], so a port whose id another
+    /// process can work out cannot be filled by it to starve the sender it
+    /// serves. Naming the sender by the endpoint it serves lets the kernel
+    /// attest who that is, where an identity passed in would be the caller's
+    /// word.
+    ///
+    /// Arguments: `port: u64` (a port the caller bound through
+    /// [`Self::PORT_BIND`]) and `server: u64` (a bound call endpoint, whose
+    /// serving instance is admitted as it is now). A later call replaces the
+    /// admitted sender; messages already queued stay. An unbound port or
+    /// endpoint is [`crate::Errno::NotFound`], and a port another process
+    /// owns [`crate::Errno::PermissionDenied`]. Ungated: the caller narrows
+    /// only its own port.
+    pub const PORT_ADMIT: Self = Self(138);
+
+    /// Whether the caller holds the controlling (foreground) ownership of
+    /// the terminal `fd` names (`plans/DISPLAY.md` D5) — the `tcgetpgrp`
+    /// question, answered for the caller alone.
+    ///
+    /// Arguments: `fd: u32`, one of the caller's own inherited standard
+    /// streams naming a console, or a pty slave of the caller. Returns `1`
+    /// when the caller owns the terminal, `0` when it is unowned or another
+    /// task owns it, or `-errno`: [`crate::Errno::NotFound`] for a
+    /// descriptor naming no terminal, [`crate::Errno::NotImplemented`] for
+    /// an unknown console. A program that draws on its terminal only while
+    /// it is in the foreground asks this once, then learns of every change
+    /// through a [`crate::WaitSourceKind::Foreground`] member rather than by
+    /// asking again. Requires [`crate::CapabilityId::CONSOLE_READ`], the
+    /// authority every other terminal control names; not audited, because
+    /// it reads the caller's own standing and changes nothing.
+    pub const FOREGROUND_HELD: Self = Self(139);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3047,6 +3095,7 @@ mod tests {
         assert_eq!(SyscallNumber::CALL_CANCEL.as_u16(), 101);
         assert_eq!(SyscallNumber::FS_WATCH.as_u16(), 136);
         assert_eq!(SyscallNumber::FS_WATCH_READ.as_u16(), 137);
+        assert_eq!(SyscallNumber::PORT_ADMIT.as_u16(), 138);
     }
 
     #[test]

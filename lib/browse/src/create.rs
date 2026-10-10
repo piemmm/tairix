@@ -146,8 +146,10 @@ impl CreateError {
 
 /// Validate `name` as a new entry in a directory listing `siblings`.
 ///
-/// Pure: the shared spelling rule, then a clash with a sibling. No permission
-/// decision is made here; that is the VFS's, at create time.
+/// Pure: the shared spelling rule, then an exact clash with a sibling. No
+/// permission decision is made here, and no clash under the volume's own
+/// matching rule: those are the VFS's, at create time, and a create never
+/// replaces, so a name the volume finds taken is refused as a clash then.
 ///
 /// # Errors
 ///

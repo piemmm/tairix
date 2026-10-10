@@ -253,9 +253,14 @@ asynchronous signals.
   queue (`stream_read`) or changes its line discipline
   (`stream_input_mode`); every other task — including the granting shell
   itself — is refused with the typed `Errno::NotForeground` (27) *before
-  any input is consumed*. Two tasks on one console can never both drain
-  it. An unowned console reads openly (the shell at its prompt;
-  single-tenant bring-up), exactly as before.
+  any input is consumed*, a parked reader included: the gate is asked again
+  before every byte it takes, and a change of hands wakes it to ask. Two
+  tasks on one console can never both drain it. An unowned console reads
+  openly (single-tenant bring-up).
+- **A process may hold its own terminal.** `console_foreground` with the
+  caller's own pid makes it the owner and its own granter — the shell's
+  standing at its prompt, from start-up and again after every foreground job,
+  so a background job reads nothing until it is brought forward.
 - **Handoff is an explicit, checked call, and moves only down the spawn
   chain.** `console_foreground` (72, `CAP_CONSOLE_READ`) grants the
   ownership to a **live child of the caller** (the same
@@ -276,17 +281,26 @@ asynchronous signals.
   so a gate that cannot prove death keeps denying — it can heal, never
   widen.
 - **Signal routing rides the same slot.** The cooked-mode `^C`/`^Z`
-  delivery to the foreground job (SP9) targets the same recorded owner, so
-  "who gets the interrupt" and "who drains the input" can never diverge. The
+  delivery to the foreground job (SP9) targets the same recorded owner when
+  it is a **job** — a process the terminal was handed to — so "who gets the
+  interrupt" and "who drains the input" can never diverge; a process holding
+  its own terminal is no job and reads those bytes. The
   slot records the owner's process *instance* beside its pid, and the
   delivery refuses a target whose pid now names a different one — an id whose
   task is gone may be drawn again, and a mis-delivered `^C` would kill a
   bystander.
 
+- **Where it stands, and when it moves.** `foreground_held` (139) answers
+  whether the caller owns the terminal, and a `Foreground` wait-set member
+  is an edge on the terminal's ownership generation, so a full-screen
+  program draws only while it holds the foreground and learns of every
+  handover without asking on a timer.
+
 Kernel host tests prove the exclusivity (two tasks cannot both drain, the
-refused reader consumes nothing), the handoff transfer, the bystander
-steal refusals, the input-mode gate, and both no-wedge paths (exit release
-and gate healing).
+refused reader consumes nothing), the handoff transfer, a shell holding its
+own console and taking it back, the bystander steal refusals, the input-mode
+gate, the pty slave's gate, the `Foreground` edge, and both no-wedge paths
+(exit release and gate healing).
 
 ## Toward the live desktop session (Stages D7a–D7c)
 
@@ -465,7 +479,9 @@ user must read is a program's output; a screen the kernel is merely noting
 something on is not. An eviction
 (`seat_revoke`) and a dead owner's reclaim always restore the text console,
 so a wedged or hostile presenter cannot leave the screen dark by claiming a
-hand-over and exiting.
+hand-over and exiting — nor by asking for one when it acknowledges its
+eviction: that release is refused `SeatRevoked` and leaves the screen with
+the text console.
 
 The transition is driven by the seat registry itself, under the seat's own
 state lock, so it cannot be forgotten at a call site and two CPUs racing to
@@ -478,7 +494,7 @@ change ownership cannot leave the surface with the loser's answer:
 | `display_release(Handover)` | cleared, and held cleared | purged |
 | `seat_revoke` | repainted | purged |
 | owner task exits, faults, or is killed | repainted | purged |
-| `seat_switch` on an unowned seat | moves to the new foreground console | — |
+| `seat_switch` on an unowned seat | moves to the new foreground console, ending a hand-over | — |
 | refused acquire / release, a non-owner | unchanged | unchanged |
 
 The kernel's text console belongs to the **boot** seat (`SEAT_PRIMARY`),
@@ -522,6 +538,14 @@ inside the console's renderer, and waiting there would hang the machine with no
 report at all — including on a build whose report would otherwise have reached
 a serial console untouched. Losing a repaint is the lesser failure; the record
 still reaches its log sink.
+
+**The lease is a notice the seat's device services follow.** Every row above
+that changes the lease — and a `seat_switch` that ends a hand-over — moves the
+boot seat's `DisplayLease` notice (`docs/src/abi/notice.md`), whose payload
+says whether the seat is held, handed over, or back with its text console, and
+names the login session its holder lies within. The display service follows
+it to release a dead lease's configuration; the audio service follows it to
+mix only that session into the seat's speakers (`docs/src/userland/audiod.md`).
 
 ## Observing seats
 

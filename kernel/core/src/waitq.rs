@@ -1013,6 +1013,20 @@ pub fn notice_wake() {
     NOTICE_WAITQ.request_wake();
 }
 
+/// The wait-queue holding `waitset_wait` callers with a `Foreground` member,
+/// woken whenever a terminal changes hands. One queue for every terminal: a
+/// woken waiter compares its own terminal's generation with the one its member
+/// last saw, and parks again when that one has not moved.
+pub static FOREGROUND_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Request a wake of every `Foreground` watcher because a terminal changed
+/// hands. Deferred, as [`notice_wake`] is: the exit path and the read gate
+/// move a terminal's ownership, and neither should take a wait-queue lock
+/// from inside what it is doing.
+pub fn foreground_wake() {
+    FOREGROUND_WAITQ.request_wake();
+}
+
 /// The wait-queue holding `waitset_wait` callers with a `File` or `DirWatch`
 /// member, each under the key of the node it watches (`crate::fswatch`), so a
 /// change wakes only the waiters of that node.
@@ -1407,6 +1421,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     },
     GlobalQueue {
         queue: &NOTICE_WAITQ,
+        timed: false,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &FOREGROUND_WAITQ,
         timed: false,
         deferred: true,
     },

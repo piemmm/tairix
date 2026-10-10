@@ -36,3 +36,6 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # writer every port and the kernel's own post-mortem share; the runner ends a
 # run on it rather than restating its id.
 tairix-arch-api = { path = "../../kernel/arch/api", version = "=0.0.0" }
+# The audio vertical's rate and channel count, which the capture backend is
+# set to, are defined once beside the signal both ends of it check.
+tairix-test-audio-wire = { path = "../../tests/integration/audio_wire", version = "=0.0.0" }

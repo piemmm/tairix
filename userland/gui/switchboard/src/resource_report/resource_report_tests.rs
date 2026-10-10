@@ -237,6 +237,7 @@ fn the_rail_always_carries_the_processor_memory_graphics_and_machine_panes() {
         DeviceId::Cpu,
         DeviceId::Memory,
         DeviceId::Graphics,
+        DeviceId::Audio,
         DeviceId::Identity,
         DeviceId::Sessions,
         DeviceId::Authority,
@@ -1746,4 +1747,87 @@ fn the_isa_fact_states_a_refused_inventory_as_refused() {
     let cpu = device(&report, DeviceId::Cpu);
 
     assert!(matches!(*fact(cpu, "ISA features"), Reading::Absent(_)));
+}
+
+fn sound_device(
+    device_id: u32,
+    direction: tairix_abi::driver::audio::StreamDirection,
+    name: &str,
+) -> tairix_abi::audio::AudioDeviceDescriptor {
+    use tairix_abi::audio::{AudioGain, AudioLocation, ControlAccess, DefaultChoice};
+    use tairix_abi::driver::audio::{
+        AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormats,
+    };
+    tairix_abi::audio::AudioDeviceDescriptor {
+        device_id,
+        direction,
+        jack: JackState::Present,
+        default: DefaultChoice::Inherited,
+        formats: SampleFormats::EMPTY,
+        channel_map: ChannelMap::STEREO,
+        rates: RateSupport::Continuous {
+            min: Rate::HZ_48000,
+            max: Rate::HZ_48000,
+        },
+        gain: None,
+        name: AudioName::new(name).expect("a short name"),
+        location: AudioLocation::new(0x51, 0).expect("a place"),
+        level: AudioGain::new(-650).expect("attenuation"),
+        own_level: false,
+        muted: true,
+        access: ControlAccess::Shown,
+        clock_millihertz: 47_999_500,
+        lost_frames: 12,
+    }
+}
+
+/// The Audio pane states each device's controls and measured rate and each
+/// stream's owner, and says what it could not read rather than showing
+/// nothing.
+#[test]
+fn the_audio_pane_states_its_devices_and_streams() {
+    use tairix_abi::audio::{StreamDescriptor, StreamRole, StreamState};
+    use tairix_abi::driver::audio::{Frames, StreamDirection};
+    let mut sample = permitted();
+    sample.audio_devices = Some(alloc::vec![
+        sound_device(1, StreamDirection::Playback, "Speakers"),
+        sound_device(2, StreamDirection::Capture, "Microphone"),
+    ]);
+    sample.audio_streams = Some(alloc::vec![StreamDescriptor {
+        stream_id: 7,
+        device_id: 1,
+        direction: StreamDirection::Playback,
+        role: StreamRole::Media,
+        state: StreamState::Running,
+        position: Frames::new(4_800),
+        xruns: 2,
+        xrun_frames: 64,
+        owner_uid: 1_000,
+        owner_pid: 40,
+        owner_app: None,
+    }]);
+    let report = report_of(&sample);
+    let audio = device(&report, DeviceId::Audio);
+    assert_eq!(audio.group, RailGroup::Sound);
+    assert_eq!(audio.reading.text(), Some("1 stream"));
+    let shown = format!("{:?}", audio.blocks);
+    for fact in [
+        "Speakers",
+        "-6.5dB · muted · default · 47999.500 Hz · 12 frames lost",
+        "Microphone",
+        "pid 40",
+        "plays on Speakers · running · frame 4800 · 2 underruns",
+    ] {
+        assert!(shown.contains(fact), "{fact} in {shown}");
+    }
+
+    let unread = report_of(&permitted());
+    let audio = device(&unread, DeviceId::Audio);
+    assert!(
+        audio.reading.text().is_none(),
+        "an unread count is no count"
+    );
+    let shown = format!("{:?}", audio.blocks);
+    assert!(shown.contains("the sound devices"), "{shown}");
+    assert!(shown.contains("the sound streams"), "{shown}");
 }

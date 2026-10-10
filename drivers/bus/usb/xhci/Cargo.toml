@@ -32,6 +32,10 @@ tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # per-interface URB-serve state machine on top of it.
 tairix-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 
+[dev-dependencies]
+# The interface set a test engine's `UrbScope` names.
+tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
+
 # Everything the freestanding `Run` program links beyond the `lib` is pulled in
 # only for the bare-metal targets the binary is actually built for; on the host
 # the binary is an inert stub.

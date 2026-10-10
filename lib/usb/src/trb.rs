@@ -26,6 +26,10 @@ pub const CONTROL_LINK_TOGGLE: u32 = 1 << 1;
 /// event for this TRB.
 pub const CONTROL_ISP: u32 = 1 << 2;
 
+/// Control-word bit 4 on a transfer TRB: Chain (§6.4.1.1) — the next TRB on
+/// the ring belongs to the same TD.
+pub const CONTROL_CHAIN: u32 = 1 << 4;
+
 /// Control-word bit 5 on a transfer TRB: Interrupt On Completion
 /// (§6.4.1.1).
 pub const CONTROL_IOC: u32 = 1 << 5;
@@ -33,6 +37,10 @@ pub const CONTROL_IOC: u32 = 1 << 5;
 /// Control-word bit 6 on a Setup Stage TRB: Immediate Data — the
 /// parameter dwords carry the 8 setup bytes themselves (§6.4.1.2.1).
 pub const CONTROL_IDT: u32 = 1 << 6;
+
+/// Control-word bit 9 on a Normal or Isoch TRB: Block Event Interrupt
+/// (§6.4.1.3) — its IOC event is posted without asserting the interrupter.
+pub const CONTROL_BEI: u32 = 1 << 9;
 
 /// Control-word bit 16 on Data/Status Stage TRBs: transfer direction
 /// is IN (device to host, §6.4.1.2.2/§6.4.1.2.3).
@@ -47,6 +55,22 @@ pub const SETUP_TRT_OUT: u32 = 2 << 16;
 
 /// Setup Stage TRB Transfer Type field: IN data stage.
 pub const SETUP_TRT_IN: u32 = 3 << 16;
+
+/// The status dword of a transfer TRB moving `length` bytes with `td_size`
+/// of its TD's packets still to come after it (§4.11.2.4), the count held to
+/// its five-bit field.
+#[must_use]
+pub const fn transfer_status(length: u32, td_size: u32) -> u32 {
+    let td_size = if td_size > 31 { 31 } else { td_size };
+    (length & 0x1_FFFF) | (td_size << 17)
+}
+
+/// An Isoch TRB's scheduling fields (§6.4.1.3): the TD's Transfer Burst Count
+/// and Last Burst Packet Count, and the 1 ms frame it starts in.
+#[must_use]
+pub const fn isoch_fields(tbc: u8, tlbpc: u8, frame_id: u16) -> u32 {
+    ((tbc as u32 & 0x3) << 7) | ((tlbpc as u32 & 0xF) << 16) | ((frame_id as u32 & 0x7FF) << 20)
+}
 
 /// Shift of the TRB Type field (control-word bits 15:10, §6.4.1).
 const TYPE_SHIFT: u32 = 10;
@@ -221,6 +245,8 @@ pub enum TrbType {
     DataStage = 3,
     /// Status Stage TRB (control transfers).
     StatusStage = 4,
+    /// Isoch TRB: the first TRB of an isochronous TD (§6.4.1.3).
+    Isoch = 5,
     /// Link TRB: chains ring segments / wraps a ring (§6.4.4.1).
     Link = 6,
     /// No Op transfer TRB (transfer-ring diagnostics).
@@ -277,6 +303,7 @@ impl TrbType {
             2 => Ok(Self::SetupStage),
             3 => Ok(Self::DataStage),
             4 => Ok(Self::StatusStage),
+            5 => Ok(Self::Isoch),
             6 => Ok(Self::Link),
             8 => Ok(Self::NoOp),
             9 => Ok(Self::EnableSlot),

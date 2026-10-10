@@ -44,7 +44,7 @@
 // it never builds this module (nor pulls in `tairix-rt`).
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use tairix_abi::audio::{AudioRequest, AUDIO_ENDPOINT, AUDIO_MAX_REQUEST};
+    use tairix_abi::audio::{AudioBaseline, AudioRequest, AUDIO_ENDPOINT, AUDIO_MAX_REQUEST};
     use tairix_abi::driver_store::{
         decode_config_reply, StoreRequest, SystemConfigFile, DRIVER_STORE_ENDPOINT,
         READ_CONFIG_REQUEST_LEN,
@@ -55,12 +55,13 @@ mod program {
         NETSTACK_ENDPOINT,
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::waitset::WaitSetOp;
     use tairix_abi::OpenFlags;
     use tairix_abi::{Errno, HwNode, HwTreeHeader};
-    use tairix_devmgr::audiobind::AudiodBind;
+    use tairix_devmgr::audiobind::{AudioBaselineSource, AudiodBind};
     use tairix_devmgr::{
         events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
-        NetworkInterfaceConfigSource,
+        NetworkInterfaceConfigSource, WAKE_SOURCES,
     };
     use tairix_log::{log, Event, Field, Level};
     use tairix_netconfig::InterfaceConfigPlan;
@@ -86,20 +87,43 @@ mod program {
     /// emits each tree/node report through the kernel's diagnostic log via
     /// [`LogSink`] (the serial UART on a debug build) — never `stderr`. The loop's control flow is host-tested in
     /// `tairix_devmgr::service`; this is the freestanding I/O it binds.
-    struct RtTreeService;
+    struct RtTreeService {
+        /// The wait set holding [`WAKE_SOURCES`].
+        set: u64,
+    }
+
+    impl RtTreeService {
+        /// A seam whose wait set holds every wake source, built before the
+        /// first read of the tree, so no move after that read is missed.
+        fn new() -> Result<Self, Errno> {
+            let set = tairix_rt::waitset_create();
+            if set < 0 {
+                return Err(Errno::from_syscall(set));
+            }
+            let set = set.unsigned_abs();
+            for (token, (kind, id)) in (1u64..).zip(WAKE_SOURCES) {
+                let added = tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, token);
+                if added != 0 {
+                    return Err(Errno::from_syscall(added));
+                }
+            }
+            Ok(Self { set })
+        }
+    }
 
     impl HwTreeService for RtTreeService {
         fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::hw_tree_read(buf).map_err(Errno::from_syscall)
         }
 
-        fn wait_for_change(&mut self, last_generation: u64, timeout_ns: u64) -> Result<(), Errno> {
-            // Park until the tree's generation advances past the one last
-            // observed, or `timeout_ns` elapses; the caller picks the
-            // deadline (unbounded once nothing is outstanding). A negative
-            // return is a `-errno` the loop fails closed on, `TimedOut`
-            // included — the loop reads that as "re-react".
-            let waited = tairix_rt::hw_tree_wait(last_generation, timeout_ns);
+        fn wait_for_change(&mut self, timeout_ns: u64) -> Result<(), Errno> {
+            // Park until the tree or the mount table moves, or `timeout_ns`
+            // elapses; the caller picks the deadline (unbounded once nothing
+            // is outstanding). A negative return is a `-errno` the loop
+            // fails closed on, `TimedOut` included — the loop reads that as
+            // "re-react".
+            let mut token = 0u64;
+            let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
             if waited < 0 {
                 return Err(Errno::from_syscall(waited));
             }
@@ -211,14 +235,58 @@ mod program {
     /// `tairix_devmgr::audiobind`.
     struct RtAudiodBind;
 
-    impl AudiodBind for RtAudiodBind {
-        fn bind_driver(&mut self, endpoint_id: u64) -> Result<(), Errno> {
-            let mut request = [0u8; AUDIO_MAX_REQUEST];
-            let len = AudioRequest::BindDriver { endpoint_id }.encode(&mut request)?;
+    impl RtAudiodBind {
+        /// One `audio-v1` call answered with a status.
+        fn call(request: &AudioRequest) -> Result<(), Errno> {
+            let mut frame = [0u8; AUDIO_MAX_REQUEST];
+            let len = request.encode(&mut frame)?;
             let mut reply = [0u8; STATUS_REPLY_LEN];
-            let len = tairix_rt::ipc_call(AUDIO_ENDPOINT, &request[..len], &mut reply)
+            let len = tairix_rt::ipc_call(AUDIO_ENDPOINT, &frame[..len], &mut reply)
                 .map_err(Errno::from_syscall)?;
             decode_status_reply(&reply[..len])
+        }
+    }
+
+    impl AudiodBind for RtAudiodBind {
+        fn bind_driver(&mut self, endpoint_id: u64, location: u64) -> Result<(), Errno> {
+            Self::call(&AudioRequest::BindDriver {
+                endpoint_id,
+                location,
+            })
+        }
+
+        fn unbind_driver(&mut self, endpoint_id: u64) -> Result<(), Errno> {
+            Self::call(&AudioRequest::UnbindDriver { endpoint_id })
+        }
+
+        fn deliver_baseline(&mut self, baseline: AudioBaseline) -> Result<(), Errno> {
+            Self::call(&AudioRequest::Baseline(baseline))
+        }
+    }
+
+    /// The production [`AudioBaselineSource`] backing: the `audio.*` keys of
+    /// `system.conf`, read through the layered store and mapped through the
+    /// one shared `lib/sysconfig` engine. [`None`] on any failure, which
+    /// leaves the audio service on the baseline nobody configured.
+    struct RtAudioBaseline;
+
+    impl AudioBaselineSource for RtAudioBaseline {
+        fn load(&mut self) -> Option<AudioBaseline> {
+            #[allow(
+                clippy::large_stack_arrays,
+                reason = "one byte past the engine's ceiling, so a document that fills \
+                          the buffer is proven over-long rather than parsed short"
+            )]
+            let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN + 1];
+            let len = read_layered_config(SystemConfigFile::System, &mut buf)?;
+            let Some(config) = core::str::from_utf8(&buf[..len])
+                .ok()
+                .and_then(|text| tairix_sysconfig::SystemConfig::parse(text).ok())
+            else {
+                malformed_document(SystemConfigFile::System);
+                return None;
+            };
+            Some(config.audio_baseline())
         }
     }
 
@@ -300,8 +368,8 @@ mod program {
     /// catalogue uses; the kernel re-checks the capability, so this adds no
     /// authority. [`None`] on any failure (an absent file is a benign
     /// in-band `NotFound`, an oversized or corrupt frame, a transport
-    /// error), so a caller keeps its safe defaults and retries on the next
-    /// generation bump, never guessing (fail closed).
+    /// error), so a caller keeps its safe defaults and retries at its next
+    /// reaction, never guessing (fail closed).
     fn read_store_config(which: SystemConfigFile, out: &mut [u8]) -> Option<usize> {
         let mut request = [0u8; READ_CONFIG_REQUEST_LEN];
         let n = StoreRequest::ReadConfig { which }
@@ -371,13 +439,13 @@ mod program {
     /// It returns [`None`] on any failure — neither layer reachable, an
     /// absent, unreadable, or oversized document, or one the engine cannot
     /// parse — so delivery keeps the network stack on its safe defaults and
-    /// retries on the next generation bump, never guessing at a policy (fail
+    /// retries at the next reaction, never guessing at a policy (fail
     /// closed).
     /// The production policy read, carrying the machine's RAM total once
     /// it has been answered.
     ///
     /// Installed RAM is a static hardware fact, so it is read once and
-    /// kept rather than queried per generation bump. A `None` is "not
+    /// kept rather than queried at every reaction. A `None` is "not
     /// answered yet" — the sysinfo broker may not be running this early —
     /// and is retried, because the capacity derived from a zero total is
     /// the smallest machine's rather than this machine's.
@@ -455,7 +523,7 @@ mod program {
     /// on any failure — the store not yet reachable, an absent (`NotFound`),
     /// unreadable, or oversized document, or one the engine cannot parse or
     /// validate — so delivery leaves the interfaces unconfigured and retries
-    /// on the next generation bump, never guessing at a partial configuration
+    /// at the next reaction, never guessing at a partial configuration
     /// (fail closed).
     struct RtNetworkInterfaceConfig;
 
@@ -494,11 +562,30 @@ mod program {
         #[allow(clippy::large_stack_arrays)]
         let mut reply_buf = [0u8; REPLY_BUF_LEN];
         let mut net_config_source = RtNetworkConfig::default();
+        let mut tree = match RtTreeService::new() {
+            Ok(tree) => tree,
+            Err(err) => {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Error,
+                        id: events::TREE_SEAM_FAILED,
+                        message: "the device manager's wait set could not be built; exiting for supervision",
+                        fields: &[Field {
+                            key: "error",
+                            value: tairix_log::FieldValue::Error(err),
+                        }],
+                    },
+                );
+                return 1;
+            }
+        };
         match tairix_devmgr::run(
-            &mut RtTreeService,
+            &mut tree,
             &mut RtStoreCall,
             &mut RtNetstackBind,
             &mut RtAudiodBind,
+            &mut RtAudioBaseline,
             &mut net_config_source,
             &mut RtNetworkInterfaceConfig,
             &LogSink,

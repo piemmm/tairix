@@ -488,6 +488,66 @@ impl LinkFlags {
     }
 }
 
+/// Flags accepted by
+/// [`SyscallNumber::FS_RENAME`](crate::SyscallNumber::FS_RENAME).
+///
+/// [`RenameFlags::from_bits`] rejects any reserved bit, so a future flag is
+/// never silently ignored by an older kernel (validate every input, fail
+/// closed).
+///
+/// An empty flag set is POSIX `rename()`: an existing destination is
+/// replaced, subject to kind compatibility. [`NO_REPLACE`](Self::NO_REPLACE)
+/// is `renameat2(RENAME_NOREPLACE)`: the move fails with
+/// [`Errno::AlreadyExists`] when the destination names any entry but the
+/// source's own, decided under the volume's lock — so a name another program
+/// creates after the caller looked cannot be destroyed by the move. The
+/// destination is matched by the volume's own rule, so on a volume that
+/// ignores letter case a re-spelling of the source (`Foo` to `foo`) is the
+/// source's own entry and is renamed, while a sibling spelled differently in
+/// case only is a clash.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub struct RenameFlags(u32);
+
+impl RenameFlags {
+    /// Refuse the move, rather than replace, when the destination exists.
+    pub const NO_REPLACE: Self = Self(1 << 0);
+
+    /// The set of all defined flag bits.
+    const DEFINED_BITS: u32 = Self::NO_REPLACE.0;
+
+    /// An empty flag set: POSIX `rename()`, replacing an existing destination.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Raw flag bits, as carried on the ABI.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build a flag set from raw bits, rejecting any reserved bit.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `bits` sets a reserved bit (an unknown
+    /// request is rejected at the boundary, never silently ignored).
+    pub const fn from_bits(bits: u32) -> Result<Self, Errno> {
+        if bits & !Self::DEFINED_BITS != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(bits))
+    }
+
+    /// Whether an existing destination refuses the move.
+    #[must_use]
+    pub const fn refuses_replace(self) -> bool {
+        self.0 & Self::NO_REPLACE.0 != 0
+    }
+}
+
 /// How much of a path
 /// [`SyscallNumber::FS_REALPATH`](crate::SyscallNumber::FS_REALPATH)
 /// requires to exist.
@@ -1257,8 +1317,8 @@ mod tests {
     extern crate alloc;
     use super::{
         mode_string, DirChange, DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId,
-        FileKind, FileStat, NodeTimes, OpenFlags, RealpathMode, UnlinkFlags, FS_NAME_MAX,
-        FS_PATH_MAX, FS_SYMLINK_MAX,
+        FileKind, FileStat, NodeTimes, OpenFlags, RealpathMode, RenameFlags, UnlinkFlags,
+        FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX,
     };
     use crate::time::Time64;
     use crate::Errno;
@@ -1344,6 +1404,17 @@ mod tests {
         let dir_only = UnlinkFlags::from_bits(UnlinkFlags::DIRECTORY.bits()).unwrap();
         assert!(dir_only.is_directory_only());
         assert_eq!(dir_only, UnlinkFlags::DIRECTORY);
+    }
+
+    #[test]
+    fn rename_flags_reject_reserved_bits_and_decode_no_replace() {
+        assert_eq!(RenameFlags::from_bits(1 << 1), Err(Errno::OutOfRange));
+        assert_eq!(RenameFlags::from_bits(u32::MAX), Err(Errno::OutOfRange));
+        let plain = RenameFlags::from_bits(0).unwrap();
+        assert!(!plain.refuses_replace());
+        assert_eq!(plain, RenameFlags::empty());
+        let exclusive = RenameFlags::from_bits(RenameFlags::NO_REPLACE.bits()).unwrap();
+        assert!(exclusive.refuses_replace());
     }
 
     #[test]

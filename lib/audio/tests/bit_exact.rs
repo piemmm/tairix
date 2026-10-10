@@ -30,7 +30,7 @@ use tairix_audio::channel::ChannelMatrix;
 use tairix_audio::convert::Dither;
 use tairix_audio::mix::{Mixer, SinkFormat, StreamMix};
 use tairix_audio::resample::{FilterBank, Resampler};
-use tairix_audio::volume::{millibel_to_linear, resolve, VolumeRequest};
+use tairix_audio::volume::{millibel_to_linear, stream_multiply, EndpointLevel, VolumeRequest};
 use tairix_fuzzseed::Prng;
 
 /// Every encoding the pivot carries whole, which is the set the claim covers.
@@ -146,8 +146,8 @@ fn through_the_engine(
     assert!(bank.is_unity(), "the ratio should need no filtering");
 
     // The volume model at unity: exactly one, or the claim fails here.
-    let level = resolve(&VolumeRequest::default(), None);
-    assert_eq!(level.software, 1.0, "unity must be exactly one");
+    let level = stream_multiply(&VolumeRequest::default(), EndpointLevel::UNITY);
+    assert_eq!(level, 1.0, "unity must be exactly one");
     assert_eq!(millibel_to_linear(0), 1.0);
 
     // The device carries the stream's own layout, so the matrix is the
@@ -186,7 +186,7 @@ fn through_the_engine(
     let stream = StreamMix {
         format,
         matrix: &matrix,
-        gain: level.software,
+        gain: level,
         resampled: false,
         samples: &staged,
     };

@@ -292,6 +292,36 @@ pub enum WaitSourceKind {
     /// [`crate::SyscallNumber::FS_WATCH_READ`], and may do so from another
     /// thread (`docs/src/filesystem/watch.md`).
     DirWatch = 13,
+    /// The controlling (foreground) ownership of a terminal the caller reads
+    /// (its `id` is the descriptor number: one of the caller's own inherited
+    /// standard streams naming a console, or a pty slave of the caller — the
+    /// descriptors [`crate::SyscallNumber::FOREGROUND_HELD`] accepts;
+    /// anything else refuses with the same oracle-free `NotFound` the other
+    /// kinds use). Ready when the ownership has moved since the member was
+    /// added or last reported ready: granted, claimed, released, or cleared
+    /// with a dead owner.
+    ///
+    /// Readiness is **edge-triggered** on the terminal's ownership
+    /// generation, as [`SystemNotice`](Self::SystemNotice)'s is: the woken
+    /// owner asks `foreground_held` where it now stands. A program that
+    /// draws on its terminal only while it holds the foreground learns of
+    /// every handover the moment the shell makes it, never by asking on a
+    /// timer.
+    Foreground = 14,
+    /// The discovered hardware tree (its `id` is always `0`). Ready when the
+    /// tree's generation has moved since the member was added or last
+    /// reported: a node seeded, emitted, re-parented or removed. Adding the
+    /// member demands `CAP_SYSINFO_HW`, the authority reading the tree
+    /// demands, and any other `id` refuses with the same oracle-free
+    /// `NotFound` the other kinds use.
+    ///
+    /// **Edge-triggered** on the generation, as
+    /// [`SystemNotice`](Self::SystemNotice)'s is: the woken caller reads the
+    /// tree for itself. It lets a component wait on the tree beside anything
+    /// else — the device manager waits on it beside the mount table, so
+    /// configuration the root volume brings is read the moment that volume
+    /// is mounted.
+    HardwareTree = 15,
 }
 
 impl WaitSourceKind {
@@ -323,6 +353,8 @@ impl WaitSourceKind {
             11 => Ok(Self::StreamRoom),
             12 => Ok(Self::PeerExit),
             13 => Ok(Self::DirWatch),
+            14 => Ok(Self::Foreground),
+            15 => Ok(Self::HardwareTree),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -358,10 +390,12 @@ mod tests {
             WaitSourceKind::StreamRoom,
             WaitSourceKind::PeerExit,
             WaitSourceKind::DirWatch,
+            WaitSourceKind::Foreground,
+            WaitSourceKind::HardwareTree,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(14), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(16), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -383,6 +417,8 @@ mod tests {
         assert_eq!(WaitSourceKind::StreamRoom.as_u32(), 11);
         assert_eq!(WaitSourceKind::PeerExit.as_u32(), 12);
         assert_eq!(WaitSourceKind::DirWatch.as_u32(), 13);
+        assert_eq!(WaitSourceKind::Foreground.as_u32(), 14);
+        assert_eq!(WaitSourceKind::HardwareTree.as_u32(), 15);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
         assert_eq!(WAITSET_TIMEOUT_NONE, u64::MAX);
     }

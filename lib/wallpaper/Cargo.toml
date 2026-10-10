@@ -39,6 +39,8 @@ tairix-theme = { path = "../theme", version = "=0.0.0" }
 tairix-appconf = { path = "../appconf", version = "=0.0.0" }
 # The opaque colour a backdrop is, and its bare `rrggbb` spelling.
 tairix-colour = { path = "../colour", version = "=0.0.0" }
+# The device control a remembered sound setting is put back with.
+tairix-audio = { path = "../audio", version = "=0.0.0" }
 
 # Only the apply client's own round trip: a surface asking the session to
 # adopt a document makes one `ipc_call`, and the rest of the crate stays the

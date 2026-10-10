@@ -7,7 +7,7 @@
 //! overflow, and nothing to drop. That is what makes it the right shape for
 //! facts a process must *agree* with rather than witness: the desktop's
 //! appearance and density, the mount table's composition, the memory-pressure
-//! band, the boot seat's display lease.
+//! band, the boot seat's display lease, whether the machine is recording.
 //!
 //! The mechanism is three parts:
 //!
@@ -30,6 +30,7 @@
 //! would not accept.
 
 use crate::desktop::DesktopInfo;
+use crate::le::{read_u32, read_u64};
 use crate::seat::DisplayLease;
 use crate::Errno;
 
@@ -37,10 +38,22 @@ use crate::Errno;
 /// kernel retains per topic.
 ///
 /// A containment bound, not a capacity: it is what stops a topic's payload
-/// growing into a channel. It is the widest topic's own record, the desktop's;
-/// a topic needing more than a small fixed record is carrying a document, not
-/// a state edge, and belongs on an IPC endpoint.
-pub const NOTICE_PAYLOAD_MAX: usize = DesktopInfo::WIRE_LEN;
+/// growing into a channel. It is the widest topic's own record, derived from
+/// the closed set so no topic can outgrow it; a topic needing more than a
+/// small fixed record is carrying a document, not a state edge, and belongs on
+/// an IPC endpoint.
+pub const NOTICE_PAYLOAD_MAX: usize = {
+    let mut widest = 0;
+    let mut index = 0;
+    while index < NoticeTopic::ALL.len() {
+        let len = NoticeTopic::ALL[index].payload_len();
+        if len > widest {
+            widest = len;
+        }
+        index += 1;
+    }
+    widest
+};
 
 /// One machine-wide value a process may converge on.
 ///
@@ -68,14 +81,29 @@ pub enum NoticeTopic {
     /// needs no capability — exactly as reading the load average does.
     MemoryPressure = 2,
     /// The boot seat's display lease, as a [`DisplayLease`]: moved by every
-    /// acquire, release, revocation, and dead owner's reclaim. Published by
-    /// the kernel alone, and read by the display service, which must never
-    /// keep a configuration — or a switched-off screen — past the lease that
-    /// asked for it.
+    /// acquire, release, revocation, and dead owner's reclaim, and by the
+    /// text console taking back a handover. Published by the kernel alone.
     ///
-    /// Who holds the seat is already readable through the seat inventory, so
-    /// reading it needs no capability.
+    /// Read by the two services that own the seat's devices: the display
+    /// service, which must never keep a configuration — or a switched-off
+    /// screen — past the lease that asked for it, and the audio service, which
+    /// mixes only the holder's session into the seat's speakers. Nothing else
+    /// may observe it, because the lease's history is the seat inventory's,
+    /// which is privileged.
     DisplayLease = 3,
+    /// How many capture streams are moving frames on this machine, as a
+    /// `u32`: the recording indicator's whole input. Published by the audio
+    /// service — the process the kernel attests bound the reserved audio
+    /// rendezvous — so no program can hide its own recording from it. Readable
+    /// by any process, as whether a sound device is in use is on every system.
+    AudioCapture = 4,
+    /// The sound devices moved: one was bound or lost, or a default, a level
+    /// or a mute changed. The payload is the audio service's own count of such
+    /// changes, as a `u64`, so every change is a new value; what moved is then
+    /// read from the service itself. Published by the audio service alone,
+    /// the process the kernel attests bound the reserved audio rendezvous,
+    /// and readable by any process, as the devices themselves are.
+    AudioDevices = 5,
 }
 
 impl NoticeTopic {
@@ -97,6 +125,8 @@ impl NoticeTopic {
             1 => Ok(Self::Mounts),
             2 => Ok(Self::MemoryPressure),
             3 => Ok(Self::DisplayLease),
+            4 => Ok(Self::AudioCapture),
+            5 => Ok(Self::AudioDevices),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -126,15 +156,19 @@ impl NoticeTopic {
             Self::Mounts => 0,
             Self::MemoryPressure => 1,
             Self::DisplayLease => DisplayLease::WIRE_LEN,
+            Self::AudioCapture => 4,
+            Self::AudioDevices => 8,
         }
     }
 
     /// Every topic, for a caller that must cover them all.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::Desktop,
         Self::Mounts,
         Self::MemoryPressure,
         Self::DisplayLease,
+        Self::AudioCapture,
+        Self::AudioDevices,
     ];
 }
 
@@ -156,6 +190,17 @@ pub enum Notice {
     },
     /// [`NoticeTopic::DisplayLease`]: the boot seat's display lease.
     DisplayLease(DisplayLease),
+    /// [`NoticeTopic::AudioCapture`]: the capture streams moving frames.
+    AudioCapture {
+        /// How many there are; none means nothing is recording.
+        live: u32,
+    },
+    /// [`NoticeTopic::AudioDevices`]: the sound devices moved; read them to
+    /// learn how.
+    AudioDevices {
+        /// The audio service's count of changes so far.
+        changes: u64,
+    },
 }
 
 impl Notice {
@@ -167,6 +212,8 @@ impl Notice {
             Self::Mounts => NoticeTopic::Mounts,
             Self::MemoryPressure { .. } => NoticeTopic::MemoryPressure,
             Self::DisplayLease(_) => NoticeTopic::DisplayLease,
+            Self::AudioCapture { .. } => NoticeTopic::AudioCapture,
+            Self::AudioDevices { .. } => NoticeTopic::AudioDevices,
         }
     }
 
@@ -187,6 +234,12 @@ impl Notice {
             NoticeTopic::Mounts => Ok(Self::Mounts),
             NoticeTopic::MemoryPressure => Ok(Self::MemoryPressure { band: bytes[0] }),
             NoticeTopic::DisplayLease => DisplayLease::from_bytes(bytes).map(Self::DisplayLease),
+            NoticeTopic::AudioCapture => Ok(Self::AudioCapture {
+                live: read_u32(bytes, 0),
+            }),
+            NoticeTopic::AudioDevices => Ok(Self::AudioDevices {
+                changes: read_u64(bytes, 0),
+            }),
         }
     }
 
@@ -206,6 +259,8 @@ impl Notice {
             Self::Mounts => {}
             Self::MemoryPressure { band } => slot[0] = *band,
             Self::DisplayLease(lease) => slot.copy_from_slice(&lease.to_le_bytes()),
+            Self::AudioCapture { live } => slot.copy_from_slice(&live.to_le_bytes()),
+            Self::AudioDevices { changes } => slot.copy_from_slice(&changes.to_le_bytes()),
         }
         Ok(len)
     }
@@ -216,7 +271,7 @@ mod tests {
     use super::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::seat::DisplayLease;
-    use crate::Errno;
+    use crate::{Errno, ProcId};
 
     fn desktop() -> DesktopInfo {
         match DesktopInfo::new(1920, 1080, 150, Appearance::Light) {
@@ -231,11 +286,13 @@ mod tests {
         assert_eq!(NoticeTopic::Mounts.as_u32(), 1);
         assert_eq!(NoticeTopic::MemoryPressure.as_u32(), 2);
         assert_eq!(NoticeTopic::DisplayLease.as_u32(), 3);
+        assert_eq!(NoticeTopic::AudioCapture.as_u32(), 4);
+        assert_eq!(NoticeTopic::AudioDevices.as_u32(), 5);
         for topic in NoticeTopic::ALL {
             assert_eq!(NoticeTopic::from_u32(topic.as_u32()), Ok(topic));
             assert_eq!(NoticeTopic::from_u64(u64::from(topic.as_u32())), Ok(topic));
         }
-        assert_eq!(NoticeTopic::from_u32(4), Err(Errno::OutOfRange));
+        assert_eq!(NoticeTopic::from_u32(6), Err(Errno::OutOfRange));
         assert_eq!(NoticeTopic::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -260,7 +317,9 @@ mod tests {
             Notice::Desktop(desktop()),
             Notice::Mounts,
             Notice::MemoryPressure { band: 3 },
-            Notice::DisplayLease(DisplayLease::new(4, true)),
+            Notice::DisplayLease(DisplayLease::held(4, ProcId::from_raw([0x51; 16]))),
+            Notice::AudioCapture { live: 2 },
+            Notice::AudioDevices { changes: 9 },
         ] {
             let mut buf = [0xAAu8; NOTICE_PAYLOAD_MAX];
             let topic = notice.topic();
@@ -282,9 +341,8 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
         // A payload longer than the topic's is refused, not read as a
-        // prefix. The desktop record now fills the bound exactly, so the
-        // over-long case needs a byte more than the bound itself.
-        let over = [0u8; NOTICE_PAYLOAD_MAX + 1];
+        // prefix.
+        let over = [0u8; DesktopInfo::WIRE_LEN + 1];
         assert_eq!(
             Notice::decode(NoticeTopic::Desktop, &over),
             Err(Errno::LengthOutOfRange)

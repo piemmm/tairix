@@ -53,6 +53,7 @@ members = [
     "lib/kalloc",
     "lib/caps",
     "lib/cmdres",
+    "lib/codec",
     "lib/collections",
     "lib/colour",
     "lib/complete",
@@ -91,9 +92,12 @@ members = [
     "lib/i2c",
     "lib/icon",
     "lib/image",
+    "lib/sound",
+    "lib/player",
     "lib/inline",
     "lib/input",
     "lib/keymap",
+    "lib/linkclient",
     "lib/log",
     "lib/memguard",
     "lib/multiboot2",
@@ -196,9 +200,16 @@ members = [
     "drivers/accelerator/virtio_crypto",
 
     # Drivers — audio
+    "drivers/audio/bcm2711_i2s",
+    "drivers/audio/bcm2711_pwm",
+    "drivers/audio/hda",
+    "drivers/audio/pcm5102a",
+    "drivers/audio/pcm5122",
     "drivers/audio/virtio_snd",
+    "drivers/audio/usb_uac",
 
     # Drivers — DMA engines
+    "drivers/clock/bcm2711_cprman",
     "drivers/dma/bcm2835",
 
     # Drivers — network
@@ -264,6 +275,9 @@ members = [
     "userland/apps/paint",
     "userland/apps/passwd",
     "userland/apps/ping",
+    "userland/apps/play",
+    "userland/apps/audioctl",
+    "userland/apps/music",
     "userland/apps/printf",
     "userland/apps/ps",
     "userland/apps/readlink",
@@ -333,9 +347,9 @@ members = [
     # own per-arch trees alongside this one. `harness` is the shared
     # build-glue crate that emits their `freestanding`/`itest_*` cfgs, keeping
     # target selection out of test source.
-    "tests/integration/audio_virtio_qemu_aarch64",
-    "tests/integration/audio_virtio_qemu_riscv64",
-    "tests/integration/audio_virtio_qemu_x86_64",
+    "tests/integration/audio_qemu_aarch64",
+    "tests/integration/audio_qemu_riscv64",
+    "tests/integration/audio_qemu_x86_64",
     "tests/integration/audio_wire",
     "tests/integration/bootguard",
     "tests/integration/bootguard_qemu_aarch64",

@@ -14,8 +14,8 @@
 //! been delivered, push them through the [`crate::netbind::NetstackBind`]
 //! seam. Delivery is fail-soft — the store may not be mounted yet (before the
 //! root unlock) and the stack may not be up yet, so a failed attempt is
-//! logged and retried on the next hardware-tree generation bump, exactly like
-//! an unavailable driver store. Until the real policy lands, `netstack`'s own
+//! logged and retried when the hardware tree next moves or a volume is
+//! mounted, exactly like an unavailable driver store. Until the real policy lands, `netstack`'s own
 //! safe defaults (both families enabled, SYN cookies `auto`) hold.
 
 use alloc::collections::BTreeSet;
@@ -93,9 +93,9 @@ impl NetConfigState {
 ///
 /// Reads the policy through `source`; if the store is not yet readable
 /// ([`None`]) it leaves the stack on its safe defaults and returns (retried
-/// on the next bump). A policy identical to the last delivered one is not
+/// at the next reaction). A policy identical to the last delivered one is not
 /// re-pushed. Otherwise it is pushed through `netstack`: success is recorded,
-/// and a refusal is logged fail-soft and retried next bump — the stack may
+/// and a refusal is logged fail-soft and retried at the next reaction — the stack may
 /// not have bound its admin endpoint yet.
 pub fn deliver_network_settings(
     source: &mut dyn NetworkConfigSource,
@@ -227,7 +227,7 @@ impl NetIfConfigState {
 /// Deliver each managed interface's `network.conf` configuration to the
 /// network stack, retrying until each interface has accepted it.
 ///
-/// The plan is re-read through `source` on every bump, exactly as the
+/// The plan is re-read through `source` at every reaction, exactly as the
 /// stack-wide policy is: the document on the writable root only becomes
 /// readable at the encrypted-root unlock, and an administrator may edit it
 /// at any time afterwards, so a plan read once and cached would leave the
@@ -239,7 +239,7 @@ impl NetIfConfigState {
 /// [`Errno::NotFound`] means the interface has not bound yet — the expected
 /// early state, retried silently — a success records the interface as
 /// delivered, and any other refusal is logged fail-soft and retried on the
-/// next bump.
+/// next reaction.
 pub fn deliver_interface_configs(
     source: &mut dyn NetworkInterfaceConfigSource,
     state: &mut NetIfConfigState,
@@ -284,7 +284,7 @@ pub fn deliver_interface_configs(
     // Bounded to one pass per pending item (progress each round guarantees
     // termination well inside it): a hostile or misconfigured store can never
     // spin this. Items still `NotFound` after the loop (an unbound driver)
-    // are left for the next bump, exactly as before.
+    // are left for the next reaction.
     let max_passes = match &state.plan {
         Some(plan) => plan.messages.len() + plan.bonds.len() + 1,
         None => 0,

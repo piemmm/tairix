@@ -138,7 +138,7 @@ impl<'a> IdMap<'a> {
 #[cfg(test)]
 mod tests {
     use super::{IdMap, IdMapEntry};
-    use crate::fixture::DtbBuilder;
+    use crate::write::FdtWriter;
     use crate::{Fdt, FdtError};
     use alloc::vec::Vec;
 
@@ -149,7 +149,7 @@ mod tests {
     }
 
     fn host_with(map: Option<&[u32]>, mask: Option<&[u8]>) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.begin_node("pcie@10000000");
         if let Some(map) = map {

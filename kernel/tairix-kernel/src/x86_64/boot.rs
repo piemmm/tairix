@@ -1838,8 +1838,9 @@ impl crate::pci_probe::UnitTopology for DmarUnits<'_, '_> {
     }
 }
 
-/// Discover the interrupt-driven virtio-PCI functions `walk` found —
-/// virtio-net, sound and input — each with its MSI-X routed by `bus` in
+/// Discover the interrupt-driven PCI functions `walk` found — virtio-net,
+/// sound and input, xHCI and HD Audio controllers — each with its MSI-X, or
+/// else its MSI, routed by `bus` in
 /// compatibility format to a vector of its own and recorded in `routes`, for
 /// remapping to take over once the units are up. The function cannot master
 /// yet, so nothing it raises is live before then.
@@ -1851,17 +1852,17 @@ fn observe_interrupt_driven(
     log: &dyn Sink,
 ) {
     // A function that cannot be given a vector, a record or a programmed
-    // MSI-X entry is left undiscovered (fail closed): a granted line that
-    // never delivers would strand its driver parked forever.
+    // message is left undiscovered (fail closed): a granted line that never
+    // delivers would strand its driver parked forever.
     let route_irq = |bdf: u64| -> Option<crate::hwdiscovery::DeviceInterrupt> {
         let node = walk.segment.node_id(bdf)?;
         let mut routes = routes.try_borrow_mut().ok()?;
         routes.try_reserve(1).ok()?;
         let vector = crate::x86_64::msi::allocate().ok()?;
         let programmed = crate::x86_64::msi::compatibility_message(vector).is_some_and(|message| {
-            bus.route_msix(
+            crate::pci_host::route_message(
+                bus,
                 bdf,
-                crate::pci_host::MSIX_ENTRY,
                 message,
                 &crate::x86_64::registers::KernelRegisters,
             )
@@ -1888,6 +1889,14 @@ fn observe_interrupt_driven(
     let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(walk, &route_irq, sink, log);
     let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(walk, &route_irq, sink, log);
     let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(walk, &route_irq, sink, log);
+    for class in [
+        crate::hwdiscovery::XHCI_CONTROLLERS,
+        crate::hwdiscovery::HD_AUDIO_CONTROLLERS,
+    ] {
+        let _ = crate::hwdiscovery::observe_pci_class_functions(
+            walk, bus, class, &route_irq, sink, log,
+        );
+    }
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.

@@ -128,6 +128,41 @@ Stability tier: **experimental**.
   `MAX_LAYER_NAME` and a stack to `MOST_ORA_LAYERS`. `Paint.app` is the
   consumer, and reads each document through a fresh worker
   (`ParserSandbox::release`).
+- **`audiodecode`** — a sound file decoded through
+  [`tairix-sound`](./sound.md) by a long-lived worker over a supervised
+  session. The owner hands over the file's length, never the file: the
+  worker asks for the pages its decoder reads (`DecodeEvent::Need`, page
+  aligned, at most `MAX_NEED_BYTES`), the owner reads and supplies them, and
+  the worker answers the request it was serving. One request is outstanding
+  at a time: open, decode (at most `MAX_BLOCK_FRAMES`) or seek, then any
+  number of need and supply exchanges, then its one answer. The worker holds
+  up to `CACHE_PAGES` pages in a least-recently-used cache keyed by a seed the
+  owner draws, so a file cannot choose which of its offsets collide. The
+  bound is the decoders' own statement of what one decode reads at the
+  limits (`tairix_sound::max_working_set`, a FLAC stream's largest admissible
+  frame at most) with the read-ahead behind it, and pages are held only as a
+  file needs them; a need asks
+  for the read that missed plus the pages a sequential decode reads next, so
+  a stream costs one exchange a window. A decoder call that misses changes
+  nothing and is run again once its pages arrive, and every page a request
+  has read stays held until it is answered, so each retry progresses and a
+  request needing more of the file at once than the cache holds is refused
+  (`AudioRefusal::WorkingSetExceeded`) instead of asking for ever. The open
+  answer's cover range is believed only inside the file's length; the owner
+  reads the picture's bytes itself, so it never crosses the worker.
+  `AudioDecodeClient` is the owner's side: it encodes every request, and
+  believes a reply only once it holds against what was asked — a need inside
+  the file and no more needs a request than its held pages can account for,
+  a block at the stream's position of the frames asked for and no more than
+  the stream states, stream facts of a real format, encoding, rate,
+  channel map and sample format, metadata within `LIMITS` — and a reply that
+  does not is `AudioDecodeError::Unbelievable`, for the owner to condemn the
+  worker. After a replacement, `restart` opens the file again in it, refuses
+  a stream that now reads as another, and returns the replacement to the
+  stream's position by seeking or, for a stream that cannot seek, by decoding
+  up to it; a stream that fails its worker at the same position twice is
+  given up (`CannotResume`). `session_bounds` is the session an owner admits
+  it under: one largest frame each way.
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through

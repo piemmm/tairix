@@ -65,6 +65,10 @@ pub enum StatusKind {
     Network,
     /// Audio output volume.
     Volume,
+    /// Audio output, muted.
+    Muted,
+    /// Sound being recorded.
+    Recording,
     /// Battery charge.
     Battery,
 }
@@ -76,6 +80,8 @@ impl StatusKind {
         match self {
             Self::Network => IconKind::Network,
             Self::Volume => IconKind::Volume,
+            Self::Muted => IconKind::VolumeMuted,
+            Self::Recording => IconKind::Microphone,
             Self::Battery => IconKind::Battery,
         }
     }

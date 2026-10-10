@@ -657,13 +657,33 @@ before its controls do.
 Six of the categories a desktop should offer have no subsystem beneath them
 on this tree at all: there is no Bluetooth stack, no print or scan stack, no
 touchpad or touch driver, no 802.11 driver, and no file- or screen-sharing
-server. Sound has a subsystem — programs play through the audio service — but
-nothing that sets a device's volume or picks the default device, and Settings
-must not draw a volume slider that changes nothing. Theme has its parts — an
+server. Theme has its parts — an
 appearance and a picture are each set on their own panes — but no model that
 names them together, and no accent palette to choose. So those categories are
 present, reachable, and honest: each states what is missing and what would
 have to land.
+
+## Sound
+
+Sound is one composed pane of plates discovered from the audio service: one
+per sink and source — its default choice, its level and its mute — and a
+Recording plate naming the user's own live captures and counting everyone
+else's (the machine's `AudioCapture` count less the user's own). Its controls
+are the one write path that is not a document: each acts on `audio-v1`
+directly (`SetDefault`, `SetLevel`, `SetMute`), because the audio service, not
+the desktop session, owns a device's controls, and it admits them for the
+session holding the room the device serves. Settings holds no capability for
+them; a device another session's room holds is drawn disabled under an
+Authority Mark.
+
+A level moves the device live as its slider is dragged and settles where it
+rests. The round trips run on a worker over `tairix_audio::stream::ControlQueue`,
+one in flight and the latest control of each kind for each device winning
+meanwhile, so a drag costs one request at a time. A reading that lands
+mid-drag is held until the drag settles rather than rebuilding the slider
+under the pointer. The `AudioDevices` and `AudioCapture` notices re-read the
+pane whenever anything moves, whoever moved it. Settings remembers nothing:
+the desktop session follows the same notices and keeps the user's choices.
 
 ## On a running machine
 

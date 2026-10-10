@@ -565,7 +565,9 @@ tairix/
 │
 ├── drivers/             # Loadable modules. One folder per device class.
 │   ├── accelerator/     # Offload engines: virtio_crypto.
-│   ├── audio/           # Sound devices: virtio_snd.
+│   ├── audio/           # Sound devices: virtio_snd, usb_uac, hda, bcm2711_pwm,
+│   │                    #   bcm2711_i2s, and the codecs pcm5102a, pcm5122.
+│   ├── clock/           # Clock controllers: bcm2711_cprman.
 │   ├── cpufreq/         # CPU frequency mechanisms: rpi (VideoCore ARM clock).
 │   ├── display/
 │   │   ├── vesa/
@@ -605,6 +607,7 @@ tairix/
 │   ├── browse/          # Shared directory-browser engine.
 │   ├── caps/            # Capability primitives.
 │   ├── cmdres/          # Shared command-word resolution policy.
+│   ├── codec/           # Codec driver side (codec-v1 server).
 │   ├── collections/     # Heap-backed no_std containers not in core/alloc: the
 │   │                    #   hash, indexed, ordered, and concurrent tiers. The
 │   │                    #   allocation-free ones are `lib/inline`.
@@ -655,6 +658,7 @@ tairix/
 │   ├── input/           # Shared pointer input-event vocabulary.
 │   ├── kalloc/          # Freeing kernel heap allocator.
 │   ├── keymap/          # Shared terminal key map.
+│   ├── linkclient/      # Supplier-link clients: DMA channels, clocks.
 │   ├── log/             # Structured logging.
 │   ├── memguard/        # Guard-region poison: the shared sentinel + canary window.
 │   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
@@ -666,6 +670,7 @@ tairix/
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
 │   ├── path/            # Shared filesystem path-spelling parser.
 │   ├── pci/             # PCI/PCIe configuration access and the topology walk.
+│   ├── player/          # Playback engine: a programme decoded in the sandbox, gapless.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
 │   ├── proglib/         # Program-library catalog registry (folders/entries).
 │   ├── raid/            # RAID composition engines (levels, dispatch, maintenance).
@@ -683,6 +688,8 @@ tairix/
 │   ├── rt/              # The pure-Rust userland runtime.
 │   ├── sandbox/         # The parser-sandbox seam.
 │   ├── seat/            # Arch-neutral seat model.
+│   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
+│   │                    #   streamed from any input; the gated FLAC encoder.
 │   ├── spirv/           # SPIR-V shader module: decode, validate, build.
 │   ├── ssh/             # The pure SSH protocol engine (no I/O, clock, or RNG).
 │   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.

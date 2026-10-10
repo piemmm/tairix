@@ -1509,7 +1509,12 @@ never wrong. The whole operation is transactional and fail-closed — the name
 is validated before any syscall, and a VFS refusal (a permission denial, a
 read-only mount, a lost race) leaves the listing untouched and states the
 kernel's reason in the field (`AGENTS.md` §2.24, §5.4), never a silent or
-fabricated success. On success the directory is re-listed and the selection
+fabricated success. The move asks the kernel to refuse, not replace, an
+occupied name (`RenameFlags::NO_REPLACE`): the listing the name was checked
+against may be stale, and only the volume knows its own matching rule — on
+a FAT or FileCore volume `B.TXT` is the sibling `b.txt` — so the kernel's
+refusal is reported as the same clash the field shows for an exact match,
+while a change of letter case alone renames the item itself. On success the directory is re-listed and the selection
 follows the entry to its new name. The trusted file picker composes the same
 `Browser` and simply never calls the write path, so it stays read-only
 (`plans/CAPABILITY_USE.md` CU6).

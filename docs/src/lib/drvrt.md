@@ -43,7 +43,8 @@ driver derives its concrete bring-up inputs — its register BAR window and DMA
 aperture bound — from the same grant set the host maps over, without a second
 `resource_grants` syscall (§2.16). `RtDriverHost::property(key)` answers a
 fact the node states (`HwProperty::UsbInterface`, the interface a USB class
-driver's requests address).
+driver's requests address; `HwProperty::UsbSpeed`, the bus speed that fixes
+how long its endpoints' intervals are).
 
 `RtDriverHost::shared_buffer(least)` maps the node's shared buffer whole and
 hands it out once, as one exclusive slice for the life of the process, so a

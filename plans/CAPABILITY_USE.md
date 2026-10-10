@@ -782,7 +782,11 @@ what it wants first is recorded in `plans/VIEW.md`.**
   planted link, and opens a file the user agreed to replace with
   `CREATE|TRUNCATE|NO_FOLLOW`. The app cannot read what a save replaces, and
   the grant states `GRANT_EXTENT_INHERIT` — the session's own reach, bounded
-  by the user's quota and the volume.
+  by the user's quota and the volume. A *folder* pick delegates, read-only and
+  one descriptor each, the chosen folder's regular files whose content type
+  the requester's signed manifest associates, and never the folder: the user's
+  choice widens the app to those files and to nothing created there later
+  (`plans/APPWIN.md` AW5).
 
   **A document is handed over writable only to an editor.** The file manager,
   the desktop and the picker open a document read-write only for an

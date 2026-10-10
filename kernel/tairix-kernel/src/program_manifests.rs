@@ -1392,6 +1392,32 @@ mod tests {
         CapabilityId::NET_RAW,
     ];
 
+    // The `play` sound player (plans/SOUND.md SND10): console write for its
+    // output, diagnostics and full-screen interface, console read for the
+    // raw keystrokes and the foreground it follows, filesystem access for
+    // the files it is named and its own Help/, `CAP_SANDBOX_SPAWN` to
+    // re-enter its own binary as the capability-empty decoder, `CAP_SHM` for
+    // the stream's ring, and `CAP_LOG_EMIT` to record a decoder replaced
+    // after it failed. Playback asks for nothing more: the audio service
+    // authorises the stream against the caller's seat. Not an embedded
+    // spawn-floor program, so the list lives only in this pin.
+    const PLAY_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::CONSOLE_READ,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::SHM,
+        CapabilityId::LOG_EMIT,
+    ];
+
+    // `audioctl` (plans/SOUND.md SND15): CAP_SYSINFO_GLOBAL is for `streams
+    // --all` alone; a device control asks for nothing, being admitted by room.
+    const AUDIOCTL_TOOL_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SYSINFO_GLOBAL,
+    ];
+
     // The `host` DNS-lookup tool (plans/DNS.md DNS3): console write for its
     // answers and diagnostics, filesystem access for its own Help/ documents,
     // and CAP_NET for the ordinary UDP socket the stub resolver queries the
@@ -1548,6 +1574,7 @@ mod tests {
             SANDBOXED_DOCUMENT_APP_REQUEST,
         ),
         ("applib", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("audioctl", ProgramKind::Command, AUDIOCTL_TOOL_REQUEST),
         ("audiod", ProgramKind::Service, AUDIOD_MANIFEST),
         ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("cat", ProgramKind::Command, CAT_MANIFEST),
@@ -1586,10 +1613,16 @@ mod tests {
         ("man", ProgramKind::Command, MAN_MANIFEST),
         ("mdadm", ProgramKind::Command, RAID_ADMIN_TOOL_REQUEST),
         ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+        (
+            "music",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
         ("mv", ProgramKind::Command, FILE_TOOL_REQUEST),
         ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
         ("passwd", ProgramKind::Command, USERS_TOOL_MANIFEST),
         ("ping", ProgramKind::Command, PING_TOOL_REQUEST),
+        ("play", ProgramKind::Command, PLAY_TOOL_REQUEST),
         ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("ps", ProgramKind::Command, PS_MANIFEST),
         ("readlink", ProgramKind::Command, PURE_TOOL_REQUEST),

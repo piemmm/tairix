@@ -49,9 +49,11 @@
 #![deny(missing_docs)]
 
 mod host;
+mod supplier;
 mod syscalls;
 
 pub use host::{GrantedResource, RtDriverHost, MAX_GRANTS};
+pub use supplier::{RtSupplier, SupplierHost};
 pub use syscalls::{GrantSyscalls, RtGrantSyscalls};
 
 #[cfg(test)]

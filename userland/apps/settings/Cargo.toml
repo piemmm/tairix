@@ -60,6 +60,9 @@ tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # The four closed value sets the appearance rows offer, read from the one
 # place the document and the window channel both take them from.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The device controls the Sound pane asks for, the volume taper its sliders
+# read through, and the walk that lists the devices.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
 # The shared wrapping tile-grid geometry the Wallpaper pane's gallery lays
 # its pictures out with — the same one the file manager's icon view and the
 # desktop's own icon column use, so no second grid exists.
@@ -113,6 +116,8 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The band the runtime's pressure gauge reports, which decides how far past the
 # screen the panes' pictures are rendered ahead.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The audio service's live transport the Sound pane's round trips use.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
 # On the real target the mount walk goes over the runtime `ipc_call`
 # transport; the base dependency stays host-neutral so host tests build the
 # readings from records directly.

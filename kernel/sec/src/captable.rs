@@ -302,6 +302,10 @@ pub struct TaskCapabilities {
     /// Fixed at admission by [`CapTable::admit`] and carried across a record
     /// replacement; no process ever changes session.
     session: ProcId,
+    /// The innermost login session this process lies within
+    /// ([`crate::session::SessionTree::login_session`]), fixed with
+    /// `session`.
+    login_session: ProcId,
     /// Kernel-attested process name — the resolved executable's basename for
     /// a spawned process, the driver-store path's basename for a spawned
     /// driver, a fixed name for the kernel's own principals (PID 1).
@@ -442,6 +446,7 @@ impl TaskCapabilities {
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
             session: ROOT_SESSION,
+            login_session: ROOT_SESSION,
             name: ProcName::EMPTY,
             spawn_path: Vec::new(),
             app: None,
@@ -585,6 +590,14 @@ impl TaskCapabilities {
     #[must_use]
     pub fn session(&self) -> ProcId {
         self.session
+    }
+
+    /// The login session this process lies within: one principal's sign-in,
+    /// named by its anchor's instance, or [`ROOT_SESSION`] for a process no
+    /// login encloses.
+    #[must_use]
+    pub fn login_session(&self) -> ProcId {
+        self.login_session
     }
 
     /// Whether this record is `caller`'s own process or a child `caller`
@@ -806,7 +819,8 @@ impl TaskCapabilities {
             self.proc_id,
             capabilities,
             self.console,
-        );
+        )
+        .with_login_session(self.login_session);
         match self.app {
             Some(app) => origin.with_app(app),
             None => origin,
@@ -1285,6 +1299,7 @@ impl CapTable {
         if let Some(previous) = self.entries.get(&process) {
             caps.adopt_io_counters(previous);
             caps.session = previous.session;
+            caps.login_session = previous.login_session;
             self.instances.remove(&previous.proc_id());
         }
         let leader = process.leader_task();
@@ -1617,7 +1632,9 @@ impl CapTable {
     }
 
     /// Resolve where a child of `spawner` goes for `request`, before any of
-    /// the child's state exists.
+    /// the child's state exists. A session it founds is a login session where
+    /// `names_user`: the spawn names the user the child runs as, a credential
+    /// switch rather than an inheritance.
     ///
     /// The kernel ([`ProcessId::KERNEL`], loading a driver) is in the root
     /// session and anchors nothing. Any other spawner is placed by its record,
@@ -1636,6 +1653,7 @@ impl CapTable {
         &self,
         spawner: ProcessId,
         request: SpawnSession,
+        names_user: bool,
     ) -> Result<Placement, PlacementError> {
         let (parent, anchor) = if spawner == ProcessId::KERNEL {
             (ROOT_SESSION, ProcId::KERNEL)
@@ -1647,7 +1665,7 @@ impl CapTable {
         };
         let placement = match request {
             SpawnSession::Inherit => Placement::join(parent),
-            SpawnSession::New => Placement::found(anchor, parent),
+            SpawnSession::New => Placement::found(anchor, parent, names_user),
             SpawnSession::Anchored => Placement::anchored(anchor, parent),
             SpawnSession::Join(target) => {
                 let destination = self
@@ -1686,6 +1704,7 @@ impl CapTable {
         caps.session = self
             .sessions
             .place(caps.process(), caps.proc_id(), placement)?;
+        caps.login_session = self.sessions.login_session(caps.session);
         self.insert(caps);
         Ok(())
     }
@@ -3023,7 +3042,7 @@ mod tests {
         byte: u8,
         request: SpawnSession,
     ) -> Result<(), PlacementError> {
-        let placement = table.resolve_placement(ProcessId(spawner), request)?;
+        let placement = table.resolve_placement(ProcessId(spawner), request, false)?;
         table.admit(instance_record(pid, byte), placement)
     }
 
@@ -3032,6 +3051,41 @@ mod tests {
             .caps_of_process(ProcessId(pid))
             .map(TaskCapabilities::session)
             .expect("admitted")
+    }
+
+    /// A session a spawn founds as another user is its child's login session,
+    /// and everything placed inside it after lies within that login; one
+    /// founded without naming a user is no login of its own.
+    #[test]
+    fn a_session_founded_as_another_user_is_its_descendants_login() {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1));
+        let login_of = |table: &CapTable, pid: u64| {
+            table
+                .caps_of_process(ProcessId(pid))
+                .map(TaskCapabilities::login_session)
+                .expect("admitted")
+        };
+        let place = |table: &mut CapTable, spawner, pid, byte, request, names_user| {
+            let placement = table
+                .resolve_placement(ProcessId(spawner), request, names_user)
+                .expect("placeable");
+            table
+                .admit(instance_record(pid, byte), placement)
+                .expect("admitted");
+        };
+        place(&mut table, 1, 2, 2, SpawnSession::New, true);
+        let desktop = ProcId::from_raw([2; 16]);
+        assert_eq!(login_of(&table, 2), desktop);
+        place(&mut table, 2, 3, 3, SpawnSession::Anchored, false);
+        place(&mut table, 3, 4, 4, SpawnSession::New, false);
+        assert_eq!(login_of(&table, 3), desktop, "an application");
+        assert_eq!(login_of(&table, 4), desktop, "a shell its terminal started");
+        place(&mut table, 4, 5, 5, SpawnSession::Inherit, true);
+        assert_eq!(login_of(&table, 5), desktop, "a switch that founds nothing");
+        place(&mut table, 1, 6, 6, SpawnSession::New, false);
+        assert_eq!(login_of(&table, 6), ROOT_SESSION);
+        assert_eq!(login_of(&table, 1), ROOT_SESSION);
     }
 
     #[test]
@@ -3135,16 +3189,16 @@ mod tests {
     fn the_kernel_anchors_no_session_and_admission_is_for_new_processes() {
         let mut table = CapTable::new();
         assert_eq!(
-            table.resolve_placement(ProcessId::KERNEL, SpawnSession::Anchored),
+            table.resolve_placement(ProcessId::KERNEL, SpawnSession::Anchored, false),
             Err(PlacementError::NotFound)
         );
         assert_eq!(
-            table.resolve_placement(ProcessId::KERNEL, SpawnSession::Inherit),
+            table.resolve_placement(ProcessId::KERNEL, SpawnSession::Inherit, false),
             Ok(Placement::join(ROOT_SESSION))
         );
         for request in [SpawnSession::Inherit, SpawnSession::New] {
             assert_eq!(
-                table.resolve_placement(ProcessId(7), request),
+                table.resolve_placement(ProcessId(7), request, false),
                 Err(PlacementError::NotFound),
                 "a spawner that has gone never places a child in the root"
             );

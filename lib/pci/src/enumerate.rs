@@ -1257,6 +1257,47 @@ impl<C: ConfigSpace> Pci<C> {
         Err(DriverError::NotFound)
     }
 
+    /// The part of memory BAR `bar_index` of `bdf` a driver may be granted:
+    /// its base, and the bytes before the first page holding the function's
+    /// MSI-X table or pending-bit array.
+    ///
+    /// # Errors
+    ///
+    /// As [`PciBus::driver_window`](tairix_abi::driver::pci::PciBus::driver_window).
+    pub fn driver_window(&self, bdf: u64, bar_index: u8) -> Result<(u64, u64), DriverError> {
+        let bar = self.resolve_bar(bdf, bar_index)?;
+        if matches!(bar.kind, BarKind::Io) {
+            return Err(DriverError::Unsupported);
+        }
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let n = match self.capabilities(bdf, &mut caps) {
+            Ok(n) => n,
+            Err(DriverError::NotFound) => 0,
+            Err(err) => return Err(err),
+        };
+        let page = tairix_abi::PAGE_SIZE as u64;
+        let len = caps[..n]
+            .iter()
+            .filter_map(|cap| match *cap {
+                Capability::MsiX {
+                    table_bar,
+                    table_offset,
+                    pba_bar,
+                    pba_offset,
+                    ..
+                } => Some([(table_bar, table_offset), (pba_bar, pba_offset)]),
+                _ => None,
+            })
+            .flatten()
+            .filter(|&(bar, _)| bar == bar_index)
+            .map(|(_, offset)| u64::from(offset) / page * page)
+            .fold(bar.size, u64::min);
+        if len == 0 {
+            return Err(DriverError::NotFound);
+        }
+        Ok((bar.base, len))
+    }
+
     /// Locate the function's MSI-X capability, returning its
     /// `(cap_offset, table_size, table_bar, table_offset)`.
     pub(crate) fn find_msix(&self, bdf: u64) -> Result<(u8, u16, u8, u32), DriverError> {

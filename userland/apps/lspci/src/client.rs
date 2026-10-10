@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_devids::DevIds;
@@ -408,8 +409,8 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
             // inventing a pairing rather than dropped.
             None => line.push_str("Bus child (no pairing published)"),
         },
-        Some(HwResourceKind::DmaController) => describe_dma_controller(resource, line),
-        Some(HwResourceKind::DmaRequest) => describe_dma_request(resource, line),
+        Some(HwResourceKind::LinkDuty) => describe_link_duty(resource, line),
+        Some(HwResourceKind::LinkRequest) => describe_link_request(resource, line),
         Some(HwResourceKind::IommuStream) => describe_iommu_stream(resource, line),
         Some(HwResourceKind::IommuAlias) => describe_iommu_alias(resource, line),
         Some(HwResourceKind::IommuGroup) => match resource.iommu_group() {
@@ -453,6 +454,24 @@ fn describe_property(resource: &HwResource, line: &mut String) {
             let _ = write!(line, "Faults raised on interrupt {place} of the node");
         }
         Ok((HwProperty::KernelDriven, _)) => line.push_str("Driven by the kernel"),
+        Ok((HwProperty::FixedClockRate, _)) => match resource.fixed_clock() {
+            Some((index, hz)) => {
+                let _ = write!(line, "Clock {index} fixed at {hz} Hz");
+            }
+            None => line.push_str("Fixed clock (malformed)"),
+        },
+        Ok((HwProperty::UsbSpeed, speed)) => {
+            let name = u8::try_from(speed)
+                .ok()
+                .and_then(|byte| tairix_abi::usb_urb::UsbSpeed::from_u8(byte).ok())
+                .map_or("unknown", |speed| match speed {
+                    tairix_abi::usb_urb::UsbSpeed::Low => "low",
+                    tairix_abi::usb_urb::UsbSpeed::Full => "full",
+                    tairix_abi::usb_urb::UsbSpeed::High => "high",
+                    tairix_abi::usb_urb::UsbSpeed::Super => "super",
+                });
+            let _ = write!(line, "USB {name} speed");
+        }
         Err(_) => line.push_str("Property (malformed)"),
     }
 }
@@ -510,34 +529,52 @@ fn describe_iommu_reserved(resource: &HwResource, line: &mut String) {
     }
 }
 
-/// Append a DMA controller duty: the endpoint it serves and its channels.
-fn describe_dma_controller(resource: &HwResource, line: &mut String) {
-    let Ok(duty) = resource.dma_controller_duty() else {
-        line.push_str("DMA controller (malformed duty)");
-        return;
-    };
-    let _ = write!(line, "DMA controller on endpoint {}", duty.endpoint());
-    match duty.channels() {
-        Some(mask) => {
-            let _ = write!(line, " [channels=0x{mask:x}]");
-        }
-        None => line.push_str(" [channels not stated]"),
+/// What a supplier of `role` is called, and what a consumer's link to one.
+const fn role_names(role: LinkRole) -> (&'static str, &'static str) {
+    match role {
+        LinkRole::Dma => ("DMA controller", "DMA request"),
+        LinkRole::Clock => ("Clock controller", "Clock"),
+        LinkRole::Codec => ("Audio codec", "Codec link"),
     }
 }
 
-/// Append a DMA request line: its position, controller, specifier and name.
-fn describe_dma_request(resource: &HwResource, line: &mut String) {
-    let Ok(request) = resource.dma_request_line() else {
-        line.push_str("DMA request (malformed)");
+/// Append a link supplier's duty: the endpoint it serves and, for a DMA
+/// controller, its channels.
+fn describe_link_duty(resource: &HwResource, line: &mut String) {
+    let Ok(duty) = resource.link_duty() else {
+        line.push_str("Link supplier (malformed duty)");
         return;
     };
     let _ = write!(
         line,
-        "DMA request {} on endpoint {} [specifier",
+        "{} on endpoint {}",
+        role_names(duty.role()).0,
+        duty.endpoint()
+    );
+    if duty.role() == LinkRole::Dma {
+        match duty.channels() {
+            Some(mask) => {
+                let _ = write!(line, " [channels=0x{mask:x}]");
+            }
+            None => line.push_str(" [channels not stated]"),
+        }
+    }
+}
+
+/// Append a consumer's link: its position, supplier, specifier and name.
+fn describe_link_request(resource: &HwResource, line: &mut String) {
+    let Ok(request) = resource.link_request() else {
+        line.push_str("Link (malformed)");
+        return;
+    };
+    let _ = write!(
+        line,
+        "{} {} on endpoint {} [specifier",
+        role_names(request.role()).1,
         request.index(),
         request.endpoint()
     );
-    for cell in request.specifier() {
+    for cell in request.selector() {
         let _ = write!(line, " 0x{cell:x}");
     }
     line.push(']');
@@ -827,11 +864,14 @@ C 02  Network controller
     }
 
     #[test]
-    fn verbose_names_each_dma_resource_by_what_it_grants() {
-        use tairix_abi::driver::dmaengine::{
-            DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
-        };
+    fn verbose_names_each_link_resource_by_what_it_grants() {
+        use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
+        use tairix_abi::driver::codec::CODEC_ENDPOINTS;
+        use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+        use tairix_abi::hwlink::{LinkDuty, LinkRequest};
         let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(9);
+        let clock = CLOCK_CONTROLLER_ENDPOINTS.endpoint(4);
+        let codec = CODEC_ENDPOINTS.endpoint(6);
         let mut function = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Dma);
         function
             .push_match_key(HwMatchKey::pci(0x8086, 0x3483, 0x08_01_00))
@@ -843,11 +883,13 @@ C 02  Network controller
                 0xc000_0000,
                 tairix_abi::DmaCoherence::Snooped,
             ),
-            HwResource::dma_controller(
-                &DmaControllerDuty::new(endpoint, Some(0x7f5)).expect("valid"),
-            ),
-            HwResource::dma_controller(&DmaControllerDuty::new(endpoint, None).expect("valid")),
-            HwResource::dma_request(&DmaRequestLine::new(endpoint, 1, &[3], b"rx").expect("valid")),
+            HwResource::duty(&LinkDuty::new(endpoint, Some(0x7f5)).expect("valid")),
+            HwResource::duty(&LinkDuty::new(endpoint, None).expect("valid")),
+            HwResource::request(&LinkRequest::new(endpoint, 1, &[3], b"rx").expect("valid")),
+            HwResource::duty(&LinkDuty::new(clock, None).expect("valid")),
+            HwResource::request(&LinkRequest::new(clock, 0, &[0x1e], b"pwm").expect("valid")),
+            HwResource::request(&LinkRequest::new(codec, 0, &[1, 0], b"").expect("valid")),
+            HwResource::fixed_clock_rate(1, 54_000_000).expect("fits"),
         ] {
             function.push_resource(resource).expect("resource fits");
         }
@@ -864,6 +906,10 @@ C 02  Network controller
                 std::format!("  DMA controller on endpoint {endpoint} [channels=0x7f5]"),
                 std::format!("  DMA controller on endpoint {endpoint} [channels not stated]"),
                 std::format!("  DMA request 1 on endpoint {endpoint} [specifier 0x3] \"rx\""),
+                std::format!("  Clock controller on endpoint {clock}"),
+                std::format!("  Clock 0 on endpoint {clock} [specifier 0x1e] \"pwm\""),
+                std::format!("  Codec link 0 on endpoint {codec} [specifier 0x1 0x0]"),
+                "  Clock 1 fixed at 54000000 Hz".to_string(),
             ]
         );
     }

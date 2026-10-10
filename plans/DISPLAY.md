@@ -359,43 +359,50 @@ READMEs, syscall table row 23 (`u64` lease generation).
 
 ### Stage D5 — per-console controlling owner + foreground handoff
 
-**Done.** Each text console carries a kernel-tracked controlling
-(foreground) owner, enforced fail-closed with no `SIGTTIN`-style signal
-race:
+**Done.** Each terminal — a text console or a pty — carries a kernel-tracked
+controlling (foreground) owner, enforced fail-closed with no `SIGTTIN`-style
+signal race:
 
-- `ConsoleDevice` (`kernel/core/src/console.rs`) records
-  `{owner, granter}` (lock-free atomics the ISR input filter reads,
-  compound transitions serialised under the device's `fg` lock) with the
-  checked transitions `grant_foreground` (honoured only from an unowned
-  console, the recorded granter, or the current owner delegating to its
-  own child), `release_foreground` (granter/owner only; unowned release
-  is an idempotent success), and `clear_dead_foreground` (compare-and-
-  clear). The unchecked setter is gone.
-- `stream_read` and `stream_input_mode` share one gate
-  (`check_console_foreground`): while an owner is recorded, any other
-  task is refused with the typed `Errno::NotForeground` (new `abi-v1`
-  errno 27, generated into the C headers) before any input is consumed
-  or the discipline changes; an unowned console reads openly. No new
-  capability (§5.2): the authority is the inherited console descriptor,
-  the parent/child relation (`ProcessWait::authorise_child`), and the
-  owner-checked slot transition — the drain right only moves down the
-  spawn chain, inherited and intersected.
-- A vanished owner never wedges the console: the `exit` handler releases
-  the exiting task's ownership, and the gate clears an owner the process
-  bookkeeping proves dead (`ProcessWait::is_live`; the inert default
-  reports live, so an unproven death keeps denying — heal, never widen).
-- `console_foreground` (72) keeps its number and gains the grant/release
-  semantics in place; `^C`/`^Z` foreground signal delivery (SP9) rides
-  the same slot, so signal target and drain right can never diverge.
-  elsh's mark-around-wait wiring is unchanged.
+- `ForegroundOwnership` (`kernel/core/src/foreground.rs`) records
+  `{owner, granter}` under an IRQ-safe lock the input filter reads, with the
+  checked transitions `grant` (honoured only from an unowned terminal, the
+  recorded granter, or the current owner delegating to its own child),
+  `release` (granter/owner only; an unowned release is an idempotent no-op),
+  and `clear_dead`. Each change of hands moves a generation and reports that
+  it happened, so the terminal wakes its parked readers and its `Foreground`
+  wait-set watchers.
+- `stream_read`, `stream_input_mode` and a pty slave read share one gate:
+  while an owner is recorded, any other task is refused with the typed
+  `Errno::NotForeground` (errno 27) before any input is consumed or the
+  discipline changes. A parked read asks the gate before every byte it takes,
+  so a reader parked before a change of hands takes nothing after. An
+  unowned terminal reads openly. No new capability: the authority is the
+  inherited descriptor, the parent/child relation
+  (`ProcessWait::authorise_child`), and the owner-checked transition.
+- `console_foreground` (72) takes a live child of the caller, or the caller's
+  own pid, which holds the terminal as its own. Cooked-mode `^C`/`^Z` (SP9)
+  reach a **job** — an owner the terminal was handed to — and never a process
+  holding its own terminal, which reads those bytes. elsh holds its terminal
+  from start-up, hands it to each foreground job, and takes it back after, so
+  at its prompt a background job reads nothing.
+- `foreground_held` (139) answers whether the caller owns the terminal, and a
+  `Foreground` wait-set member (kind 14) is an edge on the ownership
+  generation, so a program draws on its terminal only while it holds the
+  foreground and learns of every handover without asking on a timer.
+- A vanished owner never wedges a terminal: the `exit` handler releases the
+  exiting task's console ownership, and the gate clears an owner the process
+  bookkeeping proves dead (`ProcessWait::is_live`; the inert default reports
+  live, so an unproven death keeps denying — heal, never widen).
 
 Kernel host tests prove two tasks on one console cannot both drain (the
-refused reader consumes nothing), handoff transfers the drain right,
-background reads and mode changes fail closed, bystander grant/clear
-steals are refused, and both no-wedge paths (exit release, gate healing);
+refused reader consumes nothing), handoff transfers the drain right, a shell
+holds its own console and takes it back, background reads and mode changes
+fail closed on the console and the pty slave alike, the `Foreground` edge is
+reported once per change of hands, bystander grant/clear steals are refused,
+and both no-wedge paths (exit release, gate healing);
 device-level transition tests and `ProcessTable::is_live` tests back
 them. Docs: `docs/src/desktop/seat.md` (D5 section),
-`docs/src/architecture/syscalls.md` (rows 13/21/72), the `lib/abi` /
+`docs/src/architecture/syscalls.md` (rows 13/21/72/139), the `lib/abi` /
 `lib/rt` / `lib/abi-sys` rustdoc.
 
 ### Stage D6 — multi-seat / hotplug

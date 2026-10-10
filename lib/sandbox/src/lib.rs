@@ -74,6 +74,11 @@
 //!   caller-side [`timesync::evaluate_datagram`] gates the nonce echo itself
 //!   before the worker is involved and re-validates any returned sample
 //!   against the plausibility, round-trip, and stratum bounds.
+//! * [`audiodecode`] — a sound file decoded (`tairix-sound`) by a long-lived
+//!   worker that asks its owner for the pages it reads, over a
+//!   [`supervise::SupervisedSession`]; the caller-side
+//!   [`audiodecode::AudioDecodeClient`] checks every answer against the
+//!   request it answers and brings a replacement back to the stream.
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted
 //!   targets) — the production transport: the parent spawns its own binary
 //!   in the worker role over a pipe pair wired through
@@ -84,6 +89,7 @@
 
 extern crate alloc;
 
+pub mod audiodecode;
 pub mod decode;
 pub mod helpdoc;
 pub mod host;

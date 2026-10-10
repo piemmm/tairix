@@ -25,6 +25,21 @@ It is separate from `lib/audio` for the reason `lib/netchan` is separate from
   manager hands to the mixer, and parks on a wait set over `{call endpoint,
   device interrupt}`.
 
+## The cyclic engine
+
+`cyclic::CyclicPlayback` is the stream of every device a DMA controller feeds
+from a looping buffer, written once over two seams: `DmaPort`, the channel
+(`cyclic::LinkDma` in a driver process, over `tairix-linkclient`), and
+`FrameCodec`, how the device's frame sits in the buffer. The buffer holds four
+periods and the one after the period playing is always written, as silence
+counted lost when the mixer supplied none, because a period left alone would
+replay a lap-old sound. A buffer frame is as many bytes as a ring frame of two
+channels in the codec's format, whole FIFO words, so a period is read from the
+ring straight into place. A stream ends parked: the codec's parked frame fills
+the buffer and the channel stops at its next boundary, once that frame has
+reached the device. The modelled channel drivers test against is
+`cyclic::mock`, behind the `mock-dma` feature.
+
 ## State is per endpoint, not per channel
 
 A device presents several sinks and sources and each is driven independently,

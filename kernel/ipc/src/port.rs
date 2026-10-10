@@ -29,15 +29,27 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use tairix_abi::{Errno, Origin};
+use tairix_abi::{Errno, Origin, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::{Field, Sink};
-use tairix_util::fmt::{format_hex_u64, format_usize};
+use tairix_util::fmt::{format_hex_bytes, format_hex_u64, format_u64, format_usize};
 
 use crate::audit::{record, AuditEvent};
 use crate::loom_compat::{AtomicU32, Ordering};
+
+/// Why a send was refused: the sender lacks the port's send capabilities.
+const SEND_DENIED_CAPABILITY: Field<'static> = Field {
+    key: "reason",
+    value: tairix_log::FieldValue::Str("missing_capability"),
+};
+
+/// Why a send was refused: the port's owner admitted another sender.
+const SEND_DENIED_NOT_ADMITTED: Field<'static> = Field {
+    key: "reason",
+    value: tairix_log::FieldValue::Str("not_admitted"),
+};
 
 /// Stable endpoint identifier carried in the IPC header.
 ///
@@ -84,6 +96,22 @@ pub struct Message {
     pub payload: SensitiveBuffer,
 }
 
+/// What a port's mailbox lock guards: the queued messages, and the one sender
+/// its owner admitted — checked at enqueue under the lock every send already
+/// takes, so admission costs a send nothing more.
+struct Mailbox {
+    messages: VecDeque<Message>,
+    /// The only process instance whose messages the port takes, once its
+    /// owner has named one.
+    admitted: Option<ProcId>,
+    /// Sends refused for want of that admission over the port's life.
+    refused: u64,
+    /// Whether a refusal under the current admission has been recorded. Only
+    /// the first is, so a sender the port will never take cannot flood the
+    /// audit trail through it; the rest are counted into its destruction.
+    refusal_recorded: bool,
+}
+
 /// One end of an IPC message channel.
 ///
 /// Construct with [`Port::create`]; tear down with [`Port::destroy`].
@@ -106,7 +134,7 @@ pub struct Port {
     // Mailbox under a spinlock. We use `kernel/sync`'s `SpinLock`
     // because IPC sends never block on I/O and contention is bounded
     // by the mailbox capacity.
-    mailbox: tairix_sync::SpinLock<VecDeque<Message>>,
+    mailbox: tairix_sync::SpinLock<Mailbox>,
     /// Scheduler ids of the tasks parked on a wait-set member observing
     /// this port's *room* — the senders a [`Self::recv`] must wake once it
     /// frees a slot, so a sender holding an undeliverable message parks
@@ -191,7 +219,12 @@ impl Port {
             max_payload,
             mailbox_capacity,
             state: AtomicU32::new(state::OPEN),
-            mailbox: tairix_sync::SpinLock::new(VecDeque::new()),
+            mailbox: tairix_sync::SpinLock::new(Mailbox {
+                messages: VecDeque::new(),
+                admitted: None,
+                refused: 0,
+                refusal_recorded: false,
+            }),
             room_waiters: tairix_sync::SpinLock::new(Vec::new()),
         })
     }
@@ -214,7 +247,7 @@ impl Port {
     /// uses; the woken owner's `ipc_recv` performs the actual dequeue.
     #[must_use]
     pub fn has_pending(&self) -> bool {
-        !self.mailbox.lock().is_empty()
+        !self.mailbox.lock().messages.is_empty()
     }
 
     /// `true` when the mailbox is below capacity, so a send would not be
@@ -223,7 +256,7 @@ impl Port {
     /// own [`Self::send`] takes the slot.
     #[must_use]
     pub fn has_room(&self) -> bool {
-        self.mailbox.lock().len() < self.mailbox_capacity
+        self.mailbox.lock().messages.len() < self.mailbox_capacity
     }
 
     /// Record `task` as parked for room in this mailbox, so the next
@@ -302,14 +335,15 @@ impl Port {
         // sees `CLOSED`, and Acquire on the reverse to pair with the
         // load on the send fast path.
         self.state.store(state::CLOSED, Ordering::Release);
-        let drained = {
+        let (drained, refused) = {
             let mut q = self.mailbox.lock();
-            let n = q.len();
-            q.clear();
-            n
+            let n = q.messages.len();
+            q.messages.clear();
+            (n, q.refused)
         };
         let mut id_buf = [0u8; 16];
         let mut drained_buf = [0u8; 12];
+        let mut refused_buf = [0u8; 20];
         record(
             audit,
             AuditEvent::PortDestroyed,
@@ -321,6 +355,10 @@ impl Port {
                 Field {
                     key: "drained",
                     value: tairix_log::FieldValue::Str(format_usize(drained, &mut drained_buf)),
+                },
+                Field {
+                    key: "refused",
+                    value: tairix_log::FieldValue::Str(format_u64(refused, &mut refused_buf)),
                 },
             ],
         );
@@ -341,7 +379,13 @@ impl Port {
     /// 3. **Size check.** Payload bytes must be `<= max_payload`,
     ///    bounded again by [`IPC_MESSAGE_MAX_PAYLOAD_LEN`]; otherwise
     ///    [`Errno::MessageTooLarge`] + [`AuditEvent::MessageTooLarge`].
-    /// 4. **Capacity check.** If the mailbox is at capacity,
+    /// 4. **Admission check.** Once the owner has admitted a sender
+    ///    ([`Self::admit`]), any other process instance gets
+    ///    [`Errno::PermissionDenied`], taking no room. The first such
+    ///    refusal under an admission is recorded as
+    ///    [`AuditEvent::MessageSendDenied`]; the rest are counted into the
+    ///    port's [`AuditEvent::PortDestroyed`].
+    /// 5. **Capacity check.** If the mailbox is at capacity,
     ///    [`Errno::WouldBlock`] + [`AuditEvent::MailboxFull`] — the
     ///    receiver is merely slow, the same retryable signal
     ///    [`Self::recv`]'s empty-mailbox case would report in reverse, and
@@ -393,7 +437,7 @@ impl Port {
             record(
                 audit,
                 AuditEvent::MessageSendDenied,
-                &[port_field, sender_field],
+                &[port_field, sender_field, SEND_DENIED_CAPABILITY],
             );
             return Err(Errno::PermissionDenied);
         }
@@ -430,6 +474,7 @@ impl Port {
         // 5. Enqueue under the mailbox lock; re-check destruction
         //    after acquiring, because `destroy()` may have raced
         //    between step 1 and here.
+        let origin = sender.attest_origin();
         let mut q = self.mailbox.lock();
         if self.state.load(Ordering::Acquire) == state::CLOSED {
             // Release the lock implicitly by dropping `q` after the
@@ -443,7 +488,25 @@ impl Port {
             );
             return Err(Errno::NotFound);
         }
-        if q.len() >= self.mailbox_capacity {
+        // A port whose owner named its one sender takes no other's
+        // message, so knowing — or deriving — its id is not enough to fill
+        // it and starve the sender it serves.
+        if q.admitted
+            .is_some_and(|admitted| admitted != origin.proc_id())
+        {
+            q.refused = q.refused.saturating_add(1);
+            let first = !core::mem::replace(&mut q.refusal_recorded, true);
+            drop(q);
+            if first {
+                record(
+                    audit,
+                    AuditEvent::MessageSendDenied,
+                    &[port_field, sender_field, SEND_DENIED_NOT_ADMITTED],
+                );
+            }
+            return Err(Errno::PermissionDenied);
+        }
+        if q.messages.len() >= self.mailbox_capacity {
             drop(q);
             record(audit, AuditEvent::MailboxFull, &[port_field, sender_field]);
             // The receiver is merely slow, not the caller malformed: this is
@@ -452,9 +515,9 @@ impl Port {
             // configuration error, e.g. `Port::create`'s bounds check).
             return Err(Errno::WouldBlock);
         }
-        q.push_back(Message {
+        q.messages.push_back(Message {
             sender: sender.process().0,
-            origin: sender.attest_origin(),
+            origin,
             payload,
         });
         drop(q);
@@ -474,7 +537,7 @@ impl Port {
     /// read. The Stage 2.7 dispatcher is responsible for routing the
     /// returned message to the bound receiver task.
     pub fn recv(&self) -> Option<Message> {
-        self.mailbox.lock().pop_front()
+        self.mailbox.lock().messages.pop_front()
     }
 
     /// Deliver the oldest message to `f`, dequeuing it only if `f`
@@ -499,11 +562,53 @@ impl Port {
         f: impl FnOnce(&Message) -> Result<R, E>,
     ) -> Option<Result<R, E>> {
         let mut q = self.mailbox.lock();
-        let outcome = f(q.front()?);
+        let outcome = f(q.messages.front()?);
         if outcome.is_ok() {
-            q.pop_front();
+            q.messages.pop_front();
         }
         Some(outcome)
+    }
+
+    /// Admit `sender` as the only process instance whose messages the port
+    /// takes from now on, replacing any admitted before, and discard every
+    /// queued message another instance sent — it arrived before the owner
+    /// named its sender. Answers whether that freed room, so the caller can
+    /// wake the senders [`Self::room_waiters`] names.
+    pub fn admit<S: Sink + ?Sized>(&self, sender: ProcId, audit: &S) -> bool {
+        let discarded = {
+            let mut q = self.mailbox.lock();
+            let before = q.messages.len();
+            q.messages
+                .retain(|message| message.origin.proc_id() == sender);
+            q.admitted = Some(sender);
+            q.refusal_recorded = false;
+            before - q.messages.len()
+        };
+        let mut id_buf = [0u8; 16];
+        let mut sender_buf = [0u8; 2 * tairix_abi::PROC_ID_LEN];
+        let mut discarded_buf = [0u8; 12];
+        record(
+            audit,
+            AuditEvent::PortSenderAdmitted,
+            &[
+                Field {
+                    key: "port",
+                    value: tairix_log::FieldValue::Str(format_hex_u64(self.id.0, &mut id_buf)),
+                },
+                Field {
+                    key: "admitted",
+                    value: tairix_log::FieldValue::Str(format_hex_bytes(
+                        &sender.to_le_bytes(),
+                        &mut sender_buf,
+                    )),
+                },
+                Field {
+                    key: "discarded",
+                    value: tairix_log::FieldValue::Str(format_usize(discarded, &mut discarded_buf)),
+                },
+            ],
+        );
+        discarded > 0
     }
 
     /// Number of messages currently buffered in the mailbox.
@@ -513,13 +618,13 @@ impl Port {
     /// suite; production paths should not branch on this.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.mailbox.lock().len()
+        self.mailbox.lock().messages.len()
     }
 
     /// `true` if the mailbox currently has no buffered messages.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.mailbox.lock().is_empty()
+        self.mailbox.lock().messages.is_empty()
     }
 }
 
@@ -687,6 +792,58 @@ mod tests {
         assert!(sink.ids().contains(&AuditEvent::MessageSendDenied.id().0));
         // Payload was *not* enqueued.
         assert!(port.is_empty());
+    }
+
+    #[test]
+    fn an_admitted_sender_is_the_only_one_a_port_takes_from() {
+        let (sink, port) = open_port();
+        let instance = |byte| ProcId::from_raw([byte; tairix_abi::PROC_ID_LEN]);
+        let admitted = task_with(7, &[CapabilityId::NET_RAW]).with_proc_id(instance(0x7A));
+        let flooder = task_with(9, &[CapabilityId::NET_RAW]).with_proc_id(instance(0x9F));
+        assert_eq!(port.send(&flooder, b"before", &sink), Ok(()));
+        assert_eq!(port.send(&admitted, b"early", &sink), Ok(()));
+        assert!(
+            port.admit(instance(0x7A), &sink),
+            "discarding the flooder's message freed room"
+        );
+        assert!(sink.ids().contains(&AuditEvent::PortSenderAdmitted.id().0));
+        assert_eq!(
+            port.recv().map(|message| message.origin.proc_id()),
+            Some(instance(0x7A)),
+            "only the admitted sender's message stays"
+        );
+        let denials = |sink: &RecordingSink| {
+            sink.ids()
+                .iter()
+                .filter(|&&id| id == AuditEvent::MessageSendDenied.id().0)
+                .count()
+        };
+        for _ in 0..8 {
+            assert_eq!(
+                port.send(&flooder, b"junk", &sink),
+                Err(Errno::PermissionDenied)
+            );
+        }
+        assert_eq!(denials(&sink), 1, "a flood is recorded once");
+        assert!(port.is_empty(), "the refused sends took no room");
+        assert_eq!(port.send(&admitted, b"notice", &sink), Ok(()));
+        assert!(
+            !port.admit(instance(0x7A), &sink),
+            "nothing of another's to discard"
+        );
+        assert!(
+            port.admit(instance(0x9F), &sink),
+            "a later admission replaces the earlier and discards its messages"
+        );
+        assert_eq!(
+            port.send(&admitted, b"late", &sink),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            denials(&sink),
+            2,
+            "a new admission records its own first refusal"
+        );
     }
 
     #[test]

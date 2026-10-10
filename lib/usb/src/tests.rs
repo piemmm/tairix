@@ -14,16 +14,16 @@ use super::device::{
     AttachOutcome, BulkDirection, BulkEndpoint, BulkPipe, DeviceDescriptor, DeviceIdentity,
     DeviceRegion, DmaBank, EnumStage, EventWait, HubDescriptor, HubEvent, InterfaceInfo,
     PeriodicShape, SerialNumber, StringHeader, UsbDevice, BULK_BUF_LEN, BULK_SLOTS,
-    DMA_CHUNK_ALIGN, EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, INT_TRANSFER_MAX, MAX_HUB_DEPTH,
-    PORT_RESET_POLLS, PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_QUEUE_CAP, RING_TRBS,
-    SPEED_FULL, SPEED_HIGH, SPEED_LOW, SPEED_SUPER,
+    DMA_CHUNK_ALIGN, EVENT_RING_SEGMENT_MIN_TRBS, EVENT_RING_SEGMENT_TRBS, INT_ARM_DEPTH,
+    INT_TRANSFER_MAX, MAX_HUB_DEPTH, PORT_RESET_POLLS, PORT_RESET_POLL_US, PORT_RESET_SETTLE_US,
+    REPORT_QUEUE_CAP, RING_TRBS, SPEED_FULL, SPEED_HIGH, SPEED_LOW, SPEED_SUPER,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::transport::{drive_urb, UrbEngine, UrbScope};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
 use tairix_abi::driver::DmaReach;
-use tairix_abi::usb_urb::{UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN};
+use tairix_abi::usb_urb::{UrbRequest, UsbDirection, UsbTransferType};
 use tairix_abi::Delay;
 use tairix_abi::{Errno, HwProperty};
 
@@ -936,6 +936,9 @@ struct MockXhci {
     /// that re-arms it without resetting — the interrupt-storm / silent-device
     /// bug — sees the endpoint stay dead.
     int_halt: u8,
+    /// The segment table entry, and the slot within its segment, the next
+    /// event lands in.
+    event_segment: usize,
     event_index: usize,
     event_cycle: bool,
     /// Address of the most-recently-posted event-ring slot, so a test can
@@ -1199,6 +1202,24 @@ struct MockXhci {
     control_requests: Vec<[u8; 8]>,
     /// The configuration-descriptor fixture answered for a hub.
     hub_config: &'static [u8],
+    /// The isochronous endpoints Configure Endpoints added, as the
+    /// controller holds them.
+    iso: Vec<MockIso>,
+    /// Every TD fetched off an isochronous ring, in order.
+    iso_tds: Vec<MockIsoTd>,
+    /// TDs fetched but not yet completed: with `iso_hold` set they wait for
+    /// [`MockXhci::complete_iso`], else they complete as they are fetched.
+    iso_waiting: VecDeque<MockIsoTd>,
+    iso_hold: bool,
+    /// One-shot: refuse the next Configure Endpoint touching an isochronous
+    /// endpoint with this code.
+    iso_configure_refusal: Option<CompletionCode>,
+    /// The `MFINDEX` register.
+    mfindex: u32,
+    /// One-shot: STALL the next `SET_INTERFACE`.
+    stall_set_interface: bool,
+    /// Every `SET_INTERFACE` answered, as `(interface, alternate)`.
+    set_interfaces: Vec<(u8, u8)>,
     /// The Report Descriptor the model answers `GET_DESCRIPTOR(Report)` with
     /// (`None` = the model STALLs the request, so enumeration falls back to
     /// boot protocol — the default, matching a device that serves no report
@@ -1340,6 +1361,42 @@ struct UnansweredControl {
 /// One direction of the mock's bulk endpoint model: the transfer ring's
 /// base / consumer state, the DCI the Configure Endpoint named (`0` = not
 /// configured), a one-shot STALL knob, and the recovery state machine.
+/// One isochronous endpoint the mock controller holds.
+#[derive(Clone, Debug)]
+struct MockIso {
+    slot: u8,
+    dci: u8,
+    ep_type: u32,
+    max_packet: u32,
+    max_burst: u32,
+    mult: u32,
+    interval: u32,
+    esit: u32,
+    error_count: u32,
+    base: u64,
+    index: usize,
+    cycle: bool,
+}
+
+/// One isochronous TD the mock fetched: its fields, and the TRB its
+/// completion names.
+#[derive(Clone, Debug)]
+struct MockIsoTd {
+    slot: u8,
+    dci: u8,
+    frame_id: u16,
+    sia: bool,
+    tbc: u8,
+    tlbpc: u8,
+    length: u32,
+    trbs: usize,
+    buffer: u64,
+    /// The TD's last TRB, which carries IOC.
+    last: u64,
+    ioc: bool,
+    bei: bool,
+}
+
 struct MockBulk {
     base: u64,
     index: usize,
@@ -1515,6 +1572,7 @@ impl MockXhci {
             int_index: 0,
             int_cycle: true,
             int_halt: 0,
+            event_segment: 0,
             event_index: 0,
             event_cycle: true,
             last_event_addr: 0,
@@ -1572,6 +1630,14 @@ impl MockXhci {
             int_interval: 0,
             int_armed_len: 0,
             keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
+            iso: Vec::new(),
+            iso_tds: Vec::new(),
+            iso_waiting: VecDeque::new(),
+            iso_hold: false,
+            iso_configure_refusal: None,
+            mfindex: 0,
+            stall_set_interface: false,
+            set_interfaces: Vec::new(),
             names_serial: false,
             string_descriptors: Vec::new(),
             string_header_override: None,
@@ -1880,9 +1946,11 @@ impl MockXhci {
             .collect()
     }
 
-    /// Produce one event TRB into the event segment named by the ERST.
+    /// Produce one event TRB into the segment the ERST names, moving to the
+    /// next entry at a segment's end and wrapping, with the cycle toggled,
+    /// past the last (§4.9.4).
     fn post_event(&mut self, mut event: Trb) {
-        let erst = Self::qword(self.erstba);
+        let erst = Self::qword(self.erstba) + (self.event_segment * 16) as u64;
         let entry = self.read_dwords(erst, 4);
         let segment = (u64::from(entry[1]) << 32) | u64::from(entry[0]);
         let len = usize::try_from(entry[2]).expect("segment length");
@@ -1896,7 +1964,11 @@ impl MockXhci {
         self.event_index += 1;
         if self.event_index == len {
             self.event_index = 0;
-            self.event_cycle = !self.event_cycle;
+            self.event_segment += 1;
+            if self.event_segment == self.erstsz as usize {
+                self.event_segment = 0;
+                self.event_cycle = !self.event_cycle;
+            }
         }
     }
 
@@ -2081,7 +2153,12 @@ impl MockXhci {
                 }
                 Ok(TrbType::DisableSlot) => self.handle_disable_slot(addr, trb.slot_id()),
                 Ok(TrbType::ConfigureEndpoint) => {
-                    let code = self.handle_configure_endpoint(trb.parameter, trb.slot_id());
+                    let control = self.read_dwords(trb.parameter, 2);
+                    let code = self
+                        .handle_iso_configure(trb.parameter, trb.slot_id(), &control)
+                        .unwrap_or_else(|| {
+                            self.handle_configure_endpoint(trb.parameter, trb.slot_id())
+                        });
                     self.post_command_completion(addr, code, trb.slot_id());
                 }
                 Ok(TrbType::EvaluateContext) => {
@@ -2108,6 +2185,136 @@ impl MockXhci {
                 }
             }
         }
+    }
+
+    /// A Configure Endpoint that drops endpoints or adds isochronous ones —
+    /// an alternate setting's — answered here; `None` for any other.
+    ///
+    /// Every added endpoint must be an isochronous one with no error count,
+    /// a non-zero Max ESIT Payload and an interval, and Context Entries must
+    /// cover it, or the command is a TRB Error.
+    fn handle_iso_configure(
+        &mut self,
+        input_ctx: u64,
+        slot: u8,
+        control: &[u32],
+    ) -> Option<CompletionCode> {
+        let (drop, add) = (control[0], control[1]);
+        let endpoint_adds = add & !0b1;
+        let iso_add = (0..32).any(|dci| {
+            endpoint_adds & (1 << dci) != 0 && {
+                let ctx = self.read_dwords(input_ctx + (1 + dci) * MOCK_CTX_SIZE as u64, 2);
+                matches!((ctx[1] >> 3) & 0x7, 1 | 5)
+            }
+        });
+        if drop == 0 && !iso_add {
+            return None;
+        }
+        if let Some(code) = self.iso_configure_refusal.take() {
+            return Some(code);
+        }
+        if add & 0b1 == 0 {
+            return Some(CompletionCode::TrbError);
+        }
+        let slot_ctx = self.read_dwords(input_ctx + MOCK_CTX_SIZE as u64, 1);
+        let entries = slot_ctx[0] >> 27;
+        let mut added = Vec::new();
+        for dci in 2..32u32 {
+            if endpoint_adds & (1 << dci) == 0 {
+                continue;
+            }
+            let at = input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64;
+            let ctx = self.read_dwords(at, 5);
+            let ep_type = (ctx[1] >> 3) & 0x7;
+            let esit = ((ctx[0] >> 24) << 16) | (ctx[4] >> 16);
+            if !matches!(ep_type, 1 | 5) || esit == 0 || dci > entries {
+                return Some(CompletionCode::TrbError);
+            }
+            added.push(MockIso {
+                slot,
+                dci: u8::try_from(dci).expect("a DCI"),
+                ep_type,
+                max_packet: ctx[1] >> 16,
+                max_burst: (ctx[1] >> 8) & 0xFF,
+                mult: (ctx[0] >> 8) & 0b11,
+                interval: (ctx[0] >> 16) & 0xFF,
+                esit,
+                error_count: (ctx[1] >> 1) & 0b11,
+                base: self.ep_ctx_dequeue(at),
+                index: 0,
+                cycle: true,
+            });
+        }
+        self.iso
+            .retain(|iso| iso.slot != slot || drop & (1 << iso.dci) == 0);
+        self.iso.extend(added);
+        Some(CompletionCode::Success)
+    }
+
+    /// Fetch every TD queued on `slot`'s isochronous endpoint `dci`: an
+    /// Isoch TRB and the Normal TRBs chained to it.
+    fn process_iso_ring(&mut self, slot: u8, dci: u8) {
+        let Some(at) = self
+            .iso
+            .iter()
+            .position(|iso| iso.slot == slot && iso.dci == dci)
+        else {
+            return;
+        };
+        loop {
+            let (base, mut index, mut cycle) =
+                (self.iso[at].base, self.iso[at].index, self.iso[at].cycle);
+            let Some((addr, head)) = self.next_owned(base, &mut index, &mut cycle) else {
+                return;
+            };
+            let mut td = MockIsoTd {
+                slot,
+                dci,
+                frame_id: u16::try_from((head.control >> 20) & 0x7FF).expect("eleven bits"),
+                sia: head.control & (1 << 31) != 0,
+                tbc: u8::try_from((head.control >> 7) & 0b11).expect("two bits"),
+                tlbpc: u8::try_from((head.control >> 16) & 0xF).expect("four bits"),
+                length: head.status & 0x1_FFFF,
+                trbs: 1,
+                buffer: head.parameter,
+                last: addr,
+                ioc: head.control & trb::CONTROL_IOC != 0,
+                bei: head.control & trb::CONTROL_BEI != 0,
+            };
+            assert_eq!(
+                head.trb_type(),
+                Ok(TrbType::Isoch),
+                "a TD opens with an Isoch TRB"
+            );
+            let mut chained = head.control & trb::CONTROL_CHAIN != 0;
+            while chained {
+                let Some((addr, next)) = self.next_owned(base, &mut index, &mut cycle) else {
+                    panic!("a chained TD published whole");
+                };
+                assert_eq!(next.trb_type(), Ok(TrbType::Normal));
+                td.length += next.status & 0x1_FFFF;
+                td.trbs += 1;
+                td.last = addr;
+                td.ioc = next.control & trb::CONTROL_IOC != 0;
+                td.bei = next.control & trb::CONTROL_BEI != 0;
+                chained = next.control & trb::CONTROL_CHAIN != 0;
+            }
+            self.iso[at].index = index;
+            self.iso[at].cycle = cycle;
+            self.iso_tds.push(td.clone());
+            if self.iso_hold {
+                self.iso_waiting.push_back(td);
+            } else {
+                self.post_transfer_event_for_slot(td.last, CompletionCode::Success, dci, 0, slot);
+            }
+        }
+    }
+
+    /// Complete the oldest held isochronous TD with `code`, its event naming
+    /// its last TRB and reporting `residual` bytes not moved.
+    fn complete_iso(&mut self, code: CompletionCode, residual: u32) {
+        let td = self.iso_waiting.pop_front().expect("a held TD");
+        self.post_transfer_event_for_slot(td.last, code, td.dci, residual, td.slot);
     }
 
     /// Free `slot` on a Disable Slot command at `addr` (xHCI §6.4.3.3); the
@@ -2184,6 +2391,16 @@ impl MockXhci {
         let (slot, dci) = (trb.slot_id(), trb.endpoint_id());
         let base = trb.parameter & !0xF;
         let cycle = trb.parameter & 1 != 0;
+        if let Some(iso) = self
+            .iso
+            .iter_mut()
+            .find(|iso| iso.slot == slot && iso.dci == dci)
+        {
+            iso.base = base;
+            iso.index = 0;
+            iso.cycle = cycle;
+            return CompletionCode::Success;
+        }
         if dci == 1 {
             if self.ep0_state.get(usize::from(slot)) != Some(&MockEp0::Stopped) {
                 return CompletionCode::ContextStateError;
@@ -2232,6 +2449,30 @@ impl MockXhci {
     /// refused on any other. A TD it was stuck on is abandoned with a Stopped
     /// event, or completes when the device answers it as the stop lands.
     fn stop_endpoint(&mut self, slot: u8, dci: u8) -> CompletionCode {
+        if self
+            .iso
+            .iter()
+            .any(|iso| iso.slot == slot && iso.dci == dci)
+        {
+            // The TD the endpoint was on ends Stopped; the rest are abandoned.
+            if let Some(stuck) = self
+                .iso_waiting
+                .iter()
+                .find(|td| td.slot == slot && td.dci == dci)
+                .cloned()
+            {
+                self.post_transfer_event_for_slot(
+                    stuck.last,
+                    CompletionCode::Stopped,
+                    dci,
+                    0,
+                    slot,
+                );
+            }
+            self.iso_waiting
+                .retain(|td| td.slot != slot || td.dci != dci);
+            return CompletionCode::Success;
+        }
         let index = usize::from(slot);
         if dci != 1 || index >= self.ep0_state.len() {
             return CompletionCode::TrbError;
@@ -3011,6 +3252,14 @@ impl MockXhci {
                     return;
                 }
             }
+            // SET_INTERFACE (USB 2.0 §9.4.10).
+            (0x01, 0x0B) => {
+                if core::mem::take(&mut self.stall_set_interface) {
+                    self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
+                    return;
+                }
+                self.set_interfaces.push((setup[4], setup[2]));
+            }
             // SET_CONFIGURATION
             (0x00, 0x09) => {
                 if self.fault_set_configuration {
@@ -3547,6 +3796,7 @@ impl MockXhci {
         self.ep0_unanswered = None;
         self.int_index = 0;
         self.int_cycle = true;
+        self.event_segment = 0;
         self.event_index = 0;
         self.event_cycle = true;
         self.next_slot = 1;
@@ -3659,6 +3909,9 @@ impl MockXhci {
         }
         if offset == Self::ir0(regs::IR_ERSTSZ) {
             return Ok(self.erstsz);
+        }
+        if offset == MOCK_RTSOFF as usize + regs::MFINDEX {
+            return Ok(self.mfindex);
         }
         if offset == Self::ir0(regs::IR_ERDP) {
             return Ok(self.erdp[0]);
@@ -3889,6 +4142,18 @@ impl MockXhci {
             {
                 self.process_int2_ring();
             }
+            (index, value)
+                if self
+                    .iso
+                    .iter()
+                    .any(|iso| usize::from(iso.slot) == index && u32::from(iso.dci) == value) =>
+            {
+                let (slot, dci) = (
+                    u8::try_from(index).expect("a slot"),
+                    u8::try_from(value).expect("a DCI"),
+                );
+                self.process_iso_ring(slot, dci);
+            }
             (_, 3) => self.process_int_ring(),
             _ => {}
         }
@@ -4097,6 +4362,7 @@ fn trb_type_round_trips_and_fails_closed() {
         TrbType::SetupStage,
         TrbType::DataStage,
         TrbType::StatusStage,
+        TrbType::Isoch,
         TrbType::Link,
         TrbType::NoOp,
         TrbType::EnableSlot,
@@ -4223,6 +4489,32 @@ fn producer_ring_wrap_publishes_link_and_toggles_cycle() {
     assert_eq!(trbs[3].trb_type(), Ok(TrbType::Link));
     assert!(trbs[2].cycle(), "first-pass TRB carries cycle 1");
     assert!(!trbs[0].cycle(), "second-pass TRB carries cycle 0");
+}
+
+#[test]
+fn a_td_chained_across_the_wrap_chains_through_the_link() {
+    let (mut ring, _link) = ProducerRing::new(3, 0x1000).expect("ring fits");
+    let first = ring
+        .push(Trb::new(TrbType::Normal, 0, 0, trb::CONTROL_CHAIN))
+        .expect("slot 0");
+    assert!(first.link.is_none());
+    ring.retire_one().expect("completion 0");
+    let wrapping = ring
+        .push(Trb::new(TrbType::Isoch, 0, 0, trb::CONTROL_CHAIN))
+        .expect("slot 1 wraps");
+    let link = wrapping.link.expect("the wrap re-publishes the link");
+    assert_ne!(link.control & trb::CONTROL_CHAIN, 0);
+    ring.retire_one().expect("completion 1");
+    let last = ring
+        .push(Trb::new(TrbType::Normal, 0, 0, trb::CONTROL_IOC))
+        .expect("slot 0 again");
+    assert!(last.link.is_none());
+    ring.retire_one().expect("completion 2");
+    let unchained = ring
+        .push(Trb::new(TrbType::Normal, 0, 0, trb::CONTROL_IOC))
+        .expect("slot 1 wraps again");
+    let link = unchained.link.expect("the wrap re-publishes the link");
+    assert_eq!(link.control & trb::CONTROL_CHAIN, 0);
 }
 
 #[test]
@@ -4588,11 +4880,17 @@ fn dma_program_rejects_unaligned_addresses() {
         dcbaap: 0x1000,
         command_ring: 0x1040,
         erst: 0x1080,
+        erst_entries: 1,
         event_segment: 0x10C0,
     };
     assert!(aligned.is_plausible());
     assert!(!DmaProgram {
         dcbaap: 0,
+        ..aligned
+    }
+    .is_plausible());
+    assert!(!DmaProgram {
+        erst_entries: 0,
         ..aligned
     }
     .is_plausible());
@@ -4808,19 +5106,43 @@ fn usb_device_start_programs_dma_and_runs() {
     let mock = device.host_mut().model_mut();
     assert_eq!(mock.usbcmd & regs::USBCMD_RUN, regs::USBCMD_RUN);
     assert_eq!(mock.config, 32, "all reported slots enabled");
-    assert_eq!(MockXhci::qword(mock.dcbaap), MOCK_DMA_BASE);
+    // The event segment opens the shared chunk, on its page; the DCBAA follows.
+    assert_eq!(MockXhci::qword(mock.erdp), MOCK_DMA_BASE);
+    assert_eq!(
+        MockXhci::qword(mock.dcbaap),
+        MOCK_DMA_BASE + (EVENT_RING_SEGMENT_TRBS * TRB_LEN) as u64
+    );
     assert_eq!(
         MockXhci::qword(mock.crcr) & u64::from(regs::CRCR_RCS),
         1,
         "command ring starts at consumer cycle state 1"
     );
-    assert_eq!(mock.erstsz, 1);
+    assert_eq!(mock.erstsz, 1, "the mock takes one segment");
     // The single ERST entry names the event segment the initial ERDP
     // points at, sized in TRBs.
     let entry = mock.read_dwords(MockXhci::qword(mock.erstba), 4);
     let segment = (u64::from(entry[1]) << 32) | u64::from(entry[0]);
     assert_eq!(segment, MockXhci::qword(mock.erdp));
-    assert_eq!(entry[2] as usize, RING_TRBS);
+    assert_eq!(entry[2] as usize, EVENT_RING_SEGMENT_TRBS);
+}
+
+#[test]
+fn a_controller_taking_more_segments_gets_a_longer_event_ring() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    // ERST Max 3, as the VL805 reports: eight entries, of which four are used.
+    mock.hcsparams2 |= 3 << 4;
+    let mut device = started_device(mock, &mem);
+    let mock = device.host_mut().model_mut();
+    assert_eq!(mock.erstsz, 4);
+    let first = MockXhci::qword(mock.erdp);
+    assert_eq!(first % DMA_CHUNK_ALIGN as u64, 0, "segments sit on pages");
+    for segment in 0..4u64 {
+        let entry = mock.read_dwords(MockXhci::qword(mock.erstba) + segment * 16, 4);
+        let base = (u64::from(entry[1]) << 32) | u64::from(entry[0]);
+        assert_eq!(base, first + segment * DMA_CHUNK_ALIGN as u64);
+        assert_eq!(entry[2] as usize, EVENT_RING_SEGMENT_TRBS);
+    }
 }
 
 #[test]
@@ -4851,6 +5173,18 @@ fn hcsparams2_decodes_the_vl805_scratchpad_count() {
     assert_eq!(regs::hcsparams2_max_scratchpad(1 << 21), 32);
     // No scratchpad required.
     assert_eq!(regs::hcsparams2_max_scratchpad(0), 0);
+}
+
+#[test]
+fn hcsparams2_decodes_the_scheduling_threshold_and_segment_table_size() {
+    // The VL805's `FC000031h`: IST of one microframe, ERST Max 3.
+    assert_eq!(regs::hcsparams2_ist_microframes(0xFC00_0031), 1);
+    assert_eq!(regs::hcsparams2_erst_entries(0xFC00_0031), 8);
+    // QEMU's `0000000Fh`: IST of seven whole frames, one segment.
+    assert_eq!(regs::hcsparams2_ist_microframes(0x0F), 56);
+    assert_eq!(regs::hcsparams2_erst_entries(0x0F), 1);
+    assert!(regs::hccparams1_cfc(1 << 11));
+    assert!(!regs::hccparams1_cfc(!(1 << 11)));
 }
 
 #[test]
@@ -5934,13 +6268,10 @@ fn serve_control(
         } else {
             UsbDirection::In
         },
-        buffer: 0,
         length: u32::from(u16::from_le_bytes([setup[6], setup[7]])),
         setup,
     };
-    let mut frame = [0u8; URB_REQUEST_LEN];
-    let len = urb.encode(&mut frame).expect("encodes");
-    drive_urb(&frame[..len], shared, &mut device.engine_for(index))
+    drive_urb(&urb, shared, &mut device.engine_for(index))
 }
 
 /// A keyboard's Report Descriptor, as the mock serves it.
@@ -5953,10 +6284,12 @@ fn a_class_driver_reaches_its_own_interface_and_never_the_device() {
     mock.report_descriptor = Some(&MOCK_REPORT_DESCRIPTOR);
     let mut device = started_device(mock, &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
+    let mut own = tairix_inline::BitSet256::new();
+    own.insert(0);
     assert_eq!(
         device.engine_for(0).scope(),
         Some(UrbScope {
-            interface: 0,
+            interfaces: own,
             endpoints: 1 << 3,
         })
     );
@@ -7950,12 +8283,22 @@ fn describe_device_emits_the_hid_child_node() {
     // interface.
     let mouse_key = HwMatchKey::usb(0, 0, 0x03_01_02);
     assert!(!mouse_key.matches(&emitted));
+    let properties: alloc::vec::Vec<_> = node
+        .resources()
+        .iter()
+        .filter_map(|resource| resource.property_value().ok())
+        .collect();
     assert_eq!(
-        node.resources()
-            .iter()
-            .find_map(|resource| resource.property_value().ok()),
-        Some((HwProperty::UsbInterface, 0)),
-        "the node names the interface its driver's requests address"
+        properties,
+        [
+            (HwProperty::UsbInterface, 0),
+            (
+                HwProperty::UsbSpeed,
+                u64::from(tairix_abi::usb_urb::UsbSpeed::High.as_u8())
+            ),
+        ],
+        "the node names the interface its driver's requests address, and the \
+         speed that fixes its endpoints' intervals"
     );
 }
 
@@ -10057,15 +10400,19 @@ fn a_nodes_address_is_its_devices_position_which_a_controller_reset_keeps() {
 
 #[test]
 fn the_shared_chunk_holds_only_what_the_controller_shares() {
-    // The DCBAA for the mock's 32 slots, the event-ring segment table entry,
-    // the command ring, the event segment and the input context: every
+    // The event segment, the DCBAA for the mock's 32 slots, the event-ring
+    // segment table entry, the command ring and the input context: every
     // control endpoint lives in its own device's region, never here.
     let mem = shared_mem();
     let device = started_device(MockXhci::with_device(&mem), &mem);
     let packed = |len: usize| len.next_multiple_of(64);
     assert_eq!(
         device.dma_ref().chunks[0].1,
-        packed(33 * 8) + packed(16) + 2 * packed(RING_TRBS * TRB_LEN) + 33 * MOCK_CTX_SIZE
+        EVENT_RING_SEGMENT_TRBS * TRB_LEN
+            + packed(33 * 8)
+            + packed(16)
+            + packed(RING_TRBS * TRB_LEN)
+            + 33 * MOCK_CTX_SIZE
     );
 }
 
@@ -12189,3 +12536,5 @@ fn two_hubs_reporting_at_once_are_both_serviced_without_a_further_interrupt() {
         "both leaves are freed"
     );
 }
+
+mod iso;

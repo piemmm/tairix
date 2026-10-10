@@ -28,9 +28,10 @@
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use tairix_fdt::fixture::{arm_with_cpus, ecam_host_arm, virt_like, DtbBuilder};
+use tairix_fdt::fixture::{arm_with_cpus, ecam_host_arm, virt_like};
 use tairix_fdt::iommu::{each_iommu_address, iommu_cells, stream_id};
 use tairix_fdt::pci::each_pci_host;
+use tairix_fdt::write::FdtWriter;
 use tairix_fdt::{
     gpio_enabled_regulator, gpio_selected_regulator, phandle_args, supply, Fdt, IdMap, Node,
 };
@@ -70,7 +71,7 @@ fn templates() -> Vec<Vec<u8>> {
         {
             // A deeply nested tree with assorted property shapes, to drive the
             // node/property iterators and the cell decoders.
-            let mut b = DtbBuilder::new();
+            let mut b = FdtWriter::new();
             b.begin_node("");
             b.prop_u32("#address-cells", 2);
             b.prop_u32("#size-cells", 2);
@@ -90,7 +91,7 @@ fn templates() -> Vec<Vec<u8>> {
             let cells = |values: &[u32]| -> Vec<u8> {
                 values.iter().flat_map(|v| v.to_be_bytes()).collect()
             };
-            let mut b = DtbBuilder::new();
+            let mut b = FdtWriter::new();
             b.begin_node("");
             b.begin_node("gpio");
             b.prop_u32("#gpio-cells", 2);
@@ -128,7 +129,7 @@ fn templates() -> Vec<Vec<u8>> {
 fn translation_topology() -> Vec<u8> {
     let cells =
         |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);

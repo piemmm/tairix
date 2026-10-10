@@ -104,6 +104,11 @@ impl HwTreeSource for Tree {
         }
         Ok(found)
     }
+
+    fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
+        self.nodes.lock().iter().for_each(visit);
+        Ok(())
+    }
 }
 
 /// A reference unit, its frames and a tree, in statics of this expansion's

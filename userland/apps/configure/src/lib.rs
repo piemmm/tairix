@@ -487,6 +487,7 @@ pub fn run(
             if let Some((current, edited)) = network.as_ref() {
                 notice.push_str(&apply_interfaces(current, edited, policy));
             }
+            notice.push_str(&audio_notice(&named));
             if notice.is_empty() {
                 return Ok(());
             }
@@ -699,6 +700,28 @@ fn deferred_notice(keys: &[Key], err: Errno) -> String {
         "{named}: saved; the running network stack did not accept it ({err}); it applies at next \
          boot\n"
     )
+}
+
+/// The notice a saved `audio.*` change reports: the audio service holds no
+/// filesystem capability, so the device manager hands it the baseline when
+/// it next reads the store, and `audioctl` is what changes the running
+/// machine. Empty when no audio key was named.
+fn audio_notice(named: &[(Named<'_>, &str)]) -> String {
+    let mut keys = String::new();
+    for (key, _) in named {
+        if let Named::System(key) = key {
+            if key.is_audio() {
+                if !keys.is_empty() {
+                    keys.push_str(", ");
+                }
+                keys.push_str(key.name());
+            }
+        }
+    }
+    if keys.is_empty() {
+        return keys;
+    }
+    format!("{keys}: saved; it applies at next boot, and `audioctl` changes the running machine\n")
 }
 
 /// Which registry a key name on the command line belongs to.
@@ -1020,7 +1043,10 @@ mod tests {
              net.sockets.mem auto\n\
              time.servers none\n\
              time.refresh 1d\n\
-             input.mouse.debounce 25\n",
+             input.mouse.debounce 25\n\
+             audio.output auto\n\
+             audio.input auto\n\
+             audio.level 0dB\n",
         );
     }
 
@@ -1559,6 +1585,41 @@ mod tests {
         );
         assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
         assert!(policy.applied.borrow().is_empty(), "no net.* policy pushed");
+    }
+
+    /// The audio service holds no filesystem capability, so a saved
+    /// `audio.*` change is the next boot's, and the operator is told where
+    /// the running machine is changed instead.
+    #[test]
+    fn a_saved_audio_key_says_when_it_applies() {
+        let store = MemStore::new(None);
+        let (outcome, notice) = set_pairs(
+            &[("audio.level", "-6dB")],
+            &store,
+            &MemNetStore::holding(ONE_INTERFACE),
+            &MemPolicy::accepting(),
+        );
+        outcome.expect("sets");
+        assert!(
+            store
+                .text
+                .borrow()
+                .as_deref()
+                .is_some_and(|text| text.contains("audio.level -6dB")),
+            "saved"
+        );
+        assert_eq!(
+            notice,
+            "audio.level: saved; it applies at next boot, and `audioctl` changes the running \
+             machine\n"
+        );
+        let (_, quiet) = set_pairs(
+            &[("cache.all", "off")],
+            &MemStore::new(None),
+            &MemNetStore::holding(ONE_INTERFACE),
+            &MemPolicy::accepting(),
+        );
+        assert!(quiet.is_empty(), "{quiet}");
     }
 
     #[test]

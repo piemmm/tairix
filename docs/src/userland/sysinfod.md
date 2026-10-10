@@ -85,6 +85,9 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `DMA_UNITS`              | `CAP_SYSINFO_HW`     | yes     | packed `DmaUnitRecord`s             |
 | `DMA_GROUPS`             | `CAP_SYSINFO_HW`     | yes     | packed `DmaGroupRecord`s            |
 | `DMA_NODES`              | `CAP_SYSINFO_HW`     | yes     | packed `DmaNodeRecord`s             |
+| `AUDIO_DEVICES`          | none                 | no      | packed `AudioDeviceDescriptor`s     |
+| `SELF_AUDIO_STREAMS`     | none (self-scoped)   | no      | packed `StreamDescriptor`s          |
+| `GLOBAL_AUDIO_STREAMS`   | `CAP_SYSINFO_GLOBAL` | yes     | packed `StreamDescriptor`s          |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the
@@ -131,6 +134,14 @@ The reply carries the occupancy the service measured around its own
 present calls, the memory its driver reports the device owns, the
 compositor capabilities that driver publishes, and the mode being scanned
 out.
+
+The sound queries forward to the audio service over the reserved
+`AUDIO_ENDPOINT`, walked by id through `lib/audio`'s client. The broker clears
+each device's `access` to `Shown`: the service's answer was for the broker,
+not the caller. It reads every stream under its own
+`CAP_SYSINFO_INTROSPECT` and keeps the caller's own for `SELF_AUDIO_STREAMS`,
+so the scope is decided here, once; `GLOBAL_AUDIO_STREAMS` hands over all of
+them to a caller holding `CAP_SYSINFO_GLOBAL`.
 
 ## Reported cache ledgers
 

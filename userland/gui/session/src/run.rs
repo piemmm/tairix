@@ -80,6 +80,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+    use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::driver::display::{Display, DisplayMode};
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
@@ -102,11 +103,13 @@ mod program {
         PreviewOutcome, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
-        CapabilityId, DriverError, Errno, FdWire, Notice, Origin, ProcId, WaitFlags, WaitSetOp,
-        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN, WAITSET_TIMEOUT_NONE,
-        WAIT_PID_ANY,
+        CapabilityId, DriverError, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags,
+        WaitSetOp, WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN,
+        WAITSET_TIMEOUT_NONE, WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
+    use tairix_audio::live::{live_captures, RtAudio};
+    use tairix_audio::stream::{devices, set_control, DeviceControl};
     use tairix_browse::{
         AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, ListingJob, Probe,
         Probes, RtLinkReader, Took, WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
@@ -120,6 +123,7 @@ mod program {
         Keeper, Memory as TraceMemory, Picture, PictureFiles, TraceDesk, TraceHost, TraceLink,
         Unkept,
     };
+    use tairix_desktop_session::sound::{SoundAnswer, SoundJob, SoundSession};
     use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
@@ -171,6 +175,7 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
+    use tairix_rt::work::Worker;
     use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{
         plan_wallpaper, rasterise_icon, upload_document, ImageRenderService, UploadFailure,
@@ -178,7 +183,9 @@ mod program {
     };
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
-    use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
+    use tairix_taskbar::{
+        MenuRequest, MenuSubject, SoundAction, TaskId, TaskbarConfig, TaskbarResponse,
+    };
     use tairix_theme::Accessibility;
     use tairix_wallpaper::{
         CpuUse, DesktopSettings, RaytraceOptions, ScreensaverKind, MAX_WALLPAPER_BYTES,
@@ -342,6 +349,18 @@ mod program {
 
     /// The wait-set token of the showing pick's folder watch.
     const PICKER_WATCH_TOKEN: u64 = 12;
+
+    /// The wait-set token of the sound worker's wake: a round trip to the
+    /// audio service has come back.
+    const SOUND_TOKEN: u64 = 13;
+
+    /// The wait-set token of the `AudioDevices` notice: a device or one of
+    /// its controls moved, whoever moved it.
+    const AUDIO_DEVICES_TOKEN: u64 = 14;
+
+    /// The wait-set token of the `AudioCapture` notice the recording
+    /// indicator is drawn from.
+    const AUDIO_CAPTURE_TOKEN: u64 = 15;
 
     /// Queued-wake capacity of the mailbox. The authority sends one wake per
     /// switch and the loop drains it on the very next turn, so a handful of
@@ -1773,14 +1792,16 @@ mod program {
         };
         // Bind the fast-user-switching wake mailbox before the first frame,
         // so a session is resumable from the moment it can be switched away
-        // from. The id is derived from this session's own pid and is
-        // unreserved, so anyone may send to it — every message is attested
-        // against the authority when it is drained. A refused bind is not
-        // fatal: the desktop runs as a session that simply cannot be
-        // switched away from, and says so by leaving the row out.
+        // from. The id is derived from this session's own pid, so only the
+        // session authority is admitted to it — no one else can fill it —
+        // and every message is still attested when it is drained. A refused
+        // bind or admission is not fatal: the desktop runs as a session that
+        // simply cannot be switched away from, and says so by leaving the
+        // row out.
         let wake = session_wake_endpoint(self_origin.pid());
         let bound = !tairix_abi::ipc::is_reserved_endpoint(wake)
-            && tairix_rt::port_bind(wake, SESSION_WAKE_LEN, WAKE_CAPACITY) == 0;
+            && tairix_rt::port_bind(wake, SESSION_WAKE_LEN, WAKE_CAPACITY) == 0
+            && tairix_rt::port_admit(wake, SESSION_ENDPOINT).is_ok();
         if !bound {
             io::write_stderr_line(
                 "desktop: session wake mailbox refused; this session cannot switch user",
@@ -2000,6 +2021,21 @@ mod program {
         if workers.file.is_none() {
             files.stop();
         }
+        // The audio service's round trips leave the loop, as every other
+        // service call does; with no thread they run here.
+        let sound_worker = alloc::sync::Arc::new(Worker::new(
+            serve_sound,
+            RtAudio::new(),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Worker::start(&sound_worker) {
+            app::report(
+                APP_NAME,
+                format_args!("no sound thread ({reason:?}); that work runs on the serve loop"),
+            );
+        }
+        let _sound_guard = tairix_rt::work::WorkerGuard::new(&sound_worker);
+        let mut sound = SoundSession::new();
         // The shipped wallpaper store, walked once: `/System` is read-only,
         // so this is the catalog for the life of the boot and the query that
         // answers it never reaches a directory again. Bring-up, not a frame:
@@ -2385,6 +2421,48 @@ mod program {
         if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
             return app::fail(APP_NAME, EXIT_WAIT_FAILED, "memory-pressure wait refused");
         }
+        if let Some(read) = sound_worker.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                SOUND_TOKEN,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "sound wake wait refused");
+            }
+        }
+        // A member reports a generation that moves after it joins, so each
+        // is read once after joining and nothing published in between is
+        // missed.
+        for (topic, token) in [
+            (NoticeTopic::AudioDevices, AUDIO_DEVICES_TOKEN),
+            (NoticeTopic::AudioCapture, AUDIO_CAPTURE_TOKEN),
+        ] {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::SystemNotice,
+                u64::from(topic.as_u32()),
+                token,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "sound notice wait refused");
+            }
+        }
+        shell.set_sound(&mut compositor, sound.captures(live_captures()));
+        sound.refresh();
+        pump_sound(
+            &mut sound,
+            &sound_worker,
+            &publisher,
+            &mut pinboard,
+            &wallpapers,
+            &mut desktop,
+            &mut shell,
+            &mut compositor,
+        );
         // The wake mailbox joins for the session's whole life, foreground or
         // background: it is the only member a switched-away desktop waits
         // on, so a bind that succeeded and a member that did not join would
@@ -3292,6 +3370,18 @@ mod program {
                             &mut apps,
                             &mut menu,
                         ),
+                        FileAnswer::Folder { serial, opened } => settle_folder_pick(
+                            serial,
+                            opened,
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps,
+                            &mut menu,
+                        ),
                         FileAnswer::Desktop(done) => {
                             settle_desktop_call(
                                 done,
@@ -3382,6 +3472,24 @@ mod program {
                         &mut menu,
                     );
                 }
+            } else if token == SOUND_TOKEN || token == AUDIO_DEVICES_TOKEN {
+                if token == SOUND_TOKEN {
+                    sound_worker.wake().drain();
+                } else {
+                    sound.refresh();
+                }
+                pump_sound(
+                    &mut sound,
+                    &sound_worker,
+                    &publisher,
+                    &mut pinboard,
+                    &wallpapers,
+                    &mut desktop,
+                    &mut shell,
+                    &mut compositor,
+                );
+            } else if token == AUDIO_CAPTURE_TOKEN {
+                shell.set_sound(&mut compositor, sound.captures(live_captures()));
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
                 // whose asynchronous load was refused exits with a reserved
@@ -3636,6 +3744,8 @@ mod program {
                         region: &mut region,
                         fade: &mut fade,
                         set,
+                        sound: &mut sound,
+                        sound_worker: &sound_worker,
                     },
                     tairix_rt::clock_get(),
                 );
@@ -3879,22 +3989,34 @@ mod program {
         }
     }
 
-    /// Which applications edit the documents they open, by the signed
-    /// manifest of the bundle the kernel attests each runs.
-    struct Editors<'a> {
+    /// What each application does with the documents it is handed, by the
+    /// signed manifest of the bundle the kernel attests it runs.
+    struct Openers<'a> {
         identity: &'a RtWindowIdentity,
         programs: &'a Programs,
     }
 
-    impl Editors<'_> {
+    impl Openers<'_> {
         /// Whether `owner` edits documents. An owner nothing attests, or whose
         /// bundle is not installed, is handed documents to read.
         fn edits(&self, owner: ProcId) -> bool {
+            self.association(owner)
+                .is_some_and(AppAssociation::writes_documents)
+        }
+
+        /// The content types `owner`'s manifest says it opens: none for an
+        /// owner nothing attests, so a folder delegates nothing to it.
+        fn kinds(&self, owner: ProcId) -> Vec<alloc::string::String> {
+            self.association(owner)
+                .map(|association| association.mime_types().to_vec())
+                .unwrap_or_default()
+        }
+
+        fn association(&self, owner: ProcId) -> Option<&AppAssociation> {
             self.identity
                 .app_of(owner)
                 .and_then(|app| self.programs.bundles.path_of(&app))
                 .and_then(|bundle| self.programs.association(bundle))
-                .is_some_and(AppAssociation::writes_documents)
         }
     }
 
@@ -5171,6 +5293,13 @@ mod program {
             access: PickAccess,
             edits: bool,
         },
+        /// Open the files of the folder a pick chose whose content type is
+        /// one of `kinds`, for the attempt `serial` names.
+        Folder {
+            serial: u64,
+            path: alloc::string::String,
+            kinds: Vec<alloc::string::String>,
+        },
         /// A call for the user's own gesture on the desktop.
         Desktop(DesktopCall),
     }
@@ -5196,11 +5325,24 @@ mod program {
     /// A file opened for the user, which closes when it is dropped.
     type Opened = Result<tairix_browse::document::Opened, Errno>;
 
+    /// The files of a chosen folder its requester opens, opened in the order
+    /// the picker lists them, and how many more were not.
+    struct FolderFiles {
+        files: Vec<(tairix_browse::document::Opened, alloc::string::String)>,
+        left_out: u32,
+    }
+
     /// What a [`FileJob`] came to, in the shape its own kind of call yields,
     /// so an open never answers with nothing opened.
     enum FileAnswer {
         /// What a pick chose, opened for the attempt `serial` names.
         Pick { serial: u64, opened: Opened },
+        /// The files of the folder a pick chose, opened for the attempt
+        /// `serial` names.
+        Folder {
+            serial: u64,
+            opened: Result<FolderFiles, Errno>,
+        },
         /// A desktop gesture's call.
         Desktop(DesktopAnswer),
     }
@@ -5250,6 +5392,14 @@ mod program {
                     };
                     FileAnswer::Pick { serial, opened }
                 }
+                Self::Folder {
+                    serial,
+                    path,
+                    kinds,
+                } => FileAnswer::Folder {
+                    serial,
+                    opened: open_folder(&path, &kinds),
+                },
                 Self::Desktop(DesktopCall::Document {
                     run_path,
                     label,
@@ -5285,6 +5435,10 @@ mod program {
                     serial,
                     opened: Err(err),
                 },
+                Self::Folder { serial, .. } => FileAnswer::Folder {
+                    serial,
+                    opened: Err(err),
+                },
                 Self::Desktop(DesktopCall::Document {
                     run_path,
                     label,
@@ -5303,6 +5457,40 @@ mod program {
                 }),
             }
         }
+    }
+
+    /// Open, read-only, the files of the folder at `path` the picker's
+    /// selection keeps for `kinds`.
+    ///
+    /// Opened without following a link, so a name turned into one since the
+    /// listing hands over nothing. A file that will not open is left out, and
+    /// counted.
+    fn open_folder(path: &str, kinds: &[alloc::string::String]) -> Result<FolderFiles, Errno> {
+        let components = tairix_browse::vfs::components_from_absolute_path(path)?;
+        let mut entries = read_directory(&components)?;
+        let mut found = FolderFiles {
+            files: Vec::new(),
+            left_out: tairix_desktop_session::picker::folder_selection(&mut entries, kinds),
+        };
+        for entry in &entries {
+            let mut child = alloc::string::String::from(path);
+            tairix_browse::vfs::push_child(&mut child, entry.name());
+            let opened = tairix_rt::File::open(
+                child.as_bytes(),
+                tairix_abi::fs::OpenFlags::READ.union(tairix_abi::fs::OpenFlags::NO_FOLLOW),
+            );
+            match opened {
+                Ok(file) => found.files.push((
+                    tairix_browse::document::Opened {
+                        file,
+                        writable: false,
+                    },
+                    alloc::string::String::from(entry.name()),
+                )),
+                Err(_) => found.left_out = found.left_out.saturating_add(1),
+            }
+        }
+        Ok(found)
     }
 
     /// The desktop's filesystem calls, carried out on a worker in the order
@@ -5791,6 +5979,8 @@ mod program {
         region: &'a mut Option<FrameRegion>,
         fade: &'a mut ScreenFade,
         set: u64,
+        sound: &'a mut SoundSession,
+        sound_worker: &'a SoundWorker,
     }
 
     impl<S: DirectorySource, F: FnMut() -> S> SeatRouter for SessionRoute<'_, S, F> {
@@ -5801,6 +5991,31 @@ mod program {
             key: Option<KeyInput>,
             now_ns: u64,
         ) -> Routed {
+            if let tairix_desktop_session::ShellOutcome::Taskbar(TaskbarResponse::Sound(action)) =
+                &outcome
+            {
+                let (device_id, control, settled) = match *action {
+                    SoundAction::Level {
+                        device_id,
+                        level,
+                        settled,
+                    } => (device_id, DeviceControl::Level(level), settled),
+                    SoundAction::Mute { device_id, muted } => {
+                        (device_id, DeviceControl::Mute(muted), true)
+                    }
+                };
+                self.sound.ask(device_id, control, settled);
+                pump_sound(
+                    self.sound,
+                    self.sound_worker,
+                    self.publisher,
+                    self.pinboard,
+                    self.wallpapers,
+                    self.desktop,
+                    seat.shell,
+                    seat.compositor,
+                );
+            }
             route_desktop(
                 &outcome,
                 self.publisher,
@@ -6658,7 +6873,7 @@ mod program {
                         let step = picker.handle_click(local, shell, compositor);
                         step_pick(
                             step,
-                            &Editors { identity, programs },
+                            &Openers { identity, programs },
                             files,
                             server,
                             sink,
@@ -6764,7 +6979,7 @@ mod program {
                             let step = picker.handle_key(&record, shell, compositor);
                             step_pick(
                                 step,
-                                &Editors { identity, programs },
+                                &Openers { identity, programs },
                                 files,
                                 server,
                                 sink,
@@ -6922,7 +7137,7 @@ mod program {
                         let step = picker.cancel(shell, compositor);
                         step_pick(
                             step,
-                            &Editors { identity, programs },
+                            &Openers { identity, programs },
                             files,
                             server,
                             sink,
@@ -7274,10 +7489,83 @@ mod program {
                 | TaskbarResponse::WindowChosen { .. }
                 | TaskbarResponse::DismissNotification { .. }
                 | TaskbarResponse::ShowWindowPicker { .. }
-                | TaskbarResponse::CreateDesktopShortcut { .. },
+                | TaskbarResponse::CreateDesktopShortcut { .. }
+                | TaskbarResponse::Sound(_),
             ) => {}
         }
         Routed::Continue
+    }
+
+    /// The session's round trips to the audio service.
+    type SoundWorker = Worker<RtAudio, SoundJob, SoundAnswer>;
+
+    /// Apply a job's controls in order, then list the sinks and the sources.
+    fn serve_sound(audio: &mut RtAudio, job: &mut SoundJob) -> SoundAnswer {
+        let mut refused = None;
+        for (device_id, control) in job.controls.drain(..) {
+            if let Err(err) = set_control(audio, device_id, control) {
+                refused.get_or_insert(err);
+            }
+        }
+        let listed = devices(audio, StreamDirection::Playback).and_then(|mut sinks| {
+            sinks.append(&mut devices(audio, StreamDirection::Capture)?);
+            Ok(sinks)
+        });
+        SoundAnswer {
+            refused,
+            devices: listed,
+        }
+    }
+
+    /// Adopt every round trip already back and start the next one owed: the
+    /// bar shows what came back, and what the user's own room shows of their
+    /// controls is published with their settings.
+    #[allow(clippy::too_many_arguments)] // The desktop's settings state, threaded explicitly.
+    fn pump_sound<S: DirectorySource>(
+        sound: &mut SoundSession,
+        worker: &SoundWorker,
+        publisher: &Publisher,
+        pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        loop {
+            while let Some(answer) = worker.collect() {
+                let landed = sound.landed(answer, &desktop.settings().sound);
+                shell.set_sound(compositor, landed.shown);
+                if let Some(err) = landed.refused {
+                    app::report(
+                        APP_NAME,
+                        format_args!("a sound control was refused ({err})"),
+                    );
+                }
+                if let Some(remembered) = landed.remember {
+                    let mut settings = desktop.settings().clone();
+                    settings.sound = remembered;
+                    let _ = request_pinboard_settings(
+                        settings,
+                        publisher,
+                        None,
+                        pinboard,
+                        wallpapers,
+                        desktop,
+                        shell,
+                        compositor,
+                        tairix_rt::clock_get(),
+                    );
+                }
+            }
+            let Some(job) = sound.next_job() else {
+                return;
+            };
+            // On a thread the answer wakes the loop; inline it is already
+            // back, and is adopted on the next turn round.
+            if !worker.submit(job) {
+                return;
+            }
+        }
     }
 
     /// What the credential prompt says the account is wanted for.
@@ -7798,7 +8086,8 @@ mod program {
                 false
             }
             Some(DesktopAction::AdoptSettings(settings)) => request_pinboard_settings(
-                settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+                *settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor,
+                now_ns,
             ),
             // Wallpaper is a section of Settings, not an application beside
             // it. A Settings already running is handed the pane and
@@ -8701,13 +8990,14 @@ mod program {
         Some(pid)
     }
 
-    /// Carry out what the showing pick asked for: the chosen file is opened
-    /// on the file worker for the window's owner as `editors` says it opens
-    /// documents, and a pick the user walked away from is concluded.
+    /// Carry out what the showing pick asked for: the chosen file — or the
+    /// chosen folder's files — opened on the file worker for the window's
+    /// owner as `openers` says it opens documents, and a pick the user walked
+    /// away from concluded.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn step_pick<S: DirectorySource, F: FnMut() -> S>(
         step: Option<PickStep>,
-        editors: &Editors<'_>,
+        openers: &Openers<'_>,
         files: &Files,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
@@ -8730,6 +9020,19 @@ mod program {
                 serial,
                 for_window,
                 path,
+                access: PickAccess::Folder,
+            }) => files.submit(FileJob::Folder {
+                serial,
+                path,
+                kinds: server
+                    .owner_of(for_window)
+                    .map(|owner| openers.kinds(owner))
+                    .unwrap_or_default(),
+            }),
+            Some(PickStep::Open {
+                serial,
+                for_window,
+                path,
                 access,
             }) => files.submit(FileJob::Pick {
                 serial,
@@ -8737,14 +9040,77 @@ mod program {
                 access,
                 edits: server
                     .owner_of(for_window)
-                    .is_some_and(|owner| editors.edits(owner)),
+                    .is_some_and(|owner| openers.edits(owner)),
             }),
         };
         // Answered at once: carried out here for want of a worker, or
         // refused because too many calls are waiting.
-        if let Some(FileAnswer::Pick { serial, opened }) = answered {
-            settle_pick(
+        match answered {
+            Some(FileAnswer::Pick { serial, opened }) => settle_pick(
                 serial, opened, server, sink, shell, compositor, windows, picker, apps, menu,
+            ),
+            Some(FileAnswer::Folder { serial, opened }) => settle_folder_pick(
+                serial, opened, server, sink, shell, compositor, windows, picker, apps, menu,
+            ),
+            Some(FileAnswer::Desktop(_)) | None => {}
+        }
+    }
+
+    /// Settle the folder the file worker opened for the pick attempt
+    /// `serial`: delegate each file one-shot to the attested owner of the
+    /// window that asked and deliver `FolderPicked`, counting a file whose
+    /// grant is refused among those left out. A folder that could not be read
+    /// leaves the picker up to say why; an answer the picker no longer waits
+    /// for is dropped, and the files it opened close with it.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_folder_pick<S: DirectorySource, F: FnMut() -> S>(
+        serial: u64,
+        result: Result<FolderFiles, Errno>,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let status = result.as_ref().map(|_| ()).map_err(|err| *err);
+        let Some(PickEnd::Chosen { for_window, .. }) =
+            picker.opened(serial, status, shell, compositor)
+        else {
+            return;
+        };
+        let Ok(found) = result else {
+            return;
+        };
+        let mut files = alloc::collections::VecDeque::new();
+        let mut left_out = found.left_out;
+        for (file, name) in found.files {
+            let granted = DocumentName::new(&name)
+                .ok()
+                .zip(delegate(&file, for_window, server));
+            match granted {
+                Some((name, handle)) => {
+                    files.push_back(tairix_abi::window_ipc::PickedFile { handle, name });
+                }
+                None => left_out = left_out.saturating_add(1),
+            }
+        }
+        let Some(owner) = server.owner_of(for_window) else {
+            return;
+        };
+        if let Err(Errno::NotFound) = server.conclude_folder_pick(sink, for_window, files, left_out)
+        {
+            drop_departed(
+                owner,
+                server,
+                shell,
+                compositor,
+                windows,
+                picker,
+                &mut apps.service,
+                menu,
             );
         }
     }

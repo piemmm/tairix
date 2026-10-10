@@ -73,6 +73,12 @@ Die Abfragen:
   Eigentümer übersetzt — Einheit und Gruppe, Generation und Stand des
   Eigentümers, seine Streams sowie die Zuordnungen seiner Domäne und deren
   Bytes (benötigt `CAP_SYSINFO_HW`).
+- `audio`, `sound` — die Audiogeräte: eine Zeile je Ausgabe und Eingabe —
+  ihre Kennung, ob sie der Standard ihrer Richtung ist, ihr Pegel und ihre
+  Stummschaltung, die gemessene Rate ihres Takts während der Wiedergabe, die
+  verlorenen Frames, ihr Ort und ihr Name — dann eine Zeile je eigenem
+  Audiostrom — sein Gerät, seine Richtung, Rolle und sein Zustand, seine
+  Position, seine Aussetzer und wer ihn hält.
 - `show <resource-ref>` — liest eine `info:`/`state:`/`stats:`-Ressourcen­referenz
   und gibt ihren Wert aus. Diese Namensräume liefern typisierte Werte über
   diese API, niemals Byteströme — `cat` kann sie nicht öffnen. Eine
@@ -90,6 +96,7 @@ Ohne Abfrage wird die Kurzhilfe angezeigt.
 - `--all, -a` — mit `processes`: alle Prozesse des Systems auflisten
   statt nur die eigenen; der Dienst gewährt diese Sicht nur einem
   Aufrufer mit `CAP_SYSINFO_GLOBAL`.
+  Mit `audio` jeden Audiostrom der Maschine, mit derselben Fähigkeit.
 - `-h, -?` — die Kurzhilfe dieses Befehls anzeigen.
 
 ## EXAMPLES

@@ -45,6 +45,7 @@ use crate::menu::{self, MenuRequest, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::picker::{PickerEntry, PickerLayout, WindowPicker};
 use crate::repaint::TaskbarRepaint;
+use crate::sound::{SoundPanel, SoundPanelLayout, SoundState, RECORDING_SIGNAL, VOLUME_SIGNAL};
 use crate::system::{self, SystemPermits};
 use crate::tasks::TaskList;
 use crate::tray::SwitchboardTray;
@@ -157,6 +158,7 @@ pub struct Taskbar {
     notifications: NotificationArea,
     clock: Clock,
     tray: SwitchboardTray,
+    sound: SoundPanel,
     elevation_available: bool,
     switch_user_available: bool,
     repaint: TaskbarRepaint,
@@ -187,6 +189,7 @@ impl Taskbar {
             notifications: NotificationArea::new(),
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
+            sound: SoundPanel::new(),
             elevation_available: false,
             switch_user_available: false,
             repaint: TaskbarRepaint::NONE,
@@ -365,6 +368,88 @@ impl Taskbar {
     #[must_use]
     pub const fn notifications(&self) -> &NotificationArea {
         &self.notifications
+    }
+
+    /// Adopt what the audio service reports: the default sink the volume
+    /// signal stands for and whether anything is recording. The signals draw
+    /// on the bar and the panel on its own surface, so each latches only
+    /// when its own pixels moved. Answers whether either did.
+    pub fn set_sound(&mut self, state: SoundState) -> bool {
+        let mut moved = false;
+        let mut signals: Vec<StatusSignal> = self
+            .notifications
+            .signals()
+            .iter()
+            .filter(|signal| signal.id != VOLUME_SIGNAL && signal.id != RECORDING_SIGNAL)
+            .cloned()
+            .collect();
+        signals.extend(state.signals());
+        if signals != self.notifications.signals() {
+            self.notifications.set_signals(signals);
+            self.repaint |= TaskbarRepaint::BAR;
+            moved = true;
+        }
+        if self.sound.adopt(state.output) {
+            self.repaint |= TaskbarRepaint::SOUND;
+            moved = true;
+        }
+        moved
+    }
+
+    /// The volume panel.
+    #[must_use]
+    pub const fn sound(&self) -> &SoundPanel {
+        &self.sound
+    }
+
+    pub(crate) fn sound_mut(&mut self) -> &mut SoundPanel {
+        &mut self.sound
+    }
+
+    /// Whether a popup that takes every input while it is open is open.
+    #[must_use]
+    pub const fn modal_open(&self) -> bool {
+        self.library.is_open() || self.sound.is_open()
+    }
+
+    /// Open the volume panel over the volume signal, answering whether there
+    /// was an output to open it for.
+    pub(crate) fn open_sound(&mut self) -> bool {
+        let opened = self.sound.open();
+        if opened {
+            self.repaint |= TaskbarRepaint::SOUND;
+        }
+        opened
+    }
+
+    /// Close the volume panel.
+    pub(crate) fn close_sound(&mut self) {
+        if self.sound.is_open() {
+            self.sound.close();
+            self.repaint |= TaskbarRepaint::SOUND;
+        }
+    }
+
+    /// Where the open volume panel lies at `scale`, beside the volume signal.
+    #[must_use]
+    pub fn sound_layout(&self, scale: Scale) -> Option<SoundPanelLayout> {
+        if !self.sound.is_open() {
+            return None;
+        }
+        let bar = self.layout(scale);
+        let slot = self
+            .notifications
+            .signals()
+            .iter()
+            .position(|signal| signal.id == VOLUME_SIGNAL)?;
+        let anchor = *bar.notifications.get(slot)?;
+        Some(SoundPanelLayout::compute(
+            self.config.edge,
+            &bar,
+            anchor,
+            scale,
+            &self.theme,
+        ))
     }
 
     /// Replace the notification area's status signals — how the session hands

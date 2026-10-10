@@ -60,14 +60,14 @@ use tairix_abi::{
     LoadHeader, ManifestHeader, MapFlags, MountAvailability, MountRecord, NamedKeyCode,
     NeededLibrary, NoticeTopic, OpenFlags, PageRequest, PeerWatchOp, PointerButtonCode,
     PointerInput, PortName, PowerAction, ProcessRecord, ProcessStartHeader, ProcessState,
-    RandomFlags, ReaddirFrom, RealpathMode, ResourceLimit, ResourceLimitRecord, RxePermission,
-    SchedPriority, Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp, StdInfoKind,
-    StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime,
-    UserDirectoryRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
-    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
-    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
-    CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
+    RandomFlags, ReaddirFrom, RealpathMode, RenameFlags, ResourceLimit, ResourceLimitRecord,
+    RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp,
+    StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64,
+    UnlinkFlags, Uptime, UserDirectoryRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1,
+    APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
+    BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX,
+    BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
     ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
@@ -156,6 +156,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("NOT_ATTACHED", Errno::NotAttached),
     ("DEADLOCK", Errno::Deadlock),
     ("STALE", Errno::Stale),
+    ("NO_BANDWIDTH", Errno::NoBandwidth),
 ];
 
 /// The `abi-v1` driver-ABI error codes, paired with the
@@ -192,6 +193,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("DIRECTORY_NOT_EMPTY", DriverError::DirectoryNotEmpty),
     ("DIRECTORY_CYCLE", DriverError::DirectoryCycle),
     ("OUT_OF_MEMORY", DriverError::OutOfMemory),
+    ("NO_BANDWIDTH", DriverError::NoBandwidth),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -774,8 +776,8 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::Framebuffer => "FRAMEBUFFER",
         HwResourceKind::LinkAddress => "LINK_ADDRESS",
         HwResourceKind::BusChild => "BUS_CHILD",
-        HwResourceKind::DmaController => "DMA_CONTROLLER",
-        HwResourceKind::DmaRequest => "DMA_REQUEST",
+        HwResourceKind::LinkDuty => "LINK_DUTY",
+        HwResourceKind::LinkRequest => "LINK_REQUEST",
         HwResourceKind::IommuStream => "IOMMU_STREAM",
         HwResourceKind::IommuReserved => "IOMMU_RESERVED",
         HwResourceKind::Property => "PROPERTY",
@@ -792,6 +794,8 @@ fn property_name(key: HwProperty) -> &'static str {
         HwProperty::UsbInterface => "USB_INTERFACE",
         HwProperty::FaultInterrupt => "FAULT_INTERRUPT",
         HwProperty::KernelDriven => "KERNEL_DRIVEN",
+        HwProperty::UsbSpeed => "USB_SPEED",
+        HwProperty::FixedClockRate => "FIXED_CLOCK_RATE",
     }
 }
 
@@ -831,6 +835,7 @@ fn hwtree_structs(out: &mut String) {
          \x20   uint8_t match_key_count;\n\
          \x20   uint8_t resource_count;\n\
          \x20   uint8_t fault_health;\n\
+         \x20   uint8_t served;\n\
          \x20   tairix_hw_match_key_t match_keys[TAIRIX_HW_NODE_MAX_MATCH_KEYS];\n\
          \x20   tairix_hw_resource_t resources[TAIRIX_HW_NODE_MAX_RESOURCES];\n\
          } tairix_hw_node_t;\n\n",
@@ -3131,6 +3136,8 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::StreamRoom => "STREAM_ROOM",
         WaitSourceKind::PeerExit => "PEER_EXIT",
         WaitSourceKind::DirWatch => "DIR_WATCH",
+        WaitSourceKind::Foreground => "FOREGROUND",
+        WaitSourceKind::HardwareTree => "HARDWARE_TREE",
     }
 }
 
@@ -3184,6 +3191,8 @@ const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
         NoticeTopic::Mounts => "MOUNTS",
         NoticeTopic::MemoryPressure => "MEMORY_PRESSURE",
         NoticeTopic::DisplayLease => "DISPLAY_LEASE",
+        NoticeTopic::AudioCapture => "AUDIO_CAPTURE",
+        NoticeTopic::AudioDevices => "AUDIO_DEVICES",
     }
 }
 
@@ -3238,6 +3247,20 @@ fn emit_fs_contract(out: &mut String) {
         out,
         "#define TAIRIX_LINK_FLAG_FOLLOW {:#x}u",
         LinkFlags::FOLLOW.bits()
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/* fs_rename() flag bits (uint32_t). Every undefined bit is reserved and rejected\n\
+         * with TAIRIX_E_OUT_OF_RANGE. 0 is POSIX rename(): an existing destination is\n\
+         * replaced. With the NO_REPLACE bit the move is refused with\n\
+         * TAIRIX_E_ALREADY_EXISTS when the destination names any entry but the source's\n\
+         * own, decided under the volume's lock (the renameat2(RENAME_NOREPLACE) posture). */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_RENAME_FLAG_NO_REPLACE {:#x}u",
+        RenameFlags::NO_REPLACE.bits()
     );
     out.push('\n');
 
@@ -3930,6 +3953,19 @@ mod tests {
                 "int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
             ),
             "fs_link prototype carries the flags argument: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_RENAME_FLAG_NO_REPLACE {:#x}u",
+                RenameFlags::NO_REPLACE.bits()
+            )),
+            "fs_rename no-replace flag bit: {h}"
+        );
+        assert!(
+            h.contains(
+                "int32_t tairix_sys_fs_rename(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);"
+            ),
+            "fs_rename prototype carries the flags argument: {h}"
         );
         for (name, mode) in [
             ("EXISTING", RealpathMode::Existing),

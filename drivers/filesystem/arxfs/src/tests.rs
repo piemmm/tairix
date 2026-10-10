@@ -9006,6 +9006,131 @@ fn an_unrepairable_primary_transaction_root_still_mounts_from_its_companion() {
     let mut re = ARXFS::open(dev, &TEST_KEY).expect("mount from the companion");
     re.lookup(re.root(), b"witness")
         .expect("the newest committed root was taken");
+    let report = re.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(
+        report.metadata_damaged, 1,
+        "the refused repair is on record"
+    );
+    assert_eq!(report.metadata_repaired, 0);
+    assert_eq!(report.state, HealthState::Degraded);
+}
+
+/// The commit after a generation frees that generation's root, so the live
+/// volume may have written over the root's primary while its companion still
+/// authenticates. Rewriting the primary from it would destroy live data.
+#[test]
+fn a_mount_never_rewrites_a_superseded_root_from_its_companion() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"first", NodeKind::RegularFile)
+        .expect("create");
+    let superseded = fs.root_phys;
+    let superseded_generation = fs.generation;
+    fs.create(root, b"second", NodeKind::RegularFile)
+        .expect("create");
+    assert_ne!(fs.root_phys, superseded);
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
+    let primary = as_usize(superseded) * 512;
+    bytes[primary..primary + 512].fill(0xa5);
+
+    let re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("mount");
+    let (uuid, key) = (re.fs_uuid, re.mac_key);
+    let after = re.into_block().expect("the volume closes").bytes();
+    let companion = primary + 512;
+    assert!(
+        TxnRoot::decode_verify(
+            &after[companion..companion + 512],
+            uuid,
+            superseded,
+            superseded_generation,
+            &key,
+        )
+        .is_ok(),
+        "the superseded root's companion still authenticates, so a repair was possible"
+    );
+    assert!(
+        after[primary..primary + 512].iter().all(|&b| b == 0xa5),
+        "the mount wrote over a block the live volume owns"
+    );
+}
+
+#[test]
+fn a_mount_repairs_the_root_it_chose_and_records_the_repair() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"witness", NodeKind::RegularFile)
+        .expect("create");
+    let root_phys = as_usize(fs.root_phys) * 512;
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
+    bytes[root_phys..root_phys + 512].fill(0);
+
+    let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("mount");
+    let after = re.block.bytes();
+    assert_eq!(
+        after[root_phys..root_phys + 512],
+        after[root_phys + 512..root_phys + 1024],
+        "the chosen root's primary is rewritten from its companion"
+    );
+    let report = re.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(report.metadata_repaired, 1);
+    assert_eq!(report.metadata_damaged, 0);
+    assert_eq!(report.state, HealthState::Degraded);
+    // Stored, so a second pass neither loses the repair nor counts it again.
+    let again = re.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(again.metadata_repaired, 1);
+}
+
+#[test]
+fn a_mount_repairs_the_slot_it_chose_and_no_other() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"first", NodeKind::RegularFile)
+        .expect("create");
+    let older = as_usize(slot_block((fs.ring_pos - 1) % RING_SLOTS)) * 512;
+    fs.create(root, b"second", NodeKind::RegularFile)
+        .expect("create");
+    let chosen = as_usize(slot_block((fs.ring_pos - 1) % RING_SLOTS)) * 512;
+    assert_ne!(older, chosen);
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
+    bytes[older..older + 512].fill(0);
+    bytes[chosen..chosen + 512].fill(0);
+
+    let mut re = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY).expect("mount");
+    re.lookup(re.root(), b"second")
+        .expect("the newest slot was chosen from its companion");
+    let after = re.block.bytes();
+    assert_eq!(
+        after[chosen..chosen + 512],
+        after[chosen + 512..chosen + 1024]
+    );
+    assert!(
+        after[older..older + 512].iter().all(|&b| b == 0),
+        "a slot the mount did not choose is left as it was"
+    );
+    let report = re.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(report.metadata_repaired, 1);
+}
+
+#[test]
+fn a_read_only_mount_records_a_bad_root_copy_and_writes_nothing() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    fs.create(root, b"witness", NodeKind::RegularFile)
+        .expect("create");
+    let root_phys = as_usize(fs.root_phys) * 512;
+    let mut bytes = fs.into_block().expect("the volume closes").bytes();
+    bytes[root_phys..root_phys + 512].fill(0);
+    let before = bytes.clone();
+
+    let mut re = ARXFS::open_read_only(MemBlock::from_bytes(bytes, 512, 256), &TEST_KEY)
+        .expect("mount read-only");
+    let report = re.health(&GrantAll, &NullSink).expect("health");
+    assert_eq!(report.metadata_damaged, 1);
+    assert_eq!(report.state, HealthState::Degraded);
+    assert!(
+        re.block.bytes() == before,
+        "a read-only mount wrote the device"
+    );
 }
 
 #[test]

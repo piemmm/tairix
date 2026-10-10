@@ -37,9 +37,10 @@ Hybrid **buddy + bitmap**:
   non-existent`. The bitmap is the source of truth for ownership, so
   every double-free or stray-free is detected and reported as
   `AllocError::InvariantViolation`.
-- A [`tairix_inline::IntrusiveList`](../lib/inline.md) per
-  buddy order holds the free blocks of that order, threaded through one
-  link array indexed by starting frame. Splits push two half-blocks down
+- The usable span is cut into **zones**, and in each zone a
+  [`tairix_inline::IntrusiveList`](../lib/inline.md) per buddy order holds
+  the free blocks of that order, threaded through one link array indexed by
+  starting frame. Splits push two half-blocks down
   one order; merges pop a buddy at the same order and push the parent up
   one order — and a merge unlinks its buddy from the *middle* of a list in
   constant time, which is why the lists are intrusive rather than ordered
@@ -52,20 +53,33 @@ The allocator never panics on OOM: `alloc` / `alloc_order` return
 `AllocError::OutOfMemory`. The constructor refuses overlapping or
 malformed boot maps.
 
+**Zones keep the memory a device that reaches less needs for it.** The
+boundaries are the limits of the DMA windows the boot hardware tree
+describes, and 4 GiB, each kept only where usable RAM lies both inside the
+window below the limit and above it, and each aligned down to the largest
+block so no block straddles two zones and buddies merge within one. 4 GiB is a
+boundary wherever RAM spans it because a PCI function a bus driver finds after
+boot may reach only 32 bits without the boot tree saying so — Linux's
+`ZONE_DMA32`. An ordinary request is served from the highest zone first, and
+from a lower one only while that zone keeps its **reserve**: a 256th of the
+usable RAM above it (Linux's default `lowmem_reserve_ratio`), at most a
+quarter of the zone. So ordinary allocations on a busy machine fill high
+memory before low, and never the last of the low.
+
 **A carve for a device that reaches only part of RAM searches below its
-ceiling.** The lists are LIFO and address-blind, so their front block says
-nothing about where a free block below a device's addressing limit is —
-seeded in ascending order, it is the *top* of RAM. `alloc_order_under_user` walks
-the bitmap's maximal free runs downward from the ceiling a word at a time and
-takes the highest aligned block below it, so a device reaching less keeps the
-memory beneath, and the carve fails only when no such block is free
-(`OutOfMemory`), or when no usable RAM lies below the ceiling at all
+ceiling.** The zone the ceiling falls in is the highest the carve can use, so
+its reserve is the carve's own: `alloc_order_under_user` walks that zone's
+bitmap downward from the ceiling a word at a time and takes the highest
+aligned block below it, so a device reaching less keeps the memory beneath,
+because the lists are LIFO and address-blind. A zone lower still gives a block
+only while it keeps its own reserve. The carve fails only when no such block
+is free (`OutOfMemory`), or when no usable RAM lies below the ceiling at all
 (`OutOfRange`). The search costs a step per bitmap word and per free run it
 passes below the ceiling, paid only on a carve's set-up path, and a ceiling
-above every usable frame is an ordinary `alloc_order`. The claimed block is split out of the one free block
-enclosing it: population and eager merging keep every aligned all-free run
-inside one free block, so a run none encloses is refused as an invariant
-violation.
+above every usable frame is an ordinary `alloc_order`. The claimed block is
+split out of the one free block enclosing it: population and eager merging
+keep every aligned all-free run inside one free block, so a run none encloses
+is refused as an invariant violation.
 
 **Every frame is charged to exactly one memory class.** A draw names its
 [`MemoryClass`](../abi/sysinfo.md) — `UserAnon`, `UserFile`, `PageTable`,

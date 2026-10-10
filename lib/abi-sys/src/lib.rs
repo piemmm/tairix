@@ -97,6 +97,7 @@ const NUM_USERS_ADMIN: u64 = SyscallNumber::USERS_ADMIN.as_u16() as u64;
 const NUM_CONSOLE_COUNT: u64 = SyscallNumber::CONSOLE_COUNT.as_u16() as u64;
 const NUM_STREAM_INPUT_MODE: u64 = SyscallNumber::STREAM_INPUT_MODE.as_u16() as u64;
 const NUM_TERMINAL_PURGE: u64 = SyscallNumber::TERMINAL_PURGE.as_u16() as u64;
+const NUM_FOREGROUND_HELD: u64 = SyscallNumber::FOREGROUND_HELD.as_u16() as u64;
 const NUM_THREAD_CREATE: u64 = SyscallNumber::THREAD_CREATE.as_u16() as u64;
 const NUM_THREAD_EXIT: u64 = SyscallNumber::THREAD_EXIT.as_u16() as u64;
 const NUM_FUTEX_WAIT: u64 = SyscallNumber::FUTEX_WAIT.as_u16() as u64;
@@ -204,6 +205,8 @@ const NUM_FS_ATTR_LIST: u64 = SyscallNumber::FS_ATTR_LIST.as_u16() as u64;
 const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
 const NUM_PORT_RESOLVE: u64 = SyscallNumber::PORT_RESOLVE.as_u16() as u64;
 const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
+/// `port_admit` syscall number (as above).
+const NUM_PORT_ADMIT: u64 = SyscallNumber::PORT_ADMIT.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
@@ -467,6 +470,19 @@ pub extern "C" fn sys_port_bind(endpoint: u64, max_payload: usize, capacity: usi
             [endpoint, max_payload as u64, capacity as u64, 0, 0, 0],
         ))
     }
+}
+
+/// `port_admit`: admit the process instance serving call endpoint `server` as
+/// the only one whose messages the caller's port `port` takes, replacing any
+/// admitted before and discarding what another instance had queued
+/// (`SyscallNumber::PORT_ADMIT`). A port another process owns is refused.
+/// Returns a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_port_admit"]
+pub extern "C" fn sys_port_admit(port: u64, server: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; both
+    // arguments are plain scalars the kernel validates.
+    unsafe { ret_i32(raw_syscall(NUM_PORT_ADMIT, [port, server, 0, 0, 0, 0])) }
 }
 
 /// `cap_query`: report whether the caller holds capability `cap`
@@ -2898,8 +2914,11 @@ pub extern "C" fn sys_fs_unlink(path: *mut c_void, path_len: usize, flags: u32) 
 /// model match `tairix_sys_fs_open`. Both paths must resolve under the same
 /// mounted volume; a non-empty directory destination, a
 /// directory-into-its-own-subtree move, or a cross-mount move fails closed.
-/// The kernel validates both `(ptr, len)` pairs against the caller's
-/// address space before reading them.
+/// `flags` is `0` (an existing destination is replaced) or
+/// `TAIRIX_RENAME_FLAG_NO_REPLACE` (it refuses the move with
+/// `TAIRIX_E_ALREADY_EXISTS`); a reserved bit fails closed. The kernel
+/// validates both `(ptr, len)` pairs against the caller's address space
+/// before reading them.
 #[must_use]
 #[export_name = "tairix_sys_fs_rename"]
 pub extern "C" fn sys_fs_rename(
@@ -2907,6 +2926,7 @@ pub extern "C" fn sys_fs_rename(
     src_len: usize,
     dst: *mut c_void,
     dst_len: usize,
+    flags: u32,
 ) -> i32 {
     // SAFETY: see `sys_ipc_send`; the kernel validates both `(ptr, len)`.
     unsafe {
@@ -2917,7 +2937,7 @@ pub extern "C" fn sys_fs_rename(
                 src_len as u64,
                 ptr_arg(dst),
                 dst_len as u64,
-                0,
+                u64::from(flags),
                 0,
             ],
         ))
@@ -3311,9 +3331,10 @@ pub extern "C" fn sys_signal(pid: i64, signal: u32) -> i32 {
 /// (`SyscallNumber::CONSOLE_FOREGROUND`, the `tcsetpgrp` analogue,
 /// `plans/DISPLAY.md` D5). Returns a `TAIRIX_E_*` code.
 ///
-/// `pid` is a live child of the caller, or `0` to release. While an owner
-/// is recorded, only it may `stream_read` or `stream_input_mode` that
-/// console — every other task sees `TAIRIX_E_NOT_FOREGROUND`. Requires
+/// `pid` is a live child of the caller, the caller's own pid to hold the
+/// terminal itself, or `0` to release. While an owner is recorded, only it
+/// may `stream_read` or `stream_input_mode` that console — every other task
+/// sees `TAIRIX_E_NOT_FOREGROUND`, a parked reader included. Requires
 /// `TAIRIX_CAP_CONSOLE_READ` (the same fd-scoped terminal-control gate
 /// `stream_input_mode` carries); the kernel authorises the child through
 /// the same parent/child bookkeeping `wait`/`signal` use,
@@ -3331,6 +3352,20 @@ pub extern "C" fn sys_console_foreground(fd: u32, pid: i64) -> i32 {
             [u64::from(fd), i64_arg(pid), 0, 0, 0, 0],
         ))
     }
+}
+
+/// `foreground_held`: whether the caller holds the controlling (foreground)
+/// ownership of the terminal behind readable descriptor `fd`
+/// (`SyscallNumber::FOREGROUND_HELD`, the `tcgetpgrp` question asked of
+/// oneself). Returns `1` when it does, `0` when it does not, or a
+/// `TAIRIX_E_*` code reinterpreted into the result. Requires
+/// `TAIRIX_CAP_CONSOLE_READ`.
+#[must_use]
+#[export_name = "tairix_sys_foreground_held"]
+pub extern "C" fn sys_foreground_held(fd: u32) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // resolves `fd` against the caller's own descriptor table.
+    unsafe { raw_syscall(NUM_FOREGROUND_HELD, [u64::from(fd), 0, 0, 0, 0, 0]) }
 }
 
 /// `fs_chdir`: change the calling process's working directory to the
@@ -3556,6 +3591,7 @@ mod tests {
         (NUM_STREAM_INPUT_MODE, "stream_input_mode", 2),
         (NUM_TERMINAL_PURGE, "terminal_purge", 1),
         (NUM_CONSOLE_FOREGROUND, "console_foreground", 2),
+        (NUM_FOREGROUND_HELD, "foreground_held", 1),
         (NUM_KEY_INJECT, "key_inject", 3),
         (NUM_DISPLAY_ACQUIRE, "display_acquire", 1),
         (NUM_DISPLAY_RELEASE, "display_release", 2),
@@ -3609,7 +3645,7 @@ mod tests {
         (NUM_FS_SYNC, "fs_sync", 1),
         (NUM_FS_MKDIR, "fs_mkdir", 2),
         (NUM_FS_UNLINK, "fs_unlink", 3),
-        (NUM_FS_RENAME, "fs_rename", 4),
+        (NUM_FS_RENAME, "fs_rename", 5),
         (NUM_FS_SYMLINK, "fs_symlink", 4),
         (NUM_FS_READLINK, "fs_readlink", 4),
         (NUM_FS_LINK, "fs_link", 5),
@@ -3636,6 +3672,7 @@ mod tests {
         (NUM_FS_ATTR_LIST, "fs_attr_list", 5),
         (NUM_FS_ATTR_REMOVE, "fs_attr_remove", 4),
         (NUM_PORT_BIND, "port_bind", 3),
+        (NUM_PORT_ADMIT, "port_admit", 2),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
@@ -3811,6 +3848,16 @@ mod tests {
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], 16);
         assert_eq!(args[3], sender_ptr as usize as u64);
+    }
+
+    #[test]
+    fn port_admit_marshals_the_port_and_the_endpoint() {
+        let (number, args) = capture(0, || {
+            let _ = sys_port_admit(0x5EAD_0002, 0x5EAD_0003);
+        });
+        assert_eq!(number, NUM_PORT_ADMIT);
+        assert_eq!(&args[..2], &[0x5EAD_0002, 0x5EAD_0003]);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -5132,14 +5179,14 @@ mod tests {
         let src_ptr = src.as_mut_ptr().cast::<c_void>();
         let dst_ptr = dst.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(0, || {
-            assert_eq!(sys_fs_rename(src_ptr, src.len(), dst_ptr, dst.len()), 0);
+            assert_eq!(sys_fs_rename(src_ptr, src.len(), dst_ptr, dst.len(), 1), 0);
         });
         assert_eq!(number, NUM_FS_RENAME);
         assert_eq!(args[0], src_ptr as usize as u64);
         assert_eq!(args[1], src.len() as u64);
         assert_eq!(args[2], dst_ptr as usize as u64);
         assert_eq!(args[3], dst.len() as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(&args[4..], &[1, 0]);
     }
 
     #[test]
@@ -5166,6 +5213,17 @@ mod tests {
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], 64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn foreground_held_marshals_fd_and_passes_the_answer_through() {
+        for answer in [0, 1] {
+            let (number, args) = capture(answer, || {
+                assert_eq!(sys_foreground_held(0), answer);
+            });
+            assert_eq!(number, NUM_FOREGROUND_HELD);
+            assert_eq!(args, [0, 0, 0, 0, 0, 0]);
+        }
     }
 
     #[test]

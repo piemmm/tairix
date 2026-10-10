@@ -23,6 +23,7 @@ use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace, TextChoices};
 use crate::network::{IfaceSetting, NetworkFacts};
 use crate::registry::{PaneContent, PaneRow};
+use crate::sound::SoundReading;
 use crate::statement;
 use crate::volumes::{Readings, VolumeReading};
 
@@ -61,6 +62,8 @@ pub(crate) struct Answered<'a> {
     /// The sources the desktop said have notified, or `None` while it has
     /// not said.
     pub(crate) notify_sources: Option<&'a [BundleId]>,
+    /// The sound devices and captures, or `None` while not read.
+    pub(crate) sound: Option<&'a SoundReading>,
     /// Why the desktop last would not lock the screen, if it would not.
     pub(crate) lock_refusal: Option<Errno>,
     /// Why the desktop last would not show the screensaver, if it would not.
@@ -79,6 +82,7 @@ impl<'a> Answered<'a> {
             addressing: &self.network.addressing,
             staged: self.staged,
             resolvers: self.network.resolvers_slice(),
+            sound: self.sound,
             accounts: self.accounts,
             staged_accounts: self.staged_accounts,
             notify_sources: self.notify_sources,

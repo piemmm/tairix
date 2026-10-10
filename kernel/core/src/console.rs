@@ -262,6 +262,29 @@ pub trait ConsoleRead {
         self.read(buf)
     }
 
+    /// Read as [`ConsoleRead::read_timeout`] does, or as
+    /// [`ConsoleRead::read`] with no bound, but only while `may_read`
+    /// admits the caller: it is asked before any byte is taken — on entry
+    /// and, for a backing that parks, after every wake — so a reader parked
+    /// before its terminal changed hands takes nothing after the change.
+    ///
+    /// # Errors
+    ///
+    /// What `may_read` refuses with; otherwise exactly as the read it
+    /// stands for.
+    fn read_while(
+        &self,
+        buf: &mut [u8],
+        timeout_ns: Option<u64>,
+        may_read: &dyn Fn() -> Result<(), Errno>,
+    ) -> Result<usize, Errno> {
+        may_read()?;
+        match timeout_ns {
+            Some(timeout_ns) => self.read_timeout(buf, timeout_ns),
+            None => self.read(buf),
+        }
+    }
+
     /// How often a parked reader must come back to this device, for a
     /// backing with **no wake source at all**.
     ///
@@ -779,7 +802,9 @@ impl ConsoleDevice {
         caller: ProcessId,
         owner: crate::foreground::ForegroundOwner,
     ) -> Result<(), Errno> {
-        self.fg.grant(caller, owner)
+        let moved = self.fg.grant(caller, owner)?;
+        foreground_moved(moved);
+        Ok(())
     }
 
     /// Release this console's foreground ownership (the granting shell back
@@ -797,7 +822,9 @@ impl ConsoleDevice {
     /// [`Errno::NotForeground`] when another task's ownership is in place
     /// and `caller` is neither its granter nor the owner.
     pub fn release_foreground(&self, caller: ProcessId) -> Result<(), Errno> {
-        self.fg.release(caller)
+        let moved = self.fg.release(caller)?;
+        foreground_moved(moved);
+        Ok(())
     }
 
     /// Clear the foreground slot if `dead` is its recorded owner.
@@ -810,7 +837,7 @@ impl ConsoleDevice {
     /// proven-dead owner can never displace a live successor. A slot naming
     /// any other task is left untouched (idempotent).
     pub fn clear_dead_foreground(&self, dead: ProcessId) {
-        self.fg.clear_dead(dead);
+        foreground_moved(self.fg.clear_dead(dead));
     }
 
     /// This console's current controlling (foreground) owner, if any.
@@ -899,6 +926,16 @@ impl ConsoleDevice {
     }
 }
 
+/// After a console changed hands: its parked readers re-check the gate, so a
+/// reader parked before the change takes nothing after it, and its
+/// `Foreground` wait-set members see the edge.
+fn foreground_moved(moved: bool) {
+    if moved {
+        crate::waitq::console_wake();
+        crate::waitq::foreground_wake();
+    }
+}
+
 impl ConsoleInput for ConsoleDevice {
     /// Push produced input through this console's line discipline
     /// (`plans/SPAWN.md` SP9): in the **cooked** mode, with a foreground
@@ -919,7 +956,7 @@ impl ConsoleInput for ConsoleDevice {
         // and an installed producer. Anything else passes through — a
         // missing producer must not swallow bytes no one will act on.
         let target = if self.input_mode() == InputMode::Cooked {
-            self.foreground()
+            self.fg.job()
         } else {
             None
         };
@@ -1211,7 +1248,12 @@ where
     /// [`ConsoleRead::read_timeout`]: block until the inner device yields
     /// bytes, fails, or — when `limit_ns` is `Some` — the caller's absolute
     /// deadline passes with no input ([`Errno::TimedOut`]).
-    fn read_until(&self, buf: &mut [u8], limit_ns: Option<u64>) -> Result<usize, Errno> {
+    fn read_until(
+        &self,
+        buf: &mut [u8],
+        limit_ns: Option<u64>,
+        may_read: &dyn Fn() -> Result<(), Errno>,
+    ) -> Result<usize, Errno> {
         // A zero-length destination can never receive a byte; report the
         // empty read instead of parking a caller no input could ever wake
         // (the handler already screens this, defence in
@@ -1259,6 +1301,12 @@ where
             // line-oriented reader; registering first closes that race.
             if let Some(task) = parkable {
                 crate::waitq::CONSOLE_WAITQ.register(task, deadline);
+            }
+            if let Err(refused) = may_read() {
+                if let Some(task) = parkable {
+                    crate::waitq::console_deregister(task, deadline);
+                }
+                return Err(refused);
             }
             let read = match self.inner.read(buf) {
                 Ok(read) => read,
@@ -1372,17 +1420,28 @@ where
     A: SchedulerArch + Send + Sync + 'static,
 {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-        self.read_until(buf, None)
+        self.read_until(buf, None, &|| Ok(()))
     }
 
     fn read_timeout(&self, buf: &mut [u8], timeout_ns: u64) -> Result<usize, Errno> {
+        self.read_while(buf, Some(timeout_ns), &|| Ok(()))
+    }
+
+    fn read_while(
+        &self,
+        buf: &mut [u8],
+        timeout_ns: Option<u64>,
+        may_read: &dyn Fn() -> Result<(), Errno>,
+    ) -> Result<usize, Errno> {
         // The absolute deadline on the same monotonic clock the park's
         // one-shot is armed against, saturating so a hostile bound can
         // never wrap below `now`. With no wait clock installed there is
         // no scheduler to park on either; the unbounded core then fails
         // closed on an empty poll exactly as `read` does.
-        let limit = crate::waitq::wait_now_ns().map(|now| now.saturating_add(timeout_ns));
-        self.read_until(buf, limit)
+        let limit = timeout_ns.and_then(|timeout_ns| {
+            crate::waitq::wait_now_ns().map(|now| now.saturating_add(timeout_ns))
+        });
+        self.read_until(buf, limit, may_read)
     }
 
     fn purge(&self) {
@@ -1602,6 +1661,47 @@ mod tests {
         // Exactly one device poll: a read with pending input never
         // reschedules.
         assert_eq!(INNER.polls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_reader_the_gate_refuses_takes_nothing() {
+        static INNER: ScriptedRead = ScriptedRead::with_bytes(b"hi");
+        let blocking = BlockingConsoleRead::new(leaked_arch(), &INNER, None);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            blocking.read_while(&mut buf, None, &|| Err(Errno::NotForeground)),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(
+            INNER.polls.load(Ordering::Relaxed),
+            0,
+            "refused before the device"
+        );
+        let asked = AtomicUsize::new(0);
+        let admit = || {
+            asked.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        };
+        assert_eq!(blocking.read_while(&mut buf, Some(1_000), &admit), Ok(2));
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            1,
+            "asked before the poll it admits"
+        );
+        assert_eq!(&buf[..2], b"hi");
+    }
+
+    #[test]
+    fn a_non_parking_source_asks_the_gate_before_it_gives_up_a_byte() {
+        let queue = ConsoleInputQueue::new();
+        assert_eq!(queue.push(b"kept"), Ok(4));
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            queue.read_while(&mut buf, None, &|| Err(Errno::NotForeground)),
+            Err(Errno::NotForeground)
+        );
+        assert_eq!(queue.read_while(&mut buf, None, &|| Ok(())), Ok(4));
+        assert_eq!(&buf[..4], b"kept", "the refused read left the bytes queued");
     }
 
     #[test]
@@ -2398,6 +2498,28 @@ mod tests {
         assert_eq!(
             crate::procsignal::take_pending_foreground_for_test(),
             Some((fg_owner(9), Signal::Interrupt))
+        );
+    }
+
+    #[test]
+    fn a_process_holding_its_own_console_is_no_job_and_reads_its_control_bytes() {
+        let _guard = crate::procsignal::foreground_test_lock();
+        crate::procsignal::ensure_foreground_hook_for_test();
+        let (device, queue) = filter_device();
+        grant(device, 2, 2);
+        assert_eq!(device.push(b"a\x03\x1a"), Ok(3));
+        assert_eq!(
+            drain(queue),
+            b"a\x03\x1a",
+            "the shell at its prompt reads them"
+        );
+        assert_eq!(crate::procsignal::take_pending_foreground_for_test(), None);
+        grant(device, 2, 9);
+        assert_eq!(device.push(b"\x03"), Ok(1));
+        assert_eq!(
+            crate::procsignal::take_pending_foreground_for_test(),
+            Some((fg_owner(9), Signal::Interrupt)),
+            "the job it handed the console to takes them"
         );
     }
 

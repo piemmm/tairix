@@ -518,6 +518,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }

@@ -659,14 +659,15 @@ impl<S: DirectorySource> Browser<S> {
     ///
     /// # Errors
     ///
-    /// [`RenameError::Refused`] for the volume's refusal, or
+    /// [`RenameError::Clash`] when the volume found the name taken,
+    /// [`RenameError::Refused`] for any other refusal, or
     /// [`RenameError::Source`] when the re-list fails.
     pub fn finish_rename(
         &mut self,
         pending: &PendingRename,
         moved: Result<(), Errno>,
     ) -> Result<bool, RenameError> {
-        moved.map_err(RenameError::Refused)?;
+        moved.map_err(RenameError::from_volume)?;
         if self.components != pending.dir {
             return Ok(false);
         }
@@ -722,7 +723,10 @@ impl<S: DirectorySource> Browser<S> {
             Errno::LengthOutOfRange => CreateError::TooLong,
             _ => CreateError::Invalid,
         })?;
-        make(&path).map_err(CreateError::Refused)?;
+        make(&path).map_err(|errno| match errno {
+            Errno::AlreadyExists => CreateError::Clash,
+            refused => CreateError::Refused(refused),
+        })?;
 
         self.refresh()
             .map_err(|err| CreateError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;

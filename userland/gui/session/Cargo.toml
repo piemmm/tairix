@@ -26,6 +26,8 @@ tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # catalog the bar cannot read itself. Composing two GUI crates is the
 # permitted `userland/gui/*` edge.
 tairix-taskbar = { path = "../taskbar", version = "=0.0.0" }
+# The device controls the session asks for and the walk that lists them.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
 # The compositing window manager: the session presents the taskbar bar
 # and its program-library popup as compositor windows, placed and rounded
 # through the window manager's single anti-aliased rounded-corner path.
@@ -227,6 +229,8 @@ path = "src/run.rs"
 # with that host for the bare-metal build only, so host tests still drive the
 # client over their own fake.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The audio service's live transport the sound worker's round trips use.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
 # The browser engine's production symbolic-link reader (`RtLinkReader`): the
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.

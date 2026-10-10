@@ -247,7 +247,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Arch, AttachedDevices};
+    use crate::{Arch, AttachedDevices, SoundCard};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -268,6 +268,7 @@ mod tests {
             interrupts: crate::InterruptControllers::Default,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
+            sound_card: crate::SoundCard::Virtio,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
@@ -339,7 +340,7 @@ mod tests {
             !bare.iter().any(|a| a.contains("virtio-sound")),
             "a capture-free spec must attach no sound device"
         );
-        let spec = fixture_spec(1).with_audio_wav("/tmp/k.wav");
+        let spec = fixture_spec(1).with_audio_capture("/tmp/k.wav", SoundCard::Virtio);
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let backend = argv
             .iter()
@@ -359,6 +360,52 @@ mod tests {
         // One stream: the `wav` backend records playback and cannot supply
         // capture, so a second stream would advertise what the host has not.
         assert!(argv.iter().any(|a| a.contains("streams=1")), "{argv:?}");
+    }
+
+    #[test]
+    fn a_usb_speaker_rides_its_own_controller_and_records_past_the_mixing_engine() {
+        let spec = fixture_spec(1).with_audio_capture("/tmp/k.wav", SoundCard::Usb);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a.contains("virtio-sound")), "{argv:?}");
+        let backend = argv
+            .iter()
+            .find(|a| a.starts_with("wav,id=snd0,path=/tmp/k.wav"))
+            .expect("the wav backend names the capture file");
+        assert!(backend.contains("out.mixing-engine=off"), "{backend}");
+        assert!(
+            !backend.contains("out.frequency"),
+            "QEMU refuses a stated format with the mixing engine off"
+        );
+        let controller = argv
+            .iter()
+            .position(|a| a == "qemu-xhci,id=usbaudio")
+            .expect("a controller of its own");
+        assert_eq!(argv[controller - 1], "-device");
+        assert_eq!(
+            argv[controller + 2],
+            "usb-audio,bus=usbaudio.0,audiodev=snd0"
+        );
+    }
+
+    #[test]
+    fn an_hd_audio_controller_carries_an_output_codec_behind_the_stated_backend() {
+        let spec = fixture_spec(1).with_audio_capture("/tmp/k.wav", SoundCard::Hda);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a.contains("virtio-sound")), "{argv:?}");
+        let backend = argv
+            .iter()
+            .find(|a| a.starts_with("wav,id=snd0,path=/tmp/k.wav"))
+            .expect("the wav backend names the capture file");
+        assert!(backend.contains("out.frequency=48000"), "{backend}");
+        let controller = argv
+            .iter()
+            .position(|a| a == "intel-hda,id=hda0")
+            .expect("the controller");
+        assert_eq!(argv[controller - 1], "-device");
+        // Output only: the `wav` backend records playback and cannot supply
+        // a codec's input.
+        assert_eq!(argv[controller + 2], "hda-output,audiodev=snd0,bus=hda0.0");
+        assert_eq!(SoundCard::Hda.capture_label_hz(), 48_000);
     }
 
     #[test]

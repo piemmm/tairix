@@ -202,7 +202,7 @@ session over it. What it guarantees:
 - Live verticals: `root_unlock_admission_qemu_x86_64` (interactive passphrase →
   `/System` mount → encrypted-root unlock → users database installed, over the
   virtio-blk-PCI MSI-X completion path), `spawn_session_qemu_x86_64` (the
-  `wait` → reap → relaunch supervision cycle), and `audio_virtio_qemu_x86_64`
+  `wait` → reap → relaunch supervision cycle), and `audio_qemu_x86_64`
   (a scripted passphrase, `login` form and shell command).
 
 ### A4 — `devmgr` autoload over the ACPI/PCI tree
@@ -212,7 +212,7 @@ The x86_64 discovery emits generic match-key nodes (PCI
 driver store through the same `lib/devmatch` policy as every port; only the
 per-port node emission is new. Live today: the virtio-input keyboard
 (`autoload_input_qemu_x86_64`), virtio-net (`netstack_autoload_qemu_x86_64`
-and the `netstack_*` family) and virtio-sound (`audio_virtio_qemu_x86_64`),
+and the `netstack_*` family) and virtio-sound (`audio_qemu_x86_64`),
 each autoloaded into its own process in the production boot.
 
 Remaining:

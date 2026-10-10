@@ -13,3 +13,12 @@ workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+# The signal as the FLAC file the `play` verticals plant, written by
+# `lib/sound`'s encoder: for the image build and the player's host tests,
+# never for a guest fixture, which carries no encoder.
+flac = ["dep:tairix-sound"]
+
+[dependencies]
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0", features = ["encode"], optional = true }

@@ -270,8 +270,17 @@ impl AppIdentity {
 }
 
 /// Length, in bytes, of the [`Origin`] wire encoding.
-pub const ORIGIN_WIRE_LEN: usize =
-    1 + 4 + 4 + 8 + PROC_ID_LEN + CAPABILITY_SUMMARY_LEN + 8 + 1 + BUNDLE_ID_MAX + PUBLISHER_ID_LEN;
+pub const ORIGIN_WIRE_LEN: usize = 1
+    + 4
+    + 4
+    + 8
+    + PROC_ID_LEN
+    + CAPABILITY_SUMMARY_LEN
+    + 8
+    + 1
+    + BUNDLE_ID_MAX
+    + PUBLISHER_ID_LEN
+    + PROC_ID_LEN;
 
 /// Sentinel [`Origin::console`] value for a principal whose standard
 /// streams are not backed by an installed console (a driver process, a
@@ -319,6 +328,7 @@ pub struct Origin {
     capabilities: CapabilitySummary,
     console: u64,
     app: Option<AppIdentity>,
+    login_session: ProcId,
 }
 
 impl Origin {
@@ -346,6 +356,7 @@ impl Origin {
             capabilities,
             console,
             app: None,
+            login_session: ProcId::KERNEL,
         }
     }
 
@@ -361,6 +372,27 @@ impl Origin {
     pub const fn with_app(mut self, app: AppIdentity) -> Self {
         self.app = Some(app);
         self
+    }
+
+    /// Attach the login session this principal lies within, consumed and
+    /// returned so the kernel's attestation can set it inline.
+    #[must_use]
+    pub const fn with_login_session(mut self, session: ProcId) -> Self {
+        self.login_session = session;
+        self
+    }
+
+    /// The login session this principal lies within — one user's sign-in, the
+    /// session a seat's devices are arbitrated between — named by its
+    /// anchor's instance, or [`None`] for a principal no login encloses (the
+    /// kernel's own, and what PID 1 starts without naming a user).
+    #[must_use]
+    pub fn login_session(&self) -> Option<ProcId> {
+        if self.login_session.is_kernel() {
+            None
+        } else {
+            Some(self.login_session)
+        }
     }
 
     /// The attested identity of the application this principal is running, or
@@ -446,6 +478,7 @@ impl Origin {
             out[OFF_PUBLISHER..OFF_PUBLISHER + PUBLISHER_ID_LEN]
                 .copy_from_slice(app.publisher.as_bytes());
         }
+        out[OFF_LOGIN_SESSION..].copy_from_slice(self.login_session.as_bytes());
         out
     }
 
@@ -472,6 +505,7 @@ impl Origin {
         caps.copy_from_slice(&bytes[33..65]);
         let console = read_u64(bytes, 65);
         let app = decode_app_identity(bytes)?;
+        let login_session = ProcId::from_bytes(&bytes[OFF_LOGIN_SESSION..])?;
         Ok(Self {
             trust_domain,
             uid,
@@ -481,6 +515,7 @@ impl Origin {
             capabilities: CapabilitySummary::from_raw(caps),
             console,
             app,
+            login_session,
         })
     }
 }
@@ -491,6 +526,8 @@ const OFF_BUNDLE_ID_LEN: usize = 73;
 const OFF_BUNDLE_ID: usize = OFF_BUNDLE_ID_LEN + 1;
 /// Wire offset of the app-identity tail's publisher identity.
 const OFF_PUBLISHER: usize = OFF_BUNDLE_ID + BUNDLE_ID_MAX;
+/// Wire offset of the login session.
+const OFF_LOGIN_SESSION: usize = OFF_PUBLISHER + PUBLISHER_ID_LEN;
 
 /// Decode the app-identity tail of an [`Origin`] wire image.
 ///
@@ -651,6 +688,22 @@ mod tests {
             .capabilities()
             .holds_cap(CapabilityId::SYSINFO_GLOBAL));
         assert_eq!(decoded.console(), 1);
+    }
+
+    /// No login is the canonical zero image, and a login session crosses the
+    /// wire intact beside an app identity.
+    #[test]
+    fn a_login_session_crosses_the_wire_and_none_is_the_zero_image() {
+        let bare = sample_origin();
+        assert_eq!(bare.login_session(), None);
+        assert!(bare.to_le_bytes()[ORIGIN_WIRE_LEN - PROC_ID_LEN..]
+            .iter()
+            .all(|&byte| byte == 0));
+        let session = ProcId::from_raw([0x5C; PROC_ID_LEN]);
+        let signed_in = sample_origin().with_login_session(session);
+        let decoded = Origin::from_bytes(&signed_in.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded.login_session(), Some(session));
+        assert_eq!(decoded, signed_in);
     }
 
     #[test]

@@ -71,6 +71,12 @@ Yr ymholiadau:
   gyfieithu ar ran perchennog — ei uned a'i grŵp, cenhedlaeth a chyflwr ei
   berchennog, ei ffrydiau, a mapiadau ei barth a'r beitiau y maent yn eu
   mapio (angen `CAP_SYSINFO_HW`).
+- `audio`, `sound` — y dyfeisiau sain: un rhes i bob allbwn a mewnbwn — ei
+  ddynodwr, ai dyma ddewis diofyn ei gyfeiriad, ei lefel a'i fudo, cyfradd
+  fesuredig ei gloc wrth chwarae, y fframiau a gollodd, ei leoliad a'i enw
+  — yna un rhes i bob ffrwd sain sy'n eiddo i chi — ei dyfais, ei
+  chyfeiriad, ei rôl a'i chyflwr, ei safle, ei glitshys a phwy sy'n ei
+  dal.
 - `show <resource-ref>` — darllen un cyfeiriad adnodd
   `info:`/`state:`/`stats:` ac argraffu ei werth. Mae'r gofodau enwau hynny
   yn gweini gwerthoedd teipiedig drwy'r API hwn, byth ffrydiau beit: ni all
@@ -88,6 +94,7 @@ Heb ymholiad, dangosir y cymorth byr.
 - `--all, -a` — gyda `processes`: rhestru pob proses ar y system yn
   hytrach na'ch rhai chi'n unig; dim ond i alwr sy'n dal
   `CAP_SYSINFO_GLOBAL` y mae'r gwasanaeth yn caniatáu'r olwg hon.
+  Gydag `audio`, pob ffrwd sain ar y peiriant, dan yr un gallu.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun.
 
 ## EXAMPLES

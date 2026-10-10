@@ -210,6 +210,7 @@ pub mod seat;
 pub mod session;
 pub mod settings;
 pub mod shell;
+pub mod sound;
 pub mod switchboard;
 pub mod switchuser;
 pub mod tasks;

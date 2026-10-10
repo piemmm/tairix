@@ -19,18 +19,58 @@ It is separate from `lib/audio` for the reason `lib/netchan` is separate from
 decides what samples come out is one crate and the device-channel server is
 another, so a sound card's driver carries no mixing code at all.
 
-## Two layers
+## Three layers
 
 `AudioChannelServer<A: Audio>` is the pure, host-testable per-request handler.
 It performs no I/O: the caller receives the request, maps the granted regions,
-and sends the reply this server produces, so the whole control plane is
-exercised on the host against a mock device.
+and sends the reply this server produces.
 
-`serve` is the freestanding process loop, compiled only for the bare-metal
-targets a driver binary is built for. It claims a reserved device-channel
-endpoint bound **restricted-sender on `CAP_AUDIO_DEVICE`**, publishes the
-`tairix,audiochan` hardware-tree node the device manager hands to the mixer,
-and parks on a wait set over `{call endpoint, device interrupt}`.
+`Dispatcher<A, I: ChannelIo>` is the serve loop's work without its syscalls:
+one call answered, or one device event serviced, over an injected `ChannelIo`
+that receives calls, maps and unmaps the mixer's regions, and sends its
+notifications. The whole control plane — attach and detach, the interrupt
+path's refills and notifications — is host-tested against a mock device and a
+mock channel.
+
+`serve` is the freestanding shell, compiled only for the bare-metal targets a
+driver binary is built for. It claims a reserved device-channel endpoint bound
+**restricted-sender on `CAP_AUDIO_DEVICE`**, publishes the `tairix,audiochan`
+hardware-tree node the device manager hands to the mixer, and parks on a wait
+set over `{call endpoint, device interrupt}`, handing each wake to the
+dispatcher.
+
+## The cyclic engine
+
+A device a DMA controller feeds from a looping buffer — the Raspberry Pi's
+headphone jack and its I²S interface — streams the same way whatever its FIFO
+wants, so `cyclic::CyclicPlayback` is that stream once, over two seams:
+`DmaPort`, the channel (`cyclic::LinkDma` in a driver process, the device's
+link to its [DMA controller](../drivers/dma.md) through
+[`tairix-linkclient`](linkclient.md)), and `FrameCodec`, how a frame sits in
+the buffer.
+
+- **Four periods, one written ahead.** A boundary is the answer to a posted
+  wait, which the serve loop wakes on (`Wake::CallReply`). Each frees the
+  period just played and the next period of the ring goes into it. The period
+  after the one playing is always written: as silence counted lost when the
+  mixer has not supplied it, since a period left alone replays a lap-old
+  sound.
+- **A frame is copied where it lies.** A buffer frame is as many bytes as a
+  ring frame of two channels in the codec's format, and must be whole 32-bit
+  FIFO words, so a period is read from the ring straight into the buffer and
+  encoded in place.
+- **The position is the channel's**: its boundary count, stamped with the
+  time the controller serviced the boundary.
+- **A stream ends parked.** Stopping, a drain playing out and a release fill
+  the buffer with the codec's parked frame and stop the channel at its next
+  boundary, once that frame has reached the device. `is_clocking` says whether
+  it still runs, and `halt_parking` stops a parking channel at once.
+- **Bounded.** A period holds at most 16384 frames and the buffer four of
+  them; a boundary not answered within twice the buffer's span ends the stream
+  as a fault rather than leave it waiting on a stalled channel.
+
+The modelled channel every such driver's tests drive the engine over is
+`cyclic::mock`, behind the `mock-dma` feature, so none carries a private copy.
 
 ## State is per endpoint
 
@@ -44,7 +84,8 @@ so one channel carries several endpoints' state rather than one channel's.
 - `Attach` validates the offered ring against *that recorded grant*, through
   `ConfigureGrant::geometry`: the single derivation both sides size the region
   from, so they cannot disagree about how large it is. A refused attach leaves
-  no state and no mapping.
+  no state and no mapping, and a refused re-attach leaves the endpoint
+  detached: its old region was let go before the new one was offered.
 - A reconfiguration drops the attached region rather than leaving it the wrong
   shape, and the serve loop unmaps it in the same step.
 - `Detach` releases the endpoint's device-side stream. A release the hardware
@@ -74,6 +115,11 @@ carries a `loom` model in `lib/abi`.
 An under- or over-run is reported as the **delta** since the previous service,
 because the wire report already carries the running total and the notify is
 about what just happened.
+
+The device's causes are read after every call as well as on every event wake.
+A call that waited on the device — a codec verb, a control request — may have
+consumed the very wake an elapsed period raised, and a stream whose last
+period is never serviced never reports its drain.
 
 ## Nothing spins
 

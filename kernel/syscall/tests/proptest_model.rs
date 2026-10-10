@@ -195,6 +195,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn foreground_held(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn thread_create(
         &self,
         _c: &CallerContext<'_>,
@@ -891,6 +895,7 @@ impl SyscallHandlers for CountingHandlers {
         _src_len: usize,
         _dst: u64,
         _dst_len: usize,
+        _flags: tairix_abi::RenameFlags,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -1040,6 +1045,10 @@ impl SyscallHandlers for CountingHandlers {
         Ok(0)
     }
     fn port_bind(&self, _c: &CallerContext<'_>, _e: u64, _mp: usize, _cap: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn port_admit(&self, _c: &CallerContext<'_>, _p: u64, _s: u64) -> SyscallResult {
         self.bump();
         Ok(0)
     }

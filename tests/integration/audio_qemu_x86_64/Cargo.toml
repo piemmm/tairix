@@ -1,0 +1,31 @@
+[package]
+name = "tairix-test-audio-qemu-x86-64"
+description = "plans/SOUND.md QEMU audio vertical: boot the production x86_64 tairix-kernel pipeline against an audio-root disk carrying the signed drivers for the sound card the run attaches (a virtio sound device, or QEMU's USB speaker behind an xHCI controller) and the test-only audiotone fixture, and assert the card received the fixture's signal sample for sample."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding: the production x86_64 boot pipeline through `tairix-kernel`'s
+# library half, unchanged, with an audit-stream observer that ends the run once
+# the fixture and then the scripted shell have exited.
+
+[[bin]]
+name = "tairix-test-audio-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The audit-record reading every guest sink shares.
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+tairix-test-audio-wire = { path = "../audio_wire", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

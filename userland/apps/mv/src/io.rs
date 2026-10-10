@@ -9,7 +9,7 @@
 //! `FileSystem`).
 
 use alloc::string::String;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, RenameFlags};
 
 /// What kind of object a path or directory entry is, as far as `mv` cares.
 ///
@@ -84,7 +84,7 @@ pub trait FileSystem {
     fn kind(&self, path: &str) -> Result<EntryKind, Errno>;
 
     /// Rename `source` onto `dest`, replacing an existing `dest` of a
-    /// compatible kind.
+    /// compatible kind unless `flags` refuses the replacement.
     ///
     /// Returns [`RenameOutcome::Renamed`] when the rename completed
     /// atomically, or [`RenameOutcome::CrossDevice`] when `source` and `dest`
@@ -94,8 +94,9 @@ pub trait FileSystem {
     /// # Errors
     ///
     /// Any [`Errno`] the filesystem raises — e.g. [`Errno::PermissionDenied`]
-    /// for an unwritable destination directory.
-    fn rename(&self, source: &str, dest: &str) -> Result<RenameOutcome, Errno>;
+    /// for an unwritable destination directory, or [`Errno::AlreadyExists`]
+    /// for an occupied one under [`RenameFlags::NO_REPLACE`].
+    fn rename(&self, source: &str, dest: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno>;
 
     /// Read up to `buf.len()` bytes of `path` starting at `offset`, returning
     /// the number of bytes written into `buf` (`0` at end-of-file).

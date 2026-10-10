@@ -86,6 +86,7 @@ pub mod notifications;
 pub mod picker;
 pub mod render;
 pub mod repaint;
+pub mod sound;
 pub mod system;
 pub mod taskbar;
 pub mod tasks;
@@ -114,6 +115,7 @@ pub use picker::{
 };
 pub use render::{icon_cache, IconEpoch, TaskbarRenderer};
 pub use repaint::TaskbarRepaint;
+pub use sound::{OutputState, SoundAction, SoundPanel, SoundPanelLayout, SoundState};
 pub use system::{SystemAction, SystemPermits, SystemRow};
 pub use taskbar::{Taskbar, TaskbarConfig};
 pub use tasks::{TaskEntry, TaskId, TaskList};

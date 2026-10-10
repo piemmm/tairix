@@ -16,7 +16,7 @@ use tairix_abi::driver::display::{
     DisplayPower,
 };
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::seat::DisplayLease;
+use tairix_abi::seat::{DisplayLease, ReleaseSurface};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverError, Errno, ProcId, PROC_ID_LEN};
 
@@ -673,7 +673,7 @@ fn a_revoked_owner_is_refused_typed_and_its_frames_go_with_the_lease() {
     assert_eq!(rig.configure(2), Ok(()));
     rig.seat = MockSeat::refusing(Errno::SeatRevoked);
     assert_eq!(rig.present(0, &[full()]), Err(Errno::SeatRevoked));
-    rig.lease_moved(DisplayLease::new(1, false));
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
     assert!(
         !rig.server.is_configured(),
         "a revoked owner's frames are released, never scanned out"
@@ -747,7 +747,7 @@ fn the_display_is_lit_before_the_first_presenters_first_frame() {
     rig.display.power_fails = Some(DriverError::Busy);
     assert_eq!(rig.configure(2), Ok(()));
     rig.display.power_fails = None;
-    rig.lease_moved(DisplayLease::new(1, false));
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
     assert_eq!(rig.display.switches, vec![DisplayPower::On]);
 }
 
@@ -771,7 +771,7 @@ fn a_display_with_no_power_control_says_so() {
     rig.display.has_power = false;
     assert_eq!(rig.configure(2), Ok(()));
     assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotImplemented));
-    rig.lease_moved(DisplayLease::new(1, false));
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
     assert!(!rig.server.is_configured());
 }
 
@@ -781,14 +781,14 @@ fn an_ended_lease_releases_its_configuration_and_lights_the_display() {
     assert_eq!(rig.configure(2), Ok(()));
     assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
 
-    rig.lease_moved(DisplayLease::new(1, true));
+    rig.lease_moved(DisplayLease::held(1, ProcId::KERNEL));
     assert!(rig.server.is_configured(), "the live lease is left alone");
     assert_eq!(
         rig.display.switches,
         vec![DisplayPower::On, DisplayPower::Off]
     );
 
-    rig.lease_moved(DisplayLease::new(1, false));
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
     assert!(!rig.server.is_configured());
     assert_eq!(
         rig.display.switches,
@@ -817,13 +817,13 @@ fn a_display_that_will_not_light_again_is_refused_to_the_next_presenter() {
     assert_eq!(rig.configure(2), Ok(()));
     assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
     rig.display.power_fails = Some(DriverError::DeviceFault);
-    rig.lease_moved(DisplayLease::new(1, false));
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
     rig.seat = MockSeat::live(2);
     assert_eq!(rig.configure(2), Err(Errno::DeviceFault));
 
     // The next lease edge retries, and a lit display configures again.
     rig.display.power_fails = None;
-    rig.lease_moved(DisplayLease::new(2, true));
+    rig.lease_moved(DisplayLease::held(2, ProcId::KERNEL));
     assert_eq!(
         rig.display.switches,
         vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]

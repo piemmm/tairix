@@ -490,7 +490,7 @@ pub(crate) mod tests {
         let cells = |values: &[u32]| -> std::vec::Vec<u8> {
             values.iter().flat_map(|v| v.to_be_bytes()).collect()
         };
-        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        let mut b = tairix_fdt::write::FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);

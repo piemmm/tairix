@@ -45,6 +45,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use tairix_abi::audio::{AudioDeviceDescriptor, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::HwNode;
 use tairix_abi::net_ipc::{
@@ -60,9 +61,10 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_procinfo::{
-    call, fetch_tree, for_each_cpu_time, for_each_net_socket, for_each_process, memory_pressure,
-    memory_pressure_band, net_stack_defence, ramzip_stats, walk_pages_with, CallError, CpuTotals,
-    ListError, Transport, WalkStep,
+    call, fetch_tree, for_each_audio_device, for_each_audio_stream, for_each_cpu_time,
+    for_each_net_socket, for_each_process, memory_pressure, memory_pressure_band,
+    net_stack_defence, ramzip_stats, walk_pages_with, CallError, CpuTotals, ListError, StreamScope,
+    Transport, WalkStep,
 };
 
 use crate::schedule::{Cadence, SAMPLE_PERIOD_NS};
@@ -229,6 +231,10 @@ pub enum DegradedField {
     NetStackDefence,
     /// The hardware tree could not be read.
     HardwareTree,
+    /// The sound devices could not be read.
+    AudioDevices,
+    /// The sound streams could not be read.
+    AudioStreams,
 }
 
 /// Why a reading is absent from a [`Sample`].
@@ -328,6 +334,15 @@ const SERVER_RECORD_CAP: usize = 16;
 /// server with several root complexes and their whole PCIe fan-out stays
 /// well inside this while a service claiming more cannot page without limit.
 const HW_NODE_CAP: usize = 1024;
+
+/// The most sound devices one sample holds: an endpoint per sink or source,
+/// well past the sound cards, headsets and displays a machine plugs in.
+const AUDIO_DEVICE_CAP: usize = 128;
+
+/// The most sound streams one sample holds: a pane lists every one, so a
+/// server playing for hundreds of sessions shows the first of them rather
+/// than holding them all.
+const AUDIO_STREAM_CAP: usize = 256;
 
 /// Seat records the sampler retains.
 ///
@@ -593,6 +608,11 @@ pub struct Sample {
     /// The discovered hardware tree ([`Cadence::Inventory`], hardware
     /// scope), which names the graphics device the display path runs on.
     pub hardware: Option<Vec<HwNode>>,
+    /// The sound devices, sinks first ([`Cadence::EverySample`]).
+    pub audio_devices: Option<Vec<AudioDeviceDescriptor>>,
+    /// The sound streams: this session's own, or every principal's under the
+    /// global scope ([`Cadence::EverySample`]).
+    pub audio_streams: Option<Vec<StreamDescriptor>>,
     /// Recent user-fault crash records ([`Cadence::Inventory`],
     /// kernel-statistics scope). `Some(empty)` is the healthy system that
     /// has crashed nothing — which is why this is not a bare [`Vec`].
@@ -689,7 +709,9 @@ impl ScopeVerdicts {
             | DegradedField::VolumeIoStats
             | DegradedField::NetResolverServers
             | DegradedField::NetTimeServers
-            | DegradedField::ResourceLimits => true,
+            | DegradedField::ResourceLimits
+            | DegradedField::AudioDevices
+            | DegradedField::AudioStreams => true,
             DegradedField::MemoryPressure
             | DegradedField::CpuLoad
             | DegradedField::KernelMemory
@@ -899,6 +921,8 @@ impl Sampler {
         let net_counters = self.read_net_counters(transport, &mut degradations);
         let sockets = self.read_sockets(transport, &mut degradations);
         let stack_defence = self.read_stack_defence(transport, &mut degradations);
+        let audio_devices = self.read_audio_devices(transport, &mut degradations);
+        let audio_streams = self.read_audio_streams(transport, &mut degradations);
         self.refresh_cached(transport, &mut degradations);
 
         self.prev_sample_ns = Some(now_ns);
@@ -940,6 +964,8 @@ impl Sampler {
             time_servers: self.time_servers.clone(),
             stack_defence,
             hardware: self.hardware.clone(),
+            audio_devices,
+            audio_streams,
             scopes: self.scopes,
             elapsed_ns,
         }
@@ -1348,6 +1374,56 @@ impl Sampler {
         let read = net_stack_defence(transport).ok();
         self.note(DegradedField::NetStackDefence, read.is_some(), degradations);
         read
+    }
+
+    /// The sound devices, sinks first, at most [`AUDIO_DEVICE_CAP`].
+    fn read_audio_devices(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<Vec<AudioDeviceDescriptor>> {
+        if !self.due(DegradedField::AudioDevices, false) {
+            return None;
+        }
+        let mut devices = Vec::new();
+        let read = for_each_audio_device(transport, |device| {
+            devices.push(*device);
+            Ok(if devices.len() < AUDIO_DEVICE_CAP {
+                WalkStep::Continue
+            } else {
+                WalkStep::Stop
+            })
+        });
+        self.note(DegradedField::AudioDevices, read.is_ok(), degradations);
+        read.ok().map(|()| devices)
+    }
+
+    /// The sound streams this session may see, at most [`AUDIO_STREAM_CAP`]:
+    /// every principal's under the global scope, else its own.
+    fn read_audio_streams(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<Vec<StreamDescriptor>> {
+        if !self.due(DegradedField::AudioStreams, false) {
+            return None;
+        }
+        let scope = if self.scopes.global_process_scope {
+            StreamScope::Every
+        } else {
+            StreamScope::Own
+        };
+        let mut streams = Vec::new();
+        let read = for_each_audio_stream(transport, scope, |stream| {
+            streams.push(*stream);
+            Ok(if streams.len() < AUDIO_STREAM_CAP {
+                WalkStep::Continue
+            } else {
+                WalkStep::Stop
+            })
+        });
+        self.note(DegradedField::AudioStreams, read.is_ok(), degradations);
+        read.ok().map(|()| streams)
     }
 
     /// How many sockets are established and listening.
@@ -1859,7 +1935,9 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::NetStackDefence
         | DegradedField::VolumeIoStats
         | DegradedField::VolumeIoQueue
-        | DegradedField::GpuDeviceStats => Cadence::EverySample,
+        | DegradedField::GpuDeviceStats
+        | DegradedField::AudioDevices
+        | DegradedField::AudioStreams => Cadence::EverySample,
         DegradedField::MemoryPressure
         | DegradedField::KernelMemory
         | DegradedField::ReclaimStats

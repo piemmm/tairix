@@ -240,6 +240,33 @@ struct Layout {
     max_cluster: u32,
 }
 
+/// A short entry's stored timestamps, byte for byte: the creation time's
+/// tenths, time and date with the access date (offsets 13..20), and the
+/// write time and date (22..26). Carried verbatim when an entry is rewritten,
+/// so a rename changes no stamp and loses none of the precision a decode
+/// would round away.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct EntryStamps {
+    created: [u8; 7],
+    written: [u8; 4],
+}
+
+impl EntryStamps {
+    /// No stamp at all: what this driver, which reads no clock, gives a new
+    /// entry.
+    const NONE: Self = Self {
+        created: [0; 7],
+        written: [0; 4],
+    };
+
+    fn of(raw: &RawEntry) -> Self {
+        let mut stamps = Self::NONE;
+        stamps.created.copy_from_slice(&raw[13..20]);
+        stamps.written.copy_from_slice(&raw[22..26]);
+        stamps
+    }
+}
+
 /// A single decoded directory entry. `name` holds the file name as
 /// UTF-8 bytes — the reconstructed long name when one is present and
 /// valid, otherwise the 8.3 short name.
@@ -258,6 +285,8 @@ struct ParsedEntry {
     /// is [`Time64::UNIX_EPOCH`] (the documented "no stamp" value — never a
     /// clamped or guessed date).
     times: NodeTimes,
+    /// The same stamps as stored, for rewriting the entry without loss.
+    stamps: EntryStamps,
     /// Device byte offset of the 8.3 short entry (the one carrying the
     /// cluster and size); the write path patches metadata here.
     short_offset: u64,
@@ -554,6 +583,7 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
             accessed: dos_datetime_to_time64(le16(raw, 18), 0),
             changed: Time64::UNIX_EPOCH,
         },
+        stamps: EntryStamps::of(raw),
         short_offset: 0,
         first: SlotPos::at(0),
         slot_span: 0,
@@ -1725,11 +1755,19 @@ impl<B: Block> Fat32<B> {
     }
 
     /// Build a short directory entry with the given raw name field,
-    /// attribute, first cluster, and size.
-    fn build_short_entry(field: &[u8; 11], attr: u8, cluster: u32, size: u32) -> RawEntry {
+    /// attribute, first cluster, size, and stamps.
+    fn build_short_entry(
+        field: &[u8; 11],
+        attr: u8,
+        cluster: u32,
+        size: u32,
+        stamps: EntryStamps,
+    ) -> RawEntry {
         let mut raw = [0u8; DIR_ENTRY_LEN];
         raw[0..11].copy_from_slice(field);
         raw[11] = attr;
+        raw[13..20].copy_from_slice(&stamps.created);
+        raw[22..26].copy_from_slice(&stamps.written);
         let cb = cluster.to_le_bytes();
         raw[20..22].copy_from_slice(&cb[2..4]);
         raw[26..28].copy_from_slice(&cb[0..2]);
@@ -1747,7 +1785,7 @@ impl<B: Block> Fat32<B> {
         let dot = {
             let mut f = [b' '; 11];
             f[0] = b'.';
-            Self::build_short_entry(&f, ATTR_DIRECTORY, child_cluster, 0)
+            Self::build_short_entry(&f, ATTR_DIRECTORY, child_cluster, 0, EntryStamps::NONE)
         };
         let dotdot = {
             let mut f = [b' '; 11];
@@ -1758,7 +1796,7 @@ impl<B: Block> Fat32<B> {
             } else {
                 parent_cluster
             };
-            Self::build_short_entry(&f, ATTR_DIRECTORY, pc, 0)
+            Self::build_short_entry(&f, ATTR_DIRECTORY, pc, 0, EntryStamps::NONE)
         };
         let base = self.cluster_byte(child_cluster);
         self.write_bytes(base, &dot)?;
@@ -1887,7 +1925,9 @@ impl<B: Block> Fat32<B> {
             0
         };
         let attr = if is_dir { ATTR_DIRECTORY } else { 0x20 };
-        if let Err(e) = self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0) {
+        if let Err(e) =
+            self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0, EntryStamps::NONE)
+        {
             // Reclaim the directory cluster if naming the entry failed, so a
             // rejected create leaves no orphaned chain behind.
             if is_dir && child_cluster >= 2 {
@@ -1910,6 +1950,7 @@ impl<B: Block> Fat32<B> {
         attr: u8,
         cluster: u32,
         size: u32,
+        stamps: EntryStamps,
     ) -> Result<(), DriverError> {
         let mut units = [0u16; MAX_LONG_NAME_UNITS];
         let unit_count = encode_utf16le(name, &mut units).ok_or(DriverError::LengthOutOfRange)?;
@@ -1959,7 +2000,7 @@ impl<B: Block> Fat32<B> {
         }
         self.put_slot(
             &mut pos,
-            &Self::build_short_entry(&short, attr, cluster, size),
+            &Self::build_short_entry(&short, attr, cluster, size, stamps),
         )
     }
 
@@ -2140,9 +2181,11 @@ impl<B: Block> Fat32<B> {
     ///
     /// FAT has no inode and no journal: the move re-encodes the source's
     /// long-name + short entry under the destination name (preserving its
-    /// first cluster, size, and attribute byte verbatim), then deletes the
-    /// source entry, so the file's data clusters are never touched. Across
-    /// directories a moved directory's `..` is repointed at the new parent.
+    /// first cluster, size, attribute byte, and stamps verbatim), then deletes
+    /// the source entry, so the file's data clusters are never touched. A
+    /// destination matching the source's own name is that entry re-spelled.
+    /// Across directories a moved directory's `..` is repointed at the new
+    /// parent.
     /// Replacement of an existing destination is therefore best-effort
     /// rather than atomic, matching the non-transactional create/remove
     /// paths the on-disk format allows.
@@ -2175,12 +2218,17 @@ impl<B: Block> Fat32<B> {
         self.read_bytes(src_entry.short_offset + 11, &mut attr_buf)?;
         let attr = attr_buf[0];
 
-        let dst_existing = self.find_child(dst_cluster, dst_name)?;
-        if let Some(d) = &dst_existing {
-            if d.short_offset == src_entry.short_offset {
-                // Source and destination resolve to the same entry already.
-                return Ok(());
-            }
+        // A destination resolving to the source's own entry is that entry
+        // re-spelled, since names match ignoring case: it takes the spelling
+        // asked for, and is never the replaced entry, whose chain the move is.
+        let dst_existing = self
+            .find_child(dst_cluster, dst_name)?
+            .filter(|d| d.short_offset != src_entry.short_offset);
+        if dst_existing.is_none()
+            && src_cluster == dst_cluster
+            && src_entry.name[..src_entry.name_len] == *dst_name
+        {
+            return Ok(());
         }
 
         // Refuse moving a directory into itself or its own subtree.
@@ -2212,6 +2260,7 @@ impl<B: Block> Fat32<B> {
             attr,
             src_entry.cluster,
             src_entry.size,
+            src_entry.stamps,
         )?;
         self.delete_entry_slots(src_entry.first, src_entry.slot_span)?;
 

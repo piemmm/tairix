@@ -390,7 +390,8 @@ mod tests {
     use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind};
     use tairix_arch_api::platform::{conformance, DiscoveryError, HwNodeSink, PlatformDiscovery};
     use tairix_fdt::fixture;
-    use tairix_fdt::fixture::{arm_with_cpus, raspi_like_arm, virt_like_arm, DtbBuilder};
+    use tairix_fdt::fixture::{arm_with_cpus, raspi_like_arm, virt_like_arm};
+    use tairix_fdt::write::FdtWriter;
 
     #[test]
     fn passes_platform_discovery_conformance() {
@@ -495,7 +496,7 @@ mod tests {
     fn a_gicv3_and_its_translation_service_are_the_kernel_s_and_a_gpio_controller_is_not() {
         let cells =
             |values: &[u64]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        let mut b = tairix_fdt::write::FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -536,7 +537,7 @@ mod tests {
     fn a_generic_ecam_host_is_the_kernel_s() {
         let cells =
             |values: &[u64]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
-        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        let mut b = tairix_fdt::write::FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -692,7 +693,7 @@ mod tests {
         // A GICv3-only extended-SPI binding (type 2) is not a line this
         // GICv2 port can raise: the node is still emitted, carrying no IRQ
         // resource, rather than a line 32 below something real.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -715,7 +716,7 @@ mod tests {
 
     #[test]
     fn a_spi_the_tree_says_is_edge_triggered_is_granted_as_one() {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -754,7 +755,7 @@ mod tests {
     /// whose `ranges` maps the legacy bus addresses (`0x7e……`) to the
     /// BCM2711 ARM-physical window (`0xfe……`) — the real Pi DTB shape.
     fn nested_soc_tree(with_ranges: bool) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -803,7 +804,7 @@ mod tests {
     /// A Pi-4-shaped tree with a `PCIe` host bridge under `/scb`, carrying
     /// the real BCM2711 `reg`, `ranges`, and `dma-ranges` shapes.
     fn scb_pcie_tree() -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -920,7 +921,7 @@ mod tests {
     fn pcie_bridge_without_ranges_carries_no_outbound_window() {
         // The without-`dma-ranges` fixture also carries no `ranges`: no
         // outbound window is invented.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -970,7 +971,7 @@ mod tests {
     fn pcie_bridge_without_dma_ranges_carries_no_aperture() {
         // Strip the `dma-ranges`: the bridge is still emitted with its
         // translated window, but no aperture is invented.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1009,7 +1010,7 @@ mod tests {
     #[test]
     fn skips_an_overlong_compatible_and_keeps_list_order() {
         let overlong = "x".repeat(65);
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1049,7 +1050,7 @@ mod tests {
     fn refuses_a_tree_nested_beyond_the_walk_bound() {
         // 16 nested nodes exceed `MAX_WALK_DEPTH`; the walk fails closed
         // rather than silently under-enumerating.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         for _ in 0..16 {
             b.begin_node("nest");
@@ -1074,7 +1075,7 @@ mod tests {
     /// The pinned Pi 4 tree's interrupt wiring: a GIC-400 the root names, and
     /// the `aon_intr` second-level controller both HDMI blocks name instead.
     fn nested_intc_tree() -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 1);
@@ -1125,7 +1126,7 @@ mod tests {
     /// The Pi 4's `/emmc2bus` holding the EMMC2 host, its `dma-ranges`
     /// mapping `size` bytes at bus address `bus` onto CPU address `cpu`.
     fn emmc2_tree(bus: u32, cpu: u32, size: u32) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 1);
@@ -1188,7 +1189,7 @@ mod tests {
     /// start of the DMA page, and DMA4's four channels starting at channel
     /// eleven of the same page, each stating the Broadcom absolute mask.
     fn bcm_dma_tree(legacy_mask: &[u8]) -> Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 1);
@@ -1236,7 +1237,7 @@ mod tests {
         by_key(nodes, compatible)
             .resources()
             .iter()
-            .find_map(|r| r.dma_controller_duty().ok())
+            .find_map(|r| r.link_duty().ok())
             .expect("a controller duty")
             .channels()
     }

@@ -178,6 +178,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn foreground_held(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn thread_create(
         &self,
         _c: &CallerContext<'_>,
@@ -851,6 +855,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _src_len: usize,
         _dst: u64,
         _dst_len: usize,
+        _flags: tairix_abi::RenameFlags,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -1000,6 +1005,10 @@ impl SyscallHandlers for AcceptingHandlers {
         Ok(0)
     }
     fn port_bind(&self, _c: &CallerContext<'_>, _e: u64, _mp: usize, _cap: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn port_admit(&self, _c: &CallerContext<'_>, _p: u64, _s: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -1275,6 +1284,7 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
     // re-listing each accepted value here.
     let flags_arg: Option<FlagsArg> = match spec.number {
         SyscallNumber::FS_UNLINK => Some((2, |b| UnlinkFlags::from_bits(b).is_ok())),
+        SyscallNumber::FS_RENAME => Some((4, |b| tairix_abi::RenameFlags::from_bits(b).is_ok())),
         SyscallNumber::FS_LINK => Some((4, |b| LinkFlags::from_bits(b).is_ok())),
         SyscallNumber::FS_REALPATH => Some((4, |b| RealpathMode::from_raw(b).is_ok())),
         _ => None,

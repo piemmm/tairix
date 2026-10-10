@@ -94,8 +94,10 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("song.flac", MediaType::AudioFlac, IconKind::Audio),
     ("song.ogg", MediaType::AudioOgg, IconKind::Audio),
     ("song.oga", MediaType::AudioOgg, IconKind::Audio),
-    ("song.opus", MediaType::AudioOgg, IconKind::Audio),
+    ("song.opus", MediaType::AudioOpus, IconKind::Audio),
     ("song.wav", MediaType::AudioWav, IconKind::Audio),
+    ("chime.au", MediaType::AudioAu, IconKind::Audio),
+    ("chime.snd", MediaType::AudioAu, IconKind::Audio),
     ("song.aac", MediaType::AudioAac, IconKind::Audio),
     ("song.m4a", MediaType::AudioMp4, IconKind::Audio),
     ("film.mp4", MediaType::VideoMp4, IconKind::Video),
@@ -383,8 +385,8 @@ const PRESERVED: &[(&str, &str)] = &[
 /// The names the registry types *more specifically* than the pre-registry
 /// table did: `(name, the older broader spelling, the spelling now produced)`.
 ///
-/// Each is a source form with its own honest type, so the registry names it
-/// rather than lumping it in with plain text. Refining a name is only
+/// Each is a form with its own honest type, so the registry names it rather
+/// than lumping it in with plain text or its container. Refining a name is only
 /// admissible because it takes nothing away: the broader spelling is still a
 /// type the registry knows *and* is still an ancestor of the refined one, so an
 /// application declaring it keeps matching these names. The test below asserts
@@ -395,6 +397,7 @@ const REFINED: &[(&str, &str, &str)] = &[
     ("parse.c", "text/plain", "text/x-c"),
     ("parse.h", "text/plain", "text/x-c"),
     ("Cargo.toml", "text/plain", "application/toml"),
+    ("song.opus", "audio/ogg", "audio/opus"),
 ];
 
 #[test]
@@ -416,12 +419,13 @@ fn the_association_vocabulary_never_shrinks() {
     }
 }
 
-/// Every type that *is* readable text without *being* `text/plain` — exactly
-/// the types that name a parent.
+/// Every type that *is* readable text without *being* `text/plain`: the
+/// textual types that name a parent.
 ///
-/// [`every_textual_type_reaches_plain_text_and_nothing_else_has_a_parent`]
-/// checks this list in both directions, so a textual type cannot lose its
-/// parent (silently narrowing what opens it) and a binary type cannot gain one.
+/// [`every_textual_type_reaches_plain_text_and_a_codec_its_container`]
+/// checks this list and [`CONTAINED`] in both directions, so a textual type
+/// cannot lose its parent (silently narrowing what opens it) and no other
+/// binary type can gain one.
 const TEXTUAL: &[MediaType] = &[
     MediaType::TextMarkdown,
     MediaType::TextCsv,
@@ -440,16 +444,22 @@ const TEXTUAL: &[MediaType] = &[
     MediaType::ImageSvg,
 ];
 
+/// Each codec's file and the container it is carried in.
+const CONTAINED: &[(MediaType, MediaType)] = &[(MediaType::AudioOpus, MediaType::AudioOgg)];
+
 #[test]
-fn every_textual_type_reaches_plain_text_and_nothing_else_has_a_parent() {
+fn every_textual_type_reaches_plain_text_and_a_codec_its_container() {
     for media in TEXTUAL {
         let root = ancestry(*media).last().expect("the walk yields the type");
         assert_eq!(root, MediaType::TextPlain, "{media:?}");
     }
-    // The converse: only a readable-text format subclasses anything, so plain
-    // text itself and every binary type are roots.
+    for (codec, container) in CONTAINED {
+        assert_eq!(codec.parent(), Some(*container), "{codec:?}");
+    }
+    // The converse: nothing else subclasses anything, so plain text itself and
+    // every other binary type are roots.
     for media in ALL {
-        if !TEXTUAL.contains(media) {
+        if !TEXTUAL.contains(media) && !CONTAINED.iter().any(|(codec, _)| codec == media) {
             assert_eq!(media.parent(), None, "{media:?}");
         }
     }

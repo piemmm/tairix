@@ -558,6 +558,45 @@ pub fn audiotone_store_files(
     )
 }
 
+/// The audio verticals' store: the [`audiotone_store_files`] set plus the
+/// signal as a FLAC file at [`tairix_test_audio_wire::SIGNAL_FILE`], which the
+/// `play` vertical plays (`plans/SOUND.md` SND10, SND12), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`], or a signal file path outside `/System`.
+pub fn audio_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            let mut files = audiotone_store_files(ctx, arch, profile)?.to_vec();
+            files.push(signal_file()?);
+            Ok(files)
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The shared signal, as the FLAC file the `play` vertical is run on.
+fn signal_file() -> Result<AppStoreFile, String> {
+    let path = tairix_test_audio_wire::SIGNAL_FILE;
+    let within = path
+        .strip_prefix("/System/")
+        .ok_or_else(|| format!("image: the signal file {path} is not on /System"))?;
+    let bytes = tairix_test_audio_wire::signal_flac()
+        .map_err(|err| format!("image: the signal file could not be encoded: {err:?}"))?;
+    Ok(AppStoreFile {
+        components: within.split('/').map(|c| c.as_bytes().to_vec()).collect(),
+        bytes,
+    })
+}
+
 /// A planted `/System/Settings/` configuration file, addressed by the ABI's
 /// own volume-relative path so a fixture and the pre-unlock reader that
 /// resolves it can never name different files.

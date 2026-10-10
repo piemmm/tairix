@@ -77,6 +77,12 @@ Le interrogazioni:
   suo gruppo, la generazione e lo stato del suo proprietario, i suoi flussi,
   e le mappature del suo dominio con i byte che coprono (richiede
   `CAP_SYSINFO_HW`).
+- `audio`, `sound` — i dispositivi audio: una riga per uscita e per
+  ingresso — il suo identificativo, se è il predefinito della sua
+  direzione, il livello e l'esclusione, la frequenza misurata del suo
+  orologio durante la riproduzione, i fotogrammi persi, la posizione e il
+  nome — poi una riga per ogni flusso audio tuo — il dispositivo, la
+  direzione, il ruolo e lo stato, la posizione, i difetti e chi lo detiene.
 - `show <resource-ref>` — legge un riferimento a risorsa
   `info:`/`state:`/`stats:` e stampa il suo valore. Quegli spazi dei nomi
   servono valori tipizzati tramite questa API, mai flussi di byte: `cat` non
@@ -95,6 +101,8 @@ Senza interrogazione viene mostrata la guida breve.
 - `--all, -a` — con `processes`: elencare tutti i processi del sistema
   anziché solo i propri; il servizio concede questa vista solo a un
   chiamante che detiene `CAP_SYSINFO_GLOBAL`.
+  Con `audio`, tutti i flussi audio della macchina, con la stessa
+  capacità.
 - `-h, -?` — mostrare la guida breve di questo comando.
 
 ## EXAMPLES

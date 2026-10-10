@@ -609,3 +609,25 @@ fn an_interrupt_bitmap_names_only_the_endpoints_it_set() {
     assert!(AudioInterrupt::NONE.is_empty());
     assert_eq!(AudioInterrupt::default(), AudioInterrupt::NONE);
 }
+
+#[test]
+fn the_conventional_layout_is_only_claimed_where_one_exists() {
+    assert_eq!(ChannelMap::conventional(1).map(|m| m.channels()), Some(1));
+    assert_eq!(ChannelMap::conventional(2), Some(ChannelMap::STEREO));
+    assert_eq!(ChannelMap::conventional(6).map(|m| m.channels()), Some(6));
+    assert_eq!(ChannelMap::conventional(8).map(|m| m.channels()), Some(8));
+    // Five and seven channels have no conventional reading, so none is
+    // invented.
+    for channels in [0, 5, 7, 9] {
+        assert_eq!(ChannelMap::conventional(channels), None, "{channels}");
+    }
+}
+
+#[test]
+fn the_standard_rates_are_valid_ascending_and_fill_a_device_rate_set() {
+    for rate in STANDARD_RATES {
+        assert_eq!(Rate::new(rate.hz()), Ok(rate));
+    }
+    assert!(RateSet::new(&STANDARD_RATES).is_ok(), "strictly ascending");
+    assert_eq!(STANDARD_RATES.len(), MAX_DEVICE_RATES);
+}

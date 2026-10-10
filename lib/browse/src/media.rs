@@ -149,10 +149,14 @@ pub enum MediaType {
     AudioMpeg,
     /// A FLAC audio file (`audio/flac`).
     AudioFlac,
-    /// An Ogg audio file — Vorbis or Opus (`audio/ogg`).
+    /// An Ogg audio file (`audio/ogg`).
     AudioOgg,
+    /// An Opus audio file, Opus in Ogg (`audio/opus`).
+    AudioOpus,
     /// A WAVE audio file (`audio/wav`).
     AudioWav,
+    /// A Sun/NeXT audio file (`audio/basic`).
+    AudioAu,
     /// An AAC audio stream (`audio/aac`).
     AudioAac,
     /// An MPEG-4 audio file (`audio/mp4`).
@@ -219,7 +223,9 @@ impl MediaType {
             Self::AudioMpeg => "audio/mpeg",
             Self::AudioFlac => "audio/flac",
             Self::AudioOgg => "audio/ogg",
+            Self::AudioOpus => "audio/opus",
             Self::AudioWav => "audio/wav",
+            Self::AudioAu => "audio/basic",
             Self::AudioAac => "audio/aac",
             Self::AudioMp4 => "audio/mp4",
             Self::VideoMp4 => "video/mp4",
@@ -248,7 +254,10 @@ impl MediaType {
     /// A concrete textual format is *also* plain text — a `.rs` file is Rust
     /// source and readable text both — so every textual type names
     /// [`TextPlain`](Self::TextPlain) (directly, or through an intermediate
-    /// such as SVG's `application/xml`) and everything binary names `None`.
+    /// such as SVG's `application/xml`). A codec's file is likewise its
+    /// container's: an Opus file is an Ogg stream, so
+    /// [`AudioOpus`](Self::AudioOpus) names [`AudioOgg`](Self::AudioOgg).
+    /// Every other binary type names `None`.
     /// The relation exists so naming a format precisely never narrows what can
     /// open it: association matching walks this chain, offering an application
     /// that declares an ancestor type while ranking one that declares the exact
@@ -275,6 +284,7 @@ impl MediaType {
             | Self::TextPython
             | Self::ShellScript => Some(Self::TextPlain),
             Self::ImageSvg => Some(Self::Xml),
+            Self::AudioOpus => Some(Self::AudioOgg),
             Self::InodeDirectory
             | Self::TairixApp
             | Self::TairixService
@@ -304,6 +314,7 @@ impl MediaType {
             | Self::AudioFlac
             | Self::AudioOgg
             | Self::AudioWav
+            | Self::AudioAu
             | Self::AudioAac
             | Self::AudioMp4
             | Self::VideoMp4
@@ -392,7 +403,9 @@ impl MediaType {
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
+            | Self::AudioOpus
             | Self::AudioWav
+            | Self::AudioAu
             | Self::AudioAac
             | Self::AudioMp4 => IconKind::Audio,
             Self::VideoMp4
@@ -455,7 +468,9 @@ impl MediaType {
             | Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
+            | Self::AudioOpus
             | Self::AudioWav
+            | Self::AudioAu
             | Self::AudioAac
             | Self::AudioMp4
             | Self::VideoMp4
@@ -544,7 +559,9 @@ impl MediaType {
             Self::AudioMpeg
             | Self::AudioFlac
             | Self::AudioOgg
+            | Self::AudioOpus
             | Self::AudioWav
+            | Self::AudioAu
             | Self::AudioAac
             | Self::AudioMp4 => Some(Family::Audio),
             Self::VideoMp4
@@ -726,7 +743,9 @@ pub(crate) const ALL: &[MediaType] = &[
     MediaType::AudioMpeg,
     MediaType::AudioFlac,
     MediaType::AudioOgg,
+    MediaType::AudioOpus,
     MediaType::AudioWav,
+    MediaType::AudioAu,
     MediaType::AudioAac,
     MediaType::AudioMp4,
     MediaType::VideoMp4,
@@ -793,8 +812,10 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveRar, &["rar"]),
     (MediaType::AudioMpeg, &["mp3"]),
     (MediaType::AudioFlac, &["flac"]),
-    (MediaType::AudioOgg, &["ogg", "oga", "opus"]),
+    (MediaType::AudioOgg, &["ogg", "oga"]),
+    (MediaType::AudioOpus, &["opus"]),
     (MediaType::AudioWav, &["wav"]),
+    (MediaType::AudioAu, &["au", "snd"]),
     (MediaType::AudioAac, &["aac"]),
     (MediaType::AudioMp4, &["m4a"]),
     (MediaType::VideoMp4, &["mp4", "m4v"]),

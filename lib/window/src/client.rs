@@ -26,16 +26,17 @@ use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_open_target_reply, decode_picked_name_reply, decode_terrain_reply,
-    decode_wallpapers_reply, AppBar, AppMenu, BundleRunPath, ClipboardHeld, ClipboardKind,
-    CursorShape, DragItems, DropOperation, DropTarget, HandOverDocument, HandOverOutcome,
-    LayerDepth, NameList, OpenTarget, PickPurpose, PointerAction, PreviewSubject, TerrainPlate,
-    TooltipText, WallpaperPage, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
-    WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+    decode_open_target_reply, decode_picked_file_reply, decode_picked_name_reply,
+    decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu, BundleRunPath, ClipboardHeld,
+    ClipboardKind, CursorShape, DragItems, DropOperation, DropTarget, HandOverDocument,
+    HandOverOutcome, LayerDepth, NameList, OpenTarget, PickPurpose, PickedFile, PointerAction,
+    PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent, WindowRegion,
+    WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
+    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
+    WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -90,7 +91,7 @@ const PULL_REPLY_MAX: usize = {
             wider(
                 WINDOW_CLIPBOARD_REPLY_LEN,
                 wider(
-                    WINDOW_PICKED_NAME_REPLY_MAX,
+                    wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX),
                     wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
                 ),
             ),
@@ -1213,6 +1214,20 @@ impl<T: WindowTransport> WindowClient<T> {
         let name =
             decode_picked_name_reply(self.pull(&WindowRequest::TakePickedName { window_id })?)?;
         Ok(String::from(name.as_str()))
+    }
+
+    /// The next file window `window_id`'s last folder pick delegated, once its
+    /// [`WindowEvent::FolderPicked`] has arrived: the `fd_redeem` handle and
+    /// the file's name.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] once every file is taken, or when the window is
+    /// not the caller's; a transport failure; or a corrupt reply.
+    ///
+    /// [`WindowEvent::FolderPicked`]: tairix_abi::window_ipc::WindowEvent::FolderPicked
+    pub fn take_picked_file(&mut self, window_id: u64) -> Result<PickedFile, Errno> {
+        decode_picked_file_reply(self.pull(&WindowRequest::TakePickedFile { window_id })?)
     }
 
     /// One page of the shipped wallpaper catalog, from entry `from`.

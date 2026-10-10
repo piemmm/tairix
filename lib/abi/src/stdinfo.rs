@@ -243,7 +243,41 @@ impl core::fmt::Display for Suggestion<'_> {
     }
 }
 
-/// Every control byte's JSON escape, by value.
+/// `text` as one quoted JSON string, escaped as every record field is.
+///
+/// The one escape for text a producer embeds in its `ai` object, so a hostile
+/// file or directory name cannot break a record's framing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct JsonStr<'a>(pub &'a str);
+
+impl core::fmt::Display for JsonStr<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("\"")?;
+        escape_json(self.0, &mut |piece: &str| f.write_str(piece))?;
+        f.write_str("\"")
+    }
+}
+
+/// Escapes everything written through it into `inner`, as the body of a JSON
+/// string, for a value that is formatted rather than held as text.
+pub struct JsonEscaper<'w, W: core::fmt::Write + ?Sized> {
+    inner: &'w mut W,
+}
+
+impl<'w, W: core::fmt::Write + ?Sized> JsonEscaper<'w, W> {
+    /// Escape into `inner`.
+    pub fn new(inner: &'w mut W) -> Self {
+        Self { inner }
+    }
+}
+
+impl<W: core::fmt::Write + ?Sized> core::fmt::Write for JsonEscaper<'_, W> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        escape_json(s, &mut |piece: &str| self.inner.write_str(piece))
+    }
+}
+
+/// Every C0 control's JSON escape, by value.
 const CONTROL_ESCAPES: [&str; 0x20] = [
     "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007", "\\b",
     "\\t", "\\n", "\\u000b", "\\f", "\\r", "\\u000e", "\\u000f", "\\u0010", "\\u0011", "\\u0012",
@@ -251,22 +285,34 @@ const CONTROL_ESCAPES: [&str; 0x20] = [
     "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
 ];
 
+/// DEL's and every C1 control's escape, from DEL up.
+const WIDE_ESCAPES: [&str; 0x21] = [
+    "\\u007f", "\\u0080", "\\u0081", "\\u0082", "\\u0083", "\\u0084", "\\u0085", "\\u0086",
+    "\\u0087", "\\u0088", "\\u0089", "\\u008a", "\\u008b", "\\u008c", "\\u008d", "\\u008e",
+    "\\u008f", "\\u0090", "\\u0091", "\\u0092", "\\u0093", "\\u0094", "\\u0095", "\\u0096",
+    "\\u0097", "\\u0098", "\\u0099", "\\u009a", "\\u009b", "\\u009c", "\\u009d", "\\u009e",
+    "\\u009f",
+];
+
 /// Hand `value`'s JSON string body to `emit`: runs that need no escape as they
-/// stand, and each `"`, `\` and control byte escaped.
+/// stand, and each `"`, `\` and control character escaped.
 ///
-/// Every byte escaped is ASCII, so each run ends on a character boundary.
+/// DEL and the C1 controls are escaped too, though JSON would carry them raw:
+/// a record shown in a terminal must not be able to carry an escape sequence.
 fn escape_json<E>(value: &str, emit: &mut impl FnMut(&str) -> Result<(), E>) -> Result<(), E> {
     let mut run = 0;
-    for (at, byte) in value.bytes().enumerate() {
-        let escape = match byte {
-            b'"' => "\\\"",
-            b'\\' => "\\\\",
-            0x00..=0x1F => CONTROL_ESCAPES[usize::from(byte)],
+    for (at, ch) in value.char_indices() {
+        let code = u32::from(ch) as usize;
+        let escape = match ch {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\u{0}'..='\u{1f}' => CONTROL_ESCAPES[code],
+            '\u{7f}'..='\u{9f}' => WIDE_ESCAPES[code - 0x7f],
             _ => continue,
         };
         emit(&value[run..at])?;
         emit(escape)?;
-        run = at + 1;
+        run = at + ch.len_utf8();
     }
     emit(&value[run..])
 }
@@ -318,7 +364,7 @@ mod tests {
     extern crate alloc;
 
     use super::{
-        Human, Severity, StdInfoKind, StdInfoRecord, Suggestion, STDINFO_FD,
+        Human, JsonEscaper, JsonStr, Severity, StdInfoKind, StdInfoRecord, Suggestion, STDINFO_FD,
         STDINFO_VERSION_CURRENT,
     };
     use crate::Errno;
@@ -432,6 +478,35 @@ mod tests {
                 "byte {byte:#04x}"
             );
         }
+    }
+
+    /// A raw C1 control is an 8-bit escape introducer to a terminal that
+    /// honours one, so a record shown raw must not carry it.
+    #[test]
+    fn del_and_the_c1_controls_are_escaped_and_the_rest_of_unicode_is_not() {
+        for code in 0x7Fu32..=0x9F {
+            let ch = char::from_u32(code).expect("a scalar value");
+            let word = String::from(ch);
+            assert_eq!(
+                format!("{}", JsonStr(&word)),
+                format!("\"\\u{code:04x}\""),
+                "{code:#x}"
+            );
+        }
+        assert_eq!(
+            format!("{}", JsonStr("\u{a0}é\u{2028}")),
+            "\"\u{a0}é\u{2028}\""
+        );
+    }
+
+    #[test]
+    fn a_json_string_is_quoted_and_a_formatted_value_escaped_alike() {
+        assert_eq!(format!("{}", JsonStr("a\"b\\c\n")), "\"a\\\"b\\\\c\\n\"");
+        let mut out = String::new();
+        let mut escaper = JsonEscaper::new(&mut out);
+        core::fmt::Write::write_fmt(&mut escaper, format_args!("{}\u{1b}[2J{}", 7, '"'))
+            .expect("a string takes anything");
+        assert_eq!(out, "7\\u001b[2J\\\"");
     }
 
     #[test]

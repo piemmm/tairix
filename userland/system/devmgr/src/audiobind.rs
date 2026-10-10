@@ -19,14 +19,18 @@
 //! the node persists across every later generation bump while the driver
 //! lives, so a re-bind would provision a duplicate device. A hand-off that
 //! fails (the service is not up yet, or refuses) is fail-soft — logged and
-//! retried on the next bump, exactly like an unavailable driver store — never
+//! retried at the next reaction, exactly like an unavailable driver store — never
 //! fatal to the observe loop.
 
 use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
+use core::hash::Hasher;
 
+use tairix_abi::audio::AudioBaseline;
 use tairix_abi::driver::audio_channel::AUDIOCHAN_NODE_COMPATIBLE;
-use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
+use tairix_abi::hwtree::{HwMatchKind, HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::{Errno, HwNode};
+use tairix_hash::{HashSeed, SipHash13};
 use tairix_log::{log as log_event, Event, EventId, Field, FieldValue, Level, Sink};
 
 use crate::events;
@@ -43,13 +47,100 @@ use crate::events;
 /// the reactive loop is host-testable against a recording double.
 pub trait AudiodBind {
     /// Ask the audio service to adopt the driver's device-channel
-    /// `endpoint_id` as a sound device.
+    /// `endpoint_id` as a sound device at `location`.
     ///
     /// # Errors
     ///
     /// The service's typed refusal, or a transport failure — treated
     /// fail-soft by the caller (retried on the next generation bump).
-    fn bind_driver(&mut self, endpoint_id: u64) -> Result<(), Errno>;
+    fn bind_driver(&mut self, endpoint_id: u64, location: u64) -> Result<(), Errno>;
+
+    /// Tell the audio service the channel `endpoint_id`'s node has left the
+    /// hardware tree.
+    ///
+    /// # Errors
+    ///
+    /// The service's typed refusal — [`Errno::NotFound`] for a device it
+    /// already let go — or a transport failure.
+    fn unbind_driver(&mut self, endpoint_id: u64) -> Result<(), Errno>;
+
+    /// Hand the audio service the machine's baseline.
+    ///
+    /// # Errors
+    ///
+    /// The service's typed refusal, or a transport failure.
+    fn deliver_baseline(&mut self, baseline: AudioBaseline) -> Result<(), Errno>;
+}
+
+/// The device manager's read of the machine's audio baseline from the
+/// system-configuration store.
+///
+/// Returns [`None`] while the store cannot be read, which leaves the audio
+/// service on the baseline nobody configured and is retried on the next
+/// reaction.
+pub trait AudioBaselineSource {
+    /// Load the current baseline.
+    fn load(&mut self) -> Option<AudioBaseline>;
+}
+
+/// The key a location is hashed under. A location is a name for a place,
+/// not a secret, so the key is fixed and the same place answers the same
+/// location on every boot.
+const LOCATION_KEY: HashSeed = HashSeed::from_words(0x7461_6972_6978_2e61, 0x7564_696f_2e6c_6f63);
+
+/// Where the device behind the channel node `channel` sits in the hardware
+/// tree: the device half of each of its endpoints' locations.
+///
+/// The device is the channel node's parent — the kernel re-parents a
+/// driver's emission under the node it was loaded for — and its place is the
+/// chain from it to the root, each step spelled by the node's class, its
+/// bus-local address, its first register window, and its rank among the
+/// siblings that share all three. Node ids are not part of it: they are
+/// handed out in discovery order, and a place must not move because
+/// something else was found first.
+///
+/// [`None`] for a channel with no parent in `nodes`. Never zero.
+#[must_use]
+pub fn device_location(nodes: &[HwNode], channel: &HwNode) -> Option<u64> {
+    let mut at = find(nodes, channel.parent())?;
+    let mut hasher = SipHash13::new(LOCATION_KEY);
+    // Bounded by the tree, so a malformed cycle of parents ends.
+    for _ in 0..nodes.len() {
+        let rank = nodes
+            .iter()
+            .filter(|sibling| sibling.parent() == at.parent() && place(sibling) == place(at))
+            .take_while(|sibling| sibling.id() != at.id())
+            .count();
+        let (class, address, window) = place(at);
+        hasher.write_u16(class);
+        hasher.write_u32(address);
+        hasher.write_u64(window);
+        hasher.write_usize(rank);
+        if at.parent() == HW_NODE_ROOT {
+            return Some(hasher.finish().max(1));
+        }
+        at = find(nodes, at.parent())?;
+    }
+    None
+}
+
+/// The node `id` names in `nodes`.
+fn find(nodes: &[HwNode], id: u32) -> Option<&HwNode> {
+    nodes.iter().find(|node| node.id() == id)
+}
+
+/// What a node's place is spelled by: its class, its bus-local address, and
+/// the base of its first register window.
+fn place(node: &HwNode) -> (u16, u32, u64) {
+    let class = node
+        .class()
+        .map_or(u16::MAX, tairix_abi::HwDeviceClass::as_u16);
+    let window = node
+        .resources()
+        .iter()
+        .find(|resource| resource.kind() == Some(HwResourceKind::Mmio))
+        .map_or(0, tairix_abi::HwResource::base);
+    (class, node.address(), window)
 }
 
 /// The device manager's memory of which audio channels it has already handed
@@ -62,6 +153,8 @@ pub trait AudiodBind {
 pub struct AudioBindState {
     bound: BTreeSet<u64>,
     deferred: bool,
+    delivered: Option<AudioBaseline>,
+    baseline_deferred: bool,
 }
 
 impl AudioBindState {
@@ -77,13 +170,61 @@ impl AudioBindState {
         self.bound.contains(&endpoint_id)
     }
 
-    /// Whether the last pass left a discovered channel unbound.
+    /// Whether the last pass left a discovered channel unbound or retired
+    /// unreported, or a readable baseline undelivered.
     ///
     /// The audio service becoming reachable is not a hardware-tree mutation,
     /// so a caller that parks for one would never retry the hand-off.
     #[must_use]
     pub fn has_deferred_work(&self) -> bool {
-        self.deferred
+        self.deferred || self.baseline_deferred
+    }
+}
+
+/// Deliver the machine's audio baseline whenever it differs from the one the
+/// service last accepted, so an administrator's edit on the writable root
+/// reaches it once that volume is mounted.
+pub fn deliver_audio_baseline(
+    source: &mut dyn AudioBaselineSource,
+    state: &mut AudioBindState,
+    audiod: &mut dyn AudiodBind,
+    sink: &dyn Sink,
+) {
+    state.baseline_deferred = false;
+    let Some(baseline) = source.load() else {
+        return;
+    };
+    if state.delivered == Some(baseline) {
+        return;
+    }
+    match audiod.deliver_baseline(baseline) {
+        Ok(()) => {
+            state.delivered = Some(baseline);
+            log_event(
+                sink,
+                &Event {
+                    level: Level::Info,
+                    id: events::AUDIO_BASELINE_DELIVERED,
+                    message: "audio baseline delivered to the audio service",
+                    fields: &[],
+                },
+            );
+        }
+        Err(err) => {
+            state.baseline_deferred = true;
+            log_event(
+                sink,
+                &Event {
+                    level: Level::Warn,
+                    id: events::AUDIO_BASELINE_DELIVERY_FAILED,
+                    message: "audio baseline delivery to the audio service failed; will retry",
+                    fields: &[Field {
+                        key: "error",
+                        value: FieldValue::Error(err),
+                    }],
+                },
+            );
+        }
     }
 }
 
@@ -125,6 +266,7 @@ pub fn bind_new_channels(
     sink: &dyn Sink,
 ) {
     state.deferred = false;
+    retire_vanished(nodes, state, audiod, sink);
     for node in nodes {
         let Some(endpoint) = audiochan_endpoint(node) else {
             continue;
@@ -132,7 +274,13 @@ pub fn bind_new_channels(
         if state.bound.contains(&endpoint) {
             continue;
         }
-        match audiod.bind_driver(endpoint) {
+        let Some(location) = device_location(nodes, node) else {
+            // A channel the tree does not place has no device behind it to
+            // name; a later generation may complete it.
+            state.deferred = true;
+            continue;
+        };
+        match audiod.bind_driver(endpoint, location) {
             Ok(()) => {
                 state.bound.insert(endpoint);
                 audit(
@@ -151,6 +299,51 @@ pub fn bind_new_channels(
                     events::AUDIOD_BIND_FAILED,
                     Level::Warn,
                     "audiochan device-channel bind to audio service failed; will retry",
+                    endpoint,
+                    Some(err),
+                );
+            }
+        }
+    }
+}
+
+/// Tell the audio service of every channel handed over whose node is no
+/// longer in `nodes`, and forget it, so a replugged device reusing the
+/// endpoint is handed over again.
+fn retire_vanished(
+    nodes: &[HwNode],
+    state: &mut AudioBindState,
+    audiod: &mut dyn AudiodBind,
+    sink: &dyn Sink,
+) {
+    let present: BTreeSet<u64> = nodes.iter().filter_map(audiochan_endpoint).collect();
+    let gone: Vec<u64> = state
+        .bound
+        .iter()
+        .copied()
+        .filter(|endpoint| !present.contains(endpoint))
+        .collect();
+    for endpoint in gone {
+        match audiod.unbind_driver(endpoint) {
+            // A device the service already let go needs no word from here.
+            Ok(()) | Err(Errno::NotFound) => {
+                state.bound.remove(&endpoint);
+                audit(
+                    sink,
+                    events::AUDIOD_UNBOUND,
+                    Level::Info,
+                    "audiochan device channel left the tree; retired from the audio service",
+                    endpoint,
+                    None,
+                );
+            }
+            Err(err) => {
+                state.deferred = true;
+                audit(
+                    sink,
+                    events::AUDIOD_BIND_FAILED,
+                    Level::Warn,
+                    "audiochan device-channel retirement failed; will retry",
                     endpoint,
                     Some(err),
                 );

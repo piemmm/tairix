@@ -56,6 +56,7 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
+    use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::fs::{DirEntries, FS_IO_MAX};
     use tairix_abi::origin::{CapabilitySummary, Origin};
@@ -68,8 +69,9 @@ mod program {
         ReplInput, ResolvedCommand, ResourceLister, Shell, Signal, WaitOutcome, USAGE,
     };
     use tairix_procinfo::{
-        cpu_info, for_each_irq, for_each_net_bond_member, for_each_net_interface, CallError,
-        IpcTransport, ListError, ResolveInfoError, Transport, WalkStep,
+        cpu_info, for_each_audio_device, for_each_irq, for_each_net_bond_member,
+        for_each_net_interface, CallError, IpcTransport, ListError, ResolveInfoError, Transport,
+        WalkStep,
     };
     use tairix_resref::SelectorDomain;
     use tairix_rt::io::{write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
@@ -303,6 +305,27 @@ mod program {
                     })
                     .map_err(walk_errno)?;
                     Ok(lines)
+                }
+                // The device list is ungated: which outputs and inputs exist
+                // is the machine's, and a stream's owner is not in it. Each
+                // device is offered by both its names, this boot's and the
+                // lasting one.
+                SelectorDomain::Sink | SelectorDomain::Source => {
+                    let direction = if domain == SelectorDomain::Sink {
+                        StreamDirection::Playback
+                    } else {
+                        StreamDirection::Capture
+                    };
+                    let mut names = Vec::new();
+                    for_each_audio_device(&transport, |device| {
+                        if device.direction == direction {
+                            names.push(device.device_id.to_string());
+                            names.push(device.location.to_string());
+                        }
+                        Ok(WalkStep::Continue)
+                    })
+                    .map_err(walk_errno)?;
+                    Ok(names)
                 }
             }
         }
@@ -676,13 +699,28 @@ mod program {
         /// member is left a zombie. The shell is single-threaded, so a
         /// `RefCell` suffices.
         members: RefCell<Vec<(u64, Vec<i64>)>>,
+        /// The shell's own pid, which holds its terminal whenever no job is
+        /// in the foreground; `0` (a release) when it cannot be learned.
+        own_pid: i64,
     }
 
     impl RtProcessHost {
         fn new() -> Self {
+            let own_pid = tairix_rt::self_origin()
+                .ok()
+                .and_then(|origin| i64::try_from(origin.pid()).ok())
+                .unwrap_or(0);
             Self {
                 members: RefCell::new(Vec::new()),
+                own_pid,
             }
+        }
+
+        /// Hold the terminal on fd 0 for the shell itself, so a background
+        /// job reads nothing from it until it is brought forward. A stdin
+        /// that is no terminal refuses, which is the non-interactive case.
+        fn hold_terminal(&self) {
+            let _ = tairix_rt::console_foreground(tairix_abi::STDIN, self.own_pid);
         }
     }
 
@@ -760,9 +798,9 @@ mod program {
             // job returns control to the shell instead of blocking forever.
             let ret = tairix_rt::wait(signed_pid, &mut status, tairix_abi::WaitFlags::STOPPED);
             if marked {
-                // Reclaim the terminal: back at the prompt (or handling a
-                // stop), bytes flow to the shell again.
-                let _ = tairix_rt::console_foreground(tairix_abi::STDIN, 0);
+                // Take the terminal back: back at the prompt (or handling a
+                // stop), the shell reads it and a background job does not.
+                self.hold_terminal();
             }
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
@@ -982,6 +1020,7 @@ mod program {
         }
         let console = RtConsole;
         let host = RtProcessHost::new();
+        host.hold_terminal();
         let limits = RtLimitStore;
         let elevator = RtElevator;
         let mut input = RtInput;

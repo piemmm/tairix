@@ -380,9 +380,11 @@ of SMART/NVMe-style counters, or `Unavailable` — *recorded, not failed*, defau
 `Unavailable`). A self-identifying `BlockType::HealthBaseline` block reached from
 the transaction root (like the Stage-8 scrub-progress record) **persists** the
 last clean device snapshot plus the volume's accumulated filesystem-observed
-fault counters — metadata copy-repairs/unrepairable (Stage-3 seam) and per-class
-data faults (Stage-5 seam); both are persisted because a repaired transient
-fault leaves no trace in the live trees (§4). `format` stores the initial
+fault counters — metadata copy-repairs, copies left damaged, and unrepairable
+blocks (Stage-3 seam) and per-class data faults (Stage-5 seam); both are
+persisted because a repaired transient fault leaves no trace in the live trees
+(§4). A bad copy a read path meets outside a scrub, the mount's own repairs
+among them, is tallied on the handle and folded in by the next pass. `format` stores the initial
 baseline, and a crash mid-update leaves the previous committed baseline selected
 (§14).
 

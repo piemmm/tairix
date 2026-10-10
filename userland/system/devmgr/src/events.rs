@@ -125,12 +125,26 @@ pub const NODE_LOAD_RACED_REMOVAL: EventId = EventId(13_020);
 /// holds the node. The node is driven, just not by an instance this service
 /// loaded: recorded at `Info`, carrying the `errno`.
 pub const NODE_ALREADY_DRIVEN: EventId = EventId(13_021);
+/// A matched node waits for a supplier its links name, which is in the tree
+/// and matched but not yet bound, or not in the tree at all. Routine at boot,
+/// so recorded at `Debug`, carrying the `supplier` node id.
+pub const NODE_HELD: EventId = EventId(13_022);
+/// An audio device channel the audio service had adopted left the hardware
+/// tree — its driver exited or its device was removed — so the service was
+/// told to retire it, and the endpoint is free to be handed over again.
+pub const AUDIOD_UNBOUND: EventId = EventId(13_023);
+/// The machine's audio baseline read from the configuration store was
+/// delivered to the audio service.
+pub const AUDIO_BASELINE_DELIVERED: EventId = EventId(13_024);
+/// The audio baseline could not be delivered: the service refused it or was
+/// unreachable. Retried on the next reaction.
+pub const AUDIO_BASELINE_DELIVERY_FAILED: EventId = EventId(13_025);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 21] = [
+    const ALL: [EventId; 25] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -152,6 +166,10 @@ mod tests {
         AUDIOD_BIND_FAILED,
         NODE_LOAD_RACED_REMOVAL,
         NODE_ALREADY_DRIVEN,
+        NODE_HELD,
+        AUDIOD_UNBOUND,
+        AUDIO_BASELINE_DELIVERED,
+        AUDIO_BASELINE_DELIVERY_FAILED,
     ];
 
     #[test]

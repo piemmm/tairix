@@ -535,6 +535,28 @@ manager uses for cursors (`AGENTS.md` §2.2).
 See [SVG asset decoding](svg-assets.md) for the caching layer and
 [Desktop icons](icons.md) for the vector representation and the glyph set.
 
+## The volume signal, its panel, and the recording indicator
+
+The session hands the bar what the audio service reports (`Taskbar::set_sound`):
+the default sink — its name, level and mute, and whether this session may
+change them — and whether anything on the machine is recording. The bar draws
+a `Volume` signal (`VolumeMuted` when muted) while there is a default sink,
+and a `Microphone` signal while any capture stream moves frames, from the
+`AudioCapture` notice. Both are the session's own pixels, so no program can
+hide that it is recording.
+
+A primary press on the volume signal opens `SoundPanel`, a modal popup beside
+it holding the sink's name, its level `Slider` and its mute `Toggle`; a press
+on the signal again, a press outside, or `Escape` closes it — though an
+`Escape` during a drag first settles the level where it stands. The level moves
+live as it is dragged (`SoundAction::Level { settled: false }`) and settles
+where it is released, the session asking the audio service for each over one
+coalescing queue. A sink whose room another session holds is drawn under an
+Authority Mark and asks for nothing. A report arriving mid-drag cannot pull
+the slider from under the pointer, and an output that goes away takes the
+panel with it. The panel has its own repaint account (`TaskbarRepaint::SOUND`)
+and window.
+
 ## The program-library popup
 
 `LibraryPopup` is the folder-organised application launcher the Library

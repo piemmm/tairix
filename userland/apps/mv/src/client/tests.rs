@@ -8,7 +8,7 @@ use crate::io::{Entry, EntryKind, FileSystem, Output, Prompt, RenameOutcome};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, RenameFlags};
 use tairix_help::{HelpSource, SourceError};
 
 /// A prompt no non-interactive run may ever reach.
@@ -116,6 +116,9 @@ struct State {
     write_fail: Option<(String, Errno)>,
     /// `remove_file`/`remove_dir` of this path fails with the errno.
     remove_fail: Option<(String, Errno)>,
+    /// A file another program creates at its path just before the next
+    /// rename reaches it — after any look the client took.
+    appears_at_rename: Option<(String, Vec<u8>)>,
 }
 
 impl MemFs {
@@ -130,6 +133,7 @@ impl MemFs {
                 read_fail: None,
                 write_fail: None,
                 remove_fail: None,
+                appears_at_rename: None,
             }),
         }
     }
@@ -154,6 +158,11 @@ impl MemFs {
 
     fn rename_fails(self, source: &str, errno: Errno) -> Self {
         self.state.borrow_mut().rename_fail = Some((source.to_string(), errno));
+        self
+    }
+
+    fn appears_at_rename(self, path: &str, contents: &[u8]) -> Self {
+        self.state.borrow_mut().appears_at_rename = Some((path.to_string(), contents.to_vec()));
         self
     }
 
@@ -237,10 +246,13 @@ impl FileSystem for MemFs {
         Err(Errno::NotFound)
     }
 
-    fn rename(&self, source: &str, dest: &str) -> Result<RenameOutcome, Errno> {
+    fn rename(&self, source: &str, dest: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno> {
         let source = canon(source);
         let dest = canon(dest);
         let mut state = self.state.borrow_mut();
+        if let Some(planted) = state.appears_at_rename.take() {
+            state.files.push(planted);
+        }
         if let Some((p, errno)) = &state.rename_fail {
             if p == source {
                 return Err(*errno);
@@ -253,6 +265,9 @@ impl FileSystem for MemFs {
         }
         let dest_exists =
             state.files.iter().any(|(p, _)| p == dest) || state.dirs.iter().any(|p| p == dest);
+        if flags.refuses_replace() && dest_exists {
+            return Err(Errno::AlreadyExists);
+        }
         if state.block_if_dest_exists && dest_exists {
             return Err(Errno::PermissionDenied);
         }
@@ -569,6 +584,47 @@ fn no_clobber_skips_an_existing_destination() {
     // The destination is untouched and the source remains.
     assert_eq!(fs.contents("/b").as_deref(), Some(&b"old"[..]));
     assert_eq!(fs.contents("/a").as_deref(), Some(&b"new"[..]));
+}
+
+/// `-n` decides on what it saw, so a destination created between its look
+/// and its rename must not be destroyed: the kernel refuses the move and the
+/// source is skipped as if the file had been there all along.
+#[test]
+fn no_clobber_never_replaces_a_destination_created_after_its_look() {
+    let fs = MemFs::new()
+        .file("/a", b"new")
+        .appears_at_rename("/b", b"theirs");
+    let out = Recorder::new();
+    assert_eq!(run(mv(false, true, &["/a"], "/b"), &fs, &out), Ok(()));
+    assert_eq!(fs.contents("/b").as_deref(), Some(&b"theirs"[..]));
+    assert_eq!(fs.contents("/a").as_deref(), Some(&b"new"[..]));
+}
+
+/// `-i` asks before replacing anything, including a destination that only
+/// appeared after its look.
+#[test]
+fn interactive_asks_about_a_destination_created_after_its_look() {
+    for (reply, kept) in [(false, &b"theirs"[..]), (true, &b"new"[..])] {
+        let fs = MemFs::new()
+            .file("/a", b"new")
+            .appears_at_rename("/b", b"theirs");
+        let out = Recorder::new();
+        let prompt = Answers::new(&[reply]);
+        let command = mv_with(
+            Options {
+                clobber: Clobber::Prompt,
+                ..Options::DEFAULT
+            },
+            &["/a"],
+            "/b",
+        );
+        assert_eq!(
+            engine_run(command, None, &fs, &prompt, &NoHelp, &out),
+            Ok(())
+        );
+        assert_eq!(fs.contents("/b").as_deref(), Some(kept));
+        assert_eq!(prompt.asked(), ["overwrite '/b'?"]);
+    }
 }
 
 #[test]

@@ -331,6 +331,18 @@ Done (code + host coverage). What now holds:
   pending pick and holds the name, so exactly one conclusion follows each
   acceptance; the client half is `WindowClient::pick_file` and
   `take_picked_name`.
+- **A folder pick** (`PickPurpose::Folder`) chooses a folder, never hands one
+  over. The session lists it under its own authority and keeps its regular
+  files — no links, each opened `NO_FOLLOW` — whose content type the
+  requester's *signed* manifest associates, in the browser's name order, at
+  most `WINDOW_FOLDER_PICK_MAX`. That bound is the kernel's own
+  `FD_GRANT_PENDING_MAX`, so every file a conclusion states can be pending at
+  once. Each is delegated read-only, and `FolderPicked { files, left_out }`
+  (kind 23) concludes; the app takes them one at a time with
+  `TakePickedFile` (op 36), each reply a `PickedFile { handle, name }`. A
+  minted delegation cannot be withdrawn, so the engine refuses a new pick
+  while any is untaken, and a file whose grant failed is counted as left out
+  rather than stated.
 - **The shared browser engine moved to `lib/browse`** (`tairix-browse`):
   the AW1 model/renderer/path-spelling hoisted out of the files app (its
   package is now the `Run` binary only) because the picker is its second

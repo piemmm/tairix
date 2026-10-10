@@ -27,13 +27,15 @@
 //! seed frames and feeds pure noise. A plain `cargo test` runs the fixed smoke
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
+use tairix_abi::appinfo::BundleId;
 use tairix_abi::audio::{
     decode_clock_reply, decode_enumerate_reply, decode_open_reply, decode_state_reply,
-    encode_clock_reply, encode_enumerate_reply, encode_open_reply, encode_state_reply,
-    notify_endpoint_for, AudioDeviceDescriptor, AudioNotify, AudioRequest, ClockReport, OpenParams,
-    StreamGrant, StreamReport, StreamRole, StreamState, AUDIO_CLOCK_REPLY_LEN,
-    AUDIO_ENUMERATE_REPLY_LEN, AUDIO_MAX_REQUEST, AUDIO_NOTIFY_LEN, AUDIO_OPEN_REPLY_LEN,
-    AUDIO_STATE_REPLY_LEN,
+    decode_streams_reply, encode_clock_reply, encode_enumerate_reply, encode_open_reply,
+    encode_state_reply, encode_streams_reply, notify_endpoint_for, AudioBaseline,
+    AudioDeviceDescriptor, AudioGain, AudioLocation, AudioNotify, AudioRequest, ClockReport,
+    ControlAccess, DefaultChoice, OpenParams, StreamDescriptor, StreamGrant, StreamReport,
+    StreamRole, StreamState, AUDIO_CLOCK_REPLY_LEN, AUDIO_ENUMERATE_REPLY_LEN, AUDIO_MAX_REQUEST,
+    AUDIO_NOTIFY_LEN, AUDIO_OPEN_REPLY_LEN, AUDIO_STATE_REPLY_LEN, AUDIO_STREAMS_REPLY_LEN,
 };
 use tairix_abi::driver::audio::{
     ring_bounds, AudioDeviceFacts, AudioEndpointFacts, AudioName, ChannelMap, Frames, GainRange,
@@ -51,6 +53,7 @@ use tairix_abi::driver::audio_ring::{
     aligned_region, PcmGeometry, PcmRing, PCM_RING_HEADER_LEN, REGION_ALIGN_PADDING,
 };
 use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::Errno;
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -97,13 +100,24 @@ fn descriptor() -> AudioDeviceDescriptor {
         device_id: 7,
         direction: StreamDirection::Playback,
         jack: JackState::Present,
-        is_default: true,
+        default: DefaultChoice::Inherited,
         formats: SampleFormats::EMPTY.with(SampleFormat::F32),
         channel_map: ChannelMap::STEREO,
         rates: rates(),
         gain: None,
         name: AudioName::new("Headphones").expect("plain text"),
+        location: location(),
+        level: AudioGain::new(-900).expect("attenuation"),
+        muted: false,
+        own_level: false,
+        access: ControlAccess::Shared,
+        clock_millihertz: 48_000_011,
+        lost_frames: 96,
     }
+}
+
+fn location() -> AudioLocation {
+    AudioLocation::new(0x51e7_0042_9f3a_1c00, 1).expect("a place")
 }
 
 /// Encode a device-channel request into a frame of exactly its own length.
@@ -248,6 +262,13 @@ fn exercise_replies(bytes: &[u8]) {
             Ok(report)
         );
     }
+    if let Ok(stream) = decode_streams_reply(bytes) {
+        assert_ne!(stream.stream_id, 0, "no stream is ever id zero");
+        assert_eq!(
+            decode_streams_reply(&encode_streams_reply(Ok(stream))),
+            Ok(stream)
+        );
+    }
 }
 
 /// Drive every ring operation over a region whose two peer-written positions
@@ -335,7 +356,7 @@ fn client_seeds() -> Vec<Vec<u8>> {
     vec![
         client_frame(&AudioRequest::Enumerate {
             direction: StreamDirection::Playback,
-            index: 0,
+            after: 0,
         }),
         client_frame(&AudioRequest::Open(OpenParams {
             device_id: 7,
@@ -354,11 +375,37 @@ fn client_seeds() -> Vec<Vec<u8>> {
             stream_id: 42,
             at: Frames::new(96_000),
         }),
+        client_frame(&AudioRequest::Gain {
+            stream_id: 42,
+            gain: AudioGain::new(-600).expect("attenuation"),
+        }),
         client_frame(&AudioRequest::Mute {
             stream_id: 42,
             muted: false,
         }),
         client_frame(&AudioRequest::Close { stream_id: 42 }),
+        client_frame(&AudioRequest::BindDriver {
+            endpoint_id: 0x4143_4841_4E00_0001,
+            location: 0x51e7_0042_9f3a_1c00,
+        }),
+        client_frame(&AudioRequest::UnbindDriver {
+            endpoint_id: 0x4143_4841_4E00_0001,
+        }),
+        client_frame(&AudioRequest::SetDefault { device_id: 3 }),
+        client_frame(&AudioRequest::SetLevel {
+            device_id: 3,
+            level: AudioGain::new(-1_200).expect("attenuation"),
+        }),
+        client_frame(&AudioRequest::SetMute {
+            device_id: 3,
+            muted: true,
+        }),
+        client_frame(&AudioRequest::ListStreams { after: 41 }),
+        client_frame(&AudioRequest::Baseline(AudioBaseline {
+            output: Some(location()),
+            input: None,
+            level: AudioGain::new(-600).expect("attenuation"),
+        })),
     ]
 }
 
@@ -376,6 +423,12 @@ fn notify_seeds() -> Vec<Vec<u8>> {
             endpoint: 1,
             position: Frames::new(48_000),
             lost_frames: 96,
+        }
+        .encode()
+        .to_vec(),
+        AudioChannelNotify::Faulted {
+            endpoint: 2,
+            reason: Errno::DeviceFault,
         }
         .encode()
         .to_vec(),
@@ -446,6 +499,20 @@ fn reply_seeds() -> Vec<Vec<u8>> {
             xrun_frames: 512,
         }))
         .to_vec(),
+        encode_streams_reply(Ok(StreamDescriptor {
+            stream_id: 42,
+            device_id: 3,
+            direction: StreamDirection::Capture,
+            role: StreamRole::Communication,
+            state: StreamState::Running,
+            position: Frames::new(96_000),
+            xruns: 1,
+            xrun_frames: 64,
+            owner_uid: 1000,
+            owner_pid: 77,
+            owner_app: Some(BundleId::new("os.tairix.recorder").expect("an identifier")),
+        }))
+        .to_vec(),
     ]
 }
 
@@ -472,6 +539,7 @@ fn widest_reply() -> usize {
         AUDIO_OPEN_REPLY_LEN,
         AUDIO_CLOCK_REPLY_LEN,
         AUDIO_STATE_REPLY_LEN,
+        AUDIO_STREAMS_REPLY_LEN,
     ]
     .into_iter()
     .max()

@@ -15,13 +15,16 @@ workspace = true
 path = "src/lib.rs"
 
 [features]
-# `test-fixtures` exposes the `fixture` module — a minimal in-memory DTB
-# builder — so the architecture ports' discovery tests drive the same
-# fixture as this crate's own parser tests rather than re-rolling a second
-# builder. It pulls `alloc`, so it is off by default and
-# enabled only in the dependent crates' [dev-dependencies].
+# `writer` exposes the `write` module, the tree writer a build tool emits a
+# blob for firmware with. It pulls `alloc`, so it is off by default: the
+# architecture ports link only the allocation-free reader.
+# `test-fixtures` exposes the `fixture` module — the trees the architecture
+# ports' discovery tests and this crate's own parser tests are built from,
+# through the same writer — and is enabled only in the dependent crates'
+# [dev-dependencies].
 default = []
-test-fixtures = []
+writer = []
+test-fixtures = ["writer"]
 
 [dependencies]
 

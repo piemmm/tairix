@@ -296,7 +296,8 @@ mod tests {
         psci_method, timer_clock_frequency, Fdt, PsciMethod, GIC_TYPE_PPI, GIC_TYPE_SPI,
     };
     use crate::gic::{MAX_INTID, MIN_SPI_INTID};
-    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm, DtbBuilder};
+    use tairix_fdt::fixture::{raspi_like_arm, virt_like_arm};
+    use tairix_fdt::write::FdtWriter;
 
     /// Build a tree with two CPUs and, optionally, a per-CPU
     /// `arm,coresight-cpu-debug` node under a `/soc` bus, so
@@ -306,7 +307,7 @@ mod tests {
     /// translated like a real board's peripheral. CPU affinities are `0` and
     /// `1` with phandles `1` and `2`.
     fn tree_with_debug_nodes(debug: &[(u32, u64)]) -> std::vec::Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -391,7 +392,7 @@ mod tests {
     /// `clock-frequency` (a single big-endian `u32`), used to exercise
     /// the P4 counter-rate override reader.
     fn tree_with_timer_clock(hz: u32) -> std::vec::Vec<u8> {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -427,7 +428,7 @@ mod tests {
     fn psci_method_absent_on_a_tree_without_the_node() {
         // A tree with no `/psci` node yields `None`, so the bring-up path
         // fails closed rather than assuming a conduit.
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -482,7 +483,7 @@ mod tests {
     /// Build a minimal tree with one device node carrying an `interrupts`
     /// triple `<type number flags>`, then hand that node to `f`.
     fn with_device_interrupts(triple: &[u8], f: impl FnOnce(&super::Node<'_>)) {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);

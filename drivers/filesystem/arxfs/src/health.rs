@@ -89,7 +89,7 @@ const SNAPSHOT_FIELDS: usize = 11;
 /// First of the [`COUNTER_FIELDS`] accumulated fault-counter `u64`s.
 const HB_COUNTERS: usize = HB_SNAPSHOT + SNAPSHOT_FIELDS * 8;
 /// Number of accumulated filesystem-observed counter fields persisted.
-const COUNTER_FIELDS: usize = 6;
+const COUNTER_FIELDS: usize = 7;
 
 /// The volume's health classification (`docs/src/filesystem/arxfs-spec.md`
 /// §11). Ordered worst-last so the worse of two signals can be taken with a
@@ -189,6 +189,11 @@ pub struct HealthReport {
     pub media_error_delta: u64,
     /// Accumulated metadata copy-repairs over the volume's lifetime.
     pub metadata_repaired: u64,
+    /// Accumulated sightings of a bad metadata copy left as it was — declined
+    /// by a read-only handle or refused by the device — over the volume's
+    /// lifetime. A copy met again is counted again, as a device's error log
+    /// counts each failed transfer.
+    pub metadata_damaged: u64,
     /// Accumulated both-copies-bad metadata blocks over the volume's
     /// lifetime.
     pub metadata_unrepairable: u64,
@@ -262,10 +267,12 @@ struct FaultCounters {
     data_aead_faults: u64,
     data_logical_faults: u64,
     scrubs_triggered: u64,
+    metadata_damaged: u64,
 }
 
 impl FaultCounters {
-    /// The six persisted counters in their on-disk order.
+    /// The persisted counters in their on-disk order. `metadata_damaged` is
+    /// last, so a baseline written before it existed reads it as zero.
     fn to_array(self) -> [u64; COUNTER_FIELDS] {
         [
             self.metadata_repaired,
@@ -274,10 +281,11 @@ impl FaultCounters {
             self.data_aead_faults,
             self.data_logical_faults,
             self.scrubs_triggered,
+            self.metadata_damaged,
         ]
     }
 
-    /// Reconstruct from the six persisted counters in their on-disk order.
+    /// Reconstruct from the persisted counters in their on-disk order.
     fn from_array(a: [u64; COUNTER_FIELDS]) -> Self {
         Self {
             metadata_repaired: a[0],
@@ -286,7 +294,18 @@ impl FaultCounters {
             data_aead_faults: a[3],
             data_logical_faults: a[4],
             scrubs_triggered: a[5],
+            metadata_damaged: a[6],
         }
+    }
+
+    /// Fold what the read paths found since the last stored baseline.
+    fn fold_observed(&mut self, observed: ObservedFaults) {
+        self.metadata_repaired = self
+            .metadata_repaired
+            .saturating_add(observed.metadata_repaired);
+        self.metadata_damaged = self
+            .metadata_damaged
+            .saturating_add(observed.metadata_damaged);
     }
 
     /// Fold one scrub's findings into the lifetime counters (saturating, so a
@@ -296,6 +315,9 @@ impl FaultCounters {
         self.metadata_repaired = self
             .metadata_repaired
             .saturating_add(report.metadata_repaired);
+        self.metadata_damaged = self
+            .metadata_damaged
+            .saturating_add(report.metadata_damaged);
         self.metadata_unrepairable = self
             .metadata_unrepairable
             .saturating_add(report.metadata_unrepairable);
@@ -316,6 +338,43 @@ impl FaultCounters {
         self.data_physical_faults
             .saturating_add(self.data_aead_faults)
             .saturating_add(self.data_logical_faults)
+    }
+}
+
+/// Mirror-copy findings a handle's read paths made since its last stored
+/// baseline, the mount's repair of the slot and root it chose among them.
+/// They live only on the handle until a health pass folds them into the
+/// durable history; a scrub's findings travel in its report instead, so none
+/// is counted twice.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObservedFaults {
+    metadata_repaired: u64,
+    metadata_damaged: u64,
+}
+
+impl ObservedFaults {
+    /// Record the outcome of one copy-repair the read path attempted: a
+    /// rewritten copy, or one left bad because the handle declined to write
+    /// it or the device refused the write.
+    pub(crate) fn note_repair(&mut self, outcome: Result<bool, DriverError>) {
+        if matches!(outcome, Ok(true)) {
+            self.metadata_repaired = self.metadata_repaired.saturating_add(1);
+        } else {
+            self.metadata_damaged = self.metadata_damaged.saturating_add(1);
+        }
+    }
+
+    /// What remains of this tally once `stored` has entered the durable
+    /// history.
+    fn less(self, stored: Self) -> Self {
+        Self {
+            metadata_repaired: self
+                .metadata_repaired
+                .saturating_sub(stored.metadata_repaired),
+            metadata_damaged: self
+                .metadata_damaged
+                .saturating_sub(stored.metadata_damaged),
+        }
     }
 }
 
@@ -366,23 +425,21 @@ fn snapshot_from_array(a: [u64; SNAPSHOT_FIELDS]) -> HealthSnapshot {
 }
 
 /// Classify a volume against `thresholds` from its accumulated
-/// filesystem-observed counters, `metadata_damaged` (bad metadata copies this
-/// pass left unrepaired), and its current device snapshot. The worse of the
-/// signals wins (`HealthState` is ordered worst-last).
+/// filesystem-observed counters and its current device snapshot. The worse of
+/// the signals wins (`HealthState` is ordered worst-last).
 ///
-/// A copy that went bad is the same medium signal whether or not the handle
-/// could rewrite it, so the two count against one threshold. Only a read-only
-/// handle produces the second, and a read-only handle stores no baseline, so it
-/// reaches the classification without ever entering the durable history.
+/// A copy that went bad is the same medium signal whether or not it could be
+/// rewritten, so repaired and damaged copies count against one threshold.
 fn classify(
     counters: &FaultCounters,
-    metadata_damaged: u64,
     device: DeviceHealth,
     thresholds: &HealthThresholds,
 ) -> HealthState {
     let mut state = HealthState::Healthy;
     let data_faults = counters.total_data_faults();
-    let mirror_faults = counters.metadata_repaired.saturating_add(metadata_damaged);
+    let mirror_faults = counters
+        .metadata_repaired
+        .saturating_add(counters.metadata_damaged);
     if mirror_faults >= thresholds.degraded_metadata_repairs
         || data_faults >= thresholds.degraded_data_faults
     {
@@ -501,9 +558,10 @@ impl<B: Block> ARXFS<B> {
             counters.fold_scrub(&report);
             scrub = Some(report);
         }
+        let observed = self.observed;
+        counters.fold_observed(observed);
 
-        let metadata_damaged = scrub.map_or(0, |report| report.metadata_damaged);
-        let state = classify(&counters, metadata_damaged, current, &thresholds);
+        let state = classify(&counters, current, &thresholds);
         let read_only_recommended = match current {
             DeviceHealth::Available(s) => device_is_critical(&s, &thresholds),
             DeviceHealth::Unavailable => false,
@@ -526,6 +584,9 @@ impl<B: Block> ARXFS<B> {
                 return Err(err);
             }
             self.commit()?;
+            // Only what this pass saw is now durable; a repair a read path
+            // made since `observed` was taken waits for the next pass.
+            self.observed = self.observed.less(observed);
         }
 
         let device = match current {
@@ -538,6 +599,7 @@ impl<B: Block> ARXFS<B> {
             unsafe_shutdown_delta,
             media_error_delta,
             metadata_repaired: counters.metadata_repaired,
+            metadata_damaged: counters.metadata_damaged,
             metadata_unrepairable: counters.metadata_unrepairable,
             data_physical_faults: counters.data_physical_faults,
             data_aead_faults: counters.data_aead_faults,

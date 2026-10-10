@@ -2,26 +2,16 @@
 //! describes it: its class code, the report descriptor its HID descriptor
 //! states (USB HID 1.11 §6.2.1), and its interrupt-IN endpoint.
 
-use tairix_usb::descriptor::{descriptors, Malformed};
+use tairix_usb::descriptor::{
+    descriptors, ConfigurationHeader, Malformed, DESC_TYPE_ENDPOINT, DESC_TYPE_INTERFACE,
+    ENDPOINT_ADDR_DIR_IN, ENDPOINT_ADDR_NUMBER_MASK, ENDPOINT_ATTR_INTERRUPT,
+    ENDPOINT_ATTR_TYPE_MASK, ENDPOINT_DESCRIPTOR_LEN, INTERFACE_DESCRIPTOR_LEN,
+};
 
-/// Bytes of a configuration descriptor's own header.
-pub const CONFIGURATION_HEADER_LEN: usize = 9;
-
-const DESC_TYPE_INTERFACE: u8 = 0x04;
-const DESC_TYPE_ENDPOINT: u8 = 0x05;
 const DESC_TYPE_HID: u8 = 0x21;
-const INTERFACE_DESC_LEN: usize = 9;
-const ENDPOINT_DESC_LEN: usize = 7;
 
 /// Bytes of a HID descriptor before its list of class descriptors.
 const HID_DESC_LIST: usize = 6;
-
-/// `bEndpointAddress`'s direction bit and number (USB 2.0 §9.6.6).
-const ENDPOINT_IN: u8 = 0x80;
-const ENDPOINT_NUMBER: u8 = 0x0F;
-
-/// `bmAttributes` naming an interrupt endpoint.
-const ATTRIBUTES_INTERRUPT: u8 = 0x03;
 
 /// The boot sub-class (HID 1.11 §4.2) and its keyboard and mouse protocols.
 const SUBCLASS_BOOT: u8 = 0x01;
@@ -69,8 +59,10 @@ impl HidInterface {
     /// [`InterfaceError::NotFound`] when no such interface carries an
     /// interrupt-IN endpoint.
     pub fn find(config: &[u8], number: u8) -> Result<Self, InterfaceError> {
+        let header =
+            ConfigurationHeader::decode(config).map_err(|Malformed| InterfaceError::Malformed)?;
         let body = config
-            .get(CONFIGURATION_HEADER_LEN..)
+            .get(header.length..)
             .ok_or(InterfaceError::Malformed)?;
         let mut found: Option<[u8; 3]> = None;
         let mut report_descriptor_len = None;
@@ -82,7 +74,7 @@ impl HidInterface {
                     if found.is_some() {
                         break;
                     }
-                    if descriptor.len() < INTERFACE_DESC_LEN {
+                    if descriptor.len() < INTERFACE_DESCRIPTOR_LEN {
                         return Err(InterfaceError::Malformed);
                     }
                     if descriptor[2] == number && descriptor[3] == 0 {
@@ -93,15 +85,15 @@ impl HidInterface {
                     report_descriptor_len = stated_report_length(descriptor);
                 }
                 DESC_TYPE_ENDPOINT if found.is_some() && interrupt_endpoint.is_none() => {
-                    if descriptor.len() < ENDPOINT_DESC_LEN {
+                    if descriptor.len() < ENDPOINT_DESCRIPTOR_LEN {
                         return Err(InterfaceError::Malformed);
                     }
                     let (address, attributes) = (descriptor[2], descriptor[3]);
-                    if address & ENDPOINT_IN != 0
-                        && address & ENDPOINT_NUMBER != 0
-                        && attributes & 0x03 == ATTRIBUTES_INTERRUPT
+                    if address & ENDPOINT_ADDR_DIR_IN != 0
+                        && address & ENDPOINT_ADDR_NUMBER_MASK != 0
+                        && attributes & ENDPOINT_ATTR_TYPE_MASK == ENDPOINT_ATTR_INTERRUPT
                     {
-                        interrupt_endpoint = Some(address & ENDPOINT_NUMBER);
+                        interrupt_endpoint = Some(address & ENDPOINT_ADDR_NUMBER_MASK);
                     }
                 }
                 _ => {}

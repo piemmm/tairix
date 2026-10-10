@@ -3729,7 +3729,7 @@ mod tests {
             .with_proc_id(ProcId::from_raw([byte; 16]));
             let mut caps = self.caps.write();
             let placement = caps
-                .resolve_placement(spawner.map_or(ProcessId::KERNEL, ProcessId), session)
+                .resolve_placement(spawner.map_or(ProcessId::KERNEL, ProcessId), session, false)
                 .expect("placeable");
             caps.admit(record, placement).expect("placed");
             task

@@ -23,11 +23,14 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::FaultDomainState;
+use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{
     HwDeviceClass, HwResource, HwResourceKind, HW_NODE_ROOT, HW_NODE_ROOT_ID,
 };
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
+use tairix_kernel_core::callreg::LinkServiceObserver;
 use tairix_kernel_core::{HwNodeLiveness, HwTreeSource};
+use tairix_kernel_ipc::EndpointId;
 use tairix_sync::SpinLock;
 
 /// The first id an unseeded store issues: the root's is never handed out.
@@ -202,6 +205,12 @@ impl HwTreeStore {
         self.inner.lock().node(node_id).copied()
     }
 
+    /// Visit every live node in id order with the store held: the visitor
+    /// must not call back into it.
+    pub fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) {
+        self.inner.lock().nodes.iter().for_each(visit);
+    }
+
     /// Remove the child `node_id` — and its whole subtree — from the
     /// inventory, but **only** when its parent is exactly `parent_id`, then
     /// bump the generation. Returns the ids of every removed node (the
@@ -292,6 +301,33 @@ impl HwTreeStore {
         // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
         // done after the inner lock is dropped.
         tairix_kernel_core::hw_tree_wake();
+        Ok(())
+    }
+
+    /// Record whether the live non-root node `node_id` is serving its `role`
+    /// endpoint, bumping the generation and waking every parked
+    /// `hw_tree_wait` caller when that changes, so the device manager binds
+    /// the node's consumers once it is.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if no live non-root node has id `node_id`.
+    pub fn set_link_served(&self, node_id: u32, role: LinkRole, live: bool) -> Result<(), Errno> {
+        let changed = {
+            let mut inner = self.inner.lock();
+            let Some(node) = inner.node_mut(node_id).filter(|node| !node.is_root()) else {
+                return Err(Errno::NotFound);
+            };
+            let changed = node.serves(role) != live;
+            if changed {
+                node.set_serves(role, live);
+                inner.generation += 1;
+            }
+            changed
+        };
+        if changed {
+            tairix_kernel_core::hw_tree_wake();
+        }
         Ok(())
     }
 
@@ -553,6 +589,11 @@ impl HwTreeSource for HwTreeStoreSource {
         Ok(HW_TREE.node(node_id))
     }
 
+    fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
+        HW_TREE.for_each_node(visit);
+        Ok(())
+    }
+
     fn node_endpoints(&self, parent_id: u32, node_id: u32) -> Result<Vec<u64>, Errno> {
         // Report the node's declared block-service endpoints from the one
         // authoritative inventory, ownership-gated on `parent_id` exactly as
@@ -565,6 +606,26 @@ impl HwTreeSource for HwTreeStoreSource {
 /// The shared [`HwTreeStoreSource`] the boot path installs through
 /// `BootInfo::with_hw_tree`.
 pub static HW_TREE_SOURCE: HwTreeStoreSource = HwTreeStoreSource;
+
+/// The endpoint registry's link-service observer over [`HW_TREE`]: a link
+/// supplier's endpoint going live or away is recorded on the supplier's node.
+pub struct LinkService;
+
+impl LinkServiceObserver for LinkService {
+    fn link_service_changed(&self, id: EndpointId, live: bool) {
+        let Some(role) = LinkRole::of_endpoint(id.0) else {
+            return;
+        };
+        let Some(node) = role.endpoints().node_of(id.0) else {
+            return;
+        };
+        // A supplier whose node has left the tree has nothing to state.
+        let _ = HW_TREE.set_link_served(node, role, live);
+    }
+}
+
+/// The [`LinkService`] the boot path installs with the tree it seeds.
+pub static LINK_SERVICE: LinkService = LinkService;
 
 #[cfg(test)]
 mod tests {
@@ -604,6 +665,17 @@ mod tests {
 
     fn ids(store: &HwTreeStore) -> Vec<u32> {
         snapshot(store).iter().map(HwNode::id).collect()
+    }
+
+    #[test]
+    fn a_visit_sees_every_live_node_in_id_order_as_a_snapshot_does() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("a fresh store seeds");
+        let child = publish(&store, 2, HwDeviceClass::Input);
+        let mut visited = Vec::new();
+        store.for_each_node(&mut |node| visited.push(node.id()));
+        assert_eq!(visited, [1, 2, child]);
+        assert_eq!(visited, ids(&store));
     }
 
     #[test]
@@ -977,6 +1049,33 @@ mod tests {
             snapshot(&store)[1].fault_health(),
             FaultDomainState::Healthy
         );
+    }
+
+    #[test]
+    fn a_served_role_is_recorded_alone_and_bumps_the_generation_only_on_a_change() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("a fresh store seeds");
+        let before = store.generation();
+        assert_eq!(store.set_link_served(2, LinkRole::Clock, true), Ok(()));
+        assert_eq!(store.generation(), before + 1);
+        let node = snapshot(&store)[1];
+        assert!(node.serves(LinkRole::Clock));
+        assert!(!node.serves(LinkRole::Dma));
+        assert_eq!(store.set_link_served(2, LinkRole::Clock, true), Ok(()));
+        assert_eq!(store.generation(), before + 1, "no change, no wake");
+        assert_eq!(store.set_link_served(2, LinkRole::Clock, false), Ok(()));
+        assert_eq!(store.generation(), before + 2);
+        assert!(!snapshot(&store)[1].serves(LinkRole::Clock));
+        assert_eq!(
+            store.set_link_served(1, LinkRole::Clock, true),
+            Err(Errno::NotFound),
+            "the root serves nothing"
+        );
+        assert_eq!(
+            store.set_link_served(4242, LinkRole::Clock, true),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(store.generation(), before + 2);
     }
 
     #[test]

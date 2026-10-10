@@ -14,9 +14,9 @@ use tairix_abi::{DriverError, Errno};
 use tairix_hid::{
     boot, DescriptorError, HidDevice, HidTransport, ReportDescriptor, ReportId, MAX_DESCRIPTOR,
 };
-use tairix_usb::device::{setup_get_configuration_descriptor, CTRL_DATA_LEN};
+use tairix_usb::transport::{read_configuration, ConfigurationError};
 
-use crate::interface::{BootLayout, HidInterface, InterfaceError, CONFIGURATION_HEADER_LEN};
+use crate::interface::{BootLayout, HidInterface, InterfaceError};
 use crate::requests::{self, Protocol};
 
 /// The control transfers bring-up makes on the driver's interface.
@@ -120,7 +120,14 @@ fn zeroed(len: usize) -> Result<Vec<u8>, BringupError> {
 ///
 /// [`BringupError`].
 pub fn bring_up(link: &mut dyn HidLink, number: u8) -> Result<Bound, BringupError> {
-    let config = read_configuration(link)?;
+    let config =
+        read_configuration(&mut |setup, data| link.control_in(setup, data)).map_err(|error| {
+            match error {
+                ConfigurationError::Transfer(errno) => failed(errno),
+                ConfigurationError::Malformed => BringupError::Interface(InterfaceError::Malformed),
+                ConfigurationError::OutOfMemory => BringupError::OutOfMemory,
+            }
+        })?;
     let interface = HidInterface::find(&config, number).map_err(BringupError::Interface)?;
     let descriptor = read_report_descriptor(link, number, interface.report_descriptor_len)?;
     let (mut protocol, mut model) = match ReportDescriptor::parse(&descriptor) {
@@ -161,26 +168,6 @@ fn boot_model(layout: BootLayout) -> Result<ReportDescriptor, BringupError> {
         BootLayout::Mouse => boot::mouse(),
     }
     .map_err(unmodelled)
-}
-
-/// The configuration descriptor, as much of it as one data stage carries.
-fn read_configuration(link: &mut dyn HidLink) -> Result<Vec<u8>, BringupError> {
-    let mut header = [0u8; CONFIGURATION_HEADER_LEN];
-    let header_len = u16::try_from(header.len()).map_err(|_| BringupError::OutOfMemory)?;
-    let read = link
-        .control_in(setup_get_configuration_descriptor(header_len), &mut header)
-        .map_err(failed)?;
-    let total = usize::from(u16::from_le_bytes([header[2], header[3]])).min(CTRL_DATA_LEN);
-    if read != header.len() || total < CONFIGURATION_HEADER_LEN {
-        return Err(BringupError::Interface(InterfaceError::Malformed));
-    }
-    let mut config = zeroed(total)?;
-    let total = u16::try_from(total).map_err(|_| BringupError::OutOfMemory)?;
-    let read = link
-        .control_in(setup_get_configuration_descriptor(total), &mut config)
-        .map_err(failed)?;
-    config.truncate(read);
-    Ok(config)
 }
 
 /// The report descriptor the interface states, as delivered: empty when it

@@ -24,38 +24,19 @@
 //! that cannot be parsed refuses the whole device rather than guessing.
 
 use tairix_abi::Errno;
-use tairix_usb::descriptor::{descriptors, Malformed};
+use tairix_usb::descriptor::{
+    descriptors, ConfigurationHeader, Malformed, DESC_TYPE_ENDPOINT, DESC_TYPE_INTERFACE,
+    ENDPOINT_ADDR_DIR_IN, ENDPOINT_ADDR_NUMBER_MASK, ENDPOINT_ATTR_BULK, ENDPOINT_ATTR_INTERRUPT,
+    ENDPOINT_ATTR_TYPE_MASK, ENDPOINT_DESCRIPTOR_LEN, INTERFACE_DESCRIPTOR_LEN,
+};
 
 use crate::scsi::CommandSet;
 
-/// `bDescriptorType` of a configuration descriptor (USB 2.0 table 9-5).
-const DESC_TYPE_CONFIGURATION: u8 = 2;
-/// `bDescriptorType` of an interface descriptor.
-const DESC_TYPE_INTERFACE: u8 = 4;
-/// `bDescriptorType` of an endpoint descriptor.
-const DESC_TYPE_ENDPOINT: u8 = 5;
 /// `bDescriptorType` of the UAS Pipe Usage descriptor (UAS §4.9, the
 /// class-specific `CS_INTERFACE`-shaped value).
 const DESC_TYPE_PIPE_USAGE: u8 = 0x24;
-
-/// Length of a configuration-descriptor header (USB 2.0 §9.6.3).
-pub const CONFIGURATION_HEADER_LEN: usize = 9;
-/// Length of an interface descriptor (USB 2.0 §9.6.5).
-const INTERFACE_DESC_LEN: usize = 9;
-/// Minimum length of an endpoint descriptor (USB 2.0 §9.6.6).
-const ENDPOINT_DESC_LEN: usize = 7;
 /// Length of a Pipe Usage descriptor (UAS §4.9).
 const PIPE_USAGE_DESC_LEN: usize = 4;
-
-/// `bmAttributes` transfer-type mask and values (USB 2.0 §9.6.6).
-const ATTR_TRANSFER_TYPE_MASK: u8 = 0x03;
-const ATTR_TRANSFER_TYPE_BULK: u8 = 0x02;
-const ATTR_TRANSFER_TYPE_INTERRUPT: u8 = 0x03;
-
-/// `bEndpointAddress` direction bit: set for IN endpoints.
-const ENDPOINT_ADDRESS_IN: u8 = 0x80;
-/// `bEndpointAddress` endpoint-number mask.
-const ENDPOINT_ADDRESS_NUMBER_MASK: u8 = 0x0F;
 
 /// Mass-storage interface class (USB 2.0 §9.6.5 `bInterfaceClass`).
 const CLASS_MASS_STORAGE: u8 = 0x08;
@@ -125,30 +106,6 @@ pub struct StorageInterface {
     pub command_set: CommandSet,
     /// The wire transport and its endpoints.
     pub protocol: StorageProtocol,
-}
-
-/// Total length (`wTotalLength`) the configuration-descriptor header
-/// announces, so the caller can fetch the full stream.
-///
-/// # Errors
-///
-/// * [`Errno::LengthOutOfRange`] if `header` is shorter than the 9-byte
-///   configuration header, or the announced total is shorter than the
-///   header itself (a stream that cannot contain its own header).
-/// * [`Errno::BadMagic`] if the descriptor type is not a configuration
-///   descriptor (fail closed — never walk a stream of the wrong shape).
-pub fn configuration_total_length(header: &[u8]) -> Result<usize, Errno> {
-    if header.len() < CONFIGURATION_HEADER_LEN {
-        return Err(Errno::LengthOutOfRange);
-    }
-    if header[1] != DESC_TYPE_CONFIGURATION {
-        return Err(Errno::BadMagic);
-    }
-    let total = usize::from(u16::from_le_bytes([header[2], header[3]]));
-    if total < CONFIGURATION_HEADER_LEN {
-        return Err(Errno::LengthOutOfRange);
-    }
-    Ok(total)
 }
 
 /// The `(sub-class, protocol)` pairs this driver serves, mapped to the
@@ -238,20 +195,18 @@ impl Collect {
 ///
 /// # Errors
 ///
-/// * [`Errno::LengthOutOfRange`] / [`Errno::BadMagic`] as
-///   [`configuration_total_length`], or for a descriptor whose announced
-///   length is shorter than its type requires or runs past the stream (a
-///   zero `bLength` cannot advance the walk and is refused, never looped
-///   on).
+/// * [`Errno::BadMagic`] for a malformed configuration header
+///   ([`ConfigurationHeader::decode`]).
+/// * [`Errno::LengthOutOfRange`] for a stream shorter than its header
+///   states, or a descriptor whose announced length is shorter than its type
+///   requires or runs past the stream (a zero `bLength` cannot advance the
+///   walk and is refused, never looped on).
 /// * [`Errno::NotFound`] if `interface` does not complete: it is absent,
 ///   outside the accepted class/sub-class/protocol set, lacks the endpoints
 ///   its transport needs, or its UAS pipes are malformed.
 pub fn find_storage_interface(stream: &[u8], interface: u8) -> Result<StorageInterface, Errno> {
-    let total = configuration_total_length(stream)?;
-    if stream.len() < total {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let stream = &stream[..total];
+    let header = ConfigurationHeader::decode(stream).map_err(|Malformed| Errno::BadMagic)?;
+    let stream = stream.get(..header.total).ok_or(Errno::LengthOutOfRange)?;
 
     // The matched interface, once seen: (number, protocol, command set).
     // Descriptors that follow it (until the next interface descriptor)
@@ -260,12 +215,12 @@ pub fn find_storage_interface(stream: &[u8], interface: u8) -> Result<StorageInt
     let mut matched: Option<(u8, u8, CommandSet)> = None;
     let mut poisoned = false;
     let mut collect = Collect::default();
-    for descriptor in descriptors(&stream[CONFIGURATION_HEADER_LEN..]) {
+    for descriptor in descriptors(&stream[header.length..]) {
         let descriptor = descriptor.map_err(|Malformed| Errno::LengthOutOfRange)?;
         let length = descriptor.len();
         match descriptor[1] {
             DESC_TYPE_INTERFACE => {
-                if length < INTERFACE_DESC_LEN {
+                if length < INTERFACE_DESCRIPTOR_LEN {
                     return Err(Errno::LengthOutOfRange);
                 }
                 // The previous matched interface's endpoint list has ended
@@ -288,17 +243,17 @@ pub fn find_storage_interface(stream: &[u8], interface: u8) -> Result<StorageInt
                 }
             }
             DESC_TYPE_ENDPOINT => {
-                if length < ENDPOINT_DESC_LEN {
+                if length < ENDPOINT_DESCRIPTOR_LEN {
                     return Err(Errno::LengthOutOfRange);
                 }
                 if matched.is_some() && !poisoned {
                     let address = descriptor[2];
                     let attributes = descriptor[3];
-                    let number = address & ENDPOINT_ADDRESS_NUMBER_MASK;
-                    let is_in = address & ENDPOINT_ADDRESS_IN != 0;
+                    let number = address & ENDPOINT_ADDR_NUMBER_MASK;
+                    let is_in = address & ENDPOINT_ADDR_DIR_IN != 0;
                     if number != 0 {
-                        match attributes & ATTR_TRANSFER_TYPE_MASK {
-                            ATTR_TRANSFER_TYPE_BULK => {
+                        match attributes & ENDPOINT_ATTR_TYPE_MASK {
+                            ENDPOINT_ATTR_BULK => {
                                 collect.pending_pipe = Some((number, is_in));
                                 if is_in {
                                     if collect.bulk_in.is_none() {
@@ -308,9 +263,7 @@ pub fn find_storage_interface(stream: &[u8], interface: u8) -> Result<StorageInt
                                     collect.bulk_out = Some(number);
                                 }
                             }
-                            ATTR_TRANSFER_TYPE_INTERRUPT
-                                if is_in && collect.interrupt_in.is_none() =>
-                            {
+                            ENDPOINT_ATTR_INTERRUPT if is_in && collect.interrupt_in.is_none() => {
                                 collect.interrupt_in = Some(number);
                             }
                             _ => {}

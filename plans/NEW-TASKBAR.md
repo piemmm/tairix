@@ -232,7 +232,8 @@ wallpaper gap  ┌────────────────────�
 - **Notification area:** status icons + transient notifications, left of the
   clock; the clock sits between it and the account capsule (desktop1
   panel 1). A secondary press on the clock opens the clock's own menu (T17);
-  a primary press on it is claimed and inert, as on a status signal.
+  a primary press on it is claimed and inert, as on a status signal other
+  than the volume signal, which opens its panel.
 - **Account capsule:** always the trailing-most element, reserved, immovable;
   no application or tray icon may occupy or displace its slot. It is the
   Switchboard tray — its badges, seam, rail, readout, and gestures are the
@@ -961,7 +962,8 @@ reserved Switchboard slot. What now stands:
   unrestricted-sender — a producer's identity is attested per request, not at
   bind.
 - **The taskbar (`userland/gui/taskbar`)** — `NotificationArea` holds typed
-  `StatusSignal`s (network/volume/battery `StatusKind` → `lib/icon` glyph,
+  `StatusSignal`s (network/volume/muted/recording/battery `StatusKind` →
+  `lib/icon` glyph,
   drawn as calm shared `IconButton`s resolving the loaded `/System/Graphics`
   artwork) and severity-then-recency ordered `TransientNotification`s (`raise`
   upserts by `(producer, key)`, `clear`, `clear_producer`).
@@ -969,7 +971,11 @@ reserved Switchboard slot. What now stands:
   `lib/controls::shell::Notification` cards outward from the notification/clock
   region — reusing the library popup's `panel_origin`/`probe_chrome` (§2.2) —
   and fails closed to no cards on a degenerate screen. A status-signal press
-  is inert (a live readout, not an action target); a card is click-to-dismiss
+  is inert (a live readout, not an action target) except the volume signal's,
+  which opens the modal `SoundPanel` (`plans/SOUND.md` §Desktop integration):
+  the default sink's level slider and mute toggle, live while dragged and
+  settled where released (`TaskbarResponse::Sound`), drawn under an Authority
+  Mark when another session's room holds the sink. A card is click-to-dismiss
   → `TaskbarResponse::DismissNotification`.
 - **The session (`userland/gui/session`)** — binds and serves `NOTIFY_ENDPOINT`
   in the desktop run loop, attests each producer via kernel `call_peer_origin`
@@ -978,9 +984,10 @@ reserved Switchboard slot. What now stands:
   user dismiss, routes a press over the non-modal popover to the taskbar, and
   drops a dead producer's notifications on child-reap.
 
-Status signals carry **no fabricated hardware** — empty by default; their live
-tray-signal feed is T9/T10, and the render/`set_status_signals` path is the
-complete §27 primitive ahead of that caller. Tested in the abi suite
+Status signals carry **no fabricated hardware** — empty by default. The
+session feeds the sound ones from the audio service (`Taskbar::set_sound`): a
+volume signal while there is a default sink, and a recording indicator while
+any capture stream moves frames; network and battery have no feed yet. Tested in the abi suite
 (round-trip + refusal matrix + fuzz), the kernel suite (the seat-lease bind of
 both seat-scoped endpoints, refused without the lease), the taskbar suite
 (model ordering/upsert/clear/`clear_producer`, popover layout + degenerate

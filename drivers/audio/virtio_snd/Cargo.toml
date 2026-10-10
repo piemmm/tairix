@@ -49,8 +49,8 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The device-agnostic driver side of the `audiochan-v1` device channel: the
 # pure `AudioChannelServer` handler plus the serve loop (claim the reserved
-# endpoint, publish the `audiochan` node, park on {call endpoint, device IRQ})
-# every audio driver process shares — one definition.
+# endpoint, publish the `audiochan` node, park on the call endpoint and the
+# device's event sources) every audio driver process shares — one definition.
 tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource
 # grants into the `MmioMapper` + `VirtioHost` the bring-up consumes

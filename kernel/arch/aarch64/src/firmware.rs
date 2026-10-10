@@ -246,7 +246,7 @@ mod tests {
     fn no_mailbox_in_a_mailboxless_tree_is_none() {
         // A virt-like tree carries no `brcm,bcm2835-mbox` node, so neither
         // the video console nor the clock raise attempts an exchange.
-        let mut builder = tairix_fdt::fixture::DtbBuilder::new();
+        let mut builder = tairix_fdt::write::FdtWriter::new();
         builder.begin_node("");
         builder.begin_node("pl011@9000000");
         builder.prop_str("compatible", "arm,pl011");

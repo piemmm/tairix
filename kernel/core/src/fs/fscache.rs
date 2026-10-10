@@ -1340,7 +1340,15 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
         self.enforce_pressure();
-        let overwritten = self.resolve_for_invalidation(dst_dir, dst_name);
+        // A move onto the source's own entry — its own name, or a re-spelling
+        // of it on a folding volume — overwrites nothing.
+        let onto_itself =
+            src_dir == dst_dir && self.inner.name_matching().matches(src_name, dst_name);
+        let overwritten = if onto_itself {
+            Ok(None)
+        } else {
+            self.resolve_for_invalidation(dst_dir, dst_name)
+        };
         // The moved node is resolved only while something is watched: its
         // watchers must learn their path no longer reaches it.
         let moved = if self.changes.as_ref().is_some_and(ChangeLog::active) {

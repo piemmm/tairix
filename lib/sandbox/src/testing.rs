@@ -10,6 +10,7 @@ use crate::loopback::LoopbackLauncher;
 use crate::worker::Service;
 
 /// Keeps no event: a test that asserts on what is logged brings its own.
+#[derive(Clone, Copy)]
 pub(crate) struct NullSink;
 
 impl Sink for NullSink {

@@ -7883,7 +7883,8 @@ fn taskbar_repaint_none_and_all_are_the_expected_extremes() {
             | TaskbarRepaint::LIBRARY
             | TaskbarRepaint::PICKER
             | TaskbarRepaint::NOTIFICATIONS
-            | TaskbarRepaint::READOUT,
+            | TaskbarRepaint::READOUT
+            | TaskbarRepaint::SOUND,
         TaskbarRepaint::ALL
     );
 }
@@ -7891,14 +7892,30 @@ fn taskbar_repaint_none_and_all_are_the_expected_extremes() {
 #[test]
 fn taskbar_repaint_single_surface_constants_owe_only_that_surface() {
     for (named, owed) in [
-        (TaskbarRepaint::BAR, [true, false, false, false, false]),
-        (TaskbarRepaint::LIBRARY, [false, true, false, false, false]),
-        (TaskbarRepaint::PICKER, [false, false, true, false, false]),
+        (
+            TaskbarRepaint::BAR,
+            [true, false, false, false, false, false],
+        ),
+        (
+            TaskbarRepaint::LIBRARY,
+            [false, true, false, false, false, false],
+        ),
+        (
+            TaskbarRepaint::PICKER,
+            [false, false, true, false, false, false],
+        ),
         (
             TaskbarRepaint::NOTIFICATIONS,
-            [false, false, false, true, false],
+            [false, false, false, true, false, false],
         ),
-        (TaskbarRepaint::READOUT, [false, false, false, false, true]),
+        (
+            TaskbarRepaint::READOUT,
+            [false, false, false, false, true, false],
+        ),
+        (
+            TaskbarRepaint::SOUND,
+            [false, false, false, false, false, true],
+        ),
     ] {
         let surfaces = [
             named.bar.clone(),
@@ -7906,6 +7923,7 @@ fn taskbar_repaint_single_surface_constants_owe_only_that_surface() {
             named.picker.clone(),
             named.notifications.clone(),
             named.readout.clone(),
+            named.sound.clone(),
         ];
         for (surface, whole) in surfaces.iter().zip(owed) {
             assert_eq!(
@@ -7921,6 +7939,7 @@ fn taskbar_repaint_single_surface_constants_owe_only_that_surface() {
         TaskbarRepaint::PICKER,
         TaskbarRepaint::NOTIFICATIONS,
         TaskbarRepaint::READOUT,
+        TaskbarRepaint::SOUND,
     ] {
         assert!(single.any());
         assert_ne!(single, TaskbarRepaint::NONE);
@@ -7938,6 +7957,7 @@ fn taskbar_repaint_bit_or_composes_without_losing_either_side() {
             picker: Repaint::Whole,
             notifications: Repaint::clean(),
             readout: Repaint::clean(),
+            sound: Repaint::clean(),
         }
     );
 

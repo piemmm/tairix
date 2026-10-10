@@ -38,6 +38,13 @@ die Programmbibliothek oder namentlich aus einer Shell. Es benötigt eine
 laufende grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar, und es
 meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
 
+Ton zeigt jede Ausgabe und Eingabe mit ihrer Standardwahl, ihrem Pegel und
+ihrer Stummschaltung, und was aufnimmt: Ihre eigenen Aufnahmen mit Namen und
+wie viele die anderen machen. Die Regler ändern das Gerät sofort, und nur
+solange Ihre Sitzung den Raum hält, den es bedient; ein Gerät im Raum einer
+anderen Sitzung wird angezeigt, lässt sich hier aber nicht ändern. Ihr Desktop
+merkt sich, was Sie einstellen.
+
 ## EXIT STATUS
 
 Null nach einem saubereren Schließen; ungleich null, wenn der Fensterkanal oder

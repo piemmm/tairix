@@ -17,7 +17,13 @@
 //!   serves and carries its characteristics;
 //! * a string descriptor is accepted exactly when both answers are the same
 //!   well-formed descriptor, and a serial is 1..=126 code units, exactly the
-//!   ones delivered.
+//!   ones delivered;
+//! * an alternate setting decodes only as the chain states it — its own
+//!   interface descriptor, each endpoint one that follows it, none twice —
+//!   and whether an interface is control-only, and which numbers a
+//!   configuration declares, are what the chain says; an isochronous budget
+//!   never moves more than a bus interval can, and an explicit feedback
+//!   report is read or refused, never panicked on.
 //!
 //! A per-run-seeded `Prng` mutates well-formed descriptors (the shapes the
 //! engine serves, and forged ones it must refuse), assembles random
@@ -26,12 +32,17 @@
 //! fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock
 //! budget.
 
+use tairix_abi::usb_urb::{UsbSpeed, ISO_MAX_PACKET_BYTES};
 use tairix_abi::DriverError;
 use tairix_fuzzseed::Prng;
+use tairix_usb::alternate::{
+    alternate_setting, interface_numbers, is_control_only, MAX_ALT_ENDPOINTS,
+};
 use tairix_usb::device::{
     first_langid, DeviceDescriptor, HubDescriptor, InterfaceInfo, PeriodicShape, SerialNumber,
     StringHeader, INT_TRANSFER_MAX,
 };
+use tairix_usb::periodic::{EndpointDescriptor, FeedbackDecoder, PeriodicBudget};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
@@ -838,6 +849,231 @@ fn string_decoders_accept_only_whole_well_formed_descriptors() {
         let mut long = random_units(&mut rng);
         long.extend((0..rng.at_most(4)).map(|_| rng.next_u16()));
         check_serial_equality(&long, &near_copy(&long, &mut rng));
+
+        iteration += 1;
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            break;
+        }
+    }
+}
+
+/// Every descriptor of a configuration chain after its header, as the walk
+/// reads it, or `None` when the chain is malformed anywhere.
+fn walk(buf: &[u8]) -> Option<Vec<&[u8]>> {
+    if buf.len() < 9
+        || buf[0] < 9
+        || buf[1] != 0x02
+        || u16::from_le_bytes([buf[2], buf[3]]) < u16::from(buf[0])
+    {
+        return None;
+    }
+    let mut rest = buf.get(usize::from(buf[0])..)?;
+    let mut out = Vec::new();
+    while rest.len() >= 2 {
+        let length = usize::from(rest[0]);
+        if length < 2 || length > rest.len() {
+            return None;
+        }
+        let (descriptor, after) = rest.split_at(length);
+        if descriptor[1] == 0x04 && length < 9 {
+            return None;
+        }
+        out.push(descriptor);
+        rest = after;
+    }
+    Some(out)
+}
+
+/// One `(interface, alternate)` setting the chain states: the endpoint
+/// addresses that follow its interface descriptor, in order, and whether an
+/// endpoint descriptor among them is too short to be one.
+struct Stated {
+    at: (u8, u8),
+    endpoints: Vec<u8>,
+    short: bool,
+}
+
+fn settings(chain: &[&[u8]]) -> Vec<Stated> {
+    let mut out: Vec<Stated> = Vec::new();
+    for descriptor in chain {
+        match descriptor[1] {
+            0x04 => out.push(Stated {
+                at: (descriptor[2], descriptor[3]),
+                endpoints: Vec::new(),
+                short: false,
+            }),
+            0x05 => {
+                if let Some(setting) = out.last_mut() {
+                    if descriptor.len() < 7 {
+                        setting.short = true;
+                    } else {
+                        setting.endpoints.push(descriptor[2]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The alternate-setting readers say only what `buf`'s chain states.
+fn check_alternates(buf: &[u8]) {
+    let chain = walk(buf);
+    let numbers = interface_numbers(buf);
+    match &chain {
+        None => assert_eq!(numbers, Err(DriverError::BadMagic)),
+        Some(chain) => {
+            let numbers = numbers.expect("a well-formed chain");
+            for number in 0..=u8::MAX {
+                let declared = chain
+                    .iter()
+                    .any(|descriptor| descriptor[1] == 0x04 && descriptor[2] == number);
+                assert_eq!(numbers.contains(u16::from(number)), declared);
+            }
+        }
+    }
+    let stated = chain.as_deref().map(settings).unwrap_or_default();
+    for interface in 0..4u8 {
+        let control_only = is_control_only(buf, interface);
+        let own: Vec<_> = stated
+            .iter()
+            .filter(|setting| setting.at.0 == interface)
+            .collect();
+        if chain.is_none() || own.iter().any(|setting| setting.short) {
+            assert_eq!(control_only, Err(DriverError::BadMagic));
+        } else {
+            assert_eq!(
+                control_only,
+                Ok(own.len() == 1 && own[0].endpoints.is_empty()),
+                "interface {interface} of {buf:02x?}"
+            );
+        }
+        for alternate in 0..3u8 {
+            let decoded = alternate_setting(buf, interface, alternate);
+            let found: Vec<_> = stated
+                .iter()
+                .filter(|setting| setting.at == (interface, alternate))
+                .collect();
+            match decoded {
+                Ok(setting) => {
+                    assert_eq!(
+                        (setting.interface, setting.alternate),
+                        (interface, alternate)
+                    );
+                    assert_eq!(found.len(), 1, "one setting decoded from {buf:02x?}");
+                    assert!(!found[0].short);
+                    let addresses: Vec<u8> = setting
+                        .endpoints()
+                        .map(|endpoint| endpoint.address)
+                        .collect();
+                    assert_eq!(addresses, found[0].endpoints, "{buf:02x?}");
+                    assert!(addresses.len() <= MAX_ALT_ENDPOINTS);
+                    let mut seen = 0u32;
+                    for endpoint in setting.endpoints() {
+                        assert!(endpoint.number() != 0 && endpoint.address & 0x70 == 0);
+                        assert_eq!(
+                            seen & (1 << endpoint.dci()),
+                            0,
+                            "two endpoints, one context"
+                        );
+                        seen |= 1 << endpoint.dci();
+                    }
+                    assert_eq!(setting.dci_mask(), seen);
+                }
+                Err(DriverError::NotFound) => assert!(chain.is_some() && found.is_empty()),
+                Err(err) => assert_eq!(err, DriverError::BadMagic),
+            }
+        }
+    }
+}
+
+/// Configurations with alternate settings: a USB Audio function — a control
+/// interface, then a streaming interface whose settings bring an asynchronous
+/// data endpoint and its feedback endpoint, then a larger one — and a
+/// `SuperSpeed` streaming interface whose endpoint a companion completes.
+fn alternate_seeds() -> Vec<Vec<u8>> {
+    let (control, streaming) = ([0x01, 0x01, 0x00], [0x01, 0x02, 0x00]);
+    vec![
+        configuration(
+            1,
+            &[
+                &interface(0, 0, control, 0),
+                &[9, 0x24, 0x01, 0x00, 0x01, 30, 0, 1, 1],
+                &interface(1, 0, streaming, 0),
+                &interface(1, 1, streaming, 2),
+                &[9, 0x05, 0x01, 0x05, 200, 0, 4, 0, 0x81],
+                &[9, 0x05, 0x81, 0x11, 4, 0, 4, 0, 0],
+                &interface(1, 2, streaming, 1),
+                &[9, 0x05, 0x01, 0x09, 0x90, 0x01, 4, 0, 0],
+            ],
+        ),
+        configuration(
+            1,
+            &[
+                &interface(0, 0, streaming, 0),
+                &interface(0, 1, streaming, 1),
+                &endpoint(0x81, 0x05, 1024, 1),
+                &[6, 0x30, 3, 1, 0x00, 0x20],
+            ],
+        ),
+    ]
+}
+
+/// Every isochronous budget an endpoint descriptor yields at every speed is
+/// one a bus interval can move, and a report a feedback decoder reads is
+/// within the window it was built for.
+fn check_periodic(descriptor: &[u8]) {
+    let Ok(endpoint) = EndpointDescriptor::decode(descriptor) else {
+        return;
+    };
+    assert!(endpoint.number() != 0 && endpoint.address & 0x70 == 0);
+    for speed in [
+        UsbSpeed::Low,
+        UsbSpeed::Full,
+        UsbSpeed::High,
+        UsbSpeed::Super,
+    ] {
+        if let Ok(budget) = PeriodicBudget::isochronous(&endpoint, speed) {
+            assert!(budget.max_esit_payload != 0);
+            assert!(budget.max_esit_payload <= ISO_MAX_PACKET_BYTES);
+            let (tbc, tlbpc) = budget.burst_counts(budget.max_esit_payload);
+            assert!(tbc <= 3 && tlbpc <= 15);
+        }
+        let mut decoder = FeedbackDecoder::new(speed, 48_000);
+        if let Some(rate) = decoder.decode(descriptor) {
+            let nominal = decoder.nominal().per_frame_q16();
+            assert!(rate.per_frame_q16().abs_diff(nominal) <= nominal / 8);
+        }
+    }
+}
+
+#[test]
+fn alternate_settings_and_periodic_endpoints_decode_only_what_the_chain_states() {
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "alternate_settings_and_periodic_endpoints_decode_only_what_the_chain_states",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let seeds = alternate_seeds();
+    for seed in &seeds {
+        assert!(alternate_setting(seed, 0, 0).is_ok() || alternate_setting(seed, 0, 1).is_ok());
+        check_alternates(seed);
+    }
+    let mut iteration: u64 = 0;
+    loop {
+        check_alternates(&mutate(rng.pick(&seeds), &mut rng));
+        let random = random_configuration(&mut rng);
+        check_alternates(&random);
+        check_alternates(&mutate(&random, &mut rng));
+
+        let mut noise = vec![0u8; rng.at_most(16)];
+        rng.fill(&mut noise);
+        if noise.len() >= 2 && rng.below(2) == 0 {
+            noise[1] = 0x05;
+            noise[0] = u8::try_from(noise.len()).unwrap_or(u8::MAX);
+        }
+        check_periodic(&noise);
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

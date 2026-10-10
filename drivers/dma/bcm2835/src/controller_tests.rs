@@ -9,12 +9,14 @@ use std::vec::Vec;
 use tairix_abi::driver::dmaengine::{
     decode_done_reply, decode_open_reply, decode_position_reply, decode_prepare_reply,
     decode_wait_reply, CyclicParams, DmaBufferGrant, DmaChannel, DmaDirection, DmaEngine,
-    DmaEngineOp, DmaEngineRequest, DmaRequestLine, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS,
+    DmaEngineOp, DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS,
     DMA_ENGINE_MAX_REQUEST,
 };
+use tairix_abi::hwlink::LinkRequest;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, ProcId, PROC_ID_LEN};
+use tairix_drvrt::SupplierHost;
 
 use crate::controller::{split_windows, Buffer, Controller, ControllerHost, Record};
 use crate::engine::Bcm2835Dma;
@@ -53,8 +55,8 @@ fn endpoint_id() -> u64 {
     DMA_CONTROLLER_ENDPOINTS.endpoint(12)
 }
 
-fn line(dreq: u32, index: u8) -> DmaRequestLine {
-    DmaRequestLine::new(endpoint_id(), index, &[dreq], b"tx").expect("valid")
+fn line(dreq: u32, index: u8) -> LinkRequest {
+    LinkRequest::new(endpoint_id(), index, &[dreq], b"tx").expect("valid")
 }
 
 fn params() -> CyclicParams {
@@ -94,7 +96,7 @@ struct Host {
     timeline: Timeline,
 }
 
-impl ControllerHost for Host {
+impl SupplierHost for Host {
     fn caller(&self, ticket: u64) -> Result<ProcId, Errno> {
         self.kernel
             .borrow()
@@ -103,7 +105,6 @@ impl ControllerHost for Host {
             .copied()
             .ok_or(Errno::NotFound)
     }
-
     fn caller_holds(&self, ticket: u64, record: &HwResource) -> Result<bool, Errno> {
         let kernel = self.kernel.borrow();
         let caller = kernel.callers.get(&ticket).ok_or(Errno::NotFound)?;
@@ -112,7 +113,33 @@ impl ControllerHost for Host {
             .iter()
             .any(|(holder, grant)| holder == caller && grant.covers(record)))
     }
+    fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno> {
+        let mut kernel = self.kernel.borrow_mut();
+        if kernel.unanswerable.contains(&ticket) {
+            return Err(Errno::NotFound);
+        }
+        kernel.replies.push((ticket, frame.to_vec()));
+        Ok(())
+    }
+    fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {
+        let mut kernel = self.kernel.borrow_mut();
+        if kernel.ended.contains(&peer) {
+            return Err(Errno::NotFound);
+        }
+        if !kernel.watched.contains(&peer) {
+            kernel.watched.push(peer);
+        }
+        Ok(())
+    }
+    fn unwatch(&mut self, peer: ProcId) {
+        self.kernel
+            .borrow_mut()
+            .watched
+            .retain(|watched| *watched != peer);
+    }
+}
 
+impl ControllerHost for Host {
     fn carve(&mut self, bytes: u32) -> Result<Buffer, Errno> {
         let mut kernel = self.kernel.borrow_mut();
         if kernel.refuse_carves {
@@ -146,33 +173,6 @@ impl ControllerHost for Host {
         Ok(0x1000 + buffer.region)
     }
 
-    fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno> {
-        let mut kernel = self.kernel.borrow_mut();
-        if kernel.unanswerable.contains(&ticket) {
-            return Err(Errno::NotFound);
-        }
-        kernel.replies.push((ticket, frame.to_vec()));
-        Ok(())
-    }
-
-    fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {
-        let mut kernel = self.kernel.borrow_mut();
-        if kernel.ended.contains(&peer) {
-            return Err(Errno::NotFound);
-        }
-        if !kernel.watched.contains(&peer) {
-            kernel.watched.push(peer);
-        }
-        Ok(())
-    }
-
-    fn unwatch(&mut self, peer: ProcId) {
-        self.kernel
-            .borrow_mut()
-            .watched
-            .retain(|watched| *watched != peer);
-    }
-
     fn now(&self) -> Duration64 {
         Duration64::from_nanos(self.kernel.borrow().now)
     }
@@ -204,7 +204,7 @@ impl Rig {
             for (holder, dreq) in [(PLAYER, 2), (RECORDER, 3)] {
                 kernel
                     .holdings
-                    .push((holder, HwResource::dma_request(&line(dreq, 0))));
+                    .push((holder, HwResource::request(&line(dreq, 0))));
                 kernel.holdings.push((holder, HwResource::mmio(PCM, 0x24)));
             }
         }
@@ -460,11 +460,11 @@ fn a_line_naming_another_controller_or_an_undefined_serving_is_refused() {
     let rig = Rig::new();
     let mut endpoint = rig.endpoint(MASK);
     let elsewhere =
-        DmaRequestLine::new(DMA_CONTROLLER_ENDPOINTS.endpoint(13), 0, &[2], b"tx").expect("valid");
+        LinkRequest::new(DMA_CONTROLLER_ENDPOINTS.endpoint(13), 0, &[2], b"tx").expect("valid");
     rig.kernel
         .borrow_mut()
         .holdings
-        .push((PLAYER, HwResource::dma_request(&elsewhere)));
+        .push((PLAYER, HwResource::request(&elsewhere)));
     let (_, reply) = rig.call(&mut endpoint, PLAYER, &DmaEngineRequest::Open(elsewhere));
     assert_eq!(
         decode_open_reply(&reply.expect("answered")),
@@ -475,7 +475,7 @@ fn a_line_naming_another_controller_or_an_undefined_serving_is_refused() {
     rig.kernel
         .borrow_mut()
         .holdings
-        .push((PLAYER, HwResource::dma_request(&undefined)));
+        .push((PLAYER, HwResource::request(&undefined)));
     let (_, reply) = rig.call(&mut endpoint, PLAYER, &DmaEngineRequest::Open(undefined));
     assert_eq!(
         decode_open_reply(&reply.expect("answered")),
@@ -493,7 +493,7 @@ fn the_lowest_free_usable_channel_is_claimed_until_none_is_left() {
     rig.kernel
         .borrow_mut()
         .holdings
-        .push((PLAYER, HwResource::dma_request(&third)));
+        .push((PLAYER, HwResource::request(&third)));
     let (_, reply) = rig.call(&mut endpoint, PLAYER, &DmaEngineRequest::Open(third));
     assert_eq!(
         decode_open_reply(&reply.expect("answered")),
@@ -515,7 +515,7 @@ fn a_line_stays_with_a_holder_that_lives_and_is_reclaimed_from_one_that_has_ende
     rig.kernel
         .borrow_mut()
         .holdings
-        .push((successor, HwResource::dma_request(&line(2, 0))));
+        .push((successor, HwResource::request(&line(2, 0))));
     // Two nodes may carry one line; while its holder lives it stays theirs.
     assert_eq!(rig.open(&mut endpoint, successor, 2), Err(Errno::Busy));
     assert!(rig.model.active(usize::from(channel)));
@@ -1355,7 +1355,7 @@ impl<'r> Walk<'r> {
         let mut kernel = self.rig.kernel.borrow_mut();
         kernel
             .holdings
-            .push((successor, HwResource::dma_request(&line(dreq, 0))));
+            .push((successor, HwResource::request(&line(dreq, 0))));
         kernel
             .holdings
             .push((successor, HwResource::mmio(PCM, 0x24)));

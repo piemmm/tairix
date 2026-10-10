@@ -102,6 +102,17 @@ interessato — non cambia mai un risultato.
   seconda pressione pochi millisecondi dopo il rilascio pur intendendo un
   solo clic. Impostare `0` per un mouse il cui modo a raffica invia coppie di
   clic intenzionali.
+- `audio.output`, `audio.input` — `auto` per impostazione predefinita, o la
+  posizione di un terminale come la mostra `audioctl` (sedici cifre
+  esadecimali, un punto e l'indice del terminale): l'uscita e l'ingresso
+  che questa macchina preferisce come predefiniti. La scelta di una
+  sessione viene prima; questa è la scelta prima di ogni accesso e su una
+  macchina senza desktop. `auto` è il primo dispositivo trovato.
+- `audio.level` — in decibel, `0dB` per impostazione predefinita, o
+  un'attenuazione come `-12dB` o `-6.5dB`, con al massimo due decimali: il
+  livello da cui parte ogni uscita e ingresso. Mai sopra `0dB`. Il servizio
+  audio adotta un valore cambiato all'avvio successivo; `audioctl` cambia
+  la macchina in funzione.
 
 Lo stack di rete legge le impostazioni `net.*`; una modifica ha effetto
 quando lo stack applica di nuovo la sua configurazione.

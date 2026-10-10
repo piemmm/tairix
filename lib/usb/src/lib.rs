@@ -52,9 +52,11 @@ extern crate std;
 use tairix_abi::driver::DmaReach;
 use tairix_abi::{DriverError, RegisterBlock};
 
+pub mod alternate;
 pub mod bank;
 pub mod descriptor;
 pub mod device;
+pub mod periodic;
 pub mod regs;
 pub mod ring;
 pub mod transport;
@@ -174,17 +176,20 @@ pub struct DmaProgram {
     pub dcbaap: u64,
     /// Command ring base, for `CRCR` (consumer cycle state starts 1).
     pub command_ring: u64,
-    /// Event ring segment table (one entry), for `ERSTSZ`/`ERSTBA`.
+    /// Event ring segment table, for `ERSTBA`.
     pub erst: u64,
+    /// Entries in the segment table, for `ERSTSZ`.
+    pub erst_entries: u32,
     /// First event segment slot, the initial `ERDP`.
     pub event_segment: u64,
 }
 
 impl DmaProgram {
-    /// `true` when every address is non-zero and 64-byte aligned.
+    /// `true` when every address is non-zero and 64-byte aligned and the
+    /// segment table has an entry.
     #[must_use]
     pub const fn is_plausible(&self) -> bool {
-        let mut ok = true;
+        let mut ok = self.erst_entries != 0;
         let addrs = [
             self.dcbaap,
             self.command_ring,
@@ -231,9 +236,14 @@ pub struct Xhci<H: RegisterBlock> {
     max_slots: u8,
     max_ports: u8,
     max_scratchpad: u32,
+    /// The Isochronous Scheduling Threshold, in microframes.
+    ist_microframes: u32,
+    /// Event ring segment table entries the controller takes.
+    erst_entries: u32,
     page_size: usize,
     ac64: bool,
     csz: bool,
+    cfc: bool,
 }
 
 /// Stage of [`Xhci::open_diagnostic`] that refused the controller.
@@ -394,11 +404,14 @@ impl<H: RegisterBlock> Xhci<H> {
             max_slots,
             max_ports,
             max_scratchpad,
+            ist_microframes: regs::hcsparams2_ist_microframes(structural2),
+            erst_entries: regs::hcsparams2_erst_entries(structural2),
             // Resolved from the operational `PAGESIZE` register below, once
             // the operational base (`CAPLENGTH`) is known.
             page_size: 0,
             ac64: regs::hccparams1_ac64(capability),
             csz: regs::hccparams1_csz(capability),
+            cfc: regs::hccparams1_cfc(capability),
         };
         // The scratchpad buffers are each one controller page and
         // page-aligned; read the size now so [`Self::start`] can
@@ -626,6 +639,38 @@ impl<H: RegisterBlock> Xhci<H> {
         self.db_base
     }
 
+    /// How far ahead of the current microframe an isochronous TD must be
+    /// queued (`HCSPARAMS2` IST), in microframes.
+    #[must_use]
+    pub const fn ist_microframes(&self) -> u32 {
+        self.ist_microframes
+    }
+
+    /// Whether the controller honours the Frame ID of every isochronous TD
+    /// (`HCCPARAMS1` CFC); without it only the first TD queued onto an empty
+    /// ring is placed by its Frame ID and the rest run back to back.
+    #[must_use]
+    pub const fn contiguous_frame_ids(&self) -> bool {
+        self.cfc
+    }
+
+    /// Event ring segment table entries the controller takes (`HCSPARAMS2`
+    /// ERST Max).
+    #[must_use]
+    pub const fn event_ring_segments(&self) -> u32 {
+        self.erst_entries
+    }
+
+    /// The microframe the controller is in (`MFINDEX`), wrapping every 2048
+    /// frames.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the register window refuses the read.
+    pub fn microframe_index(&self) -> Result<u32, DriverError> {
+        Ok(self.host.read32(self.rt_base + regs::MFINDEX)? & regs::MFINDEX_MASK)
+    }
+
     fn write_ir0(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
         self.host
             .write32(self.rt_base + regs::IR0_BASE + offset, value)
@@ -633,8 +678,8 @@ impl<H: RegisterBlock> Xhci<H> {
 
     /// Program the DMA structures and start the controller (
     /// steps 5–7): `CONFIG` (all reported slots enabled), `DCBAAP`,
-    /// `CRCR` (consumer cycle state 1), interrupter 0's single-entry
-    /// event ring segment table and dequeue pointer, then Run/Stop.
+    /// `CRCR` (consumer cycle state 1), interrupter 0's event ring segment
+    /// table and dequeue pointer, then Run/Stop.
     ///
     /// # Errors
     ///
@@ -659,7 +704,7 @@ impl<H: RegisterBlock> Xhci<H> {
         self.write_op(regs::DCBAAP + 4, high_dword(prog.dcbaap))?;
         self.write_op(regs::CRCR, low_dword(prog.command_ring) | regs::CRCR_RCS)?;
         self.write_op(regs::CRCR + 4, high_dword(prog.command_ring))?;
-        self.write_ir0(regs::IR_ERSTSZ, 1)?;
+        self.write_ir0(regs::IR_ERSTSZ, prog.erst_entries)?;
         self.write_ir0(regs::IR_ERSTBA, low_dword(prog.erst))?;
         self.write_ir0(regs::IR_ERSTBA + 4, high_dword(prog.erst))?;
         self.write_ir0(regs::IR_ERDP, low_dword(prog.event_segment))?;
@@ -670,15 +715,17 @@ impl<H: RegisterBlock> Xhci<H> {
     }
 
     /// Advance interrupter 0's event ring dequeue pointer to `erdp`
-    /// (the device-visible address of the next unconsumed event slot),
-    /// clearing Event Handler Busy (§5.5.2.3.3).
+    /// (the device-visible address of the next unconsumed event slot), in
+    /// segment `segment` of the table, clearing Event Handler Busy
+    /// (§5.5.2.3.3).
     ///
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the register window rejects
     ///   the write.
-    pub fn ack_event(&mut self, erdp: u64) -> Result<(), DriverError> {
-        self.write_ir0(regs::IR_ERDP, low_dword(erdp) | regs::ERDP_EHB)?;
+    pub fn ack_event(&mut self, erdp: u64, segment: u32) -> Result<(), DriverError> {
+        let desi = segment & regs::ERDP_DESI_MASK;
+        self.write_ir0(regs::IR_ERDP, low_dword(erdp) | desi | regs::ERDP_EHB)?;
         self.write_ir0(regs::IR_ERDP + 4, high_dword(erdp))
     }
 

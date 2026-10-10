@@ -43,6 +43,8 @@ use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
 use tairix_appconf::Registry;
+use tairix_audio::stream::DeviceControl;
+use tairix_audio::volume::level_at_permille;
 use tairix_colour::Rgb;
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
@@ -69,6 +71,7 @@ use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::notices;
 use crate::pictures::{self, Chooser, PictureWanted, Pictured, Pictures};
 use crate::saver::SaverOption;
+use crate::sound::{self, SoundReading, SoundRow};
 
 /// The UI scales the surface offers, as percentages of the reference
 /// density.
@@ -1111,6 +1114,8 @@ pub(crate) enum Owner {
     Action(Action),
     /// A settable of the desktop's own document chosen by its picture.
     Pictures(Chooser),
+    /// One control of one sound device, which the audio service owns.
+    Sound(SoundRow),
 }
 
 /// A settable a composition **declares** in a static table, as opposed to
@@ -1529,6 +1534,9 @@ pub enum Composition {
     Screensaver,
     /// The Lock Screen pane.
     LockScreen,
+    /// The Sound pane: one plate per sink and source, and what is recording,
+    /// discovered from the audio service.
+    Sound,
 }
 
 impl Composition {
@@ -1548,7 +1556,7 @@ impl Composition {
             Self::Keyboard => &KEYBOARD_GROUPS,
             Self::Screensaver => &SCREENSAVER_GROUPS,
             Self::LockScreen => &LOCK_GROUPS,
-            Self::Ethernet | Self::Dns | Self::Users => &[],
+            Self::Ethernet | Self::Dns | Self::Users | Self::Sound => &[],
         }
     }
 
@@ -1564,7 +1572,8 @@ impl Composition {
             | Self::Trackpad
             | Self::Keyboard
             | Self::Screensaver
-            | Self::LockScreen => Posture::Immediate,
+            | Self::LockScreen
+            | Self::Sound => Posture::Immediate,
             // Writing either of the machine's stores is a re-authenticated
             // run of the tool that owns them, which is not something to ask
             // for per pointer sample.
@@ -1665,7 +1674,8 @@ impl Composition {
             | Self::TcpIp
             | Self::Ethernet
             | Self::Dns
-            | Self::Users => &[],
+            | Self::Users
+            | Self::Sound => &[],
         }
     }
 
@@ -1682,6 +1692,7 @@ impl Composition {
             Self::Ethernet => network::ADDRESSING_FACTS.to_vec(),
             Self::Dns => network::RESOLVER_FACTS.to_vec(),
             Self::Users => accounts::ACCOUNT_FACTS.to_vec(),
+            Self::Sound => sound::SOUND_FACTS.to_vec(),
             Self::Notifications => self
                 .declared_labels()
                 .chain(notices::SOURCE_FACTS.iter().copied())
@@ -1729,6 +1740,15 @@ impl Composition {
                 Built::plain((groups, owners))
             }
             Self::Users => Built::plain(users(documents)),
+            Self::Sound => {
+                let (groups, rows) = sound::groups(documents.sound);
+                Built::plain((
+                    groups,
+                    rows.into_iter()
+                        .map(|rows| rows.into_iter().map(Owner::Sound).collect())
+                        .collect(),
+                ))
+            }
             Self::Notifications => {
                 let mut built = self.declared(documents);
                 let (group, sources) = notices::source_group(
@@ -1900,6 +1920,9 @@ pub(crate) struct Documents<'a> {
     /// The live resolver set the stack answered with, or `None` while the
     /// reading has not landed.
     pub(crate) resolvers: Option<&'a [NetServerAddr]>,
+    /// The sound devices and captures the audio service answered with, or
+    /// `None` while the reading has not landed.
+    pub(crate) sound: Option<&'a SoundReading>,
     /// The account readings: the caller's own record, the two ungated
     /// directories, and whatever an authenticated listing answered.
     pub(crate) accounts: &'a AccountFacts,
@@ -1927,7 +1950,8 @@ const fn secret_owner(owner: Owner) -> bool {
         | Owner::Interface(_)
         | Owner::Source(_)
         | Owner::Action(_)
-        | Owner::Pictures(_) => false,
+        | Owner::Pictures(_)
+        | Owner::Sound(_) => false,
     }
 }
 
@@ -1985,6 +2009,16 @@ pub enum FormOutcome {
     /// document as the pane shows them, which the desktop previews without
     /// keeping.
     PreviewScreensaver(String),
+    /// The reader changed a sound device's control: live while a level is
+    /// dragged, and `settled` where it rests.
+    Sound {
+        /// The device.
+        device_id: u32,
+        /// What to change.
+        control: DeviceControl,
+        /// Whether the interaction has ended.
+        settled: bool,
+    },
 }
 
 /// A composed pane: the groups it draws, and the setting behind each row.
@@ -2024,6 +2058,7 @@ pub struct Form {
     /// The live resolver set the stack answered with, kept so a rebuild
     /// restates it rather than dropping back to unmeasured.
     resolvers: Option<Vec<NetServerAddr>>,
+    sound: Option<SoundReading>,
     /// The account readings the plates are discovered from and a staged
     /// change is measured against.
     accounts: AccountFacts,
@@ -2082,6 +2117,7 @@ impl Form {
             addressing: documents.addressing.clone(),
             staged: documents.staged.to_vec(),
             resolvers: documents.resolvers.map(<[_]>::to_vec),
+            sound: documents.sound.cloned(),
             accounts: documents.accounts.clone(),
             staged_accounts: documents.staged_accounts.to_vec(),
             cursor_sets: documents.cursor_sets.to_vec(),
@@ -2140,6 +2176,12 @@ impl Form {
     /// Adopt the live resolver set the stack answered with.
     pub(crate) fn adopt_resolvers(&mut self, resolvers: Option<&[NetServerAddr]>) {
         self.resolvers = resolvers.map(<[_]>::to_vec);
+        self.rebuild();
+    }
+
+    /// Adopt what the audio service answered.
+    pub(crate) fn adopt_sound(&mut self, reading: Option<&SoundReading>) {
+        self.sound = reading.cloned();
         self.rebuild();
     }
 
@@ -2327,7 +2369,8 @@ impl Form {
             | Owner::Account(_)
             | Owner::Source(_)
             | Owner::Action(_)
-            | Owner::Pictures(_) => None,
+            | Owner::Pictures(_)
+            | Owner::Sound(_) => None,
             Owner::Machine(setting) => {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
@@ -2539,6 +2582,7 @@ impl Form {
             addressing: &self.addressing,
             staged: &self.staged,
             resolvers: self.resolvers.as_deref(),
+            sound: self.sound.as_ref(),
             accounts: &self.accounts,
             staged_accounts: &self.staged_accounts,
             notify_sources: self.notify_sources.as_deref(),
@@ -2977,6 +3021,9 @@ impl Form {
         else {
             return FormOutcome::Changed;
         };
+        if let Owner::Sound(row) = owner {
+            return sound_outcome(row, action.action);
+        }
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
             // A slider settles once, where its drag or its key step ended,
@@ -3119,7 +3166,7 @@ impl Form {
                 FormOutcome::Staged
             }
             // A command row offers no choice list to choose from.
-            Owner::Action(_) => FormOutcome::Changed,
+            Owner::Action(_) | Owner::Sound(_) => FormOutcome::Changed,
             Owner::Account(setting) => {
                 // The lock state is the pane's one closed account field;
                 // an index outside the list this surface built stages
@@ -3594,5 +3641,29 @@ impl Form {
                 .iter()
                 .any(tairix_controls::FieldRow::popup_open)
         })
+    }
+}
+
+/// What a sound row's `action` asks of the audio service. A level moves live
+/// as it is dragged; a default once chosen is not unchosen by its row, since
+/// a direction always has one.
+pub(crate) fn sound_outcome(row: SoundRow, action: FieldAction) -> FormOutcome {
+    let (device_id, control, settled) = match (row, action) {
+        (SoundRow::Level(id), FieldAction::SetValue { permille }) => {
+            (id, DeviceControl::Level(level_at_permille(permille)), false)
+        }
+        (SoundRow::Level(id), FieldAction::Settled { permille }) => {
+            (id, DeviceControl::Level(level_at_permille(permille)), true)
+        }
+        (SoundRow::Mute(id), FieldAction::Set { on }) => (id, DeviceControl::Mute(on), true),
+        (SoundRow::Default(id), FieldAction::Set { on: true }) => {
+            (id, DeviceControl::Default, true)
+        }
+        _ => return FormOutcome::Changed,
+    };
+    FormOutcome::Sound {
+        device_id,
+        control,
+        settled,
     }
 }

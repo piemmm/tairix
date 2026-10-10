@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
-use tairix_abi::{Errno, FileKind};
+use tairix_abi::{Errno, FileKind, RenameFlags};
 use tairix_procinfo::VolumeBytes;
 
 /// One directory entry as the listing reports it: exactly the fields the
@@ -230,12 +230,15 @@ pub trait Fs {
 
     /// Rename `src` to `dst` atomically within one volume, or report
     /// [`RenameOutcome::CrossDevice`] when the two paths live on different
-    /// volumes so the caller can fall back to copy-then-remove.
+    /// volumes so the caller can fall back to copy-then-remove. An occupied
+    /// `dst` is replaced unless `flags` refuses it.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises for a non-boundary failure.
-    fn rename(&mut self, src: &str, dst: &str) -> Result<RenameOutcome, Errno>;
+    /// Any [`Errno`] the filesystem raises for a non-boundary failure —
+    /// [`Errno::AlreadyExists`] for an occupied `dst` under
+    /// [`RenameFlags::NO_REPLACE`].
+    fn rename(&mut self, src: &str, dst: &str, flags: RenameFlags) -> Result<RenameOutcome, Errno>;
 }
 
 /// What a [`Fs::rename`] achieved: the atomic rename, or the honest

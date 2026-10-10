@@ -57,6 +57,7 @@ lie about.
 | **V13** | A storage entry reads its device's busy share; every byte trace is drawn against the least power of two seating its window's peak, stated on the hero's axis | V4, V5 | S4, S5 | done |
 | **V14** | The window is cut from the icon bar's glass, frosted deeper: its bare ground at `chrome_alpha` over `window_backdrop_blur`, everything on it solid, the blur asked for before the first frame and on every desktop change | — | S1 | done |
 | **V15** | One row per program: every record the kernel marks sandboxed is folded into the row of the owner its parent link names — CPU, memory and disk summed — and the task count, the tray's top task, the stopped count and the top consumers are taken from the folded rows | — | S4 | done |
+| **V16** | Audio pane — each sink and source with its level, mute, default, measured rate and lost frames, and the streams with their owners, devices, positions and underruns; its own `Sound` rail group | V1 | S4 | done |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
 | — | The section frame resolver, the fixed drop order and `PRIMARY_FLOOR` | — | S3 | done |
@@ -389,8 +390,9 @@ reading; a fact list cannot carry it.
 - **sidebar — the device rail.** One entry per *discovered device*, grouped:
   `Resources` (CPU, Memory), `Storage` (one per storage device), `Network`
   (one per managed interface), `Graphics` (the compositor), `Accelerators`
-  (one per matching hardware-tree node, S8), then `Machine` (Identity &
-  uptime, Sessions & seats, Permissions & limits). Each device entry carries
+  (one per matching hardware-tree node, S8), `Sound` (the sound devices,
+  `plans/SOUND.md` §Desktop integration), then `Machine` (Identity & uptime,
+  Sessions & seats, Permissions & limits). Each device entry carries
   its name, its current reading and its own bounded trace, so the rail is a
   live summary of the whole machine and the pane is the detail of one part of
   it. The `Machine` group's entries carry no trace: they are facts, not rates,
@@ -578,6 +580,10 @@ again inside itself.
     offloads, and the stack block (sockets, resolver, time servers, defence).
   - **Graphics** (`06-graphics.png`) — the frame-work breakdown, the
     compositing path, and the graphics device.
+  - **Audio** — each output and input with its level, mute, default, measured
+    rate and lost frames, and each stream with its owner, device, state,
+    position and underruns; a reading that could not be taken states its
+    absence. It carries no trace: no fraction of a whole describes sound.
   - **An accelerator** (`07-accelerator.png`) — what the node's discovery
     genuinely reports, and the readings awaiting S8's query. `D1` landed the
     class, so `HwDeviceClass::Accelerator` exists and a real PCI or

@@ -96,7 +96,9 @@ directories grow by one zeroed cluster at a time when their entry slots
 are exhausted, up to the format's 65,536 entries, past which a create is
 refused as out of space; and every FAT
 mutation is mirrored across all FAT copies. Sub-block writes are
-read-modified-written so neighbouring bytes are preserved.
+read-modified-written so neighbouring bytes are preserved. A rename writes the
+entry afresh under its new name and alias, carrying its attribute byte and its
+stored stamps verbatim, then frees the old slots.
 
 ## End-to-end QEMU vertical
 
@@ -122,8 +124,11 @@ MMIO sibling runs identical code.
 FAT32 stores no owner, mode, ACL, or capability gate. Those live in the
 VFS metadata layer ([Permissions](./permissions.md), `AGENTS.md` §5.3);
 the driver makes no permission decisions (§5.4 — the VFS is the policy
-point, the driver is raw structural I/O). Case-folding and Unicode
-normalisation policy likewise belong to the VFS.
+point, the driver is raw structural I/O). Names match ignoring ASCII case, as
+the format requires, and the driver declares that rule
+(`NameMatching::AsciiCaseInsensitive`), so the VFS applies it to a no-replace
+rename: `B.TXT` beside `b.txt` is a clash, and a rename to a case variant of an
+entry's own name re-spells the entry. No Unicode normalisation is applied.
 
 ## Limitations
 

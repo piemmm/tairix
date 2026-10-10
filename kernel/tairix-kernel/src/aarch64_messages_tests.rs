@@ -1,7 +1,7 @@
 extern crate std;
 
-use tairix_fdt::fixture::DtbBuilder;
 use tairix_fdt::pci::each_pci_host;
+use tairix_fdt::write::FdtWriter;
 
 use super::*;
 
@@ -34,7 +34,7 @@ fn host_tree(msi_map: Option<&[u32]>) -> std::vec::Vec<u8> {
             .flat_map(|value| value.to_be_bytes())
             .collect()
     };
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);

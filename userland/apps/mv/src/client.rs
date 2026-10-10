@@ -6,6 +6,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::{Errno, RenameFlags};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::{join, leaf_name};
 
@@ -65,7 +66,7 @@ const OWN_WORD: &str = "mv";
 ///   destination (or at any destination under `-T`), or a `-t` operand
 ///   that is not an existing directory.
 /// * [`MvError::Stat`] — an operand could not be inspected; carries the
-///   underlying [`Errno`](tairix_abi::Errno).
+///   underlying [`Errno`].
 /// * [`MvError::Rename`] — a rename failed for a non-boundary reason.
 /// * [`MvError::Read`] / [`MvError::Create`] / [`MvError::Write`] — a
 ///   cross-device copy failed.
@@ -161,25 +162,44 @@ fn move_operand(
     prompt: &dyn Prompt,
 ) -> Result<(), MvError> {
     let kind = fs.kind(source).map_err(MvError::Stat)?;
-    if stat(target, fs)?.is_some() {
-        match options.clobber {
-            Clobber::Overwrite => {}
-            // `-n`: an existing destination is left untouched and the
-            // source skipped.
-            Clobber::Skip => return Ok(()),
-            Clobber::Prompt => {
-                let question = format!("overwrite '{target}'?");
-                if !prompt.confirm(&question).map_err(MvError::Prompt)? {
-                    return Ok(());
-                }
-            }
-        }
+    let occupied = stat(target, fs)?.is_some();
+    if occupied && !may_replace(target, options, prompt)? {
+        return Ok(());
     }
-    match fs.rename(source, target) {
+    // Under `-n` or `-i` nothing the look did not decide about may be
+    // replaced: a destination created since is decided as if it had been
+    // there, with the kernel refusing the move rather than destroying it.
+    let flags = if occupied || options.clobber == Clobber::Overwrite {
+        RenameFlags::empty()
+    } else {
+        RenameFlags::NO_REPLACE
+    };
+    let outcome = match fs.rename(source, target, flags) {
+        Err(Errno::AlreadyExists) if flags.refuses_replace() => {
+            if !may_replace(target, options, prompt)? {
+                return Ok(());
+            }
+            fs.rename(source, target, RenameFlags::empty())
+        }
+        other => other,
+    };
+    match outcome {
         Ok(RenameOutcome::Renamed) => Ok(()),
         Ok(RenameOutcome::CrossDevice) => relocate(source, kind, target, fs),
         Err(_) if options.force => force_retry(source, kind, target, fs),
         Err(errno) => Err(MvError::Rename(errno)),
+    }
+}
+
+/// Whether the existing `target` may be replaced: always by default, never
+/// under `-n`, and on the user's answer under `-i`.
+fn may_replace(target: &str, options: Options, prompt: &dyn Prompt) -> Result<bool, MvError> {
+    match options.clobber {
+        Clobber::Overwrite => Ok(true),
+        Clobber::Skip => Ok(false),
+        Clobber::Prompt => prompt
+            .confirm(&format!("overwrite '{target}'?"))
+            .map_err(MvError::Prompt),
     }
 }
 
@@ -195,7 +215,7 @@ fn force_retry(
     // Remove it and retry once; a removal error is irrelevant if the retried
     // rename then succeeds.
     let _ = fs.remove_file(target);
-    match fs.rename(source, target) {
+    match fs.rename(source, target, RenameFlags::empty()) {
         Ok(RenameOutcome::Renamed) => Ok(()),
         Ok(RenameOutcome::CrossDevice) => relocate(source, kind, target, fs),
         Err(errno) => Err(MvError::Rename(errno)),

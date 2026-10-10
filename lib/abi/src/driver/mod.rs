@@ -53,6 +53,8 @@ pub mod audio_channel;
 pub mod audio_ring;
 pub mod block;
 pub mod bus;
+pub mod clock;
+pub mod codec;
 pub mod display;
 pub mod dma;
 pub mod dmaengine;
@@ -469,6 +471,15 @@ pub enum DriverError {
     /// healthy and the machine is short of memory, so freeing memory can
     /// clear it. Maps to [`Errno::OutOfMemory`].
     OutOfMemory = 22,
+    /// The bus cannot schedule the periodic transfers a setting needs.
+    ///
+    /// A USB host controller refuses a Configure Endpoint whose isochronous
+    /// or interrupt endpoints overrun its periodic schedule (xHCI's Bandwidth
+    /// Error). The device and the controller are healthy, so this is neither
+    /// [`DeviceFault`](Self::DeviceFault) nor
+    /// [`NoSpace`](Self::NoSpace): releasing another periodic stream on the
+    /// bus can clear it. Maps to [`Errno::NoBandwidth`].
+    NoBandwidth = 23,
 }
 
 impl DriverError {
@@ -512,6 +523,7 @@ impl DriverError {
             20 => Ok(Self::DirectoryNotEmpty),
             21 => Ok(Self::DirectoryCycle),
             22 => Ok(Self::OutOfMemory),
+            23 => Ok(Self::NoBandwidth),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -543,6 +555,7 @@ impl DriverError {
             Self::AlreadyExists => Errno::AlreadyExists,
             Self::DirectoryNotEmpty => Errno::NotEmpty,
             Self::OutOfMemory => Errno::OutOfMemory,
+            Self::NoBandwidth => Errno::NoBandwidth,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -582,6 +595,7 @@ impl DriverError {
             Errno::PermissionDenied => Self::PermissionDenied,
             Errno::NoSpace => Self::NoSpace,
             Errno::OutOfMemory => Self::OutOfMemory,
+            Errno::NoBandwidth => Self::NoBandwidth,
             Errno::MediumError => Self::MediumError,
             Errno::DeviceOffline => Self::DeviceOffline,
             Errno::WouldBlock | Errno::EndpointStalled => Self::Busy,
@@ -1319,6 +1333,7 @@ mod tests {
         assert_eq!(DriverError::DirectoryNotEmpty.as_i32(), 20);
         assert_eq!(DriverError::DirectoryCycle.as_i32(), 21);
         assert_eq!(DriverError::OutOfMemory.as_i32(), 22);
+        assert_eq!(DriverError::NoBandwidth.as_i32(), 23);
     }
 
     #[test]
@@ -1346,6 +1361,7 @@ mod tests {
         assert_eq!(DriverError::DirectoryNotEmpty.as_errno(), Errno::NotEmpty);
         assert_eq!(DriverError::DirectoryCycle.as_errno(), Errno::OutOfRange);
         assert_eq!(DriverError::OutOfMemory.as_errno(), Errno::OutOfMemory);
+        assert_eq!(DriverError::NoBandwidth.as_errno(), Errno::NoBandwidth);
     }
 
     #[test]
@@ -1373,12 +1389,13 @@ mod tests {
             DriverError::DirectoryNotEmpty,
             DriverError::DirectoryCycle,
             DriverError::OutOfMemory,
+            DriverError::NoBandwidth,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(23), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(24), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

@@ -401,6 +401,18 @@ sandboxes a parse imports it:
   so the retry, rotation, and Kiss-o'-Death discipline has one
   implementation whether or not the decode was sandboxed.
 
+- **Sound decoding** (`audiodecode`): a sound file is decoded
+  (`tairix_sound`) by a long-lived worker under a supervised session that is
+  handed the file's length and never the file, so its only reach into the
+  file is the pages it asks for, each page-aligned, inside the file and
+  bounded by `MAX_NEED_BYTES` — and no more often a request than every
+  answered need holding a page more could explain, so a worker that asks for
+  ever is condemned rather than served. Its page cache is keyed by a seed the owner
+  draws, so a file cannot choose colliding offsets, and a request whose
+  working set outgrows the cache is refused rather than looping. The owner's
+  `AudioDecodeClient` checks every answer against the request it answers,
+  and brings a replacement back only to the same stream, once per position.
+
 Host tests inject the in-process `loopback` fake exactly as the
 `Fs`/`Tty` seams take fakes, so a consumer's full parent-side path runs
 under plain `cargo test`.
@@ -452,9 +464,15 @@ under plain `cargo test`.
   after a wallpaper sequence on the same worker); the supervised session
   (generations, paced replacement and its reset after a stable window,
   a clean end of stream counted as a failure, condemnation, and each
-  failure logged exactly once); and the `fuzz_sandbox` harness (hostile
-  input files through the decode, helpdoc, and imagerender icon/wallpaper
-  request decoders, hostile worker replies into every client decoder) in
+  failure logged exactly once); the `audiodecode` service (a decode through
+  the worker equal to an in-process one, one need a read-ahead window, a
+  working set past the cache refused, a replacement resumed by seeking or by
+  decoding up to the position, a changed stream or a second failure at one
+  position given up, and every dishonest need, block, seek, open and refusal
+  refused); and the `fuzz_sandbox` harness (hostile
+  input files through the decode, helpdoc, imagerender icon/wallpaper and
+  audiodecode request decoders — the last a differential against an
+  in-process decode — and hostile worker replies into every client decoder) in
   `cargo xtask fuzz`. `fuzz_discoveryd` drives a supervised session
   against a hostile worker.
 - `userland/apps/man`: the loopback-driven suite runs the real

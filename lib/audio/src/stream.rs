@@ -22,9 +22,12 @@
 //! A client with a full ring parks on the stream's notify mailbox and is woken
 //! when the service has taken frames. There is no retry loop and no sleep.
 
+use alloc::vec::Vec;
+
 use tairix_abi::audio::{
-    decode_clock_reply, decode_open_reply, decode_state_reply, AudioNotify, AudioRequest,
-    ClockReport, OpenParams, StreamGrant, StreamReport, StreamState, AUDIO_MAX_REPLY,
+    decode_clock_reply, decode_enumerate_reply, decode_open_reply, decode_state_reply,
+    decode_streams_reply, AudioDeviceDescriptor, AudioGain, AudioNotify, AudioRequest, ClockReport,
+    OpenParams, StreamDescriptor, StreamGrant, StreamReport, StreamState, AUDIO_MAX_REPLY,
     AUDIO_MAX_REQUEST, AUDIO_NOTIFY_LEN,
 };
 use tairix_abi::driver::audio::{Frames, StreamDirection};
@@ -52,6 +55,279 @@ pub trait AudioTransport {
     ///
     /// The transport's own [`Errno`].
     fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Take the frame waiting on the stream's notify mailbox, or `None` when
+    /// none is; never parks.
+    ///
+    /// # Errors
+    ///
+    /// The transport's own [`Errno`].
+    fn try_notify(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno>;
+}
+
+/// Every device of `direction` the caller may see, by ascending id.
+///
+/// # Errors
+///
+/// The service's or the transport's refusal, [`Errno::BadMagic`] for a
+/// service whose ids do not ascend, or [`Errno::OutOfMemory`].
+pub fn devices<T: AudioTransport>(
+    transport: &mut T,
+    direction: StreamDirection,
+) -> Result<Vec<AudioDeviceDescriptor>, Errno> {
+    let mut reply = [0u8; AUDIO_MAX_REPLY];
+    walk(
+        |after| {
+            decode_enumerate_reply(StreamClient::send(
+                transport,
+                &AudioRequest::Enumerate { direction, after },
+                &mut reply,
+            )?)
+        },
+        |device| device.device_id,
+    )
+}
+
+/// Every stream the service holds, by ascending id. The service answers this
+/// only to a caller holding `CAP_SYSINFO_INTROSPECT`.
+///
+/// # Errors
+///
+/// As [`devices`].
+pub fn streams<T: AudioTransport>(transport: &mut T) -> Result<Vec<StreamDescriptor>, Errno> {
+    let mut reply = [0u8; AUDIO_MAX_REPLY];
+    walk(
+        |after| {
+            decode_streams_reply(StreamClient::send(
+                transport,
+                &AudioRequest::ListStreams { after },
+                &mut reply,
+            )?)
+        },
+        |stream| stream.stream_id,
+    )
+}
+
+/// A change to one device's controls.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeviceControl {
+    /// Make it its direction's default.
+    Default,
+    /// Set its own level.
+    Level(AudioGain),
+    /// Mute or unmute it.
+    Mute(bool),
+}
+
+/// Apply `control` to the device `device_id`. The service admits it for the
+/// login session holding the room the device serves, for anybody while the
+/// room is unclaimed, and for nobody while it is withheld.
+///
+/// # Errors
+///
+/// The service's refusal — [`Errno::SeatNotOwner`] outside the room's
+/// tenancy, [`Errno::NotFound`] for no such device — or the transport's.
+pub fn set_control<T: AudioTransport>(
+    transport: &mut T,
+    device_id: u32,
+    control: DeviceControl,
+) -> Result<(), Errno> {
+    let request = match control {
+        DeviceControl::Default => AudioRequest::SetDefault { device_id },
+        DeviceControl::Level(level) => AudioRequest::SetLevel { device_id, level },
+        DeviceControl::Mute(muted) => AudioRequest::SetMute { device_id, muted },
+    };
+    let mut reply = [0u8; AUDIO_MAX_REPLY];
+    decode_status_reply(StreamClient::send(transport, &request, &mut reply)?)
+}
+
+/// Device controls waiting to be applied, with at most one round trip to the
+/// service in flight: a control asked for meanwhile replaces one of its kind
+/// still waiting for its device, so a drag across a volume slider costs one
+/// request at a time however fast the pointer moves. Every round trip lists
+/// the devices after applying what it carries.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ControlQueue {
+    queued: Vec<(u32, DeviceControl)>,
+    trip: Trip,
+}
+
+/// Where a [`ControlQueue`]'s round trips stand.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+enum Trip {
+    /// None is in flight and no listing is owed.
+    #[default]
+    Idle,
+    /// None is in flight and a listing is owed.
+    Owed,
+    /// One is in flight; `again` when another listing is owed after it,
+    /// because what it lists may predate the change that asked.
+    InFlight {
+        /// Whether another is owed.
+        again: bool,
+    },
+}
+
+impl ControlQueue {
+    /// A queue that owes nothing.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            queued: Vec::new(),
+            trip: Trip::Idle,
+        }
+    }
+
+    /// Ask for `control` on `device_id`, replacing a waiting one of its kind.
+    ///
+    /// It goes to the back however long the one it replaces has waited:
+    /// making two devices default is ordered, so the one chosen last must be
+    /// the one applied last.
+    pub fn ask(&mut self, device_id: u32, control: DeviceControl) {
+        self.queued
+            .retain(|&(device, held)| device != device_id || !same_kind(held, control));
+        self.queued.push((device_id, control));
+    }
+
+    /// Put `controls` ahead of whatever waits, as they were asked earlier: one
+    /// of a kind already waiting for its device is dropped, the waiting one
+    /// being newer.
+    pub fn ask_first(&mut self, mut controls: Vec<(u32, DeviceControl)>) {
+        controls.retain(|&(device_id, control)| !self.waits(device_id, control));
+        controls.append(&mut self.queued);
+        self.queued = controls;
+    }
+
+    fn waits(&self, device_id: u32, control: DeviceControl) -> bool {
+        self.queued
+            .iter()
+            .any(|&(device, held)| device == device_id && same_kind(held, control))
+    }
+
+    /// Ask for the devices to be listed again.
+    pub fn refresh(&mut self) {
+        self.trip = match self.trip {
+            Trip::Idle | Trip::Owed => Trip::Owed,
+            Trip::InFlight { .. } => Trip::InFlight { again: true },
+        };
+    }
+
+    /// The controls of the round trip to start, if one is owed and none is
+    /// in flight.
+    pub fn next_trip(&mut self) -> Option<Vec<(u32, DeviceControl)>> {
+        match self.trip {
+            Trip::InFlight { .. } => return None,
+            Trip::Idle if self.queued.is_empty() => return None,
+            Trip::Idle | Trip::Owed => {}
+        }
+        self.trip = Trip::InFlight { again: false };
+        Some(core::mem::take(&mut self.queued))
+    }
+
+    /// The round trip in flight has come back.
+    pub fn landed(&mut self) {
+        self.trip = match self.trip {
+            Trip::InFlight { again: true } | Trip::Owed => Trip::Owed,
+            Trip::InFlight { again: false } | Trip::Idle => Trip::Idle,
+        };
+    }
+}
+
+const fn same_kind(a: DeviceControl, b: DeviceControl) -> bool {
+    matches!(
+        (a, b),
+        (DeviceControl::Default, DeviceControl::Default)
+            | (DeviceControl::Level(_), DeviceControl::Level(_))
+            | (DeviceControl::Mute(_), DeviceControl::Mute(_))
+    )
+}
+
+/// Collect what `next` answers after each id in turn until it answers
+/// [`Errno::NotFound`]. An id that does not ascend would walk for ever, so it
+/// is refused.
+fn walk<R, K: Copy + Default + Ord>(
+    mut next: impl FnMut(K) -> Result<R, Errno>,
+    id: impl Fn(&R) -> K,
+) -> Result<Vec<R>, Errno> {
+    let mut found = Vec::new();
+    let mut after = K::default();
+    loop {
+        match next(after) {
+            Ok(record) if id(&record) > after => {
+                after = id(&record);
+                found.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+                found.push(record);
+            }
+            Ok(_) => return Err(Errno::BadMagic),
+            Err(Errno::NotFound) => return Ok(found),
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Why a stream could not be opened with its ring attached; nothing of it is
+/// left open.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum OpenFailure {
+    /// The service refused the stream, or was not there.
+    Refused(Errno),
+    /// Its notify mailbox could not be bound to this process and the service.
+    Notify(Errno),
+    /// Its shared ring could not be made, granted, or attached.
+    Ring(Errno),
+}
+
+impl OpenFailure {
+    /// The refusal underneath.
+    #[must_use]
+    pub const fn errno(self) -> Errno {
+        match self {
+            Self::Refused(errno) | Self::Notify(errno) | Self::Ring(errno) => errno,
+        }
+    }
+}
+
+impl core::fmt::Display for OpenFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (what, errno) = match self {
+            Self::Refused(errno) => ("the audio service refused the stream", errno),
+            Self::Notify(errno) => ("the stream's notify mailbox could not be bound", errno),
+            Self::Ring(errno) => ("the stream's ring could not be attached", errno),
+        };
+        write!(f, "{what}: {errno}")
+    }
+}
+
+/// When a client draining its notify mailbox must read its stream's state
+/// back.
+///
+/// The service's notifications are best effort, and it drops one only when the
+/// mailbox is full. A dropped notification therefore leaves a full mailbox
+/// behind it, which wakes the client, and the drain that empties it takes at
+/// least a mailbox's worth — so that drain, and only that one, may have missed
+/// something, a stream's `Idle` or `DeviceLost` included.
+#[derive(Copy, Clone, Debug)]
+pub struct NotifyDrain {
+    capacity: usize,
+    taken: usize,
+}
+
+impl NotifyDrain {
+    /// A drain of a mailbox holding `capacity` notifications.
+    #[must_use]
+    pub const fn new(capacity: usize) -> Self {
+        Self { capacity, taken: 0 }
+    }
+
+    /// One notification was taken.
+    pub fn took(&mut self) {
+        self.taken = self.taken.saturating_add(1);
+    }
+
+    /// The mailbox is empty: whether the stream's state must be read back.
+    pub fn emptied(&mut self) -> bool {
+        core::mem::take(&mut self.taken) >= self.capacity
+    }
 }
 
 /// What one [`StreamClient::write_at`] moved.
@@ -92,21 +368,21 @@ pub struct StreamClient {
 }
 
 impl StreamClient {
-    /// Open a stream and adopt whatever the service granted.
-    ///
-    /// The grant is not always the request: a device that cannot meet the
-    /// asked-for rate, format or layout answers what it *can* meet, and the
-    /// caller owns the conversion the difference implies. Nothing is
-    /// resampled on its behalf, which is what keeps the bit-exact path a
-    /// property rather than a mode.
+    /// Open a stream and adopt what the service granted: the requested rate,
+    /// format and layout, which the mixer converts to the device's, and a
+    /// ring and latency the device's period allows, which need not be the
+    /// ones asked for.
     ///
     /// # Errors
     ///
     /// The service's refusal, or the transport's.
     pub fn open<T: AudioTransport>(transport: &mut T, params: &OpenParams) -> Result<Self, Errno> {
         let mut reply = [0u8; AUDIO_MAX_REPLY];
-        let length = Self::send(transport, &AudioRequest::Open(*params), &mut reply)?;
-        let grant = decode_open_reply(&reply[..length])?;
+        let grant = decode_open_reply(Self::send(
+            transport,
+            &AudioRequest::Open(*params),
+            &mut reply,
+        )?)?;
         Ok(Self {
             grant,
             direction: params.direction,
@@ -233,17 +509,16 @@ impl StreamClient {
     /// The service's refusal, or the transport's.
     pub fn clock<T: AudioTransport>(&self, transport: &mut T) -> Result<ClockReport, Errno> {
         let mut reply = [0u8; AUDIO_MAX_REPLY];
-        let length = Self::send(
+        decode_clock_reply(Self::send(
             transport,
             &AudioRequest::Clock {
                 stream_id: self.grant.stream_id,
             },
             &mut reply,
-        )?;
-        decode_clock_reply(&reply[..length])
+        )?)
     }
 
-    /// Set this stream's own gain. Zero is unity, and unity is bit-exact.
+    /// Set this stream's own level.
     ///
     /// # Errors
     ///
@@ -251,13 +526,13 @@ impl StreamClient {
     pub fn set_gain<T: AudioTransport>(
         &self,
         transport: &mut T,
-        millibel: i32,
+        gain: AudioGain,
     ) -> Result<(), Errno> {
         Self::status(
             transport,
             &AudioRequest::Gain {
                 stream_id: self.grant.stream_id,
-                millibel,
+                gain,
             },
         )
     }
@@ -285,14 +560,13 @@ impl StreamClient {
     /// The service's refusal, or the transport's.
     pub fn report<T: AudioTransport>(&mut self, transport: &mut T) -> Result<StreamReport, Errno> {
         let mut reply = [0u8; AUDIO_MAX_REPLY];
-        let length = Self::send(
+        let report = decode_state_reply(Self::send(
             transport,
             &AudioRequest::State {
                 stream_id: self.grant.stream_id,
             },
             &mut reply,
-        )?;
-        let report = decode_state_reply(&reply[..length])?;
+        )?)?;
         self.state = report.state;
         self.changed_at = report.changed_at;
         Ok(report)
@@ -329,9 +603,41 @@ impl StreamClient {
     ) -> Result<AudioNotify, Errno> {
         let mut frame = [0u8; AUDIO_NOTIFY_LEN];
         let length = transport.wait_notify(&mut frame)?;
-        let notify = AudioNotify::decode(&frame[..length])?;
+        let notify = decode_notify(&frame, length)?;
         self.adopt(notify);
         Ok(notify)
+    }
+
+    /// Adopt the next notification waiting, never parking; `None` once the
+    /// mailbox is empty. A drain that may have lost one to a full mailbox
+    /// ([`NotifyDrain`]) ends instead with the stream's state read back from
+    /// the service, handed over as a `StateChanged` at the frame it changed
+    /// at.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::await_notify`], or the service's refusal to report.
+    pub fn take_notify<T: AudioTransport>(
+        &mut self,
+        transport: &mut T,
+        drain: &mut NotifyDrain,
+    ) -> Result<Option<AudioNotify>, Errno> {
+        let mut frame = [0u8; AUDIO_NOTIFY_LEN];
+        if let Some(length) = transport.try_notify(&mut frame)? {
+            drain.took();
+            let notify = decode_notify(&frame, length)?;
+            self.adopt(notify);
+            return Ok(Some(notify));
+        }
+        if !drain.emptied() {
+            return Ok(None);
+        }
+        let report = self.report(transport)?;
+        Ok(Some(AudioNotify::StateChanged {
+            stream_id: self.grant.stream_id,
+            state: report.state,
+            at: report.changed_at,
+        }))
     }
 
     /// Adopt a notification's state change, if it is this stream's.
@@ -408,21 +714,26 @@ impl StreamClient {
     /// Issue `request` and expect the shared status-only reply.
     fn status<T: AudioTransport>(transport: &mut T, request: &AudioRequest) -> Result<(), Errno> {
         let mut reply = [0u8; AUDIO_MAX_REPLY];
-        let length = Self::send(transport, request, &mut reply)?;
-        decode_status_reply(&reply[..length])
+        decode_status_reply(Self::send(transport, request, &mut reply)?)
     }
 
-    /// Encode `request`, hand it to the transport, and return the reply's
-    /// length.
-    fn send<T: AudioTransport>(
+    /// Encode `request`, hand it to the transport, and return the reply.
+    fn send<'r, T: AudioTransport>(
         transport: &mut T,
         request: &AudioRequest,
-        reply: &mut [u8],
-    ) -> Result<usize, Errno> {
+        reply: &'r mut [u8],
+    ) -> Result<&'r [u8], Errno> {
         let mut frame = [0u8; AUDIO_MAX_REQUEST];
         let length = request.encode(&mut frame)?;
-        transport.call(&frame[..length], reply)
+        let request = frame.get(..length).ok_or(Errno::LengthOutOfRange)?;
+        let length = transport.call(request, reply)?;
+        reply.get(..length).ok_or(Errno::LengthOutOfRange)
     }
+}
+
+/// The notification in the first `length` bytes of `frame`.
+fn decode_notify(frame: &[u8], length: usize) -> Result<AudioNotify, Errno> {
+    AudioNotify::decode(frame.get(..length).ok_or(Errno::LengthOutOfRange)?)
 }
 
 #[cfg(test)]

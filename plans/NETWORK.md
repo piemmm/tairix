@@ -1551,8 +1551,8 @@ the whole is too large for one change and each leaves the tree working.
   default.
 - **Delivery**: `devmgr` (FS-capable, already drives the stack's admin
   endpoint) reads `system.conf` post-unlock and pushes the settings once
-  over `ApplyNetworkSettings`, fail-soft-retried on each hardware-tree
-  generation bump (`netcfg` module: `NetworkConfigSource` seam +
+  over `ApplyNetworkSettings`, fail-soft-retried each time the hardware
+  tree moves or a volume is mounted (`netcfg` module: `NetworkConfigSource` seam +
   `settings_from_config` mapping + `NetConfigState`; events 13_012/13_013).
   `devmgr` gains `CAP_FS_ACCESS` (manifest + `DEVMGR_CEILING`) for that one
   read; `netstack` stays filesystem-free (§0).
@@ -1589,8 +1589,9 @@ alias).
   loud (event `13_016`).
 - **devmgr** (`netcfg`): `deliver_interface_configs` pushes each per
   interface, retrying silently on `NotFound` (interface not bound yet) each
-  hw-tree generation bump and recording each success (events
-  `13_014`/`13_015`). The plan is **re-read on every bump**, and a delivery
+  time the hardware tree moves or a volume is mounted, and recording each
+  success (events `13_014`/`13_015`). The plan is **re-read on every
+  reaction**, and a delivery
   mark is forgotten only for an interface whose message actually changed —
   so an administrator's live edit reaches the running stack while an
   untouched interface is not reconfigured for nothing. Reuses

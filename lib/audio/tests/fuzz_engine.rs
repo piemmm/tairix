@@ -37,7 +37,7 @@ use tairix_audio::clock::ClockModel;
 use tairix_audio::convert::{self, Dither, DitherSource};
 use tairix_audio::mix::{Mixer, SinkFormat, StreamMix};
 use tairix_audio::resample::{FilterBank, Ratio, Resampler};
-use tairix_audio::volume::{millibel_to_linear, resolve, VolumeRequest};
+use tairix_audio::volume::{endpoint_level, millibel_to_linear, stream_multiply, VolumeRequest};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -353,8 +353,6 @@ fn exercise_volume(rng: &mut Prng) {
     };
     let request = VolumeRequest {
         stream_millibel: millibel(rng.next_u64()),
-        application_millibel: millibel(rng.next_u64()),
-        sink_millibel: millibel(rng.next_u64()),
         duck_millibel: millibel(rng.next_u64()),
         muted: rng.next_u64() & 1 == 0,
     };
@@ -364,16 +362,27 @@ fn exercise_volume(rng: &mut Prng) {
         u32::try_from(1 + rng.at_most(4_095)).unwrap_or(1),
     )
     .ok();
-    let resolved = resolve(&request, hardware);
+    let level = tairix_abi::audio::AudioGain::new(millibel(rng.next_u64()).min(0))
+        .unwrap_or(tairix_abi::audio::AudioGain::UNITY);
+    let endpoint = endpoint_level(level, rng.next_u64() & 1 == 0, hardware);
     assert!(
-        resolved.software.is_finite() && resolved.software >= 0.0,
-        "resolved a multiply of {}",
-        resolved.software
+        endpoint.software_millibel <= 0,
+        "the mixer was left to amplify by {}",
+        endpoint.software_millibel
     );
-    if let (Some(setting), Some(range)) = (resolved.hardware_millibel, hardware) {
+    let multiply = stream_multiply(&request, endpoint);
+    assert!(
+        multiply.is_finite() && multiply >= 0.0,
+        "resolved a multiply of {multiply}"
+    );
+    if let (Some(setting), Some(range)) = (endpoint.hardware_millibel, hardware) {
         assert!(
             (range.min_millibel()..=range.max_millibel()).contains(&setting),
             "the device was asked for {setting}, outside its own range"
+        );
+        assert!(
+            setting <= 0 || range.min_millibel() > 0,
+            "the device was driven past 0 dB to {setting}"
         );
     }
     // The noise source is driven too: a dithered block must stay finite.

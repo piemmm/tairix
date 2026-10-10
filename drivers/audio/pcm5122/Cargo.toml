@@ -1,0 +1,31 @@
+[package]
+name = "tairix-drv-audio-pcm5122"
+description = "TAIRiX autoloaded user-space driver for the TI PCM5122 DAC over I2C: framing, word length and the clock from the bit clock programmed through the part's register file, its digital volume serving as the stream's gain, behind codec-v1."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `Codec` class trait, the codec vocabulary, the I2C transfer seam and
+# the delay seam.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The register-transaction protocol over the transfer seam.
+tairix-i2c = { path = "../../../lib/i2c", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The exit codes and failure record every audio driver process ends with.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+# The capability-set type the rt-backed host is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The codec-v1 serve loop.
+tairix-codec = { path = "../../../lib/codec", version = "=0.0.0" }
+# The node's grants, and the transfer endpoint as an I2C port.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# `_start` and the parking delay.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

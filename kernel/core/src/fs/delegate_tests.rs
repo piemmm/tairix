@@ -833,8 +833,14 @@ fn delegated_create_of_legacy_top_level_name_is_allowed() {
 
     vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
         .expect("create a renameable source");
-    vfs.rename_via(&admin, &p("/Scratch"), &p("/var"), &mut fs)
-        .expect("delegated rename into a legacy top-level name is allowed");
+    vfs.rename_via(
+        &admin,
+        &p("/Scratch"),
+        &p("/var"),
+        &mut fs,
+        tairix_abi::RenameFlags::empty(),
+    )
+    .expect("delegated rename into a legacy top-level name is allowed");
 }
 
 #[test]
@@ -854,7 +860,13 @@ fn delegated_rename_across_two_backed_mounts_is_cross_volume() {
     vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
         .expect("create a renameable source on the root volume");
     assert_eq!(
-        vfs.rename_via(&admin, &p("/Scratch"), &p("/Storage/usb0/Scratch"), &mut fs),
+        vfs.rename_via(
+            &admin,
+            &p("/Scratch"),
+            &p("/Storage/usb0/Scratch"),
+            &mut fs,
+            tairix_abi::RenameFlags::empty()
+        ),
         Err(VfsError::CrossVolume)
     );
 }
@@ -2391,6 +2403,7 @@ fn unlink_and_rename_still_act_on_the_link_itself() {
         &p("/Storage/usb0/moved"),
         &p("/Storage/usb0/renamed"),
         &mut fs,
+        tairix_abi::RenameFlags::empty(),
     )
     .expect("rename the link");
     assert_eq!(
@@ -2459,15 +2472,27 @@ fn secured_rename_of_a_gated_node_needs_the_capability() {
 
     let aside = p("/Storage/usb0/stolen");
     assert_eq!(
-        vfs.rename_via_secured(&admin, &src, &aside, &mut fs),
+        vfs.rename_via_secured(
+            &admin,
+            &src,
+            &aside,
+            &mut fs,
+            tairix_abi::RenameFlags::empty()
+        ),
         Err(VfsError::PermissionDenied)
     );
 
     let mut holding = CapabilitySet::empty();
     holding.insert(CapabilityId::AUDIT_READ);
     let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
-    vfs.rename_via_secured(&admin_holding, &src, &aside, &mut fs)
-        .expect("the capability holder may move it");
+    vfs.rename_via_secured(
+        &admin_holding,
+        &src,
+        &aside,
+        &mut fs,
+        tairix_abi::RenameFlags::empty(),
+    )
+    .expect("the capability holder may move it");
 }
 
 #[test]
@@ -2487,7 +2512,13 @@ fn secured_rename_over_a_gated_destination_needs_the_capability() {
     gate_child(&mut fs, b"gated.txt");
 
     assert_eq!(
-        vfs.rename_via_secured(&admin, &src, &dst, &mut fs),
+        vfs.rename_via_secured(
+            &admin,
+            &src,
+            &dst,
+            &mut fs,
+            tairix_abi::RenameFlags::empty()
+        ),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -2659,14 +2690,26 @@ fn a_driver_reported_structural_refusal_keeps_its_own_class() {
         Err(VfsError::NotEmpty)
     );
     assert_eq!(
-        vfs.rename_via(&admin, &p("/spare"), &p("/dir"), &mut populated),
+        vfs.rename_via(
+            &admin,
+            &p("/spare"),
+            &p("/dir"),
+            &mut populated,
+            tairix_abi::RenameFlags::empty()
+        ),
         Err(VfsError::NotEmpty)
     );
 
     // Moving a directory under itself can never be made lawful, so it is not
     // the emptiable `NotEmpty` and not a retryable transient.
     assert_eq!(
-        vfs.rename_via(&admin, &p("/dir"), &p("/dir/inner/self"), &mut populated),
+        vfs.rename_via(
+            &admin,
+            &p("/dir"),
+            &p("/dir/inner/self"),
+            &mut populated,
+            tairix_abi::RenameFlags::empty()
+        ),
         Err(VfsError::DirectoryCycle)
     );
     assert_eq!(VfsError::DirectoryCycle.to_errno(), Errno::OutOfRange);

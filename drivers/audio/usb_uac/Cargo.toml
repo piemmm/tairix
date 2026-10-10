@@ -1,0 +1,33 @@
+[package]
+name = "tairix-drv-audio-usb-uac"
+description = "TAIRiX USB Audio Class driver (plans/SOUND.md SND7): binds a USB Audio 1.0 or 2.0 function's control interface, claims its streaming interfaces, and serves every sink and source on it through the `Audio` class trait over the URB transport and the host controller's isochronous streams."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# A `lib` (the bind table and capability set the image builder authors the
+# signed manifest from, and the host-testable function model and device
+# engine) and the `Run` binary devmgr autoloads. It reaches its host
+# controller only through the URB transport, so no `drivers/*` crate is a
+# dependency.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The configuration walk, alternate settings, periodic arithmetic (feedback
+# and pacing), and the URB client the program drives.
+tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The grants the matched node carried: the URB endpoint, the shared buffer,
+# the interface number.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# `_start`, `ipc_call`, the stream ports, and the shared-memory mappings.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -1,0 +1,42 @@
+[package]
+name = "tairix-audioctl"
+description = "TAIRiX `audioctl`: the sound devices' controls from a terminal (plans/SOUND.md SND15). Lists the sinks and sources and the streams on them, and makes a device its direction's default or sets its level or mute, under the room the caller's session holds."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional, on-by-default
+# build feature, so host tooling builds only the engine library and never
+# `tairix-rt`'s `_start`, allocator or panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+[[bin]]
+name = "tairix-audioctl-run"
+path = "src/run.rs"
+
+[dependencies]
+# The audio-v1 descriptors and the `Errno` every refusal is reported with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `audio:` targets a device is named by, the controls, and the typed level.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The streams walk and the one row a device and a stream are printed as.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The bundle's own help, rendered by the one help engine.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+# The freestanding `Run` binary alone links the runtime and the live seams:
+# the audio service's transport, the System Information API's, and the
+# bundle's own help source.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

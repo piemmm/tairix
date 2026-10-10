@@ -100,6 +100,17 @@ dan sylw yn arafach — nid yw byth yn newid canlyniad.
   ychydig filieiliadau ar ôl ei ryddhau pan mai un clic a olygai. Rhowch `0`
   ar gyfer llygoden y mae ei modd tanio cyflym yn anfon parau o gliciau'n
   fwriadol.
+- `audio.output`, `audio.input` — `auto` yn ddiofyn, neu leoliad pwynt
+  terfyn fel y mae `audioctl` yn ei restru (un ar bymtheg o ddigidau hecs,
+  dot, a mynegai'r pwynt terfyn): yr allbwn a'r mewnbwn y mae'r peiriant
+  hwn yn eu ffafrio yn ddiofyn. Daw dewis sesiwn ei hun yn gyntaf; hwn yw'r
+  dewis cyn i neb fewngofnodi ac ar beiriant heb fwrdd gwaith. `auto` yw'r
+  ddyfais gyntaf a ganfuwyd.
+- `audio.level` — mewn desibelau, `0dB` yn ddiofyn, neu wanhad fel `-12dB`
+  neu `-6.5dB`, i ddau le degol ar y mwyaf: y lefel y mae pob allbwn a
+  mewnbwn yn dechrau arni. Byth uwchben `0dB`. Mae'r gwasanaeth sain yn
+  derbyn gwerth newydd yn y cychwyn nesaf; mae `audioctl` yn newid y
+  peiriant sy'n rhedeg.
 
 Mae'r pentwr rhwydwaith yn darllen y gosodiadau `net.*`; daw newid i
 rym pan fydd y pentwr yn cymhwyso'i ffurfweddiad y tro nesaf.

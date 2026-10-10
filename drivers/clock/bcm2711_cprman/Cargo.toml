@@ -1,0 +1,40 @@
+[package]
+name = "tairix-drv-clock-bcm2711-cprman"
+description = "TAIRiX autoloaded user-space driver for the BCM2711 clock manager (brcm,bcm2711-cprman): serves clock-v1 for the audio blocks' clocks, making each rate from the sources the firmware leaves fixed and never retuning a clock another consumer holds."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, on cargo's default paths and names like every sibling
+# driver: the bundle builder cross-compiles `--bin <package>`. The generators
+# and the endpoint (`src/lib.rs`) are host-testable against a register-level
+# model; the `Run` binary (`src/main.rs`) links the userland runtime, so it is
+# freestanding-only and an inert host stub elsewhere (`build.rs`).
+
+[dependencies]
+# The `clock-v1` protocol, the hardware-tree records the endpoint checks and
+# the register seam.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The supplier seam the endpoint asks the kernel about its callers through,
+# and in the driver process the grants the node was admitted with and its
+# register window.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The endpoint walk draws its steps through the shared seed seam, so a failing
+# run is reproducible from its logged seed. Test scaffolding only.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability-set type the rt-backed host is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# Every decision the endpoint takes, recorded with a stable event id.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# `_start`, the wait set and the call endpoint.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

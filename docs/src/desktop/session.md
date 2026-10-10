@@ -653,6 +653,30 @@ The session remembers which sources have notified since it started, at most
 its own Settings application alone: which programs a user runs is theirs to
 see, not any application's to learn.
 
+## Sound
+
+The session follows the audio service through two notices: `AudioCapture`,
+whose count draws the recording indicator, and `AudioDevices`, which moves
+whenever a device or one of its controls does, whoever moved it. Each
+`AudioDevices` edge re-lists the devices on the session's sound worker
+(`sound::SoundSession` over `tairix_audio::stream::ControlQueue`, one round
+trip in flight), and the listing feeds the bar's volume signal and panel.
+
+**The session remembers its user's controls**, in the `audio.*` keys of its
+published settings document (`tairix_wallpaper::SoundControls`): each
+endpoint's level and mute and the preferred sink and source, by location.
+It learns only from a listing that shows the room as its own
+(`ControlAccess::Own`), and only what the user's tenancy set — a level that is
+the machine's baseline (`own_level` false) or a default inherited rather than
+preferred is nobody's choice and is never written down. The listing that
+first shows the room as its own puts the remembered controls back instead of
+learning from it, because a room just claimed shows the baseline or another
+session's leftovers. A level dragged on the bar's panel is remembered where
+it settles; one changed elsewhere is remembered when the change is seen,
+through the latest-wins publisher. An application's apply may not name the
+`audio.*` keys (`merge_applied`): what the user set is the session's own
+reading of the service, never a program's to plant.
+
 ## Resolving taskbar responses
 
 A `tairix_taskbar::TaskbarResponse` flows out of `DesktopShell::handle` as a
@@ -1533,6 +1557,24 @@ bar's presses, drags and release are routed to it
 moved — the bar and the items it slid — is repainted, into the buffer the
 picker's window already holds. A navigation step repaints the whole window into
 that same buffer, since a step never changes the window's size.
+
+### A folder pick
+
+A `PickPurpose::Folder` pick is titled `FOLDER_TITLE` and carries a band of two
+answers under the listing: *Open* chooses the folder shown, and `Enter` goes
+into a selected folder or, with a file or nothing selected, chooses the one
+shown. A file row chooses nothing. The application never holds the folder: the
+session's file worker lists it and keeps the regular files whose content type
+the requester's signed manifest associates (`picker::folder_selection`, in the
+order the picker lists them, never following a link), opens each read-only
+without following a link, and the serve loop delegates each to the requester
+before concluding with `FolderPicked` — how many were delegated and how many
+were left out, the bound (`WINDOW_FOLDER_PICK_MAX`, the most delegations one
+grantor may hold pending to one recipient) reached or a file refused. The
+requester takes them one at a time (`TakePickedFile`), each with its name; the
+window engine holds the untaken ones and refuses a further pick on that window
+until they are taken, since a delegation cannot be withdrawn. A folder that
+cannot be read keeps the picker up stating why.
 
 ### And the trusted picker's own witness
 

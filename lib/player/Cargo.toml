@@ -1,0 +1,46 @@
+[package]
+name = "tairix-player"
+description = "TAIRiX playback engine: a programme of sound files decoded in the parser sandbox and written gapless into one audio-v1 stream while their shape holds, with exact positions, seeks, passes, a peak meter, the seat's holds, track loudness from the files' own tags, and edits re-planned against what is still to be decoded. The engine of both players, `play` and `music.app`; its live seams (feature `rt`) are the one part that performs I/O. no_std, no unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The live seams: the files read through the runtime, the audio service's
+# stream, and the seed a decoder's page cache is keyed by. Enabled only by a
+# freestanding program's target-gated dependency, so the engine stays free of
+# I/O and host-testable.
+rt = ["dep:tairix-rt", "tairix-audio/rt", "tairix-sandbox/program"]
+
+[dependencies]
+# The audio-v1 and PCM vocabulary and the `Errno` the engine fails closed with.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The stream client's types, the conversion a meter and a track's level read
+# samples through, and the decibel curve.
+tairix-audio = { path = "../audio", version = "=0.0.0" }
+# The sandboxed decode seam: the engine never parses a byte of a sound file in
+# its own process.
+tairix-sandbox = { path = "../sandbox", version = "=0.0.0" }
+# What a decoded stream is, and the tags a track's loudness is read from.
+tairix-sound = { path = "../sound", version = "=0.0.0" }
+# The seed the decoder's page cache is keyed by.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The sink a contained decoder worker's death is logged to.
+tairix-log = { path = "../log", version = "=0.0.0" }
+# The runtime the live seams read files and draw seeds through (feature `rt`
+# only).
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[dev-dependencies]
+# The signal the audio verticals play, written as the WAV and FLAC files the
+# engine's tests decode.
+tairix-test-audio-wire = { path = "../../tests/integration/audio_wire", version = "=0.0.0", features = ["flac"] }
+# The encoder, for a test file carrying the tags a track's loudness is read
+# from.
+tairix-sound = { path = "../sound", version = "=0.0.0", features = ["encode"] }

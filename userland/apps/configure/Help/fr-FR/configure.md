@@ -102,6 +102,17 @@ travail concerné — cela ne change jamais un résultat.
   signaler un second appui quelques millisecondes après le relâchement alors
   qu'il n'en visait qu'un. Mettez `0` pour une souris dont le mode tir rapide
   envoie volontairement des paires de clics.
+- `audio.output`, `audio.input` — `auto` par défaut, ou l'emplacement d'un
+  point de sortie tel que `audioctl` l'affiche (seize chiffres
+  hexadécimaux, un point et l'indice du point) : la sortie et l'entrée que
+  cette machine préfère par défaut. Le choix propre à une session passe
+  avant ; celui-ci vaut avant toute connexion et sur une machine sans
+  bureau. `auto` désigne le premier périphérique trouvé.
+- `audio.level` — en décibels, `0dB` par défaut, ou une atténuation comme
+  `-12dB` ou `-6.5dB`, à deux décimales au plus : le niveau auquel
+  démarrent toutes les sorties et entrées. Jamais au-dessus de `0dB`. Le
+  service audio prend une valeur modifiée au démarrage suivant ;
+  `audioctl` modifie la machine en marche.
 
 La pile réseau lit les réglages `net.*` ; une modification prend effet
 lorsque la pile applique de nouveau sa configuration.

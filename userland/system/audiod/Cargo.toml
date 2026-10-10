@@ -36,8 +36,6 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # device clock model, routing policy and the volume model. This service is
 # its driver; it owns no sample arithmetic of its own.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
-# The seat vocabulary the routing policy arbitrates a sink's lease over.
-tairix-seat = { path = "../../../lib/seat", version = "=0.0.0" }
 # The structured audit records every capture grant and refusal, device bind
 # and loss, and default-device change is written through.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

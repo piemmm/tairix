@@ -11,9 +11,8 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write as _;
 
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, JsonStr, Severity, StdInfoKind, StdInfoRecord};
 
 use crate::model::Model;
 
@@ -80,7 +79,7 @@ fn omission_record(dir: &str, omitted: u64) -> Vec<u8> {
          \"entry_class\":\"dotfile\",\"omitted_count\":{omitted},\
          \"directory\":{},\
          \"pane_is_exhaustive\":false}}}}",
-        json_string(dir)
+        JsonStr(dir)
     );
     let record = StdInfoRecord::new(
         "fstree",
@@ -102,25 +101,4 @@ fn omission_record(dir: &str, omitted: u64) -> Vec<u8> {
         // and never worth a partial or malformed line.
         Err(_) => Vec::new(),
     }
-}
-
-/// A minimal JSON string literal for `text`: quotes, backslashes, and
-/// control bytes escaped so a hostile directory name cannot break the
-/// record's framing.
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => {
-                // Writing to a `String` cannot fail.
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }

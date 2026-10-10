@@ -159,12 +159,12 @@ definition, host-tested in `foreground.rs`.
 - `OpenBacking::PtyMaster(PtyMasterEnd)` and `OpenBacking::PtySlave(PtySlaveEnd)`
   in `kernel/core/src/aspace.rs`, joining `Pipe`. Stream `fs_read`/`fs_write`
   and the wait-set `Stream` readiness arm dispatch on them like pipe ends.
-- `stream_input_mode`, `terminal_size`, and `console_foreground` recognise a
-  pty-slave backing (its discipline lives on the `Pty`, not in the static
-  `consoles` list) in addition to a console-index stream — the pty slave is
-  a *tty* for these three terminal-control calls. Fail-closed and
-  foreground-owner-checked exactly as the console path (§5.4, §17.1
-  IRQ-safety unaffected — no ISR shares the pty lock).
+- `stream_input_mode`, `terminal_size`, `console_foreground` and
+  `foreground_held` recognise a pty-slave backing (its discipline lives on the
+  `Pty`, not in the static `consoles` list) in addition to a console-index
+  stream — the pty slave is a *tty* for these terminal-control calls, and a
+  slave read is foreground-gated before every byte it takes, exactly as the
+  console's (IRQ-safety unaffected — no ISR shares the pty lock).
 
 ### The `pty_create` syscall (ABI addition)
 

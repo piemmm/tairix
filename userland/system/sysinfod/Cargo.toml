@@ -56,4 +56,7 @@ tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # binary is an inert stub and neither is linked.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The audio service's devices and streams, walked by id over its live
+# transport.
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }

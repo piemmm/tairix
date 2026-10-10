@@ -30,6 +30,7 @@
 
 use core::fmt::{self, Write};
 
+use tairix_abi::stdinfo::{JsonEscaper, JsonStr};
 use tairix_abi::{
     BootId, Duration64, FieldValue, TrustDomain, WallTimeState, BOOT_ID_HEX_LEN, PROC_ID_HEX_LEN,
 };
@@ -81,51 +82,14 @@ const fn trust_domain_label(domain: TrustDomain) -> &'static str {
 // JSON
 // ---------------------------------------------------------------------------
 
-/// A [`Write`] adapter that escapes text for a JSON string body.
-///
-/// `"` and `\` are backslash-escaped, the short forms `\n`/`\r`/`\t`/`\b`/`\f`
-/// are used where they apply, and every other control character (including
-/// `DEL` and the C1 range) is emitted as `\u00xx`. All other characters,
-/// including printable multi-byte UTF-8, pass through unchanged. The result is
-/// always valid inside a JSON string and free of raw control bytes.
-struct JsonEscape<'w, W: Write + ?Sized> {
-    inner: &'w mut W,
-}
-
-impl<W: Write + ?Sized> Write for JsonEscape<'_, W> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            match c {
-                '"' => self.inner.write_str("\\\"")?,
-                '\\' => self.inner.write_str("\\\\")?,
-                '\n' => self.inner.write_str("\\n")?,
-                '\r' => self.inner.write_str("\\r")?,
-                '\t' => self.inner.write_str("\\t")?,
-                '\u{08}' => self.inner.write_str("\\b")?,
-                '\u{0c}' => self.inner.write_str("\\f")?,
-                c if c.is_control() => write!(self.inner, "\\u{:04x}", c as u32)?,
-                c => self.inner.write_char(c)?,
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Write `"text"` as a quoted, JSON-escaped string.
-fn json_string<W: Write + ?Sized>(out: &mut W, text: &str) -> fmt::Result {
-    out.write_str("\"")?;
-    JsonEscape { inner: out }.write_str(text)?;
-    out.write_str("\"")
-}
-
 /// Write a `"key": "value"` member for an optional caller string, prefixed by
 /// `,` so it follows the mandatory `message` member.
 fn json_opt<W: Write + ?Sized>(out: &mut W, key: &str, value: Option<&str>) -> fmt::Result {
     if let Some(v) = value {
         out.write_str(",")?;
-        json_string(out, key)?;
+        write!(out, "{}", JsonStr(key))?;
         out.write_str(":")?;
-        json_string(out, v)?;
+        write!(out, "{}", JsonStr(v))?;
     }
     Ok(())
 }
@@ -144,7 +108,7 @@ fn json_value<W: Write + ?Sized>(out: &mut W, value: &FieldValue<'_>) -> fmt::Re
         FieldValue::UnsignedInt(n) => write!(out, "{n}"),
         other => {
             out.write_str("\"")?;
-            write!(JsonEscape { inner: out }, "{other}")?;
+            write!(JsonEscaper::new(out), "{other}")?;
             out.write_str("\"")
         }
     }
@@ -180,37 +144,45 @@ pub fn render_json<W: Write + ?Sized>(
 
     write!(out, "{{\"version\":{RECORD_FORMAT_VERSION}")?;
     write!(out, ",\"stream\":")?;
-    json_string(out, frame.stream.name())?;
+    write!(out, "{}", JsonStr(frame.stream.name()))?;
     write!(out, ",\"seq\":{}", frame.seq)?;
     write!(out, ",\"cpu_id\":{}", frame.cpu_id)?;
     write!(out, ",\"cpu_seq\":{}", record.cpu_seq())?;
     write!(out, ",\"boot_id\":")?;
-    json_string(out, frame.boot_id.write_hex(&mut boot_hex))?;
+    write!(out, "{}", JsonStr(frame.boot_id.write_hex(&mut boot_hex)))?;
     write!(out, ",\"monotonic\":")?;
     json_time(out, frame.monotonic.secs(), frame.monotonic.subsec_nanos())?;
     write!(out, ",\"level\":")?;
-    json_string(out, level_label(record.effective_level()))?;
+    write!(out, "{}", JsonStr(level_label(record.effective_level())))?;
     write!(out, ",\"source\":")?;
-    json_string(out, record.source_name())?;
+    write!(out, "{}", JsonStr(record.source_name()))?;
 
     write!(out, ",\"wall\":{{\"time\":")?;
     json_time(out, wall.time().secs(), wall.time().subsec_nanos())?;
     write!(out, ",\"state\":")?;
-    json_string(out, wall_state_label(wall.state()))?;
+    write!(out, "{}", JsonStr(wall_state_label(wall.state())))?;
     write!(out, "}}")?;
 
     write!(out, ",\"origin\":{{\"trust_domain\":")?;
-    json_string(out, trust_domain_label(origin.trust_domain()))?;
+    write!(
+        out,
+        "{}",
+        JsonStr(trust_domain_label(origin.trust_domain()))
+    )?;
     write!(out, ",\"uid\":{}", origin.uid())?;
     write!(out, ",\"gid\":{}", origin.gid())?;
     write!(out, ",\"pid\":{}", origin.pid())?;
     write!(out, ",\"proc_id\":")?;
-    json_string(out, origin.proc_id().write_hex(&mut proc_hex))?;
+    write!(
+        out,
+        "{}",
+        JsonStr(origin.proc_id().write_hex(&mut proc_hex))
+    )?;
     write!(out, "}}")?;
 
     let caller = record.caller();
     write!(out, ",\"caller\":{{\"message\":")?;
-    json_string(out, caller.message)?;
+    write!(out, "{}", JsonStr(caller.message))?;
     json_opt(out, "level", caller.level.map(level_label))?;
     json_opt(out, "component", caller.component)?;
     json_opt(out, "tag", caller.tag)?;
@@ -230,7 +202,7 @@ pub fn render_json<W: Write + ?Sized>(
             out.write_str(",")?;
         }
         first = false;
-        json_string(out, name.as_str())?;
+        write!(out, "{}", JsonStr(name.as_str()))?;
         out.write_str(":")?;
         json_value(out, &value)?;
     }

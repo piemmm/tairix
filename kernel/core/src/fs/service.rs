@@ -33,7 +33,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
-    UnlinkFlags,
+    RenameFlags, UnlinkFlags,
 };
 use zeroize::Zeroize;
 
@@ -477,20 +477,23 @@ pub trait FilesystemService: Send + Sync {
 
     /// Move the file or directory at absolute `src` to absolute `dst`,
     /// preserving its identity and contents. Both paths must lie under the
-    /// same mounted volume.
+    /// same mounted volume. Under [`RenameFlags::NO_REPLACE`] a destination
+    /// naming any entry but the source's own refuses the move, decided under
+    /// the volume's lock.
     ///
     /// # Errors
     ///
     /// The stable [`Errno`] for the VFS refusal (a missing source, a
     /// read-only mount, a permission denial, a non-empty directory
-    /// destination, a cross-mount move), or [`Errno::NotImplemented`] when
-    /// no filesystem is mounted.
+    /// destination, an occupied destination under `NO_REPLACE`, a cross-mount
+    /// move), or [`Errno::NotImplemented`] when no filesystem is mounted.
     fn rename(
         &self,
         uid: u32,
         caps: &dyn CapabilityQuery,
         src: &str,
         dst: &str,
+        flags: RenameFlags,
     ) -> Result<(), Errno>;
 
     /// Set the permission bits of the node at the absolute `path` to `mode`
@@ -865,6 +868,7 @@ impl FilesystemService for NullFilesystemService {
         _caps: &dyn CapabilityQuery,
         _src: &str,
         _dst: &str,
+        _flags: RenameFlags,
     ) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }

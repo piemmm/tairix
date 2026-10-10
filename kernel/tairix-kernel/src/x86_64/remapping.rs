@@ -252,7 +252,7 @@ mod live {
     use tairix_sync::once::OnceCell;
 
     use super::{plan, BootSources, PendingRoute};
-    use crate::pci_host::{Published, MSIX_ENTRY};
+    use crate::pci_host::Published;
     use crate::x86_64::ioapic_controller::PinRemapping;
     use crate::x86_64::registers::KernelRegisters;
 
@@ -334,8 +334,9 @@ mod live {
         }
     }
 
-    /// Route MSI-X entry [`MSIX_ENTRY`] of the function the probe recorded
-    /// as `function`, which must not yet master, to a vector of its own,
+    /// Route the interrupt message of the function the probe recorded as
+    /// `function` — its MSI-X entry, else its MSI capability — which must not
+    /// yet master, to a vector of its own,
     /// raised by its unit's entry once remapping is on, else by a
     /// compatibility message.
     ///
@@ -360,7 +361,7 @@ mod live {
         };
         let routed = host
             .with(function.segment, |bus| {
-                bus.route_msix(function.address, MSIX_ENTRY, message, &KernelRegisters)
+                crate::pci_host::route_message(bus, function.address, message, &KernelRegisters)
             })
             .is_some_and(|result| result.is_ok());
         if routed {
@@ -370,7 +371,7 @@ mod live {
             remapper.release(entry);
         }
         crate::x86_64::msi::release(vector.line);
-        Err("MSI-X entry unwritable")
+        Err("interrupt message unwritable")
     }
 
     /// Route every source the boot set up through `remapper` where it can
@@ -454,7 +455,12 @@ mod live {
             let routed = host
                 .and_then(|host| {
                     host.with(function.segment, |bus| {
-                        bus.route_msix(function.address, MSIX_ENTRY, message, &KernelRegisters)
+                        crate::pci_host::route_message(
+                            bus,
+                            function.address,
+                            message,
+                            &KernelRegisters,
+                        )
                     })
                 })
                 .is_some_and(|result| result.is_ok());

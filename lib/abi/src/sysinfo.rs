@@ -650,6 +650,38 @@ impl SysinfoQueryId {
     /// [`Self::DMA_UNITS`].
     pub const DMA_NODES: Self = Self(46);
 
+    /// List the sound devices: one
+    /// [`AudioDeviceDescriptor`](crate::audio::AudioDeviceDescriptor) record
+    /// per sink and source the audio service holds — its default, level,
+    /// mute, measured clock and lost frames — paged by a [`PageRequest`].
+    ///
+    /// The record is the audio service's own type, as
+    /// [`Self::GPU_DEVICE_STATS`] serves the display service's: the service
+    /// that holds a reading defines it once. Ungated and unaudited, as the
+    /// audio service's own device listing is: which sound devices a machine
+    /// has, and how loud each is, is no principal's secret. A listing names
+    /// no caller's controls, so every record's `controllable` is clear;
+    /// whether a caller may change a device is answered by the audio service
+    /// to that caller itself.
+    pub const AUDIO_DEVICES: Self = Self(47);
+
+    /// List the caller's own sound streams: one
+    /// [`StreamDescriptor`](crate::audio::StreamDescriptor) per stream a
+    /// process of the caller's user holds open, paged by a [`PageRequest`].
+    ///
+    /// Ungated, exactly as [`Self::SELF_PROCESS_LIST`] is: a principal
+    /// describes only what is its own.
+    pub const SELF_AUDIO_STREAMS: Self = Self(48);
+
+    /// List every sound stream on the machine: one
+    /// [`StreamDescriptor`](crate::audio::StreamDescriptor) per stream,
+    /// whoever holds it, paged by a [`PageRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited, exactly as
+    /// [`Self::GLOBAL_PROCESS_LIST`] is: what another principal is playing,
+    /// and whether it is recording, is theirs.
+    pub const GLOBAL_AUDIO_STREAMS: Self = Self(49);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -1204,6 +1236,24 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::DMA_NODES,
         name: "dma_nodes",
         required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::AUDIO_DEVICES,
+        name: "audio_devices",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::SELF_AUDIO_STREAMS,
+        name: "self_audio_streams",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::GLOBAL_AUDIO_STREAMS,
+        name: "global_audio_streams",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
 ];
@@ -6945,6 +6995,27 @@ mod tests {
             assert!(spec.audit);
         }
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
+    }
+
+    /// The devices and a principal's own streams are open; another
+    /// principal's streams are read under the global authority, as its
+    /// processes are.
+    #[test]
+    fn the_sound_queries_are_scoped_as_the_processes_they_name() {
+        for (query, id, gate) in [
+            (SysinfoQueryId::AUDIO_DEVICES, 47, None),
+            (SysinfoQueryId::SELF_AUDIO_STREAMS, 48, None),
+            (
+                SysinfoQueryId::GLOBAL_AUDIO_STREAMS,
+                49,
+                Some(CapabilityId::SYSINFO_GLOBAL),
+            ),
+        ] {
+            assert_eq!(query.as_u16(), id);
+            let spec = spec_for(query).unwrap();
+            assert_eq!(spec.required_capability, gate);
+            assert_eq!(spec.audit, gate.is_some());
+        }
     }
 
     #[test]

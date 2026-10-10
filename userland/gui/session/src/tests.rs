@@ -4518,6 +4518,138 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     );
 }
 
+/// A folder pick goes into the folder Enter has selected, chooses the folder
+/// shown when a file or nothing is selected, and is titled for what it asks.
+#[test]
+fn a_folder_pick_chooses_the_folder_shown() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &PickPurpose::Folder, &mut shell, &mut comp)
+        .expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    let task = shell.tasks().task_for(wm).expect("the picker is a task");
+    let title = shell
+        .session()
+        .taskbar()
+        .tasks()
+        .entries()
+        .iter()
+        .find(|entry| entry.id == task)
+        .map(|entry| entry.title.clone())
+        .expect("the picker's entry");
+    assert_eq!(
+        title, "Choose a folder: /",
+        "the title says what is being chosen"
+    );
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "a selected folder is gone into"
+    );
+    picker.handle_key(&down, &mut shell, &mut comp);
+    let (serial, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs", PickAccess::Folder),
+        "with a file selected, the folder shown is chosen"
+    );
+    assert_eq!(
+        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        Some(PickEnd::Chosen {
+            for_window: 7,
+            name: String::from("Docs"),
+        })
+    );
+    assert_eq!(picker.wm_id(), None);
+}
+
+/// A folder that cannot be read keeps the picker up to say so, and a file row
+/// clicked in a folder pick chooses nothing.
+#[test]
+fn a_refused_folder_keeps_the_picker_up_and_a_file_row_chooses_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &PickPurpose::Folder, &mut shell, &mut comp)
+        .expect("accepted");
+    let theme = shell.session().active_theme();
+    let row = i32::try_from(chrome_height(
+        Scale::ONE,
+        theme,
+        crate::picker::PICKER_TOOLBAR,
+    ))
+    .expect("a small chrome height");
+    let row_height =
+        i32::try_from(tairix_browse::render::row_height(Scale::ONE, theme)).expect("a small row");
+    let file_row = Point::new(4, row + row_height);
+    assert_eq!(
+        picker.handle_click(file_row, &mut shell, &mut comp),
+        None,
+        "a file row chooses nothing in a folder pick"
+    );
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let (serial, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/", "the root is a folder too");
+    assert_eq!(
+        picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
+        None
+    );
+    assert!(picker.wm_id().is_some(), "the picker stays up to say why");
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    assert_eq!(
+        picker.handle_key(&escape, &mut shell, &mut comp),
+        Some(PickStep::Cancelled { for_window: 7 })
+    );
+}
+
+/// A folder hands over its regular files of the requester's kinds, in the
+/// order the picker lists them and no more than a folder pick delegates.
+#[test]
+fn a_folder_selection_keeps_the_requesters_files_in_listing_order_within_the_bound() {
+    use crate::picker::folder_selection;
+    use tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX;
+    let kinds = [String::from("audio/flac"), String::from("audio/wav")];
+    let mut entries = vec![
+        Entry::file("b.flac"),
+        Entry::directory("Extras.flac"),
+        Entry::file("cover.png"),
+        Entry::file("A.wav"),
+        Entry::file("notes"),
+        Entry::new(
+            "link.flac",
+            tairix_browse::EntryKind::for_listing(
+                tairix_abi::fs::FileKind::Symlink,
+                "link.flac",
+                Some(tairix_browse::LinkResolution {
+                    kind: tairix_abi::fs::FileKind::Regular,
+                    target_name: "elsewhere.flac",
+                }),
+            ),
+            0,
+            tairix_abi::time::Time64::UNIX_EPOCH,
+        ),
+    ];
+    assert_eq!(folder_selection(&mut entries, &kinds), 0);
+    let names: Vec<&str> = entries.iter().map(Entry::name).collect();
+    assert_eq!(names, ["A.wav", "b.flac"]);
+    assert_eq!(folder_selection(&mut entries, &[]), 0);
+    assert!(
+        entries.is_empty(),
+        "nothing for a requester that opens nothing"
+    );
+
+    let mut many: Vec<Entry> = (0..WINDOW_FOLDER_PICK_MAX + 3)
+        .map(|at| Entry::file(format!("{at:03}.flac")))
+        .collect();
+    assert_eq!(folder_selection(&mut many, &kinds), 3);
+    assert_eq!(many.len(), WINDOW_FOLDER_PICK_MAX);
+    assert_eq!(many.first().map(Entry::name), Some("000.flac"));
+}
+
 /// `/` holding `count` files, named in listing order — more than the picker's
 /// window shows, so its listing scrolls.
 fn long_root(count: usize) -> TreeSource {

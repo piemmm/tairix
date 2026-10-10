@@ -81,6 +81,13 @@ holds; once it has moved, the listing resumes just past the name it last
 returned, by binary search, a place no insertion or removal moves — so an
 entry present throughout a listing is listed exactly once.
 
+## Names
+
+Names match ignoring ASCII case, and the driver declares that rule to the VFS.
+A rename to a case variant of an entry's own name re-spells it where it stands
+— its place in the order is unchanged — and a rename replacing a sibling takes
+the spelling asked for.
+
 ## Test surface
 
 Per-variant unit tests cover round-trips (with remount), listings,

@@ -395,10 +395,11 @@ editing a rendered report never changes the log. Like `render_line` they are
   content (message, optional level/component/tag/event-id, and the source and
   stream it merely *requested*), and a `"data"` object of the typed `data.*`
   fields. Booleans and 64-bit integers render as JSON literals; every other
-  value renders as its canonical string. A dedicated JSON escaper backslash-
-  escapes `"`/`\`, uses the short `\n`/`\r`/`\t`/`\b`/`\f` forms, and emits
-  every other control byte as `\u00xx`, so the output is valid JSON and free of
-  raw control bytes.
+  value renders as its canonical string. Strings go through `stdinfo`'s
+  `JsonStr`, the tree's one JSON escape: `"`/`\` backslash-escaped, the short
+  `\n`/`\r`/`\t`/`\b`/`\f` forms, and every other control character (DEL and
+  C1 too) as `\u00xx`, so the output is valid JSON and free of raw control
+  bytes.
 * `render_markdown(out, frame, record)` — a Markdown bullet block whose header
   line carries the system-attested facts and whose indented sub-bullets carry
   the caller's own content and `data.*`, so the provenance boundary is visible.

@@ -1,7 +1,8 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::fixture::{ecam_host_arm as arm_virt, DtbBuilder};
+use crate::fixture::ecam_host_arm as arm_virt;
+use crate::write::FdtWriter;
 
 fn cells(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_be_bytes()).collect()
@@ -19,7 +20,7 @@ fn hosts(blob: &[u8]) -> Vec<PciHost<'_>> {
 #[test]
 fn probe_only_is_chosen_s_word_for_every_host() {
     let tree = |chosen: Option<u32>, on_host: bool| {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -123,7 +124,7 @@ fn a_port_marked_external_facing_is_recorded() {
 /// The fixture's host with `mask`, `map` and `ports` external-facing ports
 /// at devices 1 and up.
 fn shaped(mask: &[u32], map: &[u32], ports: u32) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -202,7 +203,7 @@ fn every_external_facing_port_a_host_marks_is_known() {
 /// cell and no address.
 #[test]
 fn a_plic_parent_takes_one_cell_and_no_address() {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -246,7 +247,7 @@ fn a_plic_parent_takes_one_cell_and_no_address() {
 
 #[test]
 fn a_malformed_host_is_skipped_whole() {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -268,7 +269,7 @@ fn a_malformed_host_is_skipped_whole() {
 /// A minimal host under `parent_status`'s bus, carrying `iommu_map` where
 /// given.
 fn host_on_bus(parent_status: Option<&str>, iommu_map: Option<&[u32]>) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -324,7 +325,7 @@ fn a_host_whose_map_does_not_decode_says_so_rather_than_naming_none() {
 
 /// A minimal host carrying `msi_map` and `msi_parent` where given.
 fn host_with_msi(msi_map: Option<&[u32]>, msi_parent: Option<&[u32]>) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -387,7 +388,7 @@ fn a_map_or_parent_that_does_not_decode_names_no_controller() {
 /// is disabled, and a child that is no unit are not.
 #[test]
 fn a_unit_that_is_a_root_bus_function_is_found_by_its_requester_id() {
-    let mut b = DtbBuilder::new();
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -401,17 +402,16 @@ fn a_unit_that_is_a_root_bus_function_is_found_by_its_requester_id() {
         "ranges",
         &cells(&[0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x1000_0000]),
     );
-    let function =
-        |b: &mut DtbBuilder, name: &str, devfn: u32, unit: bool, status: Option<&str>| {
-            b.begin_node(name);
-            b.prop("reg", &cells(&[devfn << 8, 0, 0, 0, 0]));
-            if unit {
-                b.prop_u32("#iommu-cells", 1);
-            }
-            if let Some(status) = status {
-                b.prop_str("status", status);
-            }
-        };
+    let function = |b: &mut FdtWriter, name: &str, devfn: u32, unit: bool, status: Option<&str>| {
+        b.begin_node(name);
+        b.prop("reg", &cells(&[devfn << 8, 0, 0, 0, 0]));
+        if unit {
+            b.prop_u32("#iommu-cells", 1);
+        }
+        if let Some(status) = status {
+            b.prop_str("status", status);
+        }
+    };
     function(&mut b, "virtio_iommu@2,0", 0x10, true, None);
     b.end_node();
     function(&mut b, "ethernet@3,0", 0x18, false, None);

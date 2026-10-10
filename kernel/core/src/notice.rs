@@ -19,7 +19,8 @@
 //! | `Desktop` | a counter bumped when the published record differs | retained here |
 //! | `Mounts` | a counter bumped by every mount-table mutation | none |
 //! | `MemoryPressure` | the published band's depth | rendered from the gauge |
-//! | `DisplayLease` | the boot seat's lease word | the same word, read from the registry |
+//! | `DisplayLease` | the boot seat's lease word | the word and its holder's login session, read from the registry |
+//! | `AudioCapture` | a counter bumped when the published count differs | retained here |
 //!
 //! The display lease's word only grows across transitions, so it is its own
 //! generation, and both are read from the seat registry the caller runs
@@ -29,8 +30,8 @@
 //!
 //! Every topic is readable by any process bar the display lease: when a
 //! console lease is taken and given up is what the gated seat inventory
-//! reports, so only the display service, which must follow it, is told it
-//! ([`may_observe`]).
+//! reports, so only the two services that own the seat's devices and must
+//! follow it — display and audio — are told it ([`may_observe`]).
 //!
 //! The memory-pressure generation is the band depth *itself* rather than a
 //! counter, so a band that deepens and relaxes again before a waiter runs
@@ -50,11 +51,14 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_abi::audio::AUDIO_ENDPOINT;
 use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_kernel_ipc::EndpointId;
-use tairix_sync::SpinLock;
+use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities};
+use tairix_seat::SeatOwner;
+use tairix_sync::{RwLock, SpinLock};
 
 use crate::seat::SeatRegistry;
 
@@ -103,16 +107,28 @@ pub fn mounts_changed() {
 
 /// Whether the process `observer` may read `topic` or be woken by it.
 ///
-/// The display lease is the display service's alone: the process the kernel
-/// attests bound the reserved display rendezvous, which only a privileged
-/// bind can.
+/// The display lease is for the services owning the seat's devices alone: the
+/// processes the kernel attests bound the reserved display and audio
+/// rendezvous, which only a privileged bind can.
 #[must_use]
 pub fn may_observe(topic: NoticeTopic, observer: u64) -> bool {
     match topic {
-        NoticeTopic::Desktop | NoticeTopic::Mounts | NoticeTopic::MemoryPressure => true,
-        NoticeTopic::DisplayLease => crate::callreg::lookup(EndpointId(DISPLAY_ENDPOINT))
-            .is_some_and(|endpoint| endpoint.owner() == observer),
+        NoticeTopic::Desktop
+        | NoticeTopic::Mounts
+        | NoticeTopic::MemoryPressure
+        | NoticeTopic::AudioCapture
+        | NoticeTopic::AudioDevices => true,
+        NoticeTopic::DisplayLease => {
+            binds(DISPLAY_ENDPOINT, observer) || binds(AUDIO_ENDPOINT, observer)
+        }
     }
+}
+
+/// Whether the process `process` is the one bound to the reserved call
+/// endpoint `endpoint` — the identity a service is attested by.
+#[must_use]
+pub fn binds(endpoint: u64, process: u64) -> bool {
+    crate::callreg::lookup(EndpointId(endpoint)).is_some_and(|bound| bound.owner() == process)
 }
 
 /// The generation of `topic` on a kernel whose seats are `seats`: the value a
@@ -121,19 +137,21 @@ pub fn may_observe(topic: NoticeTopic, observer: u64) -> bool {
 #[must_use]
 pub fn generation(topic: NoticeTopic, seats: &SeatRegistry) -> u64 {
     match topic {
-        NoticeTopic::Desktop => SLOTS.lock()[topic.as_u32() as usize].generation,
+        NoticeTopic::Desktop | NoticeTopic::AudioCapture | NoticeTopic::AudioDevices => {
+            SLOTS.lock()[topic.as_u32() as usize].generation
+        }
         NoticeTopic::Mounts => MOUNT_GENERATION.load(Ordering::Acquire),
         // The band depth *is* the generation, so a move and a move back
         // leave a waiter's view already correct.
         NoticeTopic::MemoryPressure => {
             u64::from(crate::memstats::MEM_STATS.published_band().depth())
         }
-        NoticeTopic::DisplayLease => seats.boot_lease().epoch(),
+        NoticeTopic::DisplayLease => seats.boot_lease_epoch(),
     }
 }
 
-/// Write `topic`'s current payload on a kernel whose seats are `seats` into
-/// `out`, answering its length.
+/// Write `topic`'s current payload on a kernel whose seats are `seats` and
+/// whose processes are `caps` into `out`, answering its length.
 ///
 /// A topic no publisher has reached yet answers `None`: there is no value to
 /// converge on, and fabricating one would have a subscriber adopt a desktop
@@ -145,10 +163,11 @@ pub fn generation(topic: NoticeTopic, seats: &SeatRegistry) -> u64 {
 pub fn payload(
     topic: NoticeTopic,
     seats: &SeatRegistry,
+    caps: &RwLock<CapTable>,
     out: &mut [u8],
 ) -> Result<Option<usize>, Errno> {
     match topic {
-        NoticeTopic::Desktop => {
+        NoticeTopic::Desktop | NoticeTopic::AudioCapture | NoticeTopic::AudioDevices => {
             let slot = SLOTS.lock()[topic.as_u32() as usize];
             if slot.len == 0 {
                 return Ok(None);
@@ -165,9 +184,18 @@ pub fn payload(
         }
         .encode(out)
         .map(Some),
-        NoticeTopic::DisplayLease => Notice::DisplayLease(seats.boot_lease())
-            .encode(out)
-            .map(Some),
+        NoticeTopic::DisplayLease => {
+            // The table before any seat's lock, never after: a dying process's
+            // seats are reclaimed with no table lock held.
+            let caps = caps.read();
+            let session_of = |owner: SeatOwner| {
+                caps.caps_of_process(ProcessId(owner.0))
+                    .map_or(ProcId::KERNEL, TaskCapabilities::login_session)
+            };
+            Notice::DisplayLease(seats.boot_lease(&session_of))
+                .encode(out)
+                .map(Some)
+        }
     }
 }
 
@@ -187,7 +215,10 @@ pub fn payload(
 /// sized to) and is reported rather than ignored.
 pub fn publish(notice: &Notice) -> Result<bool, Errno> {
     let topic = notice.topic();
-    if !matches!(topic, NoticeTopic::Desktop) {
+    if !matches!(
+        topic,
+        NoticeTopic::Desktop | NoticeTopic::AudioCapture | NoticeTopic::AudioDevices
+    ) {
         return Err(Errno::PermissionDenied);
     }
     let mut bytes = [0u8; NOTICE_PAYLOAD_MAX];
@@ -235,8 +266,22 @@ mod tests {
     use tairix_abi::desktop::{Appearance, DesktopInfo};
     use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
     use tairix_abi::seat::{DisplayLease, ReleaseSurface, SEAT_PRIMARY};
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, ProcId, SpawnSession};
+    use tairix_caps::CapabilitySet;
+    use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, UserId};
+    use tairix_log::Event;
     use tairix_seat::SeatOwner;
+    use tairix_sync::RwLock;
+
+    struct Quiet;
+
+    impl tairix_log::Sink for Quiet {
+        fn write_event(&self, _event: &Event<'_>) {}
+    }
+
+    fn no_processes() -> RwLock<CapTable> {
+        RwLock::new(CapTable::new())
+    }
 
     fn desktop(scale: u16, appearance: Appearance) -> Notice {
         match DesktopInfo::new(1024, 768, scale, appearance) {
@@ -250,7 +295,12 @@ mod tests {
         let _registry = registry_guard();
         let mut out = [0u8; NOTICE_PAYLOAD_MAX];
         assert_eq!(
-            payload(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY, &mut out),
+            payload(
+                NoticeTopic::Desktop,
+                &NULL_SEAT_REGISTRY,
+                &no_processes(),
+                &mut out
+            ),
             Ok(None)
         );
     }
@@ -266,9 +316,14 @@ mod tests {
             before
         );
         let mut out = [0u8; NOTICE_PAYLOAD_MAX];
-        let len = payload(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY, &mut out)
-            .expect("a published topic")
-            .expect("a payload");
+        let len = payload(
+            NoticeTopic::Desktop,
+            &NULL_SEAT_REGISTRY,
+            &no_processes(),
+            &mut out,
+        )
+        .expect("a published topic")
+        .expect("a payload");
         assert_eq!(
             Notice::decode(NoticeTopic::Desktop, &out[..len]),
             Ok(notice)
@@ -302,6 +357,65 @@ mod tests {
         assert_eq!(generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY), light);
     }
 
+    /// The capture count is retained like the desktop, and moves its
+    /// generation only when the count does.
+    #[test]
+    fn the_capture_count_is_retained_and_moves_only_on_a_change() {
+        let _registry = registry_guard();
+        let before = generation(NoticeTopic::AudioCapture, &NULL_SEAT_REGISTRY);
+        assert_eq!(publish(&Notice::AudioCapture { live: 1 }), Ok(true));
+        let recording = generation(NoticeTopic::AudioCapture, &NULL_SEAT_REGISTRY);
+        assert_ne!(recording, before);
+        assert_eq!(publish(&Notice::AudioCapture { live: 1 }), Ok(false));
+        assert_eq!(
+            generation(NoticeTopic::AudioCapture, &NULL_SEAT_REGISTRY),
+            recording
+        );
+        let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+        let len = payload(
+            NoticeTopic::AudioCapture,
+            &NULL_SEAT_REGISTRY,
+            &no_processes(),
+            &mut out,
+        )
+        .expect("fits")
+        .expect("published");
+        assert_eq!(
+            Notice::decode(NoticeTopic::AudioCapture, &out[..len]),
+            Ok(Notice::AudioCapture { live: 1 })
+        );
+    }
+
+    /// Every change the audio service counts is a new value, so each one
+    /// wakes a subscriber, and anyone may read it.
+    #[test]
+    fn each_counted_device_change_moves_the_generation() {
+        let _registry = registry_guard();
+        let before = generation(NoticeTopic::AudioDevices, &NULL_SEAT_REGISTRY);
+        assert_eq!(publish(&Notice::AudioDevices { changes: 1 }), Ok(true));
+        let first = generation(NoticeTopic::AudioDevices, &NULL_SEAT_REGISTRY);
+        assert_ne!(first, before);
+        assert_eq!(publish(&Notice::AudioDevices { changes: 2 }), Ok(true));
+        assert_ne!(
+            generation(NoticeTopic::AudioDevices, &NULL_SEAT_REGISTRY),
+            first
+        );
+        assert!(super::may_observe(NoticeTopic::AudioDevices, 77));
+        let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+        let len = payload(
+            NoticeTopic::AudioDevices,
+            &NULL_SEAT_REGISTRY,
+            &no_processes(),
+            &mut out,
+        )
+        .expect("fits")
+        .expect("published");
+        assert_eq!(
+            Notice::decode(NoticeTopic::AudioDevices, &out[..len]),
+            Ok(Notice::AudioDevices { changes: 2 })
+        );
+    }
+
     #[test]
     fn a_kernel_owned_topic_refuses_a_publish() {
         let _registry = registry_guard();
@@ -311,17 +425,20 @@ mod tests {
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
-            publish(&Notice::DisplayLease(DisplayLease::new(1, true))),
+            publish(&Notice::DisplayLease(DisplayLease::held(1, ProcId::KERNEL))),
             Err(Errno::PermissionDenied)
         );
     }
 
-    fn lease_notice(seats: &SeatRegistry) -> Notice {
+    fn lease_notice(seats: &SeatRegistry, caps: &RwLock<CapTable>) -> DisplayLease {
         let mut out = [0u8; NOTICE_PAYLOAD_MAX];
-        let len = payload(NoticeTopic::DisplayLease, seats, &mut out)
+        let len = payload(NoticeTopic::DisplayLease, seats, caps, &mut out)
             .expect("fits")
             .expect("always has a value");
-        Notice::decode(NoticeTopic::DisplayLease, &out[..len]).expect("decodes")
+        match Notice::decode(NoticeTopic::DisplayLease, &out[..len]) {
+            Ok(Notice::DisplayLease(lease)) => lease,
+            other => panic!("the lease topic decodes as a lease, not {other:?}"),
+        }
     }
 
     /// The topic is the registry's own lease: acquire and release both move
@@ -329,19 +446,15 @@ mod tests {
     #[test]
     fn the_lease_topic_is_the_boot_seats_lease_where_it_lives() {
         let seats = SeatRegistry::new(&NULL_CONSOLE_INPUT);
-        assert_eq!(
-            lease_notice(&seats),
-            Notice::DisplayLease(DisplayLease::UNHELD)
-        );
+        let caps = no_processes();
+        assert_eq!(lease_notice(&seats, &caps), DisplayLease::UNHELD);
         let unheld = generation(NoticeTopic::DisplayLease, &seats);
 
         let owner = SeatOwner(7);
         let lease = seats.acquire(SEAT_PRIMARY, owner).expect("free");
         let held = generation(NoticeTopic::DisplayLease, &seats);
         assert!(held > unheld);
-        let Notice::DisplayLease(read) = lease_notice(&seats) else {
-            panic!("the lease topic decodes as a lease");
-        };
+        let read = lease_notice(&seats, &caps);
         assert_eq!(read.epoch(), held);
         assert_eq!(read.live_generation(), Some(lease.generation));
 
@@ -349,10 +462,36 @@ mod tests {
             .release(SEAT_PRIMARY, owner, ReleaseSurface::Text)
             .expect("held");
         assert!(generation(NoticeTopic::DisplayLease, &seats) > held);
-        let Notice::DisplayLease(read) = lease_notice(&seats) else {
-            panic!("the lease topic decodes as a lease");
-        };
-        assert_eq!(read.live_generation(), None);
+        assert_eq!(lease_notice(&seats, &caps).live_generation(), None);
+    }
+
+    /// What a woken service reads names the login the holder was admitted
+    /// into, as the capability table attests it — never a claim of the
+    /// holder's own.
+    #[test]
+    fn the_lease_names_the_login_its_holder_lies_within() {
+        let seats = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        let desktop = ProcId::from_raw([0x7D; 16]);
+        let caps = no_processes();
+        {
+            let mut table = caps.write();
+            let placement = table
+                .resolve_placement(ProcessId::KERNEL, SpawnSession::New, true)
+                .expect("placeable");
+            let set = CapabilitySet::empty();
+            let record = TaskCapabilities::derive(ProcessId(7), UserId(1000), set, set, &Quiet)
+                .with_proc_id(desktop);
+            table.admit(record, placement).expect("admitted");
+        }
+        seats.acquire(SEAT_PRIMARY, SeatOwner(7)).expect("free");
+        assert_eq!(lease_notice(&seats, &caps).session(), Some(desktop));
+
+        // A holder no login encloses names none.
+        seats
+            .release(SEAT_PRIMARY, SeatOwner(7), ReleaseSurface::Handover)
+            .expect("held");
+        seats.acquire(SEAT_PRIMARY, SeatOwner(9)).expect("free");
+        assert_eq!(lease_notice(&seats, &caps).session(), None);
     }
 
     /// Monotone in the shared counter (observe, bump, observe greater)
@@ -372,7 +511,12 @@ mod tests {
     fn the_mounts_topic_reads_back_an_empty_payload() {
         let mut out = [0xAAu8; NOTICE_PAYLOAD_MAX];
         assert_eq!(
-            payload(NoticeTopic::Mounts, &NULL_SEAT_REGISTRY, &mut out),
+            payload(
+                NoticeTopic::Mounts,
+                &NULL_SEAT_REGISTRY,
+                &no_processes(),
+                &mut out
+            ),
             Ok(Some(0))
         );
         assert_eq!(out, [0xAA; NOTICE_PAYLOAD_MAX]);
@@ -384,7 +528,12 @@ mod tests {
         assert_eq!(publish(&desktop(100, Appearance::Dark)), Ok(true));
         let mut tiny = [0u8; DesktopInfo::WIRE_LEN - 1];
         assert_eq!(
-            payload(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY, &mut tiny),
+            payload(
+                NoticeTopic::Desktop,
+                &NULL_SEAT_REGISTRY,
+                &no_processes(),
+                &mut tiny
+            ),
             Err(Errno::LengthOutOfRange)
         );
     }

@@ -437,11 +437,11 @@ names a sibling crate.
   capacity validation incl. a 100 TB-class unit, write-protect
   enforcement before the wire, chunk sequencing, sensitive-window scrub,
   multi-LUN CBW addressing; hostile descriptor streams; the whole
-  blkio request surface over an in-memory device. No QEMU fixture
-  publishes USB interface nodes (QEMU models no Pi USB — the U4/V3
-  precedent), so the live path is Pi 4 metal acceptance and a
-  `qemu-xhci` + `usb-storage` vertical rides the first emulated target
-  that carries the USB stack. The bundle ships in the Pi image
+  blkio request surface over an in-memory device. The live path is Pi 4
+  metal acceptance. The QEMU ports now carry the USB stack — the generic
+  xHCI driver on the kernel-owned PCI host publishes interface nodes
+  there (`plans/SOUND.md` SND7) — so the `qemu-xhci` + `usb-storage`
+  vertical is unblocked and owed. The bundle ships in the Pi image
   (`Drivers/storage/usb_msd/Run`, signed, least-privilege manifest).
 
 ### 2.4 D3 — the volume forest and automount
@@ -854,9 +854,9 @@ first, then the force-unmount exit, then the verified re-insert replay.
   the medium, and a re-insert with a mutated FSInfo that mounts
   read-only, refuses the plain detach, and force-retracts — plus the
   existing force-discard scenario. Live path: Pi 4 metal acceptance,
-  and the `usb-storage` detach/re-attach vertical rides the first
-  emulated target that carries the USB stack (the D2/D3/D4a/b
-  precedent — QEMU models no Pi USB).
+  and the `usb-storage` detach/re-attach vertical, unblocked now the QEMU
+  ports carry the USB stack (`plans/SOUND.md` SND7) and owed with the
+  D2 vertical above.
 
 ### 2.6 DEVICE2 increment order
 

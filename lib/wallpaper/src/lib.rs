@@ -64,6 +64,7 @@ pub mod input;
 pub mod notify;
 pub mod saver;
 pub mod settings;
+pub mod sound;
 pub mod text;
 
 #[cfg(feature = "rt")]
@@ -90,10 +91,11 @@ pub use saver::{
     SLIDE_INTERVAL_DEFAULT, SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
 };
 pub use settings::{
-    merge, merge_within, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow,
-    IconSort, PointerTrail, SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath,
+    merge, merge_applied, merge_within, Backdrop, CursorSize, DesktopSettings, DocumentRefusal,
+    IconFlow, IconSort, PointerTrail, SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath,
     WallpaperPathError, MAX_WALLPAPER_PATH_LEN,
 };
+pub use sound::{SoundControls, REMEMBERED_LEVELS, REMEMBERED_MUTES};
 pub use tairix_abi::desktop::ScreensaverKind;
 pub use text::{resolve, ResolvedText, TextFamily, TextSize, TEXT_POINTS_MAX, TEXT_POINTS_MIN};
 

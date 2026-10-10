@@ -6,9 +6,9 @@
 //! mixes PCM with no idea a file format does. The one place they meet is a
 //! player.
 //!
-//! Nothing here performs I/O, opens a window, or issues a syscall, so every
-//! decision the stack makes about a sample is testable on a host with no
-//! machine attached. The service that drives it (`audiod`) and the device
+//! Nothing here performs I/O, opens a window, or issues a syscall — bar the
+//! live transport a program enables with feature `rt` — so every decision the
+//! stack makes about a sample is testable on a host with no machine attached. The service that drives it (`audiod`) and the device
 //! channel it drives (`lib/audiochan`) are separate, for the reason
 //! `lib/netchan` is separate from `lib/net`: a driver process must not link
 //! the mixer.
@@ -25,6 +25,8 @@
 //! | [`route`] | Which sink a stream lands on, and what a seat switch does to it. |
 //! | [`volume`] | Four gains resolved into one multiply and one number to show. |
 //! | [`stream`] | The client half of `audio-v1` — the part a program links. |
+//! | `live` | Its live transport and a stream over its shared ring (feature `rt`). |
+//! | [`target`] | The `audio:` references naming a sink or a source. |
 //!
 //! # The property the whole crate exists to keep
 //!
@@ -60,10 +62,13 @@ extern crate alloc;
 pub mod channel;
 pub mod clock;
 pub mod convert;
+#[cfg(feature = "rt")]
+pub mod live;
 pub mod mix;
 pub mod resample;
 pub mod route;
 pub mod stream;
+pub mod target;
 pub mod volume;
 
 pub use channel::ChannelMatrix;
@@ -73,4 +78,4 @@ pub use mix::{Mixer, SinkFormat, StreamMix};
 pub use resample::{FilterBank, Ratio, Resampler};
 pub use route::{Routing, SinkState, StreamRequest};
 pub use stream::{AudioTransport, StreamClient, Written};
-pub use volume::{ResolvedVolume, VolumeRequest};
+pub use volume::{EndpointLevel, VolumeRequest};

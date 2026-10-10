@@ -5,13 +5,14 @@
 #
 # The capability list is the bundle's request, intersected with the launching
 # user's grants: CAP_SHM to create the stream's PCM ring and grant it to the
-# audio service, and CAP_CONSOLE_WRITE for the AUDIO PASS/FAIL report on fd
-# 1/2. Playback itself needs no capability — the authorisation is that the
-# caller's session holds the sink's seat lease, which the service checks
-# against the kernel-attested caller — and binding the stream's own notify
-# port is an ordinary unreserved port bind.
+# audio service, CAP_CONSOLE_WRITE for the PASS/FAIL report on fd 1/2, and
+# CAP_DISPLAY for the seat run, which takes the boot seat's lease and hands it
+# over to show the stream following it. Playback itself needs no capability —
+# the authorisation is that the caller's session holds the seat, which the
+# service checks against the kernel-attested caller — and binding the stream's
+# own notify port is an ordinary unreserved port bind.
 id = "os.tairix.test.audiotone"
 name = "audiotone"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_SHM", "CAP_CONSOLE_WRITE"]
+capabilities = ["CAP_SHM", "CAP_CONSOLE_WRITE", "CAP_DISPLAY"]

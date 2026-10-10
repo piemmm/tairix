@@ -41,6 +41,25 @@ impl<B: VirtioPciBus + MsixBus + PciBus + ?Sized> HostBus for B {}
 /// line covers the whole device.
 pub const MSIX_ENTRY: u16 = 0;
 
+/// Point the interrupt of the function at `bdf` on `bus` at `message`: its
+/// MSI-X entry where it has that capability, else its MSI capability.
+///
+/// # Errors
+///
+/// [`DriverError::NotFound`] for a function with neither, or the bus's
+/// refusal.
+pub fn route_message(
+    bus: &dyn HostBus,
+    bdf: u64,
+    message: MsiMessage,
+    registers: &dyn MmioMapper,
+) -> Result<(), DriverError> {
+    match bus.route_msix(bdf, MSIX_ENTRY, message, registers) {
+        Err(DriverError::NotFound) => bus.route_msi(bdf, message),
+        routed => routed,
+    }
+}
+
 /// A function whose configuration space the kernel owns.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Function {
@@ -516,10 +535,14 @@ mod tests {
     use super::*;
 
     /// A bus holding one command/status dword per function, by address; a
-    /// function listed in `stuck` ignores every write.
+    /// function listed in `stuck` ignores every write, and one listed in
+    /// `msix` has an MSI-X capability. Each routing is recorded with whether
+    /// it was through MSI-X.
     struct CommandBus {
         commands: SpinLock<Vec<(u64, u32)>>,
         stuck: Vec<u64>,
+        msix: Vec<u64>,
+        routed: SpinLock<Vec<(u64, bool)>>,
     }
 
     impl Bus for CommandBus {
@@ -541,12 +564,16 @@ mod tests {
     impl MsixBus for CommandBus {
         fn route_msix(
             &self,
-            _bdf: u64,
+            bdf: u64,
             _entry: u16,
             _message: MsiMessage,
             _mapper: &dyn MmioMapper,
         ) -> Result<(), DriverError> {
-            Err(DriverError::Unsupported)
+            if !self.msix.contains(&bdf) {
+                return Err(DriverError::NotFound);
+            }
+            self.routed.lock().push((bdf, true));
+            Ok(())
         }
 
         fn msix_entries(&self, _bdf: u64) -> Result<u16, DriverError> {
@@ -565,6 +592,7 @@ mod tests {
             _message: tairix_abi::driver::msix::MsiMessage,
         ) -> Result<(), DriverError> {
             if self.commands.lock().iter().any(|(at, _)| *at == bdf) {
+                self.routed.lock().push((bdf, false));
                 Ok(())
             } else {
                 Err(DriverError::NotFound)
@@ -657,6 +685,8 @@ mod tests {
         let bus = CommandBus {
             commands: SpinLock::new(commands),
             stuck: vec![STUCK],
+            msix: Vec::new(),
+            routed: SpinLock::new(Vec::new()),
         };
         let functions = vec![
             Function {
@@ -786,6 +816,8 @@ mod tests {
         let bus = || CommandBus {
             commands: SpinLock::new(Vec::new()),
             stuck: Vec::new(),
+            msix: Vec::new(),
+            routed: SpinLock::new(Vec::new()),
         };
         let behind = InterruptSource::Buses { first: 2, last: 3 };
         let host = PciHost::new(
@@ -866,6 +898,8 @@ mod tests {
                 (BEHIND, 0x0002),
             ]),
             stuck: Vec::new(),
+            msix: Vec::new(),
+            routed: SpinLock::new(Vec::new()),
         };
         let host = PciHost::new(
             vec![HostSegment::new(
@@ -1002,6 +1036,8 @@ mod tests {
         let bus = CommandBus {
             commands: SpinLock::new(vec![(STUCK, BUS_MASTER_ENABLE)]),
             stuck: vec![STUCK],
+            msix: Vec::new(),
+            routed: SpinLock::new(Vec::new()),
         };
         let host = PciHost::new(
             vec![HostSegment::new(
@@ -1049,6 +1085,8 @@ mod tests {
         let bus = |command| CommandBus {
             commands: SpinLock::new(vec![(DEVICE, command)]),
             stuck: vec![],
+            msix: Vec::new(),
+            routed: SpinLock::new(Vec::new()),
         };
         let function = |node| Function {
             address: DEVICE,
@@ -1075,5 +1113,41 @@ mod tests {
                 & BUS_MASTER_ENABLE
         };
         assert_eq!((on(0), on(1)), (0, BUS_MASTER_ENABLE));
+    }
+
+    /// A mapper that maps nothing: no routing here reaches a register window.
+    struct NoMapper;
+
+    impl MmioMapper for NoMapper {
+        fn map_window(&self, _: u64, _: usize) -> Result<RegisterWindow, tairix_abi::MmioMapError> {
+            Err(tairix_abi::MmioMapError::InvalidRegion)
+        }
+    }
+
+    /// A function with MSI-X is routed through it; one with only MSI, as an
+    /// HD Audio controller often is, through that; one with neither is left
+    /// unrouted rather than handed a line that never fires.
+    #[test]
+    fn a_function_is_routed_through_msi_x_else_its_msi_capability() {
+        const WITH_MSIX: u64 = 0x08;
+        const MSI_ONLY: u64 = 0x10;
+        const NEITHER: u64 = 0x18;
+        let bus = CommandBus {
+            commands: SpinLock::new(vec![(WITH_MSIX, 0), (MSI_ONLY, 0)]),
+            stuck: Vec::new(),
+            msix: vec![WITH_MSIX],
+            routed: SpinLock::new(Vec::new()),
+        };
+        let message = MsiMessage {
+            address: 0xFEE0_0000,
+            data: 0x41,
+        };
+        assert_eq!(route_message(&bus, WITH_MSIX, message, &NoMapper), Ok(()));
+        assert_eq!(route_message(&bus, MSI_ONLY, message, &NoMapper), Ok(()));
+        assert_eq!(
+            route_message(&bus, NEITHER, message, &NoMapper),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(*bus.routed.lock(), [(WITH_MSIX, true), (MSI_ONLY, false)]);
     }
 }

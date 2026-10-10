@@ -23,10 +23,10 @@ use tairix_abi::driver::dmaengine::{
     decode_done_reply, decode_open_reply, decode_position_reply, decode_prepare_reply,
     decode_wait_reply, encode_done_reply, encode_error_reply, encode_open_reply,
     encode_position_reply, encode_prepare_reply, encode_wait_reply, CyclicParams, DmaBufferGrant,
-    DmaControllerDuty, DmaDirection, DmaEngineOp, DmaEngineRequest, DmaRequestLine, WaitEnd,
-    WaitReport, DMA_CONTROLLER_ENDPOINTS, DMA_CYCLIC_MIN_PERIODS, DMA_ENGINE_MAX_REPLY,
-    DMA_ENGINE_MAX_REQUEST, DMA_MAX_CHANNELS,
+    DmaDirection, DmaEngineOp, DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS,
+    DMA_CYCLIC_MIN_PERIODS, DMA_ENGINE_MAX_REPLY, DMA_ENGINE_MAX_REQUEST, DMA_MAX_CHANNELS,
 };
+use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, ProcId, PROC_ID_LEN};
@@ -44,8 +44,8 @@ fn scramble(frame: &mut [u8], most: usize, rng: &mut Prng) {
     }
 }
 
-fn line(index: u8, specifier: &[u32], name: &[u8]) -> DmaRequestLine {
-    DmaRequestLine::new(DMA_CONTROLLER_ENDPOINTS.endpoint(7), index, specifier, name)
+fn line(index: u8, specifier: &[u32], name: &[u8]) -> LinkRequest {
+    LinkRequest::new(DMA_CONTROLLER_ENDPOINTS.endpoint(7), index, specifier, name)
         .expect("a valid seed line")
 }
 
@@ -191,25 +191,27 @@ fn exercise_record(bytes: &[u8]) {
     let Ok(record) = HwResource::from_bytes(bytes) else {
         return;
     };
-    if let Ok(line) = record.dma_request_line() {
-        assert_eq!(HwResource::dma_request(&line), record);
-        assert!(DMA_CONTROLLER_ENDPOINTS.contains(line.endpoint()));
+    if let Ok(line) = record.link_request() {
+        assert_eq!(HwResource::request(&line), record);
+        assert!(line.role().endpoints().contains(line.endpoint()));
     }
-    if let Ok(duty) = record.dma_controller_duty() {
-        assert_eq!(HwResource::dma_controller(&duty), record);
-        assert!(DMA_CONTROLLER_ENDPOINTS.contains(duty.endpoint()));
+    if let Ok(duty) = record.link_duty() {
+        assert_eq!(HwResource::duty(&duty), record);
+        assert!(duty.role().endpoints().contains(duty.endpoint()));
+        assert!(
+            duty.channels().is_none() || duty.role() == LinkRole::Dma,
+            "channels stated for a role that has none"
+        );
     }
 }
 
 fn record_seeds() -> Vec<[u8; HwResource::WIRE_LEN]> {
     let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(7);
     vec![
-        HwResource::dma_request(&line(0, &[0x2000_000D], b"rx-tx")).to_le_bytes(),
-        HwResource::dma_request(&line(3, &[1, 2], b"audio-rx")).to_le_bytes(),
-        HwResource::dma_controller(&DmaControllerDuty::new(endpoint, Some(0x7F5)).expect("valid"))
-            .to_le_bytes(),
-        HwResource::dma_controller(&DmaControllerDuty::new(endpoint, None).expect("valid"))
-            .to_le_bytes(),
+        HwResource::request(&line(0, &[0x2000_000D], b"rx-tx")).to_le_bytes(),
+        HwResource::request(&line(3, &[1, 2], b"audio-rx")).to_le_bytes(),
+        HwResource::duty(&LinkDuty::new(endpoint, Some(0x7F5)).expect("valid")).to_le_bytes(),
+        HwResource::duty(&LinkDuty::new(endpoint, None).expect("valid")).to_le_bytes(),
     ]
 }
 

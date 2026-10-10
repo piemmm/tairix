@@ -217,6 +217,10 @@ pub const IR_ERDP: usize = 0x18;
 /// when it updates the dequeue pointer.
 pub const ERDP_EHB: u32 = 1 << 3;
 
+/// `ERDP` Dequeue ERST Segment Index (bits 2:0, §5.5.2.3.3): the low bits of
+/// the segment the dequeue pointer lies in.
+pub const ERDP_DESI_MASK: u32 = 0x7;
+
 /// `HCSPARAMS1` `MaxSlots` field (bits 7:0).
 #[must_use]
 pub const fn hcsparams1_max_slots(raw: u32) -> u8 {
@@ -228,6 +232,34 @@ pub const fn hcsparams1_max_slots(raw: u32) -> u8 {
 pub const fn hcsparams1_max_ports(raw: u32) -> u8 {
     raw.to_le_bytes()[3]
 }
+
+/// `HCSPARAMS2` Isochronous Scheduling Threshold (§5.3.4, bits 3:0), in
+/// microframes: how far ahead of the current microframe software must queue
+/// an isochronous TD for the controller to be sure of fetching it. Bit 3 set
+/// states the low three bits in whole frames.
+#[must_use]
+pub const fn hcsparams2_ist_microframes(raw: u32) -> u32 {
+    let value = raw & 0x7;
+    if raw & 0x8 != 0 {
+        value * 8
+    } else {
+        value
+    }
+}
+
+/// `HCSPARAMS2` ERST Max (§5.3.4, bits 7:4): the controller takes at most
+/// `2^ERST Max` event ring segment table entries.
+#[must_use]
+pub const fn hcsparams2_erst_entries(raw: u32) -> u32 {
+    1 << ((raw >> 4) & 0xF)
+}
+
+/// `MFINDEX` — runtime base + `0x00` (§5.5.1): the microframe the controller
+/// is in, bits 13:0, wrapping every 2048 frames.
+pub const MFINDEX: usize = 0x00;
+
+/// `MFINDEX` valid bits.
+pub const MFINDEX_MASK: u32 = 0x3FFF;
 
 /// `HCSPARAMS2` Max Scratchpad Buffers (§5.3.4): the count of
 /// page-sized scratchpad buffers software must reserve for the
@@ -264,6 +296,13 @@ pub const fn hccparams1_ac64(raw: u32) -> bool {
 #[must_use]
 pub const fn hccparams1_csz(raw: u32) -> bool {
     raw & (1 << 2) != 0
+}
+
+/// `HCCPARAMS1` CFC (bit 11): the controller honours the Frame ID of every
+/// isochronous TD, not only the first one queued onto an empty ring.
+#[must_use]
+pub const fn hccparams1_cfc(raw: u32) -> bool {
+    raw & (1 << 11) != 0
 }
 
 /// `CAPLENGTH` from the first capability dword.

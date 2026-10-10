@@ -25,7 +25,7 @@ use crate::source::Caller;
 const INSTANCE_MARKER: u8 = 0xA5;
 
 /// The uid every fixture user principal is attested as owning.
-const FIXTURE_UID: u32 = 1000;
+pub(crate) const FIXTURE_UID: u32 = 1000;
 
 /// The primary gid every fixture user principal is attested with.
 const FIXTURE_GID: u32 = 100;

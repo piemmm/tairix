@@ -377,7 +377,11 @@ mod program {
             return Err(Errno::from_syscall(synced));
         }
         drop(file);
-        let renamed = tairix_rt::fs_rename(staged.as_bytes(), path.as_bytes());
+        let renamed = tairix_rt::fs_rename(
+            staged.as_bytes(),
+            path.as_bytes(),
+            tairix_abi::RenameFlags::empty(),
+        );
         if renamed != 0 {
             return Err(Errno::from_syscall(renamed));
         }

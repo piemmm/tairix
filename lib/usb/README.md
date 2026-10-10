@@ -47,6 +47,16 @@ other (§17.4 — `drivers/* → lib/*` only).
   refused, faulted, or malformed read leaves the identity without one. A
   node's device address (`describe_device`) is the device's bus position, which
   the reset keeps where the slot it reassigns would not.
+  It also runs alternate settings and isochronous streams on the interfaces a
+  node governs — its own and the siblings it claims: a setting's isochronous
+  endpoints are reserved with the controller before the device is told, and a
+  stream's slots are scheduled onto the endpoint's ring at the frame each
+  service interval is due in, every interval accounted moved, missed or
+  failed (`plans/SOUND.md` SND6).
+- `periodic` — endpoint descriptors, service intervals, isochronous budgets,
+  explicit-feedback decoding and exact packet pacing.
+- `alternate` — a configuration's alternate settings, interface numbers,
+  control-only interfaces and interface associations.
 - `regs` / `trb` / `ring` — the register, TRB, and ring-state vocabularies.
 - `SlabBank` — the production `device::DmaBank`: a growable bank of owned
   DMA chunks minted from the host's `DmaHost` seam, aperture-checked per
@@ -86,8 +96,11 @@ other (§17.4 — `drivers/* → lib/*` only).
 - Fuzzed: `tests/fuzz_descriptors.rs` (registered with `cargo xtask fuzz`)
   holds the pure descriptor decoders — `DeviceDescriptor::decode`,
   `InterfaceInfo::decode_all`, `HubDescriptor::decode`, `StringHeader`,
-  `first_langid`, `SerialNumber::decode` — to a naive model of what they may
-  accept. The transfer path validates through those same decoders only.
+  `first_langid`, `SerialNumber::decode`, `alternate_setting`,
+  `is_control_only`, `interface_numbers`, `EndpointDescriptor::decode`,
+  `PeriodicBudget::isochronous` and `FeedbackDecoder::decode` — to a naive
+  model of what they may accept. The transfer path validates through those
+  same decoders only.
 - The crate holds **no** capability of its own — authority is the consuming
   driver's (`CAP_MMIO_MAP` for the register window, `CAP_MEM_DMA` for the DMA
   carve), checked in the wiring that mints them.

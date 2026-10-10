@@ -69,8 +69,9 @@ pub struct ControllerResources {
     pub bar_len: usize,
     /// Exclusive upper bound, in the **device-visible** address space, of the
     /// inbound DMA aperture the controller may reach — the bound
-    /// [`bring_up_controller`] checks the carved DMA region against.
-    pub dma_aperture_top: u64,
+    /// [`bring_up_controller`] checks the carved DMA region against — or
+    /// [`None`] where the grant declares no constraint.
+    pub dma_aperture_top: Option<u64>,
 }
 
 /// Derive the [`ControllerResources`] from the [`HwResource`] grants the
@@ -82,7 +83,8 @@ pub struct ControllerResources {
 /// BAR `bar_base`/`bar_len`. Exactly one [`HwResourceKind::Dma`] constraint
 /// supplies the aperture bound: its device-visible exclusive top is the
 /// far-side base plus extent for a translated inbound viewport, or its
-/// `addr_limit` for an untranslated constraint. Any other resource (an IRQ
+/// `addr_limit` for an untranslated constraint, where a zero `addr_limit`
+/// declares none. Any other resource (an IRQ
 /// line, the URB endpoint/shared-region grants the HCD itself mints later) is
 /// ignored here — this derive maps only the BAR and carves only the DMA
 /// region.
@@ -103,7 +105,7 @@ where
     I: IntoIterator<Item = &'a HwResource>,
 {
     let mut bar: Option<(u64, u64)> = None;
-    let mut aperture: Option<u64> = None;
+    let mut aperture: Option<Option<u64>> = None;
     for resource in resources {
         // The register-window base (CPU `base` for an `Mmio` window, far-side
         // `translated_base` for a `BusWindow`) is the one definition in
@@ -126,12 +128,16 @@ where
             // `addr_limit` (stored as `base`) is already the device-visible
             // exclusive top.
             let top = if resource.is_translated_dma_window() {
-                resource
-                    .translated_base()
-                    .checked_add(resource.length())
-                    .ok_or(DriverError::OutOfRange)?
+                Some(
+                    resource
+                        .translated_base()
+                        .checked_add(resource.length())
+                        .ok_or(DriverError::OutOfRange)?,
+                )
             } else {
-                resource.base()
+                // `HwResource::dma(0, 0, ..)` is "no constraint declared", not
+                // an aperture ending at address zero.
+                (resource.base() != 0).then_some(resource.base())
             };
             aperture = Some(top);
         }
@@ -158,8 +164,9 @@ where
 /// device-resource grants. `bar_base`/`bar_len` name the controller's
 /// already-assigned register BAR window; `dma_aperture_top` is the exclusive
 /// upper bound, in the device-visible address space, of the inbound window the
-/// bridge lets the controller reach. The carved region's device-visible end
-/// must lie wholly below it or the controller could not reach its own rings.
+/// bridge lets the controller reach, or [`None`] where the platform imposes
+/// none. The carved region's device-visible end must lie wholly below it or
+/// the controller could not reach its own rings.
 /// `delay` supplies the hardware-dictated hub settle windows and `wait` the
 /// parked event-wait seam the engine's synchronous completion waits block
 /// through (on metal: a park on the controller's bound interrupt line, so the
@@ -185,7 +192,7 @@ pub fn bring_up_controller<'h>(
     wait: &'h dyn EventWait,
     bar_base: u64,
     bar_len: usize,
-    dma_aperture_top: u64,
+    dma_aperture_top: Option<u64>,
 ) -> Result<ControllerDevice<'h>, DriverError> {
     bring_up_controller_diagnostic(host, delay, wait, bar_base, bar_len, dma_aperture_top)
         .map_err(|err| err.error)
@@ -323,7 +330,7 @@ pub fn bring_up_controller_diagnostic<'h>(
     wait: &'h dyn EventWait,
     bar_base: u64,
     bar_len: usize,
-    dma_aperture_top: u64,
+    dma_aperture_top: Option<u64>,
 ) -> Result<ControllerDevice<'h>, ControllerBringupError> {
     // Capability before state; the kernel re-checks at the map/allocation
     // traps regardless.
@@ -352,7 +359,10 @@ pub fn bring_up_controller_diagnostic<'h>(
     // coherent (Normal Non-Cacheable on a non-I/O-coherent platform), so
     // the controller sees the rings the driver writes with no cache
     // maintenance.
-    let dma = SlabBank::with_aperture(dma_host, dma_aperture_top);
+    let dma = match dma_aperture_top {
+        Some(top) => SlabBank::with_aperture(dma_host, top),
+        None => SlabBank::new(dma_host),
+    };
 
     // Map the controller's already-assigned register BAR. The host resolves
     // the grant covering `[bar_base, bar_base + bar_len)` and maps that window

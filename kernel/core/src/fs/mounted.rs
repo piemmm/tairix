@@ -53,7 +53,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
-    UnlinkFlags, FS_MODE_MASK,
+    RenameFlags, UnlinkFlags, FS_MODE_MASK,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
@@ -1429,9 +1429,10 @@ where
         caps: &dyn CapabilityQuery,
         src: &str,
         dst: &str,
+        flags: RenameFlags,
     ) -> Result<(), Errno> {
         self.with_secured_pair(uid, caps, src, dst, |vfs, fs, cred, src, dst, driver| {
-            let replaced = vfs.rename_via_secured(cred, src, dst, fs)?;
+            let replaced = vfs.rename_via_secured(cred, src, dst, fs, flags)?;
             if let Some(dir) = replaced {
                 self.mount.listings.removed(driver.as_u64(), dir.raw());
             }

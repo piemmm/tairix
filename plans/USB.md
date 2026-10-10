@@ -109,8 +109,9 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 
 - Lives in `drivers/bus/usb/xhci` as a user-space `Run` binary (it is a driver,
   not a `lib/*` crate; the bus-agnostic xHCI *protocol* engine stays in
-  `lib/usb`, §2.22). It binds the `usb,xhci` controller node by the xHCI PCI
-  class key it already declares in `BIND_KEYS`.
+  `lib/usb`, §2.22). It binds the `usb,xhci` node a bus driver emits by its
+  `compatible`, and a function the kernel discovered on a PCI host it owns by
+  the xHCI class code, below any driver naming the exact part.
 - It is the **sole owner** of one controller: its register BAR, its DMA command
   / event / transfer rings, and its root-hub ports. No other process maps that
   BAR. This is the ownership model that makes "two processes touching one
@@ -159,11 +160,22 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 
 ### 1.3 The URB transport IPC (the seam)
 
-- A new versioned, hashed, capability-checked ABI in `lib/abi/src/usb_urb.rs`
-  (held to the syscall-table discipline, §9): a **URB** (USB request block) is a
-  typed request — endpoint address, transfer type (control/interrupt/bulk),
-  direction, a shared-memory data buffer handle, and a length — and a typed
-  completion — status, bytes transferred. It carries no controller detail.
+- A versioned, capability-checked ABI in `lib/abi/src/usb_urb.rs` (held to
+  the syscall-table discipline, §9). A request is one of:
+  - a **URB** (USB request block) — endpoint address, transfer type
+    (control/interrupt/bulk), direction and length, its data always in the
+    node's shared buffer — answered with a typed completion: status, bytes
+    transferred;
+  - an **interface operation** — select an alternate setting, which reserves
+    bus bandwidth and so is the HCD's alone, or claim a sibling interface the
+    device publishes no node for (a streaming interface a control interface
+    governs);
+  - an **isochronous stream** operation — start, queue a slot, stop — over a
+    region of its own the HCD grants the caller, each finished slot reported
+    to the notify port the caller's attested pid names (`plans/SOUND.md`
+    SND6).
+
+  None carries a controller detail.
 - The HCD serves a URB transport **call endpoint** per interface it emits
   (`lib/usb` gains the controller-side "transport server" and the class-side
   "transport client" over this ABI; the multi-device enumeration
@@ -235,7 +247,10 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 Each increment ends green on the **whole-project** validation gate (§7). Live
 USB attach/detach is metal-only on the Pi 4 (QEMU cannot model the VL805,
 `plans/PI.md` §0.4), so the increments are ordered so that everything *except*
-the live controller behaviour is host- and CI-proven first.
+the live controller behaviour is host- and CI-proven first. QEMU's own
+`qemu-xhci` runs this driver end to end (the `plans/SOUND.md` SND7 audio
+verticals), which proves enumeration and serving on a generic controller but
+nothing of the VL805's own behaviour.
 
 - **U1 — kernel driver-unload mechanism + devmgr unload reaction.**
   `StoreRequest::Unload { handle }` (+ status-only reply) lives in
@@ -264,27 +279,16 @@ the live controller behaviour is host- and CI-proven first.
   `tests/integration/driver_unload_qemu_aarch64` `-M virt` vertical
   (autoload → `terminate_driver_process` → assert live-task count 1→0 + caps
   /aspace reclaimed + idempotent `NotFound`). Whole gate green.
-- **U2 — URB transport ABI + `lib/usb` transport server/client.**
-  The wire contract lives in `lib/abi/src/usb_urb.rs`: `UrbRequest` (endpoint,
-  `UsbTransferType`, `UsbDirection`, shared-buffer handle, length, control
-  SETUP; fixed `URB_REQUEST_LEN`) with fail-closed `decode` (truncation,
-  unknown type/direction, endpoint > `MAX_ENDPOINT`), and a status-framed
-  completion (`encode_completion`/`encode_error_completion`/`decode_completion`,
-  bytes transferred or an in-band `Errno`). It is a driver↔driver IPC format
-  (like `driver_store`/`mailbox_ipc`), so it is not part of the C-header
-  surface (`cargo xtask c-header` produced no `include/` diff). `lib/usb` gained
-  the `transport` module: the `UrbEngine` controller-side seam (`UsbDevice`
-  implements it — `control_in` over the EP0 control transfer, `interrupt_in`
-  over the interface's report queue), `serve_urb` (decode → validate against the
-  interface fail-closed → drive the engine over the shared buffer → frame the
-  completion in band; a not-yet-arrived report is `WouldBlock`), and the
-  class-side `UrbCall`/`UrbClient` (`control_in`/`interrupt_in` build, submit,
-  and decode). Covered by host unit tests (ABI round-trip/fail-closed; the URB
-  decoders added to the `lib/abi` fuzz harness; a control-IN + interrupt-IN
-  round-trip through `UrbClient` → `serve_urb` → mock engine over a shared
-  buffer; and `serve_urb` fail-closed for a bad endpoint, oversize length,
-  illegal direction, bulk, and a malformed frame, each proven not to reach the
-  engine). Whole gate green.
+- **U2 — the transport ABI and `lib/usb`'s transport server and client.**
+  `lib/abi/src/usb_urb.rs` carries `UsbRequest` — a URB, an interface
+  operation or an isochronous stream operation, each decoded only from its
+  exact canonical frame — with the status-framed completion, a stream's
+  `IsoGrant` and its `IsoNotify`. A driver-to-driver format, so not part of
+  the C-header surface. `lib/usb::transport` holds the controller-side
+  `UrbEngine` seam and `drive_urb` (validate fail-closed against the node's
+  `UrbScope`, drive the engine, frame the completion), and the class-side
+  `UrbCall` / `UrbClient` / `UrbLink`. Host-tested end to end; the decoders
+  are in the `lib/abi` fuzz harness.
 - **U3a — per-endpoint URB-transport grant mechanism.** §1.3
   requires the right to submit URBs for an interface to be "minted kernel-side
   from the matched node, never ambient" — a mechanism that did not exist. It
@@ -381,7 +385,7 @@ the live controller behaviour is host- and CI-proven first.
     consumer); not added speculatively (§2.4).
 - **U3b — xHCI HCD process** (live path metal-only).
   `drivers/bus/usb/xhci` (`tairix-drv-bus-usb`) is now a `lib`+`Run`-binary
-  crate: it binds `usb,xhci` (`BIND_KEYS = compatible(XHCI_COMPATIBLE)`), owns
+  crate: it binds `usb,xhci` and the xHCI PCI class (`BIND_KEYS`), owns
   the controller, enumerates,
   emits one per-interface node, and serves the URB transport. The host-testable
   logic is in the `lib` target:
@@ -1410,11 +1414,9 @@ attach/detach/re-attach behaviour is metal-only (QEMU models no Pi USB, §0.4).
   admits it (it binds a different controller node and serves the same URB ABI),
   but none is planned here.
 
-**Isochronous transfers are no longer out of scope here; they are specified and
-staged in `plans/SOUND.md` (SND6), whose USB audio driver is their first
-consumer.** The work is the periodic endpoint kind and service-interval model
-in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and
-feedback endpoints in `drivers/bus/usb/xhci` — an extension of this plan's seam
-rather than a departure from it, shaped for a periodic endpoint in general so
-the next consumer (a camera) reuses it. Read that plan before touching the
+**Isochronous transfers are in scope, specified by `plans/SOUND.md` (SND6),
+whose USB audio driver is their first consumer.** They extend this plan's seam
+rather than depart from it — the transport carries the interface and stream
+operations beside URBs — and are shaped for a periodic endpoint in general, so
+the next consumer (a camera) reuses them. Read that plan before touching the
 transfer path.

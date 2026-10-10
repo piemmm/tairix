@@ -100,6 +100,18 @@ afetado — nunca altera um resultado.
   uma segunda premência poucos milissegundos depois de largar quando
   pretendia um só clique. Ponha `0` num rato cujo modo de tiro rápido envia
   pares de cliques de propósito.
+- `audio.output`, `audio.input` — `auto` por omissão, ou a localização de
+  um terminal tal como o `audioctl` a mostra (dezasseis dígitos
+  hexadecimais, um ponto e o índice do terminal): a saída e a entrada que
+  esta máquina prefere por omissão. A escolha própria de uma sessão vem
+  primeiro; esta é a escolha antes de qualquer início de sessão e numa
+  máquina sem ambiente de trabalho. `auto` é o primeiro dispositivo
+  encontrado.
+- `audio.level` — em decibéis, `0dB` por omissão, ou uma atenuação como
+  `-12dB` ou `-6.5dB`, com duas casas decimais no máximo: o nível com que
+  começa cada saída e entrada. Nunca acima de `0dB`. O serviço de áudio
+  adota um valor alterado no arranque seguinte; o `audioctl` altera a
+  máquina em funcionamento.
 
 A pilha de rede lê as definições `net.*`; uma alteração produz efeito
 quando a pilha aplica novamente a sua configuração.

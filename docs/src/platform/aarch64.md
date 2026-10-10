@@ -94,7 +94,24 @@ a-time regardless.
 | `disable_overscan` | `1` | zero the firmware's default per-edge overscan margins (48 px on an HDMI CEA mode); they shrink the display size the firmware reports *and* the surface it allocates, framing the boot console and the HVS-composited desktop in a black border |
 | `init_uart_clock` | `48000000` | pin the PL011 reference clock to the 48 MHz the kernel's baud-divisor arithmetic assumes (`uart_init::UART_CLOCK_HZ`) |
 | `init_uart_baud` | `115200` | the image builder imports `uart_init::CONSOLE_BAUD`, so firmware output and the kernel-programmed 8N1 line share one definition for every image profile; logging is best-effort and never blocks on the UART |
+| `gpio` | `40,41=a0` | route the headphone jack's two pins to PWM1's channels, their first alternate function |
+| `dtoverlay` | `tairix-pwm-audio` | the first-party overlay below: the jack's PWM block enabled for its driver |
 | `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |
+
+The image builder writes one overlay of its own, `overlays/tairix-pwm-audio.dtbo`,
+with the tree writer of [`tairix-fdt`](../lib/fdt.md). It targets the base
+tree's `pwm1` label: it enables the block, names it
+`tairix,bcm2711-pwm-audio` ahead of `brcm,bcm2835-pwm` so the headphone-jack
+driver binds it and nothing mistakes a general PWM block for the jack, and
+gives it the DMA request line its node lacks, line 1 of the `dma` label's
+controller. The two labels are left for the firmware's loader to resolve
+under `__fixups__`, as `dtc` writes an overlay.
+
+An I²S HAT is the user's own configuration: its overlay enables the `i2s`
+block and describes the card as a `simple-audio-card` linking it to the
+HAT's codec, which is the binding discovery reads
+([hardware detection](../drivers/hardware-detection.md)), and its pins, GPIO
+18 to 21, are routed to the PCM block the same way (`gpio=18-21=a0`).
 
 The PSCI conduit on the Pi is **`smc`** (via `armstub8.bin`), versus `hvc` on
 the QEMU `virt` board; it is discovered through `fdt::psci_method`, never

@@ -15,7 +15,7 @@ the only process that maps the controller's registers or writes its control
 blocks, and a consumer driver never supplies an address. It quotes claims the
 kernel attests:
 
-- its **request line**, a `DmaRequest` grant discovery built from its node's
+- its **request line**, a DMA `LinkRequest` grant discovery built from its node's
   `dmas` entry, which the controller checks the calling process holds;
 - its **FIFO**, a CPU-physical address inside one of its own register
   windows, which the controller translates through the DMA window covering
@@ -30,7 +30,7 @@ channel's own buffer by construction.
 The shared device-tree walk reads the generic DMA binding for every FDT port.
 
 - **A controller** is any node with `#dma-cells`. It carries a
-  `DmaController` duty naming its endpoint — one per controller node, from
+  DMA `LinkDuty` naming its endpoint — one per controller node, from
   the reserved `DMA_CONTROLLER_ENDPOINTS` block indexed by node id — and the
   channels the tree leaves to this system (`dma-channel-mask`, numbered from
   the node's own first channel, or a port's vendor spelling converted to
@@ -44,7 +44,7 @@ The shared device-tree walk reads the generic DMA binding for every FDT port.
   controller with nothing on the way that translates reaches memory
   untranslated and gets one unconstrained window; a bus with no property maps
   nothing.
-- **A consumer's request lines**: each `dmas` entry becomes a `DmaRequest`
+- **A consumer's request lines**: each `dmas` entry becomes a DMA `LinkRequest`
   naming its controller's endpoint, the specifier in the controller's own
   binding (up to two cells — a wider entry is dropped, never truncated), the
   entry's position, and its `dma-names` string where that fits eight bytes.
@@ -52,7 +52,7 @@ The shared device-tree walk reads the generic DMA binding for every FDT port.
   walk's emission rule, so a consumer met before its controller still names
   the right endpoint.
 
-A `DmaRequest` grant covers *calling* its controller's endpoint and never
+A DMA `LinkRequest` grant covers *calling* its controller's endpoint and never
 binding it, so no consumer can serve the rendezvous every other consumer of
 that controller calls. Both record kinds decode only from their canonical
 encoding, so a record a controller receives quoted re-encodes to exactly the
@@ -164,11 +164,11 @@ error flags (bits 2:0).
 
 ## Kernel mechanisms
 
-- **The endpoint is the duty holder's alone.** Binding an id in
-  `DMA_CONTROLLER_ENDPOINTS` requires holding the `DmaController` duty that
-  names it — not merely the privileged bind — because every consumer holds a
-  request line naming the same id, and one of them serving it would answer
-  all the others.
+- **The endpoint is the duty holder's alone**, as every link supplier's is.
+  Binding an id in `DMA_CONTROLLER_ENDPOINTS` requires holding the DMA
+  `LinkDuty` that names it — not merely the privileged bind — because every
+  consumer holds a request line naming the same id, and one of them serving it
+  would answer all the others.
 - **`call_peer_holds`** answers whether the caller being served holds a grant
   covering a quoted record, so the controller checks a request line, or a
   FIFO's register window, against the kernel's grants rather than the

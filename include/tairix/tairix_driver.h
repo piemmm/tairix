@@ -77,6 +77,7 @@
 #define TAIRIX_DRIVER_ERROR_DIRECTORY_NOT_EMPTY ((int32_t)20)
 #define TAIRIX_DRIVER_ERROR_DIRECTORY_CYCLE ((int32_t)21)
 #define TAIRIX_DRIVER_ERROR_OUT_OF_MEMORY ((int32_t)22)
+#define TAIRIX_DRIVER_ERROR_NO_BANDWIDTH ((int32_t)23)
 
 /* PCI vendor ID assigned to virtio devices (uint16_t; virtio 1.1 sec.4.1.2). */
 #define TAIRIX_VIRTIO_PCI_VENDOR_ID ((uint16_t)0x1af4u)

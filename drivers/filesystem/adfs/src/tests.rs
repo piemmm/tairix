@@ -323,9 +323,44 @@ fn rename_moves_replaces_and_guards_cycles() {
             "{variant:?}: file over directory"
         );
 
-        // Renaming an entry onto itself is a no-op.
-        fs.rename(two, b"victim", two, b"VICTIM").expect("self");
-        assert!(fs.lookup(two, b"victim").is_ok());
+        // A destination naming the entry itself, spelled differently, is a
+        // re-spelling; spelled the same, nothing changes.
+        fs.rename(two, b"victim", two, b"VICTIM").expect("re-spell");
+        let names: Vec<Vec<u8>> = list(&mut fs, two)
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert!(
+            names.contains(&b"VICTIM".to_vec()),
+            "{variant:?}: {names:?}"
+        );
+        assert!(
+            !names.contains(&b"victim".to_vec()),
+            "{variant:?}: {names:?}"
+        );
+        let node = fs.lookup(two, b"victim").expect("found by either spelling");
+        assert_eq!(read_all(&mut fs, node), b"payload", "{variant:?}");
+        fs.rename(two, b"VICTIM", two, b"VICTIM").expect("no-op");
+    }
+}
+
+/// Replacing a sibling whose name differs only in case leaves the moved
+/// object under the spelling asked for.
+#[test]
+fn a_replacing_rename_takes_the_spelling_asked_for() {
+    for (variant, bytes) in VARIANTS {
+        let mut fs = fresh(variant, bytes);
+        let root = FilesystemRead::root(&fs);
+        make(&mut fs, root, b"a", b"mover");
+        make(&mut fs, root, b"b", b"victim");
+        fs.rename(root, b"a", root, b"B").expect("replace");
+        let names: Vec<Vec<u8>> = list(&mut fs, root)
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(names, [b"B".to_vec()], "{variant:?}");
+        let node = fs.lookup(root, b"b").expect("kept");
+        assert_eq!(read_all(&mut fs, node), b"mover", "{variant:?}");
     }
 }
 

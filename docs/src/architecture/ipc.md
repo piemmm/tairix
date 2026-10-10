@@ -152,6 +152,22 @@ TAIRiX `EAGAIN`) when the bound mailbox is momentarily empty and
 `Errno::BadAddress` for a faulting buffer. See
 [the syscall handler-wiring table](./syscalls.md#handler-wiring-stage-27-follow-up-f3).
 
+A port takes messages from any capable sender and its owner authenticates
+each by its attested origin, which keeps a forged message from being believed
+but not from occupying the mailbox. A port whose id another process can work
+out — one derived from its owner's pid — could therefore be filled to starve
+the one sender it serves. `port_admit` lets the owner name that sender, by
+the call endpoint it serves — the kernel resolves the instance serving it now,
+so the identity is attested rather than the owner's word. From then on
+`Port::send` refuses any other process instance with `PermissionDenied`,
+checked under the mailbox lock the send already takes, so a refused message
+occupies no room and an unrestricted port pays nothing. The admission itself
+discards whatever another instance queued before it, under the same lock, so
+the owner never has to drain a port to trust it, and wakes any sender parked
+for the room that frees. Only the first refusal under an admission is
+recorded; the rest are counted into the port's destruction record, so a
+sender the port will never take cannot flood the audit trail through it.
+
 ### Well-known names
 
 A numeric `EndpointId` is an opaque handle a binder must already know.
@@ -295,15 +311,16 @@ Audit events live in the `kernel/ipc` reserved range `3_000..4_000`
 |-----:|-------|-------------------------------|------|
 | 3000 | Info  | `PORT_CREATED`                | A capability-checked port was created. |
 | 3001 | Error | `PORT_CREATE_DENIED`          | A port-creation request was refused. |
-| 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed. |
+| 3002 | Info  | `PORT_DESTROYED`              | A port was destroyed. `drained` counts the messages discarded with it, `refused` the sends refused over its life because its owner admitted another sender. |
 | 3003 | Info  | `PORT_REGISTERED`             | A port was bound into the named-port registry. |
 | 3004 | Error | `PORT_REGISTER_DENIED`        | A registration was refused (the `EndpointId` was already bound). |
 | 3005 | Info  | `PORT_UNREGISTERED`           | A port was removed from the registry and destroyed. |
 | 3006 | Info  | `PORT_NAME_PUBLISHED`         | A well-known name was bound to an endpoint. |
 | 3007 | Error | `PORT_NAME_PUBLISH_DENIED`    | A name binding was refused (name already bound, or its endpoint is not registered). |
 | 3008 | Info  | `PORT_NAME_WITHDRAWN`         | A well-known name binding was removed (explicitly, or because its endpoint was unregistered). |
+| 3009 | Info  | `PORT_SENDER_ADMITTED`        | A port's owner admitted the one sender its port takes (`port_admit`); `discarded` counts the queued messages of other senders dropped with it. |
 | 3010 | Debug | `MESSAGE_DELIVERED`           | A message was enqueued for delivery. |
-| 3011 | Error | `MESSAGE_SEND_DENIED`         | Sender lacks the port's required capabilities. |
+| 3011 | Error | `MESSAGE_SEND_DENIED`         | A send was refused. `reason` discriminates: `missing_capability` (the sender lacks the port's required capabilities) or `not_admitted` (the port's owner admitted another sender — recorded once per admission, the rest counted into `PORT_DESTROYED`, so a sender the port will never take cannot flood the trail). |
 | 3012 | Error | `MESSAGE_TOO_LARGE`           | Payload exceeded `max_payload`. |
 | 3013 | Error | `MESSAGE_SEND_TO_CLOSED_PORT` | A send raced with destruction and lost. |
 | 3014 | Debug | `MAILBOX_FULL`                | The receiver's mailbox was full. |

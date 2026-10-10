@@ -75,6 +75,12 @@ Les requêtes :
   pour un propriétaire — son unité et son groupe, la génération et l'état de
   son propriétaire, ses flux, et les mappages de son domaine et les octets
   qu'ils couvrent (requiert `CAP_SYSINFO_HW`).
+- `audio`, `sound` — les périphériques audio : une ligne par sortie et par
+  entrée — son identifiant, s'il est le choix par défaut de son sens, son
+  niveau et sa mise en sourdine, la fréquence mesurée de son horloge pendant
+  la lecture, les trames perdues, son emplacement et son nom — puis une
+  ligne par flux audio qui vous appartient — son périphérique, son sens, son
+  rôle et son état, sa position, ses défauts et qui le détient.
 - `show <resource-ref>` — lit une référence de ressource
   `info:`/`state:`/`stats:` et affiche sa valeur. Ces espaces de noms
   fournissent des valeurs typées via cette API, jamais des flux d'octets :
@@ -93,6 +99,7 @@ Sans requête, l'aide courte est affichée.
 - `--all, -a` — avec `processes` : lister tous les processus du système
   plutôt que seulement les vôtres ; le service n'accorde cette vue qu'à
   un appelant détenant `CAP_SYSINFO_GLOBAL`.
+  Avec `audio`, tous les flux audio de la machine, sous la même capacité.
 - `-h, -?` — afficher l'aide courte de cette commande.
 
 ## EXAMPLES

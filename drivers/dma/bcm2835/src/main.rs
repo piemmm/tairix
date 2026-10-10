@@ -4,7 +4,7 @@
 //! It maps the node's register window, binds the interrupt line of every
 //! channel the tree leaves this system, resets those channels, declares the
 //! device quiesced, and only then binds the node's endpoint under its
-//! `DmaController` duty and serves it. On the host it is an inert stub.
+//! DMA `LinkDuty` and serves it. On the host it is an inert stub.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -14,9 +14,10 @@
 mod program {
     use tairix_abi::driver::dma::DmaHost;
     use tairix_abi::driver::dmaengine::{
-        DmaControllerDuty, DmaEngine, DmaEngineOp, DMA_ENGINE_MAX_REPLY, DMA_ENGINE_MAX_REQUEST,
+        DmaEngine, DmaEngineOp, DMA_ENGINE_MAX_REPLY, DMA_ENGINE_MAX_REQUEST,
     };
     use tairix_abi::driver::sole_register_window;
+    use tairix_abi::hwlink::LinkDuty;
     use tairix_abi::hwtree::{HwResource, HwResourceKind};
     use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
     use tairix_abi::time::Duration64;
@@ -29,7 +30,7 @@ mod program {
         split_windows, Buffer, Controller, ControllerHost, Record,
     };
     use tairix_drv_dma_bcm2835::engine::{Bcm2835Dma, REACH};
-    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_drvrt::{RtDriverHost, RtGrantSyscalls, RtSupplier, SupplierHost};
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_rt::LogSink;
 
@@ -101,7 +102,7 @@ mod program {
                 "dma: the node names no single register window",
             );
         };
-        let Some(duty) = resources().find_map(|r| r.dma_controller_duty().ok()) else {
+        let Some(duty) = resources().find_map(|r| r.link_duty().ok()) else {
             return fail(
                 EXIT_NO_RESOURCES,
                 "dma: the node carries no controller duty",
@@ -156,7 +157,7 @@ mod program {
             );
         }
         let kernel = Kernel {
-            endpoint: duty.endpoint(),
+            supplier: RtSupplier::new(duty.endpoint()),
             memory: memory_grant,
             instance,
         };
@@ -233,7 +234,7 @@ mod program {
 
     /// Bind the node's endpoint under its duty and gather it, peer exits and
     /// every bound line into one wait set.
-    fn serve_set(duty: &DmaControllerDuty, usable: u64, lines: &[Line]) -> Option<u64> {
+    fn serve_set(duty: &LinkDuty, usable: u64, lines: &[Line]) -> Option<u64> {
         // Only a caller whose grant covers this endpoint gets in: a request
         // line on this controller.
         let mut send_caps = CapabilitySet::empty();
@@ -309,7 +310,7 @@ mod program {
 
     /// The kernel, as the endpoint sees it.
     struct Kernel {
-        endpoint: u64,
+        supplier: RtSupplier,
         memory: u64,
         instance: ProcId,
     }
@@ -318,19 +319,29 @@ mod program {
         u64::try_from(ret).map_err(|_| Errno::from_syscall(ret))
     }
 
-    impl ControllerHost for Kernel {
+    impl SupplierHost for Kernel {
         fn caller(&self, ticket: u64) -> Result<ProcId, Errno> {
-            tairix_rt::peer_origin(self.endpoint, ticket).map(|origin| origin.proc_id())
+            self.supplier.caller(ticket)
         }
 
         fn caller_holds(&self, ticket: u64, record: &HwResource) -> Result<bool, Errno> {
-            match status(tairix_rt::call_peer_holds(self.endpoint, ticket, record)) {
-                Ok(_) => Ok(true),
-                Err(Errno::PermissionDenied) => Ok(false),
-                Err(reason) => Err(reason),
-            }
+            self.supplier.caller_holds(ticket, record)
         }
 
+        fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno> {
+            self.supplier.reply(ticket, frame)
+        }
+
+        fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {
+            self.supplier.watch(peer)
+        }
+
+        fn unwatch(&mut self, peer: ProcId) {
+            self.supplier.unwatch(peer);
+        }
+    }
+
+    impl ControllerHost for Kernel {
         fn carve(&mut self, bytes: u32) -> Result<Buffer, Errno> {
             let len = usize::try_from(bytes).map_err(|_| Errno::LengthOutOfRange)?;
             let (mut region, mut bus) = (0, 0);
@@ -358,22 +369,9 @@ mod program {
         fn grant(&mut self, buffer: &Buffer, ticket: u64) -> Result<u64, Errno> {
             status(tairix_rt::shm_grant_peer(
                 buffer.region,
-                self.endpoint,
+                self.supplier.endpoint(),
                 ticket,
             ))
-        }
-
-        fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno> {
-            status(tairix_rt::call_reply(self.endpoint, ticket, frame)).map(|_| ())
-        }
-
-        fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {
-            tairix_rt::peer_watch(peer)
-        }
-
-        fn unwatch(&mut self, peer: ProcId) {
-            // A watch that already fired has nothing left to remove.
-            let _ = tairix_rt::peer_unwatch(peer);
         }
 
         fn now(&self) -> Duration64 {

@@ -52,12 +52,16 @@ A producer that offers a command writes the `ai` object's `suggestion`
 member through [`Suggestion`], whose `Display` is the member's one spelling —
 `{"argv":[…],"safe_to_autorun":false,"requires_confirmation":true}` — with
 every word escaped, so a word taken from the user cannot break the object it
-is written into.
+is written into. Any other text the object carries — a file or directory name —
+is written through [`JsonStr`], the same escape the record's own fields take:
+`"`, `\` and every control character, DEL and the C1 range included, so a
+record shown raw in a terminal cannot carry an escape sequence.
 
 [`STDINFO_FD`]: ../../tairix_abi/stdinfo/constant.STDINFO_FD.html
 [`StdInfoRecord`]: ../../tairix_abi/stdinfo/struct.StdInfoRecord.html
 [`StdInfoRecord::write_jsonl`]: ../../tairix_abi/stdinfo/struct.StdInfoRecord.html#method.write_jsonl
 [`StdInfoKind`]: ../../tairix_abi/stdinfo/enum.StdInfoKind.html
+[`JsonStr`]: ../../tairix_abi/stdinfo/struct.JsonStr.html
 [`Severity`]: ../../tairix_abi/stdinfo/enum.Severity.html
 [`Human`]: ../../tairix_abi/stdinfo/struct.Human.html
 [`Suggestion`]: ../../tairix_abi/stdinfo/struct.Suggestion.html

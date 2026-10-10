@@ -211,6 +211,7 @@ range (`tairix_devmgr::events`):
 | `13004` `NODE_LOAD_FAILED` | the load gate refused the winner; fields: `path`, `errno` |
 | `13020` `NODE_LOAD_RACED_REMOVAL` | the node left the tree before its driver was admitted (`errno` `DeviceOffline`); `Info` |
 | `13021` `NODE_ALREADY_DRIVEN` | another live driver already holds the node (`errno` `Busy`); `Info` |
+| `13022` `NODE_HELD` | the node waits for the `supplier` its links name: in the tree and matched but not yet bound, or not in the tree; `Debug` |
 
 The drvhost gate's own `7000`-range records interleave with these on a
 shared sink, giving audit consumers the full causal chain from match
@@ -289,7 +290,7 @@ carries none of its specifiers, because they are numbers in that
 controller's space, and a tree that names no parent at all maps nothing.
 
 The generic DMA binding is read for every FDT port. A node with
-`#dma-cells` is classed `Dma` and carries a `DmaController` duty naming its
+`#dma-cells` is classed `Dma` and carries the DMA `LinkDuty` naming its
 endpoint, with the channel mask the tree states, and one `Dma` window per
 window every bus between it and the root composes to through its
 `dma-ranges`, carrying the bus address it starts at. A window is flagged
@@ -304,9 +305,45 @@ RISC-V's that it does), and on x86 that every master does. A child a bus
 driver publishes inherits it, because its `Dma` grant must carry its
 parent's flags to be covered. A translation unit states its own as a
 `Dma` resource declaring no reach. Each entry of a consumer's `dmas`
-becomes a `DmaRequest` naming its controller's endpoint, the specifier (up
-to two cells), the entry's position, and its `dma-names` string. The
+becomes a DMA `LinkRequest` naming its controller's endpoint, the specifier
+(up to two cells), the entry's position, and its `dma-names` string. The
 [DMA-engine class](dma.md) page covers both.
+
+The generic clock binding is read the same way (`plans/SUPPLIERS.md` SL1): a
+node with `#clock-cells` carries the clock `LinkDuty` naming its endpoint, and
+each entry of a consumer's `clocks` becomes a clock `LinkRequest` paired with
+its `clock-names` string — except an entry naming a `fixed-clock`, which no
+driver serves, so its rate rides on the consumer as a `FixedClockRate` fact.
+An entry naming a node no consumer may use is framed and skipped, so the
+entries after it still resolve. A `simple-audio-card` describes links rather
+than a device: each link it states, on the card itself or in a `dai-link`
+sub-node, gives its CPU interface node a codec `LinkRequest` to the codec node,
+whose selector carries the framing, which side drives the bit and frame
+clocks, which runs inverted, and the interface on each side, and gives the
+codec node the codec `LinkDuty`. As in Linux's binding, a link naming no
+master by phandle is the legacy form, and its codec sub-node's own
+`bitclock-master`, `frame-master` and inversion flags count.
+
+A link supplier's endpoint is bindable only by the holder of its node's
+duty, whatever the role. While it is bound the node states that it serves
+that role (`HwNode::serves`): the kernel records it from the endpoint
+registry each time the endpoint is bound or unbound, and bumps the tree's
+generation so `devmgr` reacts.
+
+`devmgr` holds a node whose links name a supplier not yet serving: one in the
+tree that a driver matches, that does not serve the link's role and whose
+load was not refused, or one not in the tree at all. A supplier counts once
+it serves rather than once its driver is loaded, so a consumer never calls an
+endpoint its supplier has yet to bind. A supplier no installed driver serves
+— a clock the firmware owns — holds nothing, or its consumers would wait
+forever, and neither does a link that closes a cycle: a clock controller fed
+by a PHY whose own clocks it makes would otherwise wait on the PHY while the
+PHY waits on it. As with Linux's device links, the links within a cycle
+order nothing and its members load together; a link leaving the cycle still
+holds. A supplier may sit later in the tree than its consumer, so a pass that
+bound or refused something is followed by another, and a supplier that
+vanishes takes its bound consumers down before itself (`NODE_HELD`,
+`13022`).
 
 Two further facts ride on a node when its tree declares them, so a
 user-space driver learns them from discovery rather than a board constant.

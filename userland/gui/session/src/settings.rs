@@ -45,7 +45,9 @@ use tairix_appconf::Registry;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
 use tairix_geometry::Scale;
 use tairix_touch::TouchSettings;
-use tairix_wallpaper::{merge, DesktopSettings, DocumentRefusal, PointerSpeed, PrimaryButton};
+use tairix_wallpaper::{
+    merge_applied, DesktopSettings, DocumentRefusal, PointerSpeed, PrimaryButton,
+};
 
 use crate::keyboard::KeyRepeat;
 
@@ -247,7 +249,7 @@ pub fn serve_pinboard_apply(
     }
     let request = PinboardRequest::from_bytes(request).map_err(PinboardApplyRefusal::Malformed)?;
     let PinboardRequest::Apply { document } = request;
-    merge(in_effect, document.as_str()).map_err(PinboardApplyRefusal::Undecodable)
+    merge_applied(in_effect, document.as_str()).map_err(PinboardApplyRefusal::Undecodable)
 }
 
 /// One ready-to-print warning line for settings the desktop could not fully
@@ -298,10 +300,15 @@ mod tests {
         }
     }
 
-    /// An `Apply` frame carrying `settings` as its canonical document.
+    /// An `Apply` frame carrying every key of `settings` an application may
+    /// ask for.
     fn apply_frame(settings: &DesktopSettings) -> Vec<u8> {
-        let document =
-            PinboardDocument::new(&settings.document().render()).expect("renders a valid document");
+        let applicable: Vec<SettingsKey> = SettingsKey::ALL
+            .into_iter()
+            .filter(|key| !SettingsKey::SOUND.contains(key))
+            .collect();
+        let document = PinboardDocument::new(&settings.document_of(&applicable).render())
+            .expect("renders a valid document");
         PinboardRequest::Apply { document }.to_le_bytes().to_vec()
     }
 
@@ -533,6 +540,25 @@ mod tests {
         assert_eq!(merged.sort, IconSort::Size);
         assert_eq!(merged.appearance, in_effect.appearance);
         assert_eq!(merged.density, in_effect.density);
+    }
+
+    /// What the user set on the sound devices is the session's own reading of
+    /// the audio service, never an application's to plant.
+    #[test]
+    fn an_apply_naming_the_sound_controls_is_refused_whole() {
+        let in_effect = DesktopSettings::default();
+        let frame = PinboardRequest::Apply {
+            document: PinboardDocument::new("sort = size\naudio.muted = 0000000000000051.0\n")
+                .expect("a bounded document"),
+        }
+        .to_le_bytes()
+        .to_vec();
+        assert_eq!(
+            serve_pinboard_apply(SESSION_UID, SESSION_UID, &in_effect, &frame),
+            Err(PinboardApplyRefusal::Undecodable(
+                DocumentRefusal::OutsideGroup(tairix_wallpaper::SettingsKey::AudioMuted)
+            ))
+        );
     }
 
     #[test]

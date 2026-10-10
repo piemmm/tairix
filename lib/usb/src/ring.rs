@@ -19,7 +19,7 @@
 
 use tairix_abi::DriverError;
 
-use crate::trb::{Trb, TrbType, CONTROL_CYCLE, CONTROL_LINK_TOGGLE};
+use crate::trb::{Trb, TrbType, CONTROL_CHAIN, CONTROL_CYCLE, CONTROL_LINK_TOGGLE};
 
 /// What one [`ProducerRing::push`] obliges the memory owner to
 /// publish.
@@ -132,7 +132,9 @@ impl ProducerRing {
     /// Returns the [`PushOutcome`] the memory owner publishes. When
     /// the enqueue pointer reaches the Link TRB slot the outcome also
     /// carries the re-cycled Link TRB (published after the data TRB)
-    /// and the producer cycle state toggles (§4.9.2.1).
+    /// and the producer cycle state toggles (§4.9.2.1). The link carries
+    /// `trb`'s Chain bit, so a TD that continues past the wrap stays one TD
+    /// (§4.11.5.1).
     ///
     /// # Errors
     ///
@@ -171,7 +173,9 @@ impl ProducerRing {
                 TrbType::Link,
                 self.base,
                 0,
-                CONTROL_LINK_TOGGLE | if self.cycle { CONTROL_CYCLE } else { 0 },
+                CONTROL_LINK_TOGGLE
+                    | (trb.control & CONTROL_CHAIN)
+                    | if self.cycle { CONTROL_CYCLE } else { 0 },
             );
             self.cycle = !self.cycle;
             Some(link)

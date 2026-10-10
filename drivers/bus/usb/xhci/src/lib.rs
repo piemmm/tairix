@@ -38,6 +38,7 @@
 
 extern crate alloc;
 
+use tairix_abi::driver::pci::CLASS_USB_XHCI;
 use tairix_abi::{DriverBindKey, HwMatchKey};
 use tairix_usb::XHCI_COMPATIBLE;
 
@@ -46,31 +47,60 @@ pub mod domain;
 pub mod interfaces;
 pub mod serve;
 
-/// The bind priority [`BIND_KEYS`] carries.
-///
-/// An exact `compatible`-string match for the controller node, mirroring the
-/// other `compatible`-keyed drivers (`drivers/bus/pcie_brcm`,
+/// The priority the `compatible` key binds at, mirroring the other
+/// `compatible`-keyed drivers (`drivers/bus/pcie_brcm`,
 /// `drivers/storage/emmc2`, priority 10).
 const BIND_PRIORITY: u16 = 10;
 
+/// The priority the class key binds at: below any driver naming a controller
+/// exactly (`drivers/bus/usb/vl805`, priority 20), which brings its function
+/// up first and publishes the `usb,xhci` node this driver then binds.
+const CLASS_BIND_PRIORITY: u16 = 5;
+
 /// This driver's hardware bind table: the xHCI USB host controller, matched by
-/// the [`XHCI_COMPATIBLE`] `compatible` string the bus driver publishes the
-/// controller node under (`drivers/bus/usb/vl805`'s emitted node).
+/// the [`XHCI_COMPATIBLE`] `compatible` string a bus driver publishes it under
+/// (`drivers/bus/usb/vl805`'s emitted node), or by the xHCI class code of a
+/// PCI function the kernel discovered on a host it owns.
 ///
 /// The HCD owns the whole controller, so it binds the controller node
 /// directly — the `Xhci` controller object cannot cross a process boundary.
-/// The class drivers instead bind the per-interface nodes this HCD emits (by
-/// their HID `vid:pid:class` keys), never the controller node. This `const` is
-/// the single source of truth the `drivers/bus/usb/xhci` signed manifest's
-/// bind table is authored from and `devmgr` resolves the controller node
-/// against.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    match HwMatchKey::compatible(XHCI_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: `XHCI_COMPATIBLE` is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("XHCI_COMPATIBLE fits HW_COMPATIBLE_MAX"),
-    },
-)];
+/// The class drivers instead bind the per-interface nodes this HCD emits,
+/// never the controller node. This `const` is the single source of truth the
+/// `drivers/bus/usb/xhci` signed manifest's bind table is authored from and
+/// `devmgr` resolves the controller node against.
+pub const BIND_KEYS: &[DriverBindKey] = &[
+    DriverBindKey::new(
+        BIND_PRIORITY,
+        match HwMatchKey::compatible(XHCI_COMPATIBLE) {
+            Ok(key) => key,
+            // Unreachable: `XHCI_COMPATIBLE` is well within
+            // `HW_COMPATIBLE_MAX`. A too-long literal would be a compile-time
+            // const-eval error here, never a runtime panic.
+            Err(_) => panic!("XHCI_COMPATIBLE fits HW_COMPATIBLE_MAX"),
+        },
+    ),
+    DriverBindKey::new(CLASS_BIND_PRIORITY, HwMatchKey::pci(0, 0, CLASS_USB_XHCI)),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::BIND_KEYS;
+    use tairix_abi::driver::pci::CLASS_USB_XHCI;
+    use tairix_abi::HwMatchKey;
+
+    #[test]
+    fn any_vendors_xhci_function_binds_and_no_older_usb_host_does() {
+        let binds = |node: HwMatchKey| BIND_KEYS.iter().any(|bind| bind.key.matches(&node));
+        assert!(binds(HwMatchKey::pci(0x1B36, 0x000D, CLASS_USB_XHCI)));
+        assert!(binds(HwMatchKey::pci(0x8086, 0x31A8, CLASS_USB_XHCI)));
+        for older in [0x0C_03_00, 0x0C_03_10, 0x0C_03_20, 0x0C_03_FE] {
+            assert!(
+                !binds(HwMatchKey::pci(0x1B36, 0x000D, older)),
+                "{older:06x}"
+            );
+        }
+        assert!(binds(
+            HwMatchKey::compatible(tairix_usb::XHCI_COMPATIBLE).expect("fits")
+        ));
+    }
+}

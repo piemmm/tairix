@@ -156,6 +156,14 @@ impl Time64 {
         Self { secs, nanos: 0 }
     }
 
+    /// The instant `total_nanos` after the epoch: how a monotonic clock's
+    /// nanosecond reading is stamped onto a record, its epoch unspecified and
+    /// only differences meaningful.
+    #[must_use]
+    pub fn from_nanos(total_nanos: u64) -> Self {
+        Self::UNIX_EPOCH.saturating_add(Duration64::from_nanos(total_nanos))
+    }
+
     /// Construct an instant from seconds and a nanosecond field.
     ///
     /// Returns [`Errno::TimestampOutOfRange`] if `nanos >= NANOS_PER_SEC`; the
@@ -740,6 +748,17 @@ mod tests {
         NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
     };
     use crate::Errno;
+
+    #[test]
+    fn a_monotonic_reading_is_the_instant_that_far_past_the_epoch() {
+        assert_eq!(Time64::from_nanos(0), Time64::UNIX_EPOCH);
+        assert_eq!(
+            Time64::from_nanos(3 * u64::from(NANOS_PER_SEC) + 7),
+            Time64::new(3, 7).expect("canonical")
+        );
+        let last = Time64::from_nanos(u64::MAX);
+        assert_eq!(last.subsec_nanos(), 709_551_615);
+    }
 
     #[test]
     fn the_weekday_is_iso_numbered_either_side_of_the_epoch_and_at_the_range_ends() {

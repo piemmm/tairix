@@ -76,6 +76,8 @@ fn the_first_cycle_publishes_and_notes_each_degraded_measurement_once() {
             DegradedField::LoadAverage,
             DegradedField::CpuInfo,
             DegradedField::MemoryPressureBand,
+            DegradedField::AudioDevices,
+            DegradedField::AudioStreams,
             DegradedField::Identity,
             DegradedField::MemoryTotal,
             DegradedField::ResourceLimits,

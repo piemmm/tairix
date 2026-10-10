@@ -1,0 +1,20 @@
+[package]
+name = "tairix-linkclient"
+description = "TAIRiX supplier-link clients: the consumer halves of the link seams a driver speaks to the drivers its node names — a DMA channel and the period wait its serve loop wakes on, and the clock its block runs from."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The link protocols' frames and the link records a client quotes.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The blocking call and the posted call/reap pair the production transport
+# rides. The crate builds on the host, its traps failing closed there, so the
+# client stays host-testable with no target-conditional gate.
+tairix-rt = { path = "../rt", version = "=0.0.0" }

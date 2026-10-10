@@ -5,7 +5,7 @@ use core::cell::RefCell;
 use tairix_abi::{DmaCoherence, HwNode, IommuGroup, IommuReservedWindow};
 use tairix_arch_api::fdtwalk::{FdtDiscovery, FdtPlatform};
 use tairix_arch_api::PlatformDiscovery;
-use tairix_fdt::fixture::DtbBuilder;
+use tairix_fdt::write::FdtWriter;
 use tairix_fdt::Fdt;
 use tairix_pci::topology::Topology;
 
@@ -102,7 +102,7 @@ fn windows_of(node: &HwNode) -> Vec<IommuReservedWindow> {
         .collect()
 }
 
-fn smmu(b: &mut DtbBuilder, name: &str, phandle: u32, status: Option<&str>) {
+fn smmu(b: &mut FdtWriter, name: &str, phandle: u32, status: Option<&str>) {
     b.begin_node(name);
     b.prop_str("compatible", "arm,smmu-v3");
     b.prop("reg", &cells(&[0, 0x905_0000, 0, 0x2_0000]));
@@ -114,12 +114,12 @@ fn smmu(b: &mut DtbBuilder, name: &str, phandle: u32, status: Option<&str>) {
     b.end_node();
 }
 
-fn host(b: &mut DtbBuilder, segment: u32, map: Option<&[u32]>) {
+fn host(b: &mut FdtWriter, segment: u32, map: Option<&[u32]>) {
     host_at(b, 0x1000_0000 + segment * 0x1000_0000, segment, map);
 }
 
 /// A host whose configuration space sits at `base`.
-fn host_at(b: &mut DtbBuilder, base: u32, segment: u32, map: Option<&[u32]>) {
+fn host_at(b: &mut FdtWriter, base: u32, segment: u32, map: Option<&[u32]>) {
     b.begin_node(&format!("pcie@{base:x}"));
     b.prop_str("compatible", "pci-host-ecam-generic");
     b.prop_u32("#address-cells", 3);
@@ -135,8 +135,8 @@ fn host_at(b: &mut DtbBuilder, base: u32, segment: u32, map: Option<&[u32]>) {
     }
 }
 
-fn tree(build: impl FnOnce(&mut DtbBuilder)) -> Vec<u8> {
-    let mut b = DtbBuilder::new();
+fn tree(build: impl FnOnce(&mut FdtWriter)) -> Vec<u8> {
+    let mut b = FdtWriter::new();
     b.begin_node("");
     b.prop_u32("#address-cells", 2);
     b.prop_u32("#size-cells", 2);
@@ -593,7 +593,7 @@ fn a_riscv_iommu_raises_its_faults_on_the_first_line_its_node_names() {
 }
 
 /// A `virtio,mmio` slot at `base`, naming `iommus` where given.
-fn slot(b: &mut DtbBuilder, base: u32, iommus: Option<&[u32]>) {
+fn slot(b: &mut FdtWriter, base: u32, iommus: Option<&[u32]>) {
     b.begin_node(&format!("virtio_mmio@{base:x}"));
     b.prop_str("compatible", "virtio,mmio");
     b.prop("reg", &cells(&[0, base, 0, 0x200]));

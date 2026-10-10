@@ -16,6 +16,14 @@
 //! name this module accepts may still be refused by the VFS (a permission
 //! denial, a read-only mount, a lost race), which surfaces as
 //! [`RenameError::Refused`] with the kernel's own [`Errno`].
+//!
+//! The clash test here is exact, because the listing it reads may be stale
+//! and the volume's own matching rule is not the browser's to apply: the
+//! caller renames with `RenameFlags::NO_REPLACE`, so the kernel decides a
+//! clash under the volume's lock and its rule — a sibling spelled differently
+//! in case only, on a volume that ignores case — and that refusal is reported
+//! as [`RenameError::Clash`] too. Exact matching never refuses a name the
+//! volume would take, so a re-spelling of the entry itself goes through.
 
 use core::ops::Range;
 
@@ -64,6 +72,16 @@ pub enum RenameError {
 }
 
 impl RenameError {
+    /// Map the volume's refusal of a rename: an occupied destination is a
+    /// [`Clash`](Self::Clash), anything else its own [`Refused`](Self::Refused).
+    #[must_use]
+    pub(crate) fn from_volume(errno: Errno) -> Self {
+        match errno {
+            Errno::AlreadyExists => Self::Clash,
+            refused => Self::Refused(refused),
+        }
+    }
+
     /// Map a [`PathError`] from the shared name rule onto the spelling variant.
     #[must_use]
     pub(crate) fn from_path(err: PathError) -> Self {
@@ -102,8 +120,9 @@ impl RenameError {
 /// Pure and fail-closed: the name is spelled through the one shared
 /// [`tairix_path::validate_file_name`] rule, a rename to the same name is a
 /// no-op ([`RenameError::Unchanged`]), and a name already taken by a
-/// *different* sibling is a [`RenameError::Clash`]. It performs no I/O and
-/// makes no permission decision — that is the VFS's, at commit time.
+/// *different* sibling, byte for byte, is a [`RenameError::Clash`]. It
+/// performs no I/O and makes no permission decision — that and a clash under
+/// the volume's own matching rule are the VFS's, at commit time.
 ///
 /// # Errors
 ///

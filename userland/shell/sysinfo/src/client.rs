@@ -22,12 +22,14 @@ use tairix_abi::{Errno, LimitKind};
 
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
-    call, emit_self_scope_omission, fetch_tree, for_each_cpu_load, for_each_desktop_frame_report,
-    for_each_dma_group, for_each_dma_node, for_each_dma_unit, for_each_irq, for_each_process,
-    for_each_raid_array, for_each_raid_member, format_count, format_size, format_tenths,
+    call, emit_self_scope_omission, fetch_tree, for_each_audio_device, for_each_audio_stream,
+    for_each_cpu_load, for_each_desktop_frame_report, for_each_dma_group, for_each_dma_node,
+    for_each_dma_unit, for_each_irq, for_each_process, for_each_raid_array, for_each_raid_member,
+    format_count, format_size, format_tenths, render_audio_device, render_audio_stream,
     render_limit_bound, render_process, resolve, walk_records, Authorization, InfoValue, Metric,
     MetricKind, Output, Producer, ResetBehavior, ResourceResponse, ResponsePayload, Sensitivity,
-    Transport, Unit, ValueKind, WalkStep, PROCESS_HEADER,
+    StreamScope, Transport, Unit, ValueKind, WalkStep, AUDIO_DEVICE_HEADER, AUDIO_STREAM_HEADER,
+    PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -56,6 +58,7 @@ queries:
   storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
   raid                composed arrays and the devices they are made of (needs CAP_SYSINFO_HW)
   dma                 DMA translation units, groups, and nodes (needs CAP_SYSINFO_HW)
+  audio [--all]       sound devices and your streams (--all: every stream, needs CAP_SYSINFO_GLOBAL)
   show <ref>          read one info:/state:/stats: resource reference
   describe <ref>      report a reference's producer, authorization, and metric metadata
   help, -h, -?        show this help";
@@ -94,6 +97,7 @@ pub fn run(
         Command::Show { reference } => run_show(reference, now, transport, out),
         Command::Describe { reference } => run_describe(reference, now, transport, out),
         Command::Processes { all } => run_processes(all, transport, out),
+        Command::Audio { all } => run_audio(all, transport, out),
         Command::Memory => run_memory(transport, out),
         Command::Hardware => run_hardware(transport, out),
         Command::Identity => run_identity(transport, out),
@@ -333,6 +337,32 @@ fn run_processes(
     .map_err(SysinfoError::from)?;
     if !all {
         emit_self_scope_omission(out, OWN_WORD, &[OWN_WORD, "processes", "--all"]);
+    }
+    Ok(())
+}
+
+/// List the sound devices, then the sound streams: the caller's own, or with
+/// `all` every one.
+fn run_audio(all: bool, transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(out, AUDIO_DEVICE_HEADER)?;
+    for_each_audio_device(transport, |device| {
+        out.write_line(&render_audio_device(device))
+            .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)?;
+    emit(out, AUDIO_STREAM_HEADER)?;
+    let scope = if all {
+        StreamScope::Every
+    } else {
+        StreamScope::Own
+    };
+    for_each_audio_stream(transport, scope, |stream| {
+        out.write_line(&render_audio_stream(stream))
+            .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)?;
+    if !all {
+        emit_self_scope_omission(out, OWN_WORD, &[OWN_WORD, "audio", "--all"]);
     }
     Ok(())
 }
@@ -1335,6 +1365,55 @@ mod tests {
     /// Two graphics devices a display service would report: an accelerated
     /// one with memory of its own, and a firmware framebuffer with neither —
     /// so both spellings of the memory and layer columns are covered.
+    fn fixture_sink() -> tairix_abi::audio::AudioDeviceDescriptor {
+        use tairix_abi::audio::{AudioGain, AudioLocation, ControlAccess, DefaultChoice};
+        use tairix_abi::driver::audio::{
+            AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormat, SampleFormats,
+            StreamDirection,
+        };
+        tairix_abi::audio::AudioDeviceDescriptor {
+            device_id: 1,
+            direction: StreamDirection::Playback,
+            jack: JackState::Present,
+            default: DefaultChoice::Inherited,
+            formats: SampleFormats::EMPTY.with(SampleFormat::S16),
+            channel_map: ChannelMap::STEREO,
+            rates: RateSupport::Continuous {
+                min: Rate::HZ_48000,
+                max: Rate::HZ_48000,
+            },
+            gain: None,
+            name: AudioName::new("Speakers").expect("a name"),
+            location: AudioLocation::new(0x51e7, 0).expect("a place"),
+            level: AudioGain::new(-650).expect("attenuation"),
+            muted: true,
+            own_level: false,
+            access: ControlAccess::Shown,
+            clock_millihertz: 48_000_123,
+            lost_frames: 7,
+        }
+    }
+
+    fn fixture_stream() -> tairix_abi::audio::StreamDescriptor {
+        use tairix_abi::audio::{StreamRole, StreamState};
+        use tairix_abi::driver::audio::{Frames, StreamDirection};
+        tairix_abi::audio::StreamDescriptor {
+            stream_id: 3,
+            device_id: 1,
+            direction: StreamDirection::Capture,
+            role: StreamRole::Communication,
+            state: StreamState::Running,
+            position: Frames::new(96_000),
+            xruns: 1,
+            xrun_frames: 64,
+            owner_uid: 1000,
+            owner_pid: 77,
+            owner_app: Some(
+                tairix_abi::appinfo::BundleId::new("os.tairix.recorder").expect("an id"),
+            ),
+        }
+    }
+
     fn fixture_graphics_devices() -> Vec<DisplayStats> {
         alloc::vec![
             DisplayStats {
@@ -1758,6 +1837,16 @@ mod tests {
                 )
             } else if header.query == SysinfoQueryId::GPU_DEVICE_STATS {
                 page(payload, &fixture_graphics_devices(), |record| {
+                    record.to_le_bytes().to_vec()
+                })
+            } else if header.query == SysinfoQueryId::AUDIO_DEVICES {
+                page(payload, &[fixture_sink()], |record| {
+                    record.to_le_bytes().to_vec()
+                })
+            } else if header.query == SysinfoQueryId::SELF_AUDIO_STREAMS
+                || header.query == SysinfoQueryId::GLOBAL_AUDIO_STREAMS
+            {
+                page(payload, &[fixture_stream()], |record| {
                     record.to_le_bytes().to_vec()
                 })
             } else if header.query == SysinfoQueryId::RAID_ARRAYS {
@@ -2447,6 +2536,38 @@ mod tests {
         assert!(lines[3].contains("none"));
         assert!(lines[3].ends_with("software"));
         assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn audio_lists_the_devices_and_the_callers_streams() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        assert_eq!(run(Command::Audio { all: false }, &fixture, &out), Ok(()));
+        let lines = out.lines();
+        assert!(lines[0].starts_with("device"));
+        let sink = &lines[1];
+        assert!(sink.starts_with("sink"), "{sink}");
+        assert!(sink.contains("-6.5dB"), "{sink}");
+        assert!(sink.contains("48000.123"), "{sink}");
+        assert!(sink.contains("00000000000051e7.0"), "{sink}");
+        assert!(sink.ends_with("Speakers"), "{sink}");
+        assert!(lines[2].starts_with("stream"));
+        let stream = &lines[3];
+        assert!(stream.contains("capture"), "{stream}");
+        assert!(stream.contains("  communication  running  "), "{stream}");
+        assert!(stream.ends_with("os.tairix.recorder"), "{stream}");
+        assert_eq!(
+            fixture.seen.borrow().last(),
+            Some(&SysinfoQueryId::SELF_AUDIO_STREAMS)
+        );
+        assert_eq!(
+            run(Command::Audio { all: true }, &fixture, &Recorder::new()),
+            Ok(())
+        );
+        assert_eq!(
+            fixture.seen.borrow().last(),
+            Some(&SysinfoQueryId::GLOBAL_AUDIO_STREAMS)
+        );
     }
 
     #[test]

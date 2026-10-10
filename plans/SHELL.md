@@ -1829,12 +1829,13 @@ caller-encoded, kernel-revalidated startup-strings block), so the runtime
 host passes a command's words and the shell's exported variables (with any
 `NAME=v cmd` prefix overrides layered on top) to every launched program.
 Job control is live end to end (`plans/SPAWN.md` SP7/SP9): the runtime host
-delivers `Continue`/`Terminate`/`Kill` through the `signal` syscall, marks
-its foreground child on fd 0 (`console_foreground`) around every blocking
-wait so the kernel's cooked-mode line discipline routes `^C`/`^Z` to the
-running job, and waits with `WaitFlags::STOPPED` so a `^Z`-stopped job
-returns to the prompt as `WaitOutcome::Stopped` (`$?` = 148) and `fg`/`bg`
-resume it. Pipes and redirections run end to end (`plans/SPAWN.md` SP10):
+delivers `Continue`/`Terminate`/`Kill` through the `signal` syscall, holds
+its terminal on fd 0 from start-up, hands it to its foreground child
+(`console_foreground`) around every blocking wait so the kernel's cooked-mode
+line discipline routes `^C`/`^Z` to the running job, and takes it back after,
+so at the prompt a background job reads nothing. It waits with
+`WaitFlags::STOPPED` so a `^Z`-stopped job returns to the prompt as
+`WaitOutcome::Stopped` (`$?` = 148) and `fg`/`bg` resume it. Pipes and redirections run end to end (`plans/SPAWN.md` SP10):
 the pure `tairix_elsh::wireplan` planner lowers each pipeline into
 pre-opened targets (`fs_open`/`resource_open`/`pipe_create`), one fd 0–3
 wire map per member, and the here-string / multios byte pumps, and the

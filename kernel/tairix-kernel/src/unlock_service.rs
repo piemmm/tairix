@@ -99,6 +99,10 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 /// discovery because firmware cannot describe it and every port needs it
 /// identically: it is the parent a *composed* block device hangs from.
 ///
+/// The endpoint registry reports to the inventory from here on which link
+/// suppliers are serving, so the device manager binds their consumers only
+/// once they are.
+///
 /// The store takes one seed for the boot, so a tree it refuses, or no memory
 /// to add the bus, leaves the inventory empty and no device autoloads; the
 /// refusal is logged with its errno ([`BOOT_TREE_REFUSED`]), and the binding
@@ -109,6 +113,7 @@ static UNLOCK_BOOT: SpinLock<UnlockBoot> = SpinLock::new(UnlockBoot::EMPTY);
 pub fn record_boot(dtb: u64, mut tree: Vec<HwNode>, audit: &dyn Sink) {
     let binding = crate::root_storage::resolve_root_block_driver(&tree, audit);
     *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
+    tairix_kernel_core::callreg::install_link_observer(&crate::hwtree_store::LINK_SERVICE);
     let seeded = match tree.try_reserve(1) {
         Ok(()) => {
             tree.push(crate::virtual_bus::node());

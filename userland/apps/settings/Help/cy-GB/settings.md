@@ -37,6 +37,13 @@ Rhaglenni, neu wrth ei enw o gragen. Mae'n gofyn am sesiwn graffigol sy'n
 rhedeg: heb un mae sianel y ffenestr yn anghyraeddadwy ac mae'n adrodd y
 gwrthodiad ar y ffrwd gwall safonol ac yn gorffen.
 
+Mae Sain yn dangos pob allbwn a mewnbwn gyda'i ddewis rhagosodedig, ei lefel
+a'i fudo, a'r hyn sy'n recordio: eich recordiadau chi wrth eu henw, a faint
+sydd gan bawb arall. Mae ei reolyddion yn newid y ddyfais ar unwaith, a dim
+ond tra bo'ch sesiwn yn dal yr ystafell y mae'n ei gwasanaethu; dangosir
+dyfais yn ystafell sesiwn arall, ond ni ellir ei newid yma. Mae'ch bwrdd
+gwaith yn cofio'r hyn a osodwch.
+
 ## EXIT STATUS
 
 Sero ar ôl cau glân; nid sero pan wrthodwyd sianel y ffenestr neu'r rhanbarth

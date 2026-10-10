@@ -134,7 +134,7 @@ fn a_window_over_memory_is_not_used() {
 #[test]
 fn a_host_whose_windows_overlap_is_refused() {
     let tree = |second: u32| {
-        let mut b = tairix_fdt::fixture::DtbBuilder::new();
+        let mut b = tairix_fdt::write::FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);

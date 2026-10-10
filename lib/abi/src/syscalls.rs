@@ -1507,13 +1507,16 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FS_RENAME,
         name: "fs_rename",
-        arg_count: 4,
+        arg_count: 5,
         args: [
             AbiType::UserPtr,
             AbiType::Len,
             AbiType::UserPtr,
             AbiType::Len,
-            AbiType::Unit,
+            // The validated `RenameFlags` word: empty is POSIX `rename()`,
+            // replacing an existing destination; `NO_REPLACE` refuses the
+            // move instead. A reserved bit fails closed at dispatch.
+            AbiType::U32,
             AbiType::Unit,
         ],
         ret: AbiType::Errno,
@@ -3375,6 +3378,47 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ],
         ret: AbiType::U64,
         required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::PORT_ADMIT,
+        name: "port_admit",
+        arg_count: 2,
+        args: [
+            // The caller's own port, then the call endpoint whose serving
+            // instance is admitted.
+            AbiType::IpcEndpoint,
+            AbiType::IpcEndpoint,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // No flat gate: the handler lets only the port's owner narrow it.
+        required_capability: None,
+        // Deciding who may wake a mailbox is a security decision, audited
+        // like binding it.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FOREGROUND_HELD,
+        name: "foreground_held",
+        arg_count: 1,
+        args: [
+            AbiType::U32,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `1` held, `0` not held: a two-valued answer needs no out-buffer.
+        ret: AbiType::U64,
+        // The read half's authority, as every terminal control names; the
+        // answer is the caller's own standing, so it is no decision worth a
+        // record.
+        required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: false,
     },
 ];

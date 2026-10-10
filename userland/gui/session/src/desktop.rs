@@ -55,6 +55,7 @@
 //! ([`DesktopAction`]) and the embedder — which holds the spawn and
 //! filesystem capabilities — carries it out.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -161,7 +162,7 @@ pub enum DesktopAction {
     /// The model names the new settings; it does not apply them itself, so
     /// there is exactly one place settings are adopted and the persisted
     /// document and the live desktop can never drift apart.
-    AdoptSettings(DesktopSettings),
+    AdoptSettings(Box<DesktopSettings>),
     /// Open the settings surface where the desktop picture is chosen,
     /// which is an installed application the embedder resolves and launches
     /// (the model knows no bundle paths).
@@ -1088,7 +1089,7 @@ impl<S: DirectorySource> Desktop<S> {
         if next == self.settings {
             return DesktopOutcome::ignored();
         }
-        DesktopOutcome::acting(DesktopAction::AdoptSettings(next))
+        DesktopOutcome::acting(DesktopAction::AdoptSettings(Box::new(next)))
     }
 
     /// A key while the desktop holds the keyboard: the arrows move the

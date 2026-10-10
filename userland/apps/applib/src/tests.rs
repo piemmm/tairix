@@ -15,10 +15,7 @@ use tairix_abi::{manifest_header, Errno, LibraryCategory};
 use tairix_appstore::{DirEntry, StoreReader, MAX_WALK_DEPTH, MAX_WALK_ENTRIES};
 use tairix_help::HelpSource;
 
-use super::{
-    parse, push_json_string, run, AddRequest, AppLibError, Command, Output, Side, Store, Stores,
-    USAGE,
-};
+use super::{parse, run, AddRequest, AppLibError, Command, Output, Side, Store, Stores, USAGE};
 
 /// An in-memory store fixture: `None` models the absent document.
 struct MemStore {
@@ -1021,17 +1018,6 @@ fn help_falls_back_to_the_usage_banner_without_documents() {
     )
     .expect("help renders");
     assert_eq!(output.text(), format!("{USAGE}\n"));
-}
-
-#[test]
-fn json_strings_escape_what_could_break_the_record() {
-    let mut out = String::new();
-    push_json_string(&mut out, "plain");
-    assert_eq!(out, "\"plain\"");
-
-    let mut out = String::new();
-    push_json_string(&mut out, "a\"b\\c\nd");
-    assert_eq!(out, "\"a\\\"b\\\\c\\u000ad\"");
 }
 
 /// Every locale's Help document names the subcommands, the switches, and

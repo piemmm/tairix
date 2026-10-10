@@ -4,6 +4,7 @@
 
 use super::*;
 use alloc::vec::Vec;
+use tairix_usb::descriptor::DESC_TYPE_CONFIGURATION;
 
 /// Build a configuration stream from a header and raw descriptors,
 /// patching `wTotalLength` to the real total.
@@ -311,22 +312,6 @@ fn refuses_a_descriptor_running_past_the_stream() {
     bytes[2..4].copy_from_slice(&total.to_le_bytes());
     assert_eq!(
         find_storage_interface(&bytes, 0),
-        Err(Errno::LengthOutOfRange)
-    );
-}
-
-#[test]
-fn refuses_a_truncated_or_mistyped_header() {
-    assert_eq!(
-        configuration_total_length(&[9, DESC_TYPE_CONFIGURATION, 9, 0, 1, 1, 0, 0x80]),
-        Err(Errno::LengthOutOfRange)
-    );
-    let mistyped = [9, DESC_TYPE_INTERFACE, 9, 0, 1, 1, 0, 0x80, 50];
-    assert_eq!(configuration_total_length(&mistyped), Err(Errno::BadMagic));
-    // A total shorter than the header itself cannot be a stream.
-    let short_total = [9, DESC_TYPE_CONFIGURATION, 4, 0, 1, 1, 0, 0x80, 50];
-    assert_eq!(
-        configuration_total_length(&short_total),
         Err(Errno::LengthOutOfRange)
     );
 }

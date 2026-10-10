@@ -28,13 +28,19 @@
 //! client reads back). No class driver ever sees a controller register or
 //! another interface's buffer.
 
+use alloc::vec::Vec;
+
+use tairix_abi::reply::decode_status_reply;
 use tairix_abi::usb_urb::{
-    decode_completion, encode_completion, encode_error_completion, UrbRequest, UsbDirection,
-    UsbTransferType, URB_COMPLETION_LEN, URB_REQUEST_LEN,
+    decode_completion, encode_completion, encode_error_completion, IsoGrant, IsoLayout,
+    IsoStartParams, UrbRequest, UsbDirection, UsbRequest, UsbSpeed, UsbTransferType,
+    USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno};
+use tairix_inline::BitSet256;
 
-use crate::device::BULK_BUF_LEN;
+use crate::descriptor::{ConfigurationHeader, Malformed, CONFIGURATION_HEADER_LEN};
+use crate::device::{setup_get_configuration_descriptor, BULK_BUF_LEN, CTRL_DATA_LEN};
 
 /// The controller-side operations the URB transport server drives.
 ///
@@ -84,20 +90,22 @@ pub trait UrbEngine {
     /// interface is gone, which reaches nothing.
     fn scope(&self) -> Option<UrbScope>;
 
-    /// Poll the interface's interrupt-IN endpoint for one pending report into
-    /// `data`, the whole shared buffer. `request` is the longest report the
-    /// class driver expects: the endpoint is armed to it, or to one service
-    /// interval's payload if that is longer, so a report may exceed it.
-    /// `Ok(Some(n))` if a report of `n` bytes arrived, `Ok(None)` if none is
-    /// pending yet (the caller retries).
+    /// Poll the interface's interrupt-IN endpoint, device endpoint number
+    /// `endpoint`, for one pending report into `data`, the whole shared
+    /// buffer. `request` is the longest report the class driver expects: the
+    /// endpoint is armed to it, or to one service interval's payload if that
+    /// is longer, so a report may exceed it. `Ok(Some(n))` if a report of `n`
+    /// bytes arrived, `Ok(None)` if none is pending yet (the caller retries).
     ///
     /// # Errors
     ///
-    /// A [`DriverError`] from the controller/device, or for a `request` of
-    /// zero, past `data`, or other than the one the endpoint was first armed
-    /// to.
+    /// [`DriverError::OutOfRange`] when `endpoint` is not the interface's
+    /// interrupt-IN endpoint; a [`DriverError`] from the controller/device;
+    /// or one for a `request` of zero, past `data`, or other than the one the
+    /// endpoint was first armed to.
     fn interrupt_in(
         &mut self,
+        endpoint: u8,
         request: usize,
         data: &mut [u8],
     ) -> Result<Option<usize>, DriverError>;
@@ -128,19 +136,126 @@ pub trait UrbEngine {
     ///
     /// As [`Self::bulk_in`].
     fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError>;
+
+    /// Select `alternate` on `interface` — the node's own or one it claimed —
+    /// reprogramming the controller for the endpoints the setting brings and
+    /// reserving their bandwidth before the device is told.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoBandwidth`] when the bus cannot schedule the setting,
+    /// [`DriverError::NotFound`] for a setting the device lacks or an interface
+    /// the node does not govern, [`DriverError::Busy`] while a stream runs on
+    /// the interface, or the device's refusal. An engine serving no periodic
+    /// endpoints refuses with [`DriverError::Unsupported`].
+    fn set_interface(&mut self, _interface: u8, _alternate: u8) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Govern `interface` of the node's device, which no node of its own
+    /// serves.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for an interface the device lacks,
+    /// [`DriverError::AlreadyExists`] for one another node serves or claimed,
+    /// or [`DriverError::Unsupported`] from an engine that claims nothing.
+    fn claim_interface(&mut self, _interface: u8) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Start an isochronous stream of `layout` slots on `endpoint` in its
+    /// interface's current setting, scheduling nothing until a slot is queued.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for an endpoint the governed settings do not
+    /// bring, [`DriverError::OutOfRange`] for a layout whose intervals overrun
+    /// the endpoint's payload or ring, [`DriverError::AlreadyExists`] for an
+    /// endpoint already streaming, or [`DriverError::Unsupported`].
+    fn iso_start(
+        &mut self,
+        _endpoint: u8,
+        _layout: IsoLayout,
+    ) -> Result<IsoStreamShape, DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Hand slot `slot` of the stream on `endpoint` to the controller,
+    /// reading an OUT slot's records and data out of `region`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for no such stream, [`DriverError::Busy`]
+    /// for a slot already queued, [`DriverError::OutOfRange`] for a record
+    /// past its packet's budget, or [`DriverError::Unsupported`].
+    fn iso_queue(&mut self, _endpoint: u8, _slot: u16, _region: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Stop the stream on `endpoint`, discarding what it still had queued.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for no such stream, or
+    /// [`DriverError::Unsupported`].
+    fn iso_stop(&mut self, _endpoint: u8) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Take the next slot the stream on `endpoint` finished, writing its
+    /// records — and an IN slot's data — into `region`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for no such stream, or the fault that halted
+    /// it; [`DriverError::Unsupported`] from an engine with no streams.
+    fn iso_take(
+        &mut self,
+        _endpoint: u8,
+        _region: &mut [u8],
+    ) -> Result<Option<IsoSlotDone>, DriverError> {
+        Err(DriverError::Unsupported)
+    }
+}
+
+/// What a started stream runs at, for its grant.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct IsoStreamShape {
+    /// Microframes between two of the endpoint's service intervals.
+    pub interval_microframes: u32,
+    /// The device's bus speed.
+    pub speed: UsbSpeed,
+}
+
+/// One finished slot, for its notification.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct IsoSlotDone {
+    /// The slot.
+    pub slot: u16,
+    /// Intervals that passed carrying nothing before the slot began.
+    pub skipped: u32,
+    /// The extended bus microframe of the slot's first interval.
+    pub microframe: u64,
 }
 
 /// What one interface's class driver may reach through control requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrbScope {
-    /// The served interface's `bInterfaceNumber`.
-    pub interface: u8,
-    /// The interface's endpoints: bit `n` set for Device Context Index `n`
-    /// (twice the endpoint number, plus one for IN).
+    /// The interfaces the node governs: its own and those it claimed.
+    pub interfaces: BitSet256,
+    /// Their endpoints in their current settings: bit `n` set for Device
+    /// Context Index `n` (twice the endpoint number, plus one for IN).
     pub endpoints: u32,
 }
 
 impl UrbScope {
+    /// Whether `interface` is one the node governs.
+    #[must_use]
+    pub const fn governs(self, interface: u8) -> bool {
+        self.interfaces.contains(interface as u16)
+    }
+
     /// Whether endpoint address `address` (direction bit 7, number bits 0–3)
     /// is one of the interface's own.
     #[must_use]
@@ -191,8 +306,7 @@ pub fn control_permitted(
     {
         return false;
     }
-    let index = u16::from_le_bytes([index_low, index_high]);
-    let own_interface = index_low == scope.interface;
+    let own_interface = scope.governs(index_low);
     match (
         request_type >> REQUEST_TYPE_SHIFT & 0x03,
         request_type & RECIPIENT_MASK,
@@ -202,7 +316,8 @@ pub fn control_permitted(
         }
         (REQUEST_TYPE_STANDARD, RECIPIENT_INTERFACE) => {
             reads
-                && index == u16::from(scope.interface)
+                && index_high == 0
+                && own_interface
                 && matches!(request, GET_STATUS | GET_DESCRIPTOR | GET_INTERFACE)
         }
         (REQUEST_TYPE_STANDARD, RECIPIENT_ENDPOINT) => {
@@ -216,12 +331,11 @@ pub fn control_permitted(
     }
 }
 
-/// Decode `request`, validate it fail-closed against the interface, and drive
-/// it on `engine` over the shared `data` buffer, returning the transfer
-/// outcome.
+/// Validate `urb` fail-closed against the interface and drive it on `engine`
+/// over the shared `data` buffer, returning the transfer outcome.
 ///
-/// This is the controller-side body the HCD runs after
-/// [`call_recv`](tairix_abi::SyscallNumber::CALL_RECV). It is **asynchronous**:
+/// This is the controller-side body the HCD runs for a
+/// [`UsbRequest::Transfer`] it received. It is **asynchronous**:
 ///
 /// * `Ok(Some(n))` — the transfer completed; `n` bytes landed in `data`. The
 ///   HCD frames a completion with [`frame_completion`] and replies now.
@@ -235,14 +349,13 @@ pub fn control_permitted(
 ///   the engine is touched, or a controller fault. The HCD frames an error
 ///   completion and replies now, so the blocked caller always fails closed.
 ///
-/// Re-decoding the stored `request` each time it is driven keeps the
-/// validation in one place and costs only a fixed-size parse.
+/// A held URB is driven again on each controller event, re-validated against
+/// the interface as it stands then.
 pub fn drive_urb<E: UrbEngine>(
-    request: &[u8],
+    urb: &UrbRequest,
     data: &mut [u8],
     engine: &mut E,
 ) -> Result<Option<u32>, Errno> {
-    let urb = UrbRequest::decode(request)?;
     let length = urb.length as usize;
     // The transfer may never run past the mapped shared buffer.
     if length > data.len() {
@@ -295,7 +408,7 @@ pub fn drive_urb<E: UrbEngine>(
                 return Err(Errno::OutOfRange);
             }
             match engine
-                .interrupt_in(length, data)
+                .interrupt_in(urb.endpoint, length, data)
                 .map_err(DriverError::as_errno)?
             {
                 Some(transferred) => Ok(Some(
@@ -344,7 +457,8 @@ pub fn drive_urb<E: UrbEngine>(
 /// # Errors
 ///
 /// [`Errno::BufferTooSmall`] if `reply` cannot hold a completion frame (it
-/// must be at least [`URB_COMPLETION_LEN`]). The caller sizes it so.
+/// must be at least [`URB_COMPLETION_LEN`](tairix_abi::usb_urb::URB_COMPLETION_LEN)).
+/// The caller sizes it so.
 pub fn frame_completion(reply: &mut [u8], result: Result<u32, Errno>) -> Result<usize, Errno> {
     match result {
         Ok(transferred) => encode_completion(reply, transferred),
@@ -399,25 +513,89 @@ impl<T: UrbCall> UrbClient<T> {
     /// kernel until the HCD replies, so a not-yet-ready interrupt-IN report
     /// parks the caller rather than surfacing a retryable error.
     fn submit(&mut self, urb: &UrbRequest) -> Result<u32, Errno> {
-        let mut request = [0u8; URB_REQUEST_LEN];
-        let n = urb.encode(&mut request)?;
-        let mut reply = [0u8; URB_COMPLETION_LEN];
-        let len = self.transport.call(&request[..n], &mut reply)?;
+        let mut reply = [0u8; USB_REPLY_MAX_LEN];
+        let len = self.call(&UsbRequest::Transfer(*urb), &mut reply)?;
         decode_completion(&reply[..len])
     }
 
-    /// Submit a control-IN URB on endpoint 0 reading into the shared `buffer`
-    /// of `length` bytes, returning the bytes the device delivered.
+    /// Send `request` and read its reply into `reply`, returning its length.
+    fn call(&mut self, request: &UsbRequest, reply: &mut [u8]) -> Result<usize, Errno> {
+        let mut frame = [0u8; USB_REQUEST_MAX_LEN];
+        let n = request.encode(&mut frame)?;
+        self.transport.call(&frame[..n], reply)
+    }
+
+    /// Send a request answered by a status frame alone.
+    fn call_for_status(&mut self, request: &UsbRequest) -> Result<(), Errno> {
+        let mut reply = [0u8; USB_REPLY_MAX_LEN];
+        let len = self.call(request, &mut reply)?;
+        decode_status_reply(&reply[..len])
+    }
+
+    /// Select `alternate` on `interface` ([`UsbRequest::SetInterface`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal — [`Errno::NoBandwidth`] when the bus cannot
+    /// schedule the setting — or a transport error.
+    pub fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<(), Errno> {
+        self.call_for_status(&UsbRequest::SetInterface {
+            interface,
+            alternate,
+        })
+    }
+
+    /// Govern `interface` of the same device ([`UsbRequest::ClaimInterface`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal, or a transport error.
+    pub fn claim_interface(&mut self, interface: u8) -> Result<(), Errno> {
+        self.call_for_status(&UsbRequest::ClaimInterface { interface })
+    }
+
+    /// Start an isochronous stream ([`UsbRequest::IsoStart`]), answering its
+    /// grant. The caller binds its notify port before starting, since the HCD
+    /// may report the first slot as soon as it is queued.
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal, or a transport error.
+    pub fn iso_start(&mut self, params: IsoStartParams) -> Result<IsoGrant, Errno> {
+        let mut reply = [0u8; USB_REPLY_MAX_LEN];
+        let len = self.call(&UsbRequest::IsoStart(params), &mut reply)?;
+        IsoGrant::decode(&reply[..len])
+    }
+
+    /// Queue slot `slot` of the stream on `endpoint` ([`UsbRequest::IsoQueue`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal, or a transport error.
+    pub fn iso_queue(&mut self, endpoint: u8, slot: u16) -> Result<(), Errno> {
+        self.call_for_status(&UsbRequest::IsoQueue { endpoint, slot })
+    }
+
+    /// Stop the stream on `endpoint` ([`UsbRequest::IsoStop`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal, or a transport error.
+    pub fn iso_stop(&mut self, endpoint: u8) -> Result<(), Errno> {
+        self.call_for_status(&UsbRequest::IsoStop { endpoint })
+    }
+
+    /// Submit a control-IN URB on endpoint 0 reading `length` bytes into the
+    /// shared buffer, returning the bytes the device delivered.
     ///
     /// # Errors
     ///
     /// The carried completion [`Errno`], or an encode/transport error.
-    pub fn control_in(&mut self, setup: [u8; 8], buffer: u64, length: u32) -> Result<u32, Errno> {
+    pub fn control_in(&mut self, setup: [u8; 8], length: u32) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint: 0,
             transfer_type: UsbTransferType::Control,
             direction: UsbDirection::In,
-            buffer,
             length,
             setup,
         })
@@ -435,7 +613,6 @@ impl<T: UrbCall> UrbClient<T> {
             endpoint: 0,
             transfer_type: UsbTransferType::Control,
             direction: UsbDirection::Out,
-            buffer: 0,
             length: 0,
             setup,
         })
@@ -443,7 +620,7 @@ impl<T: UrbCall> UrbClient<T> {
     }
 
     /// Submit a control-OUT URB on endpoint 0 whose OUT data stage carries
-    /// `length` bytes from the shared `buffer`: a class request with a
+    /// `length` bytes from the shared buffer: a class request with a
     /// payload, e.g. the CBI ADSC command block.
     ///
     /// # Errors
@@ -453,7 +630,7 @@ impl<T: UrbCall> UrbClient<T> {
     /// encode/transport error. A zero `length` is refused
     /// ([`Errno::LengthOutOfRange`]): the no-data form is
     /// [`Self::control_no_data`], and the two must not be conflated.
-    pub fn control_out(&mut self, setup: [u8; 8], buffer: u64, length: u32) -> Result<(), Errno> {
+    pub fn control_out(&mut self, setup: [u8; 8], length: u32) -> Result<(), Errno> {
         if length == 0 {
             return Err(Errno::LengthOutOfRange);
         }
@@ -461,7 +638,6 @@ impl<T: UrbCall> UrbClient<T> {
             endpoint: 0,
             transfer_type: UsbTransferType::Control,
             direction: UsbDirection::Out,
-            buffer,
             length,
             setup,
         })
@@ -469,7 +645,7 @@ impl<T: UrbCall> UrbClient<T> {
     }
 
     /// Submit an interrupt-IN URB for `endpoint` reading one report into the
-    /// shared `buffer`, returning the bytes transferred. `length` is the
+    /// shared buffer, returning the bytes transferred. `length` is the
     /// longest report expected; a report may run past it up to one service
     /// interval's payload, so the whole shared buffer receives it.
     ///
@@ -478,20 +654,19 @@ impl<T: UrbCall> UrbClient<T> {
     /// The carried completion [`Errno`] (a controller/device fault), or an
     /// encode/transport error. The call blocks until a report arrives, so the
     /// class driver parks rather than busy-polling for the next report.
-    pub fn interrupt_in(&mut self, endpoint: u8, buffer: u64, length: u32) -> Result<u32, Errno> {
+    pub fn interrupt_in(&mut self, endpoint: u8, length: u32) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,
             transfer_type: UsbTransferType::Interrupt,
             direction: UsbDirection::In,
-            buffer,
             length,
             setup: [0; 8],
         })
     }
 
     /// Submit a bulk-IN URB for `endpoint` reading up to `length` bytes into
-    /// the shared `buffer`, returning the bytes the device delivered (a
-    /// short packet yields fewer than `length`).
+    /// the shared buffer, returning the bytes the device delivered (a short
+    /// packet yields fewer than `length`).
     ///
     /// # Errors
     ///
@@ -500,33 +675,82 @@ impl<T: UrbCall> UrbClient<T> {
     /// with STALL (the endpoint is already recovered; the caller runs its
     /// class-level recovery and may submit again) — or an encode/transport
     /// error. The call blocks until the transfer completes.
-    pub fn bulk_in(&mut self, endpoint: u8, buffer: u64, length: u32) -> Result<u32, Errno> {
+    pub fn bulk_in(&mut self, endpoint: u8, length: u32) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,
             transfer_type: UsbTransferType::Bulk,
             direction: UsbDirection::In,
-            buffer,
             length,
             setup: [0; 8],
         })
     }
 
     /// Submit a bulk-OUT URB for `endpoint` writing `length` bytes from the
-    /// shared `buffer`, returning the bytes the device accepted.
+    /// shared buffer, returning the bytes the device accepted.
     ///
     /// # Errors
     ///
     /// As [`Self::bulk_in`].
-    pub fn bulk_out(&mut self, endpoint: u8, buffer: u64, length: u32) -> Result<u32, Errno> {
+    pub fn bulk_out(&mut self, endpoint: u8, length: u32) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,
             transfer_type: UsbTransferType::Bulk,
             direction: UsbDirection::Out,
-            buffer,
             length,
             setup: [0; 8],
         })
     }
+}
+
+/// One control-IN transfer: its SETUP, the buffer its data stage fills, and
+/// the bytes the device delivered.
+pub type ControlIn<'a> = dyn FnMut([u8; 8], &mut [u8]) -> Result<usize, Errno> + 'a;
+
+/// Why a class driver could not read its device's configuration descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigurationError {
+    /// A control transfer failed.
+    Transfer(Errno),
+    /// The header is malformed, the stream is longer than one data stage
+    /// carries, or the device delivered less than its header stated.
+    Malformed,
+    /// Memory for the stream ran out.
+    OutOfMemory,
+}
+
+/// Read the device's whole configuration descriptor: its header for the
+/// stated total, then exactly that many bytes. `control_in` runs one
+/// control-IN transfer of `data.len()` bytes and answers the bytes delivered.
+///
+/// A stream longer than one data stage carries ([`CTRL_DATA_LEN`]) is refused
+/// rather than read cut short, since a truncated stream ends mid-descriptor.
+///
+/// # Errors
+///
+/// [`ConfigurationError`].
+pub fn read_configuration(control_in: &mut ControlIn<'_>) -> Result<Vec<u8>, ConfigurationError> {
+    let mut header = [0u8; CONFIGURATION_HEADER_LEN];
+    let header_len = u16::try_from(header.len()).map_err(|_| ConfigurationError::Malformed)?;
+    let read = control_in(setup_get_configuration_descriptor(header_len), &mut header)
+        .map_err(ConfigurationError::Transfer)?;
+    let total = ConfigurationHeader::decode(header.get(..read).unwrap_or_default())
+        .map_err(|Malformed| ConfigurationError::Malformed)?
+        .total;
+    if total > CTRL_DATA_LEN {
+        return Err(ConfigurationError::Malformed);
+    }
+    let total_len = u16::try_from(total).map_err(|_| ConfigurationError::Malformed)?;
+    let mut config = Vec::new();
+    config
+        .try_reserve_exact(total)
+        .map_err(|_| ConfigurationError::OutOfMemory)?;
+    config.resize(total, 0);
+    let read = control_in(setup_get_configuration_descriptor(total_len), &mut config)
+        .map_err(ConfigurationError::Transfer)?;
+    if read != total {
+        return Err(ConfigurationError::Malformed);
+    }
+    Ok(config)
 }
 
 /// A class driver's link to its interface: the URB client and the driver's
@@ -551,6 +775,12 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         &self.client
     }
 
+    /// The URB client, for the interface and stream operations that move no
+    /// bytes through the shared buffer.
+    pub fn client_mut(&mut self) -> &mut UrbClient<T> {
+        &mut self.client
+    }
+
     /// The longest transfer one URB carries.
     fn chunk(&self) -> usize {
         self.shm.len().min(BULK_BUF_LEN)
@@ -568,7 +798,7 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
             return Err(Errno::LengthOutOfRange);
         }
         let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        let delivered = usize::try_from(self.client.control_in(setup, 0, len)?)
+        let delivered = usize::try_from(self.client.control_in(setup, len)?)
             .map_err(|_| Errno::LengthOutOfRange)?
             .min(data.len());
         data[..delivered].copy_from_slice(&self.shm[..delivered]);
@@ -588,7 +818,7 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
             .ok_or(Errno::LengthOutOfRange)?;
         staged.copy_from_slice(data);
         let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        self.client.control_out(setup, 0, len)
+        self.client.control_out(setup, len)
     }
 
     /// Run a no-data control transfer.
@@ -611,7 +841,7 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         while at < data.len() {
             let chunk = (data.len() - at).min(self.chunk());
             let len = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
-            let delivered = usize::try_from(self.client.bulk_in(endpoint, 0, len)?)
+            let delivered = usize::try_from(self.client.bulk_in(endpoint, len)?)
                 .map_err(|_| Errno::LengthOutOfRange)?
                 .min(chunk);
             data[at..at + delivered].copy_from_slice(&self.shm[..delivered]);
@@ -635,7 +865,7 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
             let chunk = (data.len() - at).min(self.chunk());
             self.shm[..chunk].copy_from_slice(&data[at..at + chunk]);
             let len = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
-            let accepted = usize::try_from(self.client.bulk_out(endpoint, 0, len)?)
+            let accepted = usize::try_from(self.client.bulk_out(endpoint, len)?)
                 .map_err(|_| Errno::LengthOutOfRange)?
                 .min(chunk);
             at += accepted;
@@ -661,7 +891,7 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         data: &mut [u8],
     ) -> Result<usize, Errno> {
         let len = u32::try_from(expected).map_err(|_| Errno::LengthOutOfRange)?;
-        let delivered = usize::try_from(self.client.interrupt_in(endpoint, 0, len)?)
+        let delivered = usize::try_from(self.client.interrupt_in(endpoint, len)?)
             .map_err(|_| Errno::LengthOutOfRange)?;
         let report = self.shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
         data.get_mut(..delivered)

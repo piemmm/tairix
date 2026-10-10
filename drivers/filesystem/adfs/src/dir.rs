@@ -70,19 +70,32 @@ impl Object {
     /// [`DriverError::LengthOutOfRange`] if the name is empty or longer
     /// than [`MAX_NAME_LEN`].
     pub fn named(name: &[u8]) -> Result<Self, DriverError> {
-        if name.is_empty() || name.len() > MAX_NAME_LEN {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        let mut object = Self {
+        Self {
             name: [0; MAX_NAME_LEN],
-            name_len: name.len(),
+            name_len: 0,
             load: 0,
             exec: 0,
             size: 0,
             indaddr: 0,
             attr: 0,
-        };
+        }
+        .renamed(name)
+    }
+
+    /// This object under `name`, every other field kept.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] if the name is empty or longer
+    /// than [`MAX_NAME_LEN`].
+    pub fn renamed(&self, name: &[u8]) -> Result<Self, DriverError> {
+        if name.is_empty() || name.len() > MAX_NAME_LEN {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        let mut object = *self;
+        object.name = [0; MAX_NAME_LEN];
         object.name[..name.len()].copy_from_slice(name);
+        object.name_len = name.len();
         Ok(object)
     }
 

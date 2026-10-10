@@ -18,6 +18,17 @@
 //! guest that raced the device would turn a real defect and a slow host into
 //! the same observation.
 //!
+//! # The seat run
+//!
+//! `audiotone seat` proves the stream follows the seat's lease
+//! (`plans/SOUND.md` SND13). Holding the seat itself, it schedules a pause at
+//! [`HOLD_FRAME`](tairix_test_audio_wire::HOLD_FRAME) before the device moves,
+//! so the segment's end is a named frame rather than a race. It then hands the
+//! seat over, is told the stream is held, plays on — which waits for the room
+//! — and takes the seat back, and is told the stream resumed on that very
+//! frame. Each step waits for the service's own notification, so no step races
+//! the one before it.
+//!
 //! It never self-exits on a failure path other than by saying why: a
 //! shortfall prints its reason on `stderr` and exits non-zero, so the run
 //! fails loud rather than quietly passing.
@@ -34,16 +45,14 @@ mod program {
     use alloc::vec;
     use core::fmt::Write as _;
 
-    use tairix_abi::audio::{
-        AudioNotify, OpenParams, StreamRole, StreamState, AUDIO_ENDPOINT, AUDIO_NOTIFY_LEN,
-    };
+    use tairix_abi::audio::{AudioNotify, OpenParams, StreamRole, StreamState};
     use tairix_abi::driver::audio::{ChannelMap, Frames, Rate, SampleFormat, StreamDirection};
-    use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
+    use tairix_abi::seat::{ReleaseSurface, SEAT_PRIMARY};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, ORIGIN_WIRE_LEN};
-    use tairix_audio::stream::{AudioTransport, StreamClient};
+    use tairix_abi::Errno;
+    use tairix_audio::live::{LiveStream, RtAudio};
+    use tairix_audio::stream::OpenFailure;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
-    use tairix_rt::shm::SharedRegion;
     use tairix_test_audio_wire as wire;
 
     /// Exit code when the audio service refused, or was not there.
@@ -52,6 +61,12 @@ mod program {
     const NO_REGION: i32 = 71;
     /// Exit code when the signal did not reach the device intact.
     const NOT_PLAYED: i32 = 72;
+    /// Exit code for an argument the fixture does not take.
+    const USAGE: i32 = 64;
+    /// Exit code when the seat could not be taken or given back.
+    const NO_SEAT: i32 = 73;
+    /// Exit code when the stream did not follow the seat as it must.
+    const NOT_HELD: i32 = 74;
 
     /// Notifies to take before giving up on the drain completing.
     ///
@@ -69,24 +84,6 @@ mod program {
     /// slower than the hardware would, and this bounds a wedged run rather
     /// than pacing a healthy one.
     const DRAIN_WAIT_NS: u64 = 10_000_000_000;
-
-    /// The live `audio-v1` transport: one `ipc_call` to the service's
-    /// reserved rendezvous, and a parked receive on this stream's own notify
-    /// mailbox.
-    struct RtAudio {
-        notify_port: u64,
-    }
-
-    impl AudioTransport for RtAudio {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(AUDIO_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
-
-        fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno> {
-            let mut from = [0u8; ORIGIN_WIRE_LEN];
-            tairix_rt::ipc_recv(self.notify_port, out, &mut from).map_err(Errno::from_syscall)
-        }
-    }
 
     /// Say why the run failed on `stderr`, so an abnormal exit is never
     /// silent, and answer the exit code.
@@ -125,9 +122,9 @@ mod program {
         }
     }
 
-    /// Open the stream, bind its notify port, and hand the service a ring
-    /// the whole signal fits in.
-    fn arm(transport: &mut RtAudio) -> Result<(StreamClient, SharedRegion, PcmGeometry), i32> {
+    /// Open the stream on the default sink with a ring the whole signal fits
+    /// in.
+    fn arm(transport: &mut RtAudio) -> Result<LiveStream, i32> {
         let Ok(rate) = Rate::new(wire::RATE_HZ) else {
             return Err(NO_SERVICE);
         };
@@ -142,52 +139,146 @@ mod program {
             role: StreamRole::Media,
             latency_target_frames: wire::RING_FRAMES,
         };
-        let stream = StreamClient::open(transport, &params)
-            .map_err(|err| fail("the audio service refused the stream", err, NO_SERVICE))?;
-        let grant = stream.grant();
-        // The notify port is derived by the service from this process's
-        // kernel-attested pid and handed back in the grant, so the transport
-        // learns it only now.
-        transport.notify_port = grant.notify_endpoint;
-        if tairix_rt::port_bind(grant.notify_endpoint, AUDIO_NOTIFY_LEN, 64) != 0 {
+        LiveStream::open(transport, &params).map_err(|failure| match failure {
+            OpenFailure::Refused(err) => {
+                fail("the audio service refused the stream", err, NO_SERVICE)
+            }
+            OpenFailure::Notify(err) => {
+                fail("the stream notify port would not bind", err, NO_SERVICE)
+            }
+            OpenFailure::Ring(err) => fail("the service refused the ring", err, NO_REGION),
+        })
+    }
+
+    /// Wait on the stream's own mailbox until the service tells it `want`,
+    /// answering the frame the change took effect at.
+    ///
+    /// Each park is bounded; running out of wakes or a stalled park is the
+    /// stack having stopped making progress, which is reported, not waited
+    /// out.
+    fn told(
+        transport: &mut RtAudio,
+        stream: &mut LiveStream,
+        set: u64,
+        want: StreamState,
+    ) -> Result<Frames, i32> {
+        for _ in 0..MAX_WAKES {
+            while let Ok(Some(notify)) = stream.take_notify(transport) {
+                if let AudioNotify::StateChanged { state, at, .. } = notify {
+                    if state == want {
+                        return Ok(at);
+                    }
+                }
+            }
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(set, DRAIN_WAIT_NS, &mut token) != 0 {
+                break;
+            }
+        }
+        Err(fail(
+            "the service never reported the state awaited",
+            Errno::TimedOut,
+            NOT_HELD,
+        ))
+    }
+
+    /// Take the boot seat, or give it up leaving its screen to `next`.
+    fn seat(take: Option<ReleaseSurface>) -> Result<(), i32> {
+        let ret = match take {
+            None => tairix_rt::display_acquire(SEAT_PRIMARY),
+            Some(next) => tairix_rt::display_release(SEAT_PRIMARY, next),
+        };
+        if ret < 0 {
             return Err(fail(
-                "the stream notify port would not bind",
-                Errno::AddressInUse,
-                NO_SERVICE,
+                "the seat would not change hands",
+                Errno::from_syscall(ret),
+                NO_SEAT,
             ));
         }
-        let geometry = PcmGeometry::new(
-            grant.ring_frames,
-            grant.format,
-            grant.channel_map.channels(),
-        )
-        .map_err(|err| fail("the granted ring has no shape", err, NO_REGION))?;
-        let region = SharedRegion::create(geometry.region_len()).ok_or_else(|| {
-            fail(
-                "the PCM ring could not be created",
-                Errno::OutOfMemory,
-                NO_REGION,
-            )
-        })?;
-        let handle = tairix_rt::shm_grant(region.id(), AUDIO_ENDPOINT);
-        if handle < 0 {
-            return Err(fail(
-                "the ring could not be granted",
-                Errno::from_syscall(handle),
-                NO_REGION,
-            ));
+        Ok(())
+    }
+
+    /// Fail with `reason` unless the service named `at` as [`wire::HOLD_FRAME`].
+    fn at_hold(at: Frames, reason: &str) -> Result<(), i32> {
+        if at.get() == wire::HOLD_FRAME as u64 {
+            return Ok(());
         }
-        #[allow(clippy::cast_sign_loss)] // `handle >= 0` is the grant handle.
+        write_stderr_line(reason);
+        Err(NOT_HELD)
+    }
+
+    /// The seat run, from a stream whose whole signal is queued to one held
+    /// at [`wire::HOLD_FRAME`] and resumed on it.
+    fn held_and_resumed(
+        transport: &mut RtAudio,
+        stream: &mut LiveStream,
+        set: u64,
+    ) -> Result<(), i32> {
+        let hold_frame = Frames::new(wire::HOLD_FRAME as u64);
+        seat(None)?;
         stream
-            .attach(transport, handle as u64)
-            .map_err(|err| fail("the service refused the ring", err, NO_REGION))?;
-        Ok((stream, region, geometry))
+            .client_mut()
+            .stop(transport, hold_frame)
+            .map_err(|err| fail("the pause would not be scheduled", err, NOT_PLAYED))?;
+        stream
+            .client_mut()
+            .start(transport, Frames::ZERO)
+            .map_err(|err| fail("the stream would not start", err, NOT_PLAYED))?;
+        let paused_at = told(transport, stream, set, StreamState::Paused)?;
+        at_hold(
+            paused_at,
+            "audiotone: the segment did not end on the frame named",
+        )?;
+        seat(Some(ReleaseSurface::Handover))?;
+        let held_at = told(transport, stream, set, StreamState::SeatInactive)?;
+        at_hold(
+            held_at,
+            "audiotone: the stream was not held where it paused",
+        )?;
+        // Played on outside the room, it waits for the room.
+        stream
+            .client_mut()
+            .start(transport, hold_frame)
+            .map_err(|err| fail("the stream would not play on", err, NOT_PLAYED))?;
+        seat(None)?;
+        let resumed_at = told(transport, stream, set, StreamState::Running)?;
+        at_hold(
+            resumed_at,
+            "audiotone: the stream did not resume where it was held",
+        )?;
+        stream
+            .client_mut()
+            .drain(transport)
+            .map_err(|err| fail("the stream would not drain", err, NOT_PLAYED))?;
+        told(transport, stream, set, StreamState::Idle)?;
+        seat(Some(ReleaseSurface::Text))
+    }
+
+    /// The plain run: start the queued stream and drain it.
+    fn played(transport: &mut RtAudio, stream: &mut LiveStream, set: u64) -> Result<(), i32> {
+        stream
+            .client_mut()
+            .start(transport, Frames::ZERO)
+            .map_err(|err| fail("the stream would not start", err, NOT_PLAYED))?;
+        stream
+            .client_mut()
+            .drain(transport)
+            .map_err(|err| fail("the stream would not drain", err, NOT_PLAYED))?;
+        told(transport, stream, set, StreamState::Idle).map(|_| ())
     }
 
     fn main() -> i32 {
-        let mut transport = RtAudio { notify_port: 0 };
-        let (mut stream, mut region, geometry) = match arm(&mut transport) {
-            Ok(armed) => armed,
+        let seat_run = match tairix_rt::args().as_deref() {
+            Some([]) => false,
+            Some([arg]) if *arg == wire::SEAT_ARG => true,
+            _ => {
+                write_stderr_line("audiotone: usage: audiotone [seat]");
+                return USAGE;
+            }
+        };
+        let mut transport = RtAudio::new();
+        let mut stream = match arm(&mut transport) {
+            Ok(stream) => stream,
             Err(code) => return code,
         };
         // Queue the whole stream *before* the device is clocked: a device
@@ -202,33 +293,19 @@ mod program {
                 NOT_PLAYED,
             );
         }
-        let mut ring = match PcmRing::bind(region.bytes_mut(), geometry) {
-            Ok(ring) => ring,
-            Err(err) => return fail("the ring would not bind", err, NO_REGION),
-        };
-        match stream.write_at(&mut ring, Frames::ZERO, &samples) {
+        match stream.write_at(Frames::ZERO, &samples) {
             Ok(written)
                 if written.sample_frames as usize == wire::STREAM_FRAMES
                     && written.silence_frames == 0 => {}
-            Ok(written) => {
-                let _ = written;
+            Ok(_) => {
                 write_stderr_line("audiotone: the ring took only part of the signal");
                 return NOT_PLAYED;
             }
             Err(err) => return fail("the ring refused the signal", err, NOT_PLAYED),
         }
 
-        if let Err(err) = stream.start(&mut transport, Frames::ZERO) {
-            return fail("the stream would not start", err, NOT_PLAYED);
-        }
-        if let Err(err) = stream.drain(&mut transport) {
-            return fail("the stream would not drain", err, NOT_PLAYED);
-        }
-
-        // Park on the stream's own mailbox until the service says the drain
-        // completed. An empty mailbox is `WouldBlock`, so the wait is the
-        // wait set — re-reading the port in a loop would spin through the
-        // whole budget without ever giving the service a chance to run.
+        // Park on the stream's own mailbox, each park bounded, for every
+        // change the run waits on.
         let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return fail(
                 "no wait set for the drain",
@@ -236,38 +313,31 @@ mod program {
                 NOT_PLAYED,
             );
         };
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            transport.notify_port,
-            NOTIFY_TOKEN,
-        ) != 0
-        {
+        let joined = transport.notify_port().is_some_and(|port| {
+            tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Port,
+                port,
+                NOTIFY_TOKEN,
+            ) == 0
+        });
+        if !joined {
             return fail(
                 "the notify port would not join the wait set",
                 Errno::NotImplemented,
                 NOT_PLAYED,
             );
         }
-        let mut frame = [0u8; AUDIO_NOTIFY_LEN];
-        for _ in 0..MAX_WAKES {
-            let mut token = 0u64;
-            if tairix_rt::waitset_wait(set, DRAIN_WAIT_NS, &mut token) != 0 {
-                break;
-            }
-            let Ok(len) = transport.wait_notify(&mut frame) else {
-                continue;
-            };
-            let Ok(notify) = AudioNotify::decode(&frame[..len]) else {
-                continue;
-            };
-            stream.adopt(notify);
-            if stream.state() == StreamState::Idle {
-                break;
-            }
+        let run = if seat_run {
+            held_and_resumed(&mut transport, &mut stream, set)
+        } else {
+            played(&mut transport, &mut stream, set)
+        };
+        if let Err(code) = run {
+            return code;
         }
-        let report = match stream.report(&mut transport) {
+        let report = match stream.client_mut().report(&mut transport) {
             Ok(report) => report,
             Err(err) => return fail("the stream state could not be read", err, NOT_PLAYED),
         };
@@ -291,7 +361,12 @@ mod program {
             buf: &mut marker,
             len: 0,
         };
-        let _ = writeln!(cursor, "{}", wire::PASS_MARKER);
+        let marker_line = if seat_run {
+            wire::SEAT_PASS_MARKER
+        } else {
+            wire::PASS_MARKER
+        };
+        let _ = writeln!(cursor, "{marker_line}");
         let len = cursor.len;
         if Stdout.write_all(&marker[..len]).is_err() {
             write_stderr_line("audiotone: the pass report could not be written");

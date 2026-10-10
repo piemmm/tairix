@@ -182,13 +182,17 @@ pub fn resolve(reference: &str, flags: OpenFlags) -> Result<ResourceBacking, Res
         .namespace()
         .known()
         .ok_or(ResolveError::UnknownNamespace)?;
-    // A value-backed namespace is refused on its shape, before any
-    // selector work: `info:`/`state:`/`stats:` are typed values read through
-    // the System Information API broker, so no selector within them could
-    // ever be a byte stream this resolver serves. Saying so — rather than
-    // "no resolver yet" — is the difference between a refusal the caller can
-    // act on and one that invites a pointless retry.
-    if namespace.backing() == NamespaceBacking::Value {
+    // A value-backed or service-resolved namespace is refused on its shape,
+    // before any selector work: `info:`/`state:`/`stats:` are typed values
+    // read through the System Information API broker, and an `audio:` name is
+    // opened through the audio service's own protocol, so no selector within
+    // them could ever be a byte stream this resolver serves. Saying so —
+    // rather than "no resolver yet" — is the difference between a refusal the
+    // caller can act on and one that invites a pointless retry.
+    if matches!(
+        namespace.backing(),
+        NamespaceBacking::Value | NamespaceBacking::Service
+    ) {
         return Err(ResolveError::NotAStream);
     }
     let backing = match namespace {
@@ -366,7 +370,7 @@ mod tests {
                 // refused for exactly the reason its backing implies;
                 // anything else is a registry error.
                 let expected = match ns.backing() {
-                    NamespaceBacking::Value => ResolveError::NotAStream,
+                    NamespaceBacking::Value | NamespaceBacking::Service => ResolveError::NotAStream,
                     NamespaceBacking::Stream => ResolveError::UnsupportedResolver,
                 };
                 if let Err(err) = resolve(&reference, OpenFlags::READ) {

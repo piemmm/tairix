@@ -38,6 +38,14 @@ Bibliothèque de programmes, ou par son nom depuis un shell. Il exige une
 session graphique en cours : sans elle, le canal de fenêtre est inaccessible et
 il signale le refus sur le flux d'erreur standard puis se termine.
 
+Son affiche chaque sortie et chaque entrée avec son choix par défaut, son
+niveau et sa sourdine, ainsi que ce qui enregistre : vos propres
+enregistrements par leur nom, et combien en font les autres. Ses réglages
+changent le périphérique sur-le-champ, et seulement tant que votre session
+tient la salle qu'il dessert ; un périphérique de la salle d'une autre session
+est affiché mais ne peut pas être modifié ici. Votre bureau retient ce que
+vous réglez.
+
 ## EXIT STATUS
 
 Zéro après une fermeture propre ; non nul lorsque le canal de fenêtre ou la

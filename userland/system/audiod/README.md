@@ -39,9 +39,13 @@ service keeps serving.
 
 ## Authority
 
-Playback needs no capability: the authorisation is that the caller's session
-holds the sink's seat lease, decided by the one routing policy against the
-kernel-attested caller. Opening a source additionally demands
+Playback needs no capability: the authorisation is that the caller's login
+session holds the seat whose room the device serves, decided by the one
+routing policy from the kernel-attested origin — at open, and again for every
+live stream as the seat's lease moves, holding a stream outside the room on
+its frame and resuming it there. The capture streams moving frames are
+published as the `AudioCapture` notice the recording indicator is drawn from.
+Opening a source additionally demands
 `CAP_AUDIO_CAPTURE`, read from the attested capability summary. Adopting a
 driver's device channel demands `CAP_DRV_LOAD` — the authority to put a driver
 on the machine is exactly the authority to tell the mixer about one, so no

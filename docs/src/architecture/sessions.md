@@ -77,6 +77,22 @@ Which gives:
 - A text login's background jobs end at logout.
 - Stopping a service ends everything it started.
 
+## Login sessions
+
+A session founded by a `New` spawn that names its user — a credential switch,
+which only a `CAP_SPAWN_AS_USER` holder may make — is a **login session**: the
+sign-in everything inside it belongs to. `login` founds one for each text
+shell, desktop and login screen it starts; an application, a terminal's shell
+and an elevated program lie inside their requester's. Each process records the
+innermost login session around it at admission, and the kernel attests it in
+the process's `Origin` (`Origin::login_session`). A process no login encloses —
+a service, a driver — has none.
+
+It is the identity a seat's devices are arbitrated on. The boot seat's
+`DisplayLease` notice names the login session its holder lies within, and the
+audio service mixes only that session's streams into the seat's speakers
+(`docs/src/userland/audiod.md`).
+
 ## In the kernel
 
 Membership lives in the capability table, under the lock that guards its

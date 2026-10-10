@@ -80,8 +80,11 @@ what is built.
   or into the source's own subtree is refused before any I/O. A move is
   an atomic `fs_rename` on one volume and falls back to copy-then-remove
   across volumes (the kernel's honest `CrossVolume` report drives the
-  fallback — the target is probed *before* the rename, so an existing
-  file is asked about, never silently replaced).
+  fallback). The rename asks the kernel to refuse an occupied target
+  rather than replace it, so an existing file — even one created after the
+  move was typed — is asked about, never silently replaced, and a
+  re-spelling of the source's own name on a volume that ignores case goes
+  straight through.
 - **The overwrite question.** When a transfer would overwrite an existing
   file the operation pauses per file: `o` overwrites, `s` skips (the
   skipped source stays in place, and the emptied-source-directory removal

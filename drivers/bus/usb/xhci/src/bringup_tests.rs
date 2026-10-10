@@ -168,7 +168,7 @@ fn bring_up(
         &NoopWait,
         BAR_BASE,
         BAR_LEN,
-        dma_aperture_top,
+        Some(dma_aperture_top),
     )
 }
 
@@ -233,7 +233,7 @@ fn diagnostic_localises_the_controller_open_stall() {
         &NoopWait,
         BAR_BASE,
         BAR_LEN,
-        APERTURE_TOP,
+        Some(APERTURE_TOP),
     )
     .err()
     .expect("an inert controller window fails closed");
@@ -262,7 +262,7 @@ fn diagnostic_localises_a_setup_stall() {
         &NoopWait,
         BAR_BASE,
         BAR_LEN,
-        APERTURE_TOP,
+        Some(APERTURE_TOP),
     )
     .err()
     .expect("a host with no mapper fails closed");
@@ -292,7 +292,7 @@ fn derives_a_bus_window_bar_and_translated_dma_aperture() {
         Ok(ControllerResources {
             bar_base: 0xC000_0000,
             bar_len: 0x9310,
-            dma_aperture_top: 0xC000_0000 + 0x4000_0000,
+            dma_aperture_top: Some(0xC000_0000 + 0x4000_0000),
         })
     );
 }
@@ -312,7 +312,7 @@ fn a_translated_aperture_starting_at_bus_zero_is_still_translated() {
     ];
     assert_eq!(
         derive_controller_resources(resources.iter()).map(|r| r.dma_aperture_top),
-        Ok(0x4000_0000)
+        Ok(Some(0x4000_0000))
     );
 }
 
@@ -330,8 +330,22 @@ fn derives_an_mmio_bar_and_untranslated_dma_aperture() {
         Ok(ControllerResources {
             bar_base: 0xA00_0000,
             bar_len: 0x1000,
-            dma_aperture_top: 0x4000_0000,
+            dma_aperture_top: Some(0x4000_0000),
         })
+    );
+}
+
+#[test]
+fn a_dma_grant_declaring_no_constraint_bounds_nothing() {
+    // A PCI function the kernel discovers on a `virt`-class host reaches all
+    // memory: `dma(0, 0, ..)` is no constraint, not an aperture ending at 0.
+    let resources = [
+        HwResource::mmio(0x1000_0000, 0x4000),
+        HwResource::dma(0, 0, tairix_abi::DmaCoherence::Snooped),
+    ];
+    assert_eq!(
+        derive_controller_resources(resources.iter()).map(|r| r.dma_aperture_top),
+        Ok(None)
     );
 }
 

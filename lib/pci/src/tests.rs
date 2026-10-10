@@ -2046,3 +2046,94 @@ fn a_bar_resolves_only_inside_the_apertures_and_off_memory() {
         );
     }
 }
+
+/// One function at 00:04.0 with a 32-bit 16 KiB memory BAR0 at
+/// `0xFE00_0000` and an MSI-X capability placing its table and PBA at
+/// `table` and `pba`, each `(bar, offset)`.
+fn msix_placement_fixture(table: (u8, u32), pba: (u8, u32)) -> MockConfigSpace {
+    let entry = |(bar, offset): (u8, u32)| offset | u32::from(bar);
+    MockConfigSpace::new(vec![MockFunction {
+        bus: 0,
+        device: 4,
+        function: 0,
+        regs: vec![
+            id(0x1B36, 0x000D),
+            status_with_caplist(),
+            (2, 0x0C03_3000),
+            header(0x00),
+            (4, 0xFE00_0000),
+            cap_pointer(0x50),
+            (20, (0x000F_u32 << 16) | 0x11),
+            (21, entry(table)),
+            (22, entry(pba)),
+        ],
+        sizing: vec![(4, 0xFFFF_C000)],
+    }])
+}
+
+fn function_04() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 4,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+    .unwrap()
+}
+
+#[test]
+fn a_driver_is_granted_a_bar_only_below_the_msix_state_it_holds() {
+    let pci = Pci::new(q35_fixture(), None);
+    let virtio = ConfigAddress {
+        bus: 0,
+        device: 3,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+    .unwrap();
+    assert_eq!(
+        PciBus::driver_window(&pci, virtio, 1),
+        Ok((0xFEBF_0000, 0x2000)),
+        "the table at 0x2000 and the PBA above it are the owner's"
+    );
+    assert_eq!(
+        PciBus::driver_window(&pci, virtio, 0),
+        Err(DriverError::Unsupported),
+        "an I/O BAR is no window"
+    );
+
+    let pci = Pci::new(msix_placement_fixture((0, 0x3000), (0, 0x3800)), None);
+    assert_eq!(
+        PciBus::driver_window(&pci, function_04(), 0),
+        Ok((0xFE00_0000, 0x3000))
+    );
+    let elsewhere = Pci::new(msix_placement_fixture((2, 0), (2, 0x800)), None);
+    assert_eq!(
+        PciBus::driver_window(&elsewhere, function_04(), 0),
+        Ok((0xFE00_0000, 0x4000)),
+        "MSI-X state in another BAR leaves this one whole"
+    );
+}
+
+#[test]
+fn msix_state_takes_its_whole_page_and_one_at_the_base_leaves_nothing() {
+    let mid_page = Pci::new(msix_placement_fixture((0, 0x2800), (0, 0x3800)), None);
+    assert_eq!(
+        PciBus::driver_window(&mid_page, function_04(), 0),
+        Ok((0xFE00_0000, 0x2000)),
+        "the page the table starts in is withheld whole"
+    );
+    let pba_first = Pci::new(msix_placement_fixture((0, 0x3000), (0, 0x1000)), None);
+    assert_eq!(
+        PciBus::driver_window(&pba_first, function_04(), 0),
+        Ok((0xFE00_0000, 0x1000)),
+        "whichever structure comes first bounds the window"
+    );
+    let at_base = Pci::new(msix_placement_fixture((0, 0), (0, 0x800)), None);
+    assert_eq!(
+        PciBus::driver_window(&at_base, function_04(), 0),
+        Err(DriverError::NotFound)
+    );
+}

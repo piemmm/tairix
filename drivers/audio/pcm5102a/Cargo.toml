@@ -1,0 +1,28 @@
+[package]
+name = "tairix-drv-audio-pcm5102a"
+description = "TAIRiX autoloaded user-space driver for the TI PCM5102A DAC: a codec with no control port, serving codec-v1 with the facts its strapping fixes so its digital audio interface's driver knows what to send it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `Codec` class trait and the codec vocabulary.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The exit codes and failure record every audio driver process ends with.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+# The capability-set type the rt-backed host is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The codec-v1 serve loop.
+tairix-codec = { path = "../../../lib/codec", version = "=0.0.0" }
+# The node's grants.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# `_start`.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -20,19 +20,27 @@ seek slider.
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
 | SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | done |
-| SND5a | The DMA seam's ABI and discovery: `HwDeviceClass::Dma`, the `DmaController` duty and `DmaRequest` resources, the sixteen-resource node, the endpoint block and its wire protocol; the shared walk's `dmas` binding, per-entry `dma-ranges` and `interrupt-parent`; the Broadcom channel mask | done |
+| SND5a | The DMA seam's ABI and discovery: `HwDeviceClass::Dma`, the DMA `LinkDuty` and `LinkRequest` resources (`plans/SUPPLIERS.md` SL1), the sixteen-resource node, the endpoint block and its wire protocol; the shared walk's `dmas` binding, per-entry `dma-ranges` and `interrupt-parent`; the Broadcom channel mask | done |
 | SND5b | The three kernel prerequisites — `shm_create_dma` (quarantined with its creator), `shm_grant_peer`, `call_peer_holds` — and the duty-gated controller endpoint | done |
 | SND5c | The `DmaEngine`/`DmaChannel` class trait and `drivers/dma/bcm2835`, host-tested against a register-level model that fetches control blocks | done |
-| SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
-| SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
-| SND8 | `drivers/audio/bcm2711_pwm` with noise shaping; `drivers/audio/bcm2711_i2s` with a separately-bound codec | planned |
-| SND9 | `lib/sound`: the registry, AU and WAV complete, the sandboxed decode seam, the fuzz target | planned |
-| SND10 | `userland/apps/play`, with and without the curses interface, backgroundable | planned |
-| SND11 | `drivers/audio/hda`: controller, CORB/RIRB, stream descriptors, the pure-graph codec walk; the QEMU `intel-hda` vertical | planned |
-| SND12 | `lib/sound`: FLAC, decoder and feature-gated encoder, verified by round-trip and against each stream's own STREAMINFO digest | planned |
-| SND13 | Seat integration: leases, pause-and-resume across a fast user switch, the capture indicator, the notice topic; the two-session vertical | planned |
-| SND14 | `userland/apps/music` | planned |
-| SND15 | Desktop integration: the Settings pane, the taskbar volume control and recording indicator, Switchboard, sysinfo, the `audio:` resolver, media types and icons, `audioctl` | planned |
+| SND6 | Isochronous transfer support: the endpoint kind, service intervals, feedback and pacing arithmetic, alternate settings with bandwidth reservation, and frame-indexed stream scheduling in `lib/usb`; the stream regions, grants and notifications in `drivers/bus/usb/xhci` | done |
+| SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | done |
+| SND8a | Address zones in the frame allocator, bounded by the DMA ceilings discovery reports, with a reserve below each, on every port (D175) | done |
+| SND8b | The supplier link's `Clock` and `Codec` roles (`plans/SUPPLIERS.md` SL1, SL2) over the duty-and-request shape SND5's request line introduced, the supplier's attestation generalised by role, a consumer bound only after its suppliers, and discovery of `clocks` and of `simple-audio-card` | done |
+| SND8c | `clock-v1` and `drivers/clock/bcm2711_cprman`: rates from the PLLs the firmware runs, MASH dividers, a shared clock never retuned under another consumer | done |
+| SND8d | The links' consumer halves (`lib/linkclient`: DMA channels and clocks) and the serve loop's posted-call wake | done |
+| SND8e | `drivers/audio/bcm2711_pwm`: PWM1 under DMA with error-feedback noise shaping, the in-band noise measured | done |
+| SND8f | `codec-v1` and the codec drivers: `ti,pcm5102a`, which has no control port, and `ti,pcm5122` over I2C | done |
+| SND8g | `drivers/audio/bcm2711_i2s`: the PCM block under DMA, bit and frame clocks driven or followed as its link states, composed with its codec | done |
+| SND8h | The image: the first-party PWM-audio overlay (`status`, `dmas`), the jack pins' function in `config.txt`, and the overlay writer in `tools/mkimage` | done |
+| SND9 | `lib/sound`: the registry, AU and WAV complete, the sandboxed decode seam, the fuzz target | done |
+| SND10 | `userland/apps/play`, with and without the curses interface, backgroundable | done |
+| SND11 | `drivers/audio/hda`: controller, CORB/RIRB, stream descriptors, the pure-graph codec walk; the QEMU `intel-hda` vertical | done |
+| SND12 | `lib/sound`: FLAC, decoder and feature-gated encoder, verified by round-trip and against each stream's own STREAMINFO digest | done |
+| SND13 | Seat integration: the lease followed through the kernel's notice, pause-and-resume on the exact frame, notifications dropped, the capture count published as a notice; the seat vertical | done |
+| SND13.1 | The two-session vertical: a fast user switch between two signed-in accounts, the departing session's stream held and resumed on its frame | blocked: needs the login vertical harness (`plans/NEW-DESKTOP-LOGIN.md` G7.2) |
+| SND14 | `userland/apps/music`, the shared engine `lib/player`, and the picker's folder pick | done |
+| SND15 | Desktop integration: device controls and their room, the machine baseline, locations, the Settings pane, the taskbar volume control and recording indicator, Switchboard, sysinfo, the `audio:` resolver, media types, `audioctl` | done |
 | SND16 | `lib/sound`: MPEG audio Layers I/II/III, verified against the ISO compliance limits | planned |
 | SND17 | `lib/sound`: Ogg container and Vorbis I | planned |
 | SND18 | `lib/sound`: Opus, verified against the RFC 6716 vectors | planned |
@@ -65,18 +73,18 @@ genuinely dropped frames, which is the one thing this vertical exists to
 catch.
 
 **What SND5a guarantees.** Every FDT port publishes a DMA controller as a
-`Dma` node carrying its `DmaController` duty — its endpoint from the reserved
+`Dma` node carrying its DMA `LinkDuty` — its endpoint from the reserved
 `DMA_CONTROLLER_ENDPOINTS` block, its channel mask in node-relative numbering,
 and whether the tree stated one — and one translated `Dma` window per entry of
 its bus's `dma-ranges`, flagged `DMA_TRANSLATED` so a window starting at bus
-`0` is never read as a plain limit (`plans/OPEN-DEFECTS.md` D178). Each consumer `dmas` entry becomes a `DmaRequest`
+`0` is never read as a plain limit (`plans/OPEN-DEFECTS.md` D178). Each consumer `dmas` entry becomes a DMA `LinkRequest`
 naming its controller's endpoint, including a consumer met before its
 controller. Both records decode only from their canonical encoding and
 `dmaengine-v1`'s frames only at their exact length; `fuzz_dmaengine` holds
 that every accepted record and frame re-encodes to its own bytes.
 
 **What SND5b guarantees.** An endpoint in `DMA_CONTROLLER_ENDPOINTS` binds
-only for the holder of the `DmaController` duty naming it. `shm_create_dma`
+only for the holder of the DMA `LinkDuty` naming it. `shm_create_dma`
 carves one contiguous block below a `Dma` grant's ceiling — the highest free
 one, found by the frame allocator's search below the ceiling rather than by
 the order of its lists (`plans/OPEN-DEFECTS.md` D173) — maps it
@@ -105,6 +113,180 @@ refuses. Host tests drive the driver against a register-level model
 that fetches control blocks from simulated memory, asserting every memory-side
 access stays inside the channel's buffer. Metal acceptance is SND8's first
 transfer.
+
+**What SND6 guarantees.** A node governs its own interface and any sibling it
+claims that no node serves; an interface with settings to choose between is
+published for nobody and claimed by its function's control interface, which
+is published even with no endpoint. Selecting a setting reserves its
+isochronous endpoints with the controller before the device is told — a
+Bandwidth Error is `NoBandwidth` with nothing changed, a device refusal puts
+the old setting back — and a stream schedules every queued slot onto its
+endpoint's ring at the frame each interval is due in, restarting a stream that
+fell behind on the first frame it can still make and reporting the intervals
+it jumped. Every interval is accounted for: moved (an IN interval with its
+received length), missed, or failed, with each TD interrupting on completion
+and a slot raising one interrupt. A stream's region is created for it and
+delegated only to the caller that started it; its notifications go to the
+port that caller's attested pid names, bounded by its queued slots
+(`IsoLayout::notify_capacity`), and each names the stream by a number its node
+advances with every stream it starts, so a late notice of an ended stream
+cannot pass for its successor's; and it ends — telling its class driver why
+when the port still allows — with its device, a controller reset, a halt, or
+a notification refused. The event ring grows to four page segments where the
+controller takes them. All of it is host-tested against the register-level
+mock's isochronous endpoint model; the end-to-end vertical is SND7's.
+
+**What SND7 guarantees.** `drivers/audio/usb_uac` binds any USB Audio 1.0 or
+2.0 function's control interface by class, claims the streaming interfaces the
+function groups with it, and serves each as one endpoint, everything it
+reports read from the function's own descriptors and controls. An endpoint is
+named for the terminal at the outside world's end of its path; its gain is the
+first feature unit on that path with a settable volume, set to the step above
+the asked-for level, mute falling back to the class's silence value. A
+setting the vocabulary cannot carry exactly is left out. 1.0 rates are set on
+the data endpoint; 2.0 rates are read from every route to a clock source — a
+programmable selector's every pin, a multiplier's ratio — as the standard
+rates its ranges admit, set on the source and read back, and never retuned
+under another endpoint running from it, through a shared source or a shared
+selector. Streams carry whole intervals paced exactly, follow
+explicit feedback, or follow implicit feedback from the function's capture
+endpoint, running it for the rate alone when nothing captures. A position is
+the device's timeline stamped by slot completion, with skipped and missed
+intervals counted as lost; a notice is believed only from its stream's
+grantor and only when it names the stream's number, and its port is admitted
+to the host controller alone. Every stream start re-establishes its interface
+— claim, setting, rate, gain — so a controller reset, which forgets all of it,
+costs nothing but the frames in flight: a data or feedback stream it ends is
+started that way again, and one that cannot be faults the endpoint and tells
+the mixer. A prime holds the whole slots the ring fills for the start, which
+queues them — or one slot of counted silence when none is held, so a started
+endpoint always has something in flight to finish. A configuration that
+fails part-way puts the previous one back. The clock-graph walk is bounded, so no topology a device describes can hang
+bring-up.
+
+The host controller runs under QEMU: the kernel publishes an xHCI PCI
+function on every port it owns the host of, its register window stopping short
+of the MSI-X state only the kernel programs (`PciBus::driver_window`), and the
+controller driver binds it by class, below a driver naming the exact part. The
+vertical `audio_qemu_{aarch64,riscv64,x86_64}` plays the audio fixture through
+QEMU's `usb-audio` behind `qemu-xhci` and asserts the capture sample for
+sample, recorded past QEMU's mixing engine because `usb-audio` applies its
+emulated volume there; with the engine off QEMU labels the file with its
+default rate, which the check expects of that card
+(`SoundCard::capture_label_hz`).
+
+**What SND9 guarantees.** `lib/sound` decodes AU and WAV completely, as
+§`lib/sound` defines, and a player reaches it only through
+`lib/sandbox::audiodecode`: a long-lived worker under a supervised session,
+handed the file's length and never the file, that asks for the pages its
+decoder reads. It holds them in a bounded least-recently-used cache keyed by a
+seed the owner draws, asks for the read that missed plus the pages a
+sequential decode reads next — one exchange a window — and refuses a request
+that needs more of the file at once than the cache holds rather than asking
+for ever. The owner believes a reply only once it holds against what was
+asked. A replacement worker is brought back to the stream's position by
+seeking, or by decoding up to it where the stream cannot seek; one that finds
+another stream, or a stream that fails its worker twice at one position, is
+given up. `CACHE_PAGES`, `MAX_NEED_BYTES`, `MAX_BLOCK_FRAMES` and `LIMITS` are
+the sandbox's fixed input-byte and output-frame ceilings. `fuzz_sound` is
+registered with `cargo xtask fuzz`.
+
+**What SND10 guarantees.** `play` is a command bundle that decodes each file
+in SND9's sandboxed worker, handing it page reads and never the file, and
+plays the list into one `audio-v1` stream while the rate, sample format and
+channel layout hold — gapless across files and passes. A change of shape
+drains the stream to its last frame before the next opens. Start, duration
+and passes are exact to the frame, a resume starts on the frame the pause
+stopped on, a seek discards what is queued, and a level step never rises
+above unity. A file that cannot be opened, decoded or read is left out or cut
+short once, with its reason on standard error and fd 3, and the exit status
+says so. Playback runs on its own loop; the curses interface is a thread that
+paints from the status at most every 50 ms and only while the process holds
+its terminal, so a backgrounded `play` keeps playing and Ctrl-Z pauses, stops
+and resumes on the same frame. A notification dropped from a full mailbox is
+recovered by reading the stream's state back (`NotifyDrain`), the under-run
+totals are the service's own count for each stream, and a wait or watch that
+fails ends playback with its reason rather than spinning. The engine is
+host-tested over the real decoder; the `play` verticals on all three QEMU
+targets plant the shared signal as a file and assert the capture holds
+exactly the signal.
+
+**What SND11 guarantees.** `drivers/audio/hda` binds any HD Audio controller
+by its class code, which the kernel publishes on every PCI host it owns with
+its message interrupt routed — through MSI where the function has no MSI-X,
+as QEMU's `intel-hda` has not. Bring-up stops whatever an earlier instance
+left running, resets the controller, starts its command and response rings
+and its DMA position buffer, and reads every codec that announces itself from
+its own widget capabilities, connection lists and pin defaults, with no
+quirk table. Outputs are routed back to converters of their own, an
+association's analogue pins carried as one output of up to eight channels; a
+pin without a converter of its own plays an output's front pair, and plugged
+headphones silence the speakers they share one with. Inputs sharing a
+converter refuse to run together. HDMI and DisplayPort pins are named for
+their monitor from its ELD, present while it is valid, and told their channel
+count by an infoframe. A codec command parks on the response ring's interrupt;
+a period that ends meanwhile is cleared in the controller and kept, and a
+command that times out restarts both rings rather than mistake a late answer
+for the next. Streams run over four periods with the one after the one
+playing always written, positions read from the position buffer. The engine
+is host-tested against a register-level controller model and modelled codecs;
+the `intel-hda` verticals on all three QEMU targets assert the capture holds
+exactly the signal.
+
+**What SND12 guarantees.** `lib/sound` decodes FLAC (RFC 9639) completely,
+native and in Ogg: every subframe kind and order, both Rice parameter widths,
+the escape partition and wasted bits, all four stereo decorrelations, every
+block size, width (4 to 32 bits, a 33-bit side channel included) and header
+code, and every metadata block — the Vorbis comment's fields as tags and its
+channel mask as the layout, the cuesheet's tracks as cues, the seek table for
+seeking, the rest checked and stepped over. Every frame is checked against its
+CRC-8 and CRC-16 and its place in the sequence; a stream decoded whole and in
+order is checked against its `STREAMINFO` MD5 and ends in
+`FlacDigestMismatch` where they differ. A frame is held to twice its verbatim
+size — verbatim is always open to an encoder — which bounds what one decode
+call reads, and the sandbox worker's page cache is sized from the figure the
+crate states (`max_working_set`). Seeking bisects the stream's own frame
+headers, narrowed by a checked seek table; in Ogg it bisects pages on the
+frame each opens, never trusting a granule. The Ogg reader verifies every
+page's CRC and sequence and reads one logical stream among interleaved
+others; a chained link after it is refused by name (`OggChained`) once the
+first link's samples are all written — reading on into further links is the
+full container's, with Vorbis in SND17. The encoder, behind the off-by-default
+`encode` feature, is a core that emits exactly the constructs it is told
+(refusing any frame past the decoder's bound) under a chooser that picks the
+cheapest; both halves share one format model. Conformance rests on RFC 9639's
+own three reference-encoded example streams, which decode to the samples the
+RFC lists and their digests; the round trip is the breadth check; the fuzz
+target drives every construct natively and in Ogg. The `play` verticals now
+plant the signal as FLAC, so the capture assertion holds the decoder and the
+sandboxed worker bit-exact on all three QEMU targets.
+
+**What SND13 guarantees.** A seat's speakers and microphones serve the room
+its display lease describes, and only that room's login session moves frames.
+The kernel attests each process's innermost login session (a session a
+credential-switching spawn founded) in its `Origin`, and the boot seat's
+`DisplayLease` notice carries the holder's login session and the lease's phase
+— held, handed over, back with the text console — readable only by the display
+and audio services. `audiod` follows it: `route::Room` is the room,
+`route::admit` decides each stream, and a stream outside the room is held at a
+frame boundary and told `SeatInactive` (a paused one too) and resumes on that
+frame; a notification outside the room is dropped, what it queued and what it
+writes while outside alike; sources follow the room as sinks do. Until the
+lease is read the room is nobody's, and a room change first hands each
+source's captured frames to the streams the old room admitted. An endpoint
+with nothing live — streams paused, held, or at a stop they scheduled — winds
+down: a sink plays out what the device already holds, so a resume is exact; a
+source stops and drops what it captured past its streams' positions. It is
+clocked again for a stream that goes live during that drain, and its gains are
+rebalanced whenever the live set changes. `audiod` publishes the number of
+capture streams moving frames as the `AudioCapture` notice, which only it may
+publish, for the indicator SND15 draws. A stop scheduled before a start ends
+the segment on its frame. The seat vertical runs on all three QEMU targets:
+`audiotone seat` takes the seat, pauses on a named frame, hands the seat over,
+plays on while held, and takes it back; the guest witnesses the hold and the
+resume on that frame, and the host asserts the capture is the signal exactly,
+silent only there. A client that corrupts its own ring now faults its own
+stream alone rather than losing the device for every user.
 
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
@@ -190,8 +372,8 @@ TAIRiX's answers, stated as binding invariants:
    Information API and raised as a system notice, so the session draws a
    recording indicator the recording application cannot touch.
 6. **Untrusted bytes never decode in a process holding a stream.** Every
-   compressed format decodes in a minimum-capability sandbox worker holding one
-   IPC endpoint and nothing else. MP3, Vorbis and Opus decoders have a long
+   file format decodes in a minimum-capability sandbox worker holding the two
+   pipes its owner wired and nothing else. MP3, Vorbis and Opus decoders have a long
    CVE history and every other system runs them with far more reach than they
    need.
 7. **Nothing spins and nothing ticks.** The driver parks on the device
@@ -563,7 +745,12 @@ The surface:
   boundary), `Start`/`Stop`/`Drain`, `Service` (the doorbell), `Gain`,
   `Detach`.
 - Notifications: `PeriodElapsed { frames, sampled_at }` — the clock pair that
-  invariant 3 is built on — plus `Xrun` and `JackChanged`.
+  invariant 3 is built on — plus `Xrun`, `Drained`, `JackChanged`, and
+  `Faulted`, which a driver sends when it can no longer serve an endpoint, so
+  the mixer learns of a fault the endpoint would otherwise never report. The
+  mixer's notify port is admitted to the one driver serving the channel
+  (`port_admit`), so no other process can forge a period, a drain or a fault
+  into it.
 
 **The driver copies between the shared ring and its own DMA buffer, once per
 period, and that is a decision rather than an oversight.** A zero-copy
@@ -593,13 +780,9 @@ service whose live streams live in its own records needs no per-period
 collection — the one place an otherwise allocation-free period path would
 have had to allocate.
 
-Two things `audiod` does not do yet, both waiting on work staged elsewhere.
-Sinks are leased to seats by SND13; until then no sink is claimed, which is
-the router's own headless case, so the router sees `leased_to: None` and any
-principal may play on an unclaimed sink. And a stream's gain is always the
-software multiply: the device's own control belongs to the *sink*, whose
-volume surface arrives with SND15, and splitting one stream's gain into
-hardware would silence every other stream on the endpoint.
+A stream's gain is always the software multiply: the device's own control
+belongs to the *sink's* level, and splitting one stream's gain into hardware
+would silence every other stream on the endpoint.
 
 `userland/system/audiod`, a `kind = "service"` bundle discovered from disk like
 any other (§16.5), declaring its readiness condition so dependants gate on it.
@@ -728,9 +911,11 @@ And three things that deliberately are **not** capabilities:
   sink, checked at open against the kernel-attested caller. That is a more
   precise check than a capability, and a capability every program would hold is
   not a boundary.
-- **Machine-wide device policy** — the default sink, per-device gain, enabling
-  a device — is a write to `/System/Settings` under the settings authority that
-  already exists. `audiod` reads it. Inventing `CAP_AUDIO_ADMIN` would be a
+- **Device controls** — the default sink and source, an endpoint's level and
+  mute — are the room's, as playback is (§Desktop integration). The machine's
+  baseline beneath them is a write to `system.conf` under the settings
+  authority that already exists, carried to `audiod` by the device manager on
+  the authority it binds devices with. Inventing `CAP_AUDIO_ADMIN` would be a
   third name for an authority already spelled.
 - **Monitoring** is the seat lease, as above.
 - **Cueing a desktop sound** is the seat lease for an application event and
@@ -865,19 +1050,54 @@ general rather than for an audio ring — §The DMA-engine seam, below.
    audio pins are wired to, clocked from the clock manager, fed by a cyclic DMA
    channel with the PWM request line.
 
-   Its quality claim is honest rather than flattering. PWM audio on this part
-   is about eleven effective bits with a noise floor the hardware fixes, so the
-   driver applies **error-feedback noise shaping** — which is what makes PWM
-   audio listenable and is what the default Linux path largely does not — and
-   the crate's docs state the measured result rather than claiming CD quality.
+   Its quality claim is honest rather than flattering. The jack runs at
+   375 kHz, so a PWM period holds 250 levels, about eight bits, and the driver
+   applies third-order **error-feedback noise shaping** with dither inside the
+   loop, which leaves the audible band of the duty stream at −90.8 dBFS,
+   measured by the crate's tests. The mixer resamples to the jack's rate, so
+   the driver only shapes. The figure is the digital stream's; the PWM pad and
+   the board's analogue stage bound what is heard and are measured on metal.
 
 3. **I2S — `drivers/audio/bcm2711_i2s`.** The SoC's PCM/I2S peripheral, again
-   DMA-fed, which is how serious audio is done on a Pi. This is where the class
-   trait's modularity earns itself: the *controller* is one driver and the DAC
-   on the HAT is another, bound separately through discovery — a codec needing
-   no control interface binds with nothing, and one with an I2C control port
-   binds through `lib/i2c` and `drivers/bus/i2c`. Two drivers composing over
-   one stream is the shape every serious audio system has and is worth proving.
+   DMA-fed, which is how serious audio is done on a Pi. The *controller* is one
+   driver and the DAC on the HAT is another, bound separately through
+   discovery and composed over `codec-v1`: a codec needing no control
+   interface binds with nothing, and one with an I2C control port binds
+   through `lib/i2c` and `drivers/bus/i2c`. The endpoint offers the codec's
+   widest sample whose FIFO word is a ring's own, so a frame is copied as it
+   is and narrowing stays the mixer's; each sample has a slot as wide, two a
+   frame, framed and inverted as the link states and as Linux frames it; and
+   every stream starts from a FIFO cleared with transmit off, so the two
+   channels cannot swap. The cyclic stream it shares with the jack is one
+   engine, `tairix_audiochan::cyclic`.
+
+**What SND8 needs beyond the DMA seam.** Each block also needs its clock, and
+the I²S block its codec. Both are a device wired to another driver's service,
+so both are `plans/SUPPLIERS.md` links rather than seams of their own: a
+`Clock` link from the block to the clock manager, its selector the block's
+`clocks` specifier, and a `Codec` link from the I²S block to the DAC, read from
+the generic `simple-audio-card` binding, its selector the DAI format, which
+side drives the bit and frame clocks, and which runs inverted.
+
+- **The clock manager's page holds every clock on the SoC**, the cores' and the
+  DRAM's among them, so it is granted to one driver,
+  `drivers/clock/bcm2711_cprman`, serving `clock-v1`. It serves the PCM and
+  PWM clocks and refuses the rest, which the firmware owns; it makes each rate
+  from the oscillator or PLLD's peripheral channel, read from the registers,
+  by the nearest MASH divisor, and never reprograms a PLL. A clock two blocks
+  share — both PWM blocks run from one — runs at the rate the first set and
+  is refused at another to the second, as SND7 refuses a shared USB clock; a
+  holder's end releases what it held.
+- **A codec driver states what it accepts and owns the gain it has.**
+  `ti,pcm5102a` has no control port and binds with nothing; `ti,pcm5122`
+  binds its I2C target. The I²S driver serves the audio channel with what both
+  it and its codec accept, and the gain it reports is the codec's.
+- **The jack's wiring is the image's.** GPIO 40 and 41 carry nothing but the
+  jack on a Pi 4, so the image's `config.txt` routes them to PWM1
+  (`gpio=40,41=a0`), and a first-party overlay the image builder writes enables
+  PWM1 and adds the request line its node lacks. An I²S HAT is the user's own
+  configuration: its overlay enables the I²S block and describes the codec,
+  and its pins are routed the same way.
 
 #### The DMA-engine seam (SND5)
 
@@ -929,7 +1149,7 @@ control-block memory, and a consumer never supplies an address: it quotes
 claims the kernel attests, and the driver builds every block from attested
 facts alone.
 
-- **The request line** is the consumer's own `DmaRequest` grant, which
+- **The request line** is the consumer's own DMA `LinkRequest` grant, which
   discovery built from its node's `dmas` entry. The consumer quotes the
   record; the driver asks the kernel whether the in-service caller holds
   exactly that grant (`call_peer_holds`, below) and refuses otherwise. The DREQ
@@ -968,11 +1188,11 @@ facts alone.
 
 **The cross-process shape.** One endpoint per controller node, from a reserved
 block indexed by the node's id, bindable only by the holder of that node's
-`DmaController` duty. It is the I²C `BusChild` precedent with one duty in place
+DMA `LinkDuty`. It is the I²C `BusChild` precedent with one duty in place
 of one per child, because a DMA controller's consumers are scattered across the
 tree rather than beneath it and a duty per consumer would not fit a node. The
 endpoint is restricted-sender on `CAP_IPC_ENDPOINT` with the grant coupled to
-the call, and a `DmaRequest` grant covers *calling* its controller's endpoint —
+the call, and a DMA `LinkRequest` grant covers *calling* its controller's endpoint —
 never serving it, so no consumer can squat the controller's rendezvous.
 
 - `Open { request }` claims the lowest free channel the mask allows, at most
@@ -1015,12 +1235,12 @@ DMA binding, so the shared walk (`kernel/arch/api/src/fdtwalk.rs`) reads them
 for every FDT port rather than `kernel/arch/aarch64` alone:
 
 - A node with `#dma-cells` is a DMA controller. It is classed
-  `HwDeviceClass::Dma`, carries a `DmaController` duty naming its endpoint, and
+  `HwDeviceClass::Dma`, carries the DMA `LinkDuty` naming its endpoint, and
   carries one `Dma` resource per entry of its parent bus's `dma-ranges`, each
   translated. `/soc` has two, and the existing aperture decoder folds entries
   into one span, which would misstate them as a single untranslated window of
   nearly 4 GiB.
-- Each entry of a consumer's `dmas` becomes a `DmaRequest` naming its
+- Each entry of a consumer's `dmas` becomes a DMA `LinkRequest` naming its
   controller's endpoint, the specifier (up to two cells — a wider one is
   dropped, never truncated), the entry's position, and its `dma-names` string
   where that fits the record's eight bytes. A phandle resolves to the id the
@@ -1097,14 +1317,10 @@ selector units, the feature unit for volume and mute, the terminal topology
 that says which endpoint is which jack, and isochronous data endpoints with
 explicit or implicit feedback.
 
-**It is reached by isochronous transfer support the tree does not have, and
-this plan owns that work (SND6) rather than waiting on it.** Today `lib/usb`
-models Control, Bulk and Interrupt-IN endpoints only: it names the isochronous
-completion codes but has no isochronous endpoint kind and nothing that
-schedules one. `plans/USB.md` listed isochronous transfers as out of scope as
-"a later class driver or HCD extension"; that scope is amended, and the
-extension is specified and staged here because this is the plan whose first
-consumer needs it.
+**It rides isochronous transfer support this plan delivers (SND6) rather than
+waits on.** `plans/USB.md` once listed isochronous transfers as out of scope;
+that scope is amended to point here, because this is the plan whose first
+consumer needs them.
 
 What it entails, and why it is not a small addition to a bulk transfer:
 
@@ -1131,11 +1347,14 @@ What it entails, and why it is not a small addition to a bulk transfer:
   invariant 3's clock model already describes — so the correction is a
   *reported* value here too, not a hidden one.
 
-The work lands in `lib/usb` (the endpoint kind, the service-interval model,
-the feedback arithmetic — all host-testable) and `drivers/bus/usb/xhci` (the
-ring, the reservation, the frame index). It is not audio-specific and is not
-written as though it were: a USB camera is the next consumer, and the seam is
-shaped for a periodic endpoint rather than for a sound card.
+The controller engine already lives in `lib/usb`, so the endpoint kind, the
+service-interval model, the feedback and pacing arithmetic, the reservation,
+the rings and the frame index land there, host-testable against the
+register-level mock; `drivers/bus/usb/xhci` holds what only a process can — the
+stream regions it delegates and the notifications it sends. It is not
+audio-specific and is not written as though it were: a USB camera is the next
+consumer, and the seam is shaped for a periodic endpoint rather than for a
+sound card.
 
 ## The applications
 
@@ -1155,14 +1374,20 @@ play [OPTION]... FILE...
   -v, --verbose            per-file format and timing on stderr
       --ui / --no-ui       force the full-screen interface on or off
   -d, --device=SINK        an audio: resource reference
-  -g, --gain=DB            gain applied to this playback
-  -s, --start=TIME         begin at an offset
-  -t, --duration=TIME      play for a duration
-  -l, --loop[=N]           repeat each file, or the whole list
+  -g, --gain=DB            the stream's level: attenuation, 0 dB or below
+  -s, --start=TIME         begin each file at an offset
+  -t, --duration=TIME      play this much of each file
+  -l, --loop[=N]           play the list N times in all, or for ever
       --list-devices       enumerate sinks and exit
   -h, -?, --help           the bundle's own Help document
       --version
 ```
+
+A stream's level cannot be raised past full scale (`AudioGain`), so `--gain`
+attenuates only; a whole sink is raised by its owner. `--loop` repeats the
+whole list, which with one file is that file, and a count is attached
+(`-l3`, `--loop=3`) because it is optional. A time is
+`[[HH:]MM:]SS[.fraction]`.
 
 **Backgrounding is a design property, not a flag.** `play album.flac &` keeps
 playing while the shell takes the terminal back, because **playback is not in
@@ -1230,6 +1455,33 @@ throughout.
 
 A file handed to it by the file manager opens in the running instance through
 the desktop's single-instance funnel, exactly as `view.app`'s does.
+
+How those resolve:
+
+- **Playback is `lib/player`**, the engine `play` runs too, on a thread of its
+  own parked on the decoder, the stream and the window's orders. The window
+  holds a copy of the playlist kept alike by the same closed set of edits, so
+  neither thread reads the other's.
+- **A folder is chosen in the session's trusted picker** (`PickPurpose::Folder`,
+  `plans/APPWIN.md` AW5): the session delegates, one by one, the files in it
+  whose content type the player's manifest associates. The player holds no
+  filesystem capability and never holds the folder.
+- **Per-application volume** is the volume slider: the stream's level, set as it
+  moves and kept in the player's settings where it settles. **Per-track volume**
+  is each track's own Replay Gain track gain, capped by its stated peak and
+  applied by the engine before the ring so a gapless boundary stays exact — the
+  per-track level the file itself states, with no library database to keep one.
+- **The output chooser** reopens the stream on the new device at the frame the
+  old one stopped on.
+
+**What SND14 guarantees.** `music.app` plays the files the user chose — files, a
+folder's files of its formats, or a document handed over from the file manager —
+through `lib/player`'s engine, with no filesystem capability and no byte of a
+file or its album art parsed in the player. A seek drag seeks once and a volume
+drag saves once; the meters repaint their own rectangle; a change that alters
+nothing owes no damage. An edit re-plans only what is still to be heard: a
+removed or moved entry is never heard out of place, and a removed entry being
+heard gives way at once to what followed it.
 
 **Not in it**: a spectrum analyser (it needs an FFT nothing else in the tree
 wants, and nobody asked for one), an equaliser, a library database, and any
@@ -1307,14 +1559,10 @@ real transition from an application's imitation of one. With it, a sound that
 claims the machine did something can only have come from the principal that
 did it.
 
-The two halves come into force at different points, and the load-bearing one
-comes first. The lifecycle check is against the caller's kernel-attested
-identity and holds the moment `soundd` exists, so no application can imitate
-the machine from SND21 onward. The application half scopes a cue to a sink,
-and until SND13 leases sinks to seats no sink is claimed — the router's
-headless case — so any principal may cue on one. That is the degradation
-ordinary playback already has and no more, and it narrows for cues and for
-playback together when the leases land.
+Both halves hold the moment `soundd` exists. The lifecycle check is against
+the caller's kernel-attested identity, so no application can imitate the
+machine from SND21 onward; the application half scopes a cue to the room the
+seat's lease describes (SND13), exactly as ordinary playback is scoped.
 
 `Bell` is the terminal's `^G`, and it is in the vocabulary because the consumer
 is already in the tree: `userland/apps/terminal`'s parser handles `Op::Bell`
@@ -1554,7 +1802,7 @@ than left implied by a table of peaks.
 - **Build.** The family contract above over the real shipped assets, through
   the same `tools/syshelp` table and loop that already validates icons,
   wallpapers and cursors.
-- **QEMU.** The strong one, and nearly free because `audio_virtio_qemu_*`
+- **QEMU.** The strong one, and nearly free because `audio_qemu_*`
   already exists: cue one event through `soundd` on a booted machine and assert
   the host-side WAV capture is **sample-exact against the shipped master's own
   decoded samples**. That single assertion covers the cue authority, the
@@ -1568,38 +1816,97 @@ than left implied by a table of peaks.
 
 ## Desktop integration
 
-Consumers of this subsystem, each owned by its own plan and named here so the
-work is not re-derived:
+**A device's controls belong to the room it serves, as its sound does.**
+`audio-v1` carries three control operations — `SetDefault` (which sink or
+source "the default" names), `SetLevel` (an endpoint's own level, attenuation
+only) and `SetMute` — and `audiod` admits each against the room playback is
+admitted against: a caller whose login session holds the room, any caller
+while the room is unclaimed (it is anybody's, and anybody may already play
+into it), and nobody while it is withheld. No capability is needed: the lease
+is already the right boundary, and a remote login can no more turn down
+somebody's room than play into it.
 
-- **Settings** — `plans/NEW-DESKTOP-SETTINGS.md` §3's `Sound` row states this
-  subsystem's absence and names this file as its prerequisite; the row leaves
-  §3 for a real pane when the subsystem lands. The pane is output and input
-  device selection, per-device volume and mute, the default-device policy, the
-  live capture list, and the desktop sounds — theme, master and per-event
-  enable, per-event gain, and choosing a file of one's own, which the pane
-  hands over as the one-shot descriptor rather than a path. All of it typed
-  intents to the authority holder; no capability in the app.
-- **The taskbar** — a volume control in the notification area with a slider
-  popup, and the recording indicator invariant 5 requires. Drawn by the
-  session from `audiod`'s state, so no application can suppress it.
-  `plans/NEW-TASKBAR.md` owns the area; this plan is a consumer.
-- **The Switchboard** — an audio section: devices, live streams with their
-  owners and positions, underrun tallies, and the measured device rates.
-- **The System Information API** — devices, streams, positions and glitch
-  tallies. A caller sees its own streams unprivileged and other principals'
-  behind `CAP_SYSINFO_GLOBAL`.
-- **`audio:` resource references** — `plans/ALIAS.md` §6.11 reserves the
-  scheme; this plan is its first implementation, resolving `audio:sink/default`,
-  `audio:sink/<id>`, `audio:source/default` and `audio:source/<id>` through the
-  shared resolver.
-- **The file manager** — `lib/browse::media` gains `AudioWav`, `AudioAu`,
-  `AudioFlac`, `AudioOgg`, `AudioOpus` and `AudioMpeg`, `lib/icon` gains an
-  `Audio` file-kind glyph (the existing `Volume` speaker stays the volume
-  control's), and `music.app`'s manifest declares the associations so a
-  double-click plays.
-- **`audioctl`** — a command exposing the same control surface as the Settings
-  pane for a headless machine: list devices, set the default, set a device's
-  volume, list live streams.
+**A control is its tenant's.** What a room's tenant sets is kept against that
+tenant. When the room moves to another session those controls stand aside for
+that session's own, and when it comes back they are in force again before any
+of its held streams resumes, so a returning user's music never resumes at
+another user's level. What is set while the room is unclaimed stays the
+unclaimed room's. A session's controls are forgotten once it neither holds the
+room nor owns a stream, because nothing could then be heard at them.
+
+**Remembering a user's controls is the session's job.** The desktop session,
+the one writer of its user's document, keeps its user's controls keyed by
+location in its own published app-data scope and applies them when it claims
+the room. It learns of every change, whoever made it — the Settings pane, the
+icon bar's slider, `audioctl` in a terminal — from the `AudioDevices` notice:
+a count `audiod` bumps whenever a device, a level, a mute, a default or the
+room moves. It then re-reads the devices and keeps only what its own tenancy
+set: a descriptor states whether the room is the caller's own session's
+(`ControlAccess::Own`), whether its level is the tenant's own rather than the
+baseline (`own_level`), and whether it is the default because the tenant
+prefers it (`DefaultChoice::Preferred`), so a machine default is never written
+down as a user's choice. The listing that first shows the room as the
+session's own puts the remembered controls back rather than learning from it.
+An application's apply may not name these keys: they are the session's own
+reading of the service.
+
+**The machine baseline is the administrator's.** `system.conf` carries
+`audio.output` and `audio.input` — the preferred default sink and source, by
+location, or `auto` — and `audio.level`, the level every endpoint starts at.
+`audiod` holds no filesystem capability. The device manager, which already
+tells it which devices exist, reads the baseline once the root volume is
+mounted and delivers it on the same authority (`CAP_DRV_LOAD`). `configure`
+saves a change for the next boot; `audioctl` changes the running machine.
+
+**A device is named by where it is.** A device id is a handle for one boot.
+Persistent configuration names an endpoint by its *location*: the device's
+place in the hardware tree, hashed, and the endpoint's index on it. The device
+manager computes the location when it hands the channel over, so the same
+hardware in the same place answers the same location across boots and across
+a replug into the same port.
+
+**A default follows a preference, not the order devices appeared in.** Each
+direction's default is the live endpoint the room's tenant prefers, else the
+one the machine prefers, else the first bound. It is chosen again whenever a
+device is bound, lost or reaped, the room moves, or a preference changes. A
+lost device is never a default and is never enumerated, and it is reaped once
+no stream rides it. A replugged device that reuses its channel endpoint
+replaces the lost one.
+
+**A level is the hardware's where the device has a control.** It is split once:
+the device's own control takes the attenuation it can, rounded to the step
+above, and the mixer multiplies by the remainder. At unity both are untouched,
+so the bit-exact path stays bit-exact. A level never raises a signal past its
+device's 0 dB point.
+
+The consumers, each owned by its own plan:
+
+- **Settings** — the Sound pane: a plate per sink and source (its default
+  choice, level and mute) and a Recording plate (the user's own live captures,
+  and how many others there are). The controls act on `audio-v1` directly,
+  under the room the user's session holds; the app holds no capability, and a
+  device another session's room holds is drawn disabled.
+- **The taskbar** — a volume signal in the notification area, whose popup holds
+  the default sink's level and mute: the level moves live as it is dragged,
+  coalesced, and is remembered where the drag settles. Beside it the recording
+  indicator, drawn from the `AudioCapture` notice. Both are the session's own
+  pixels, so no application can suppress them.
+- **The Switchboard** — an Audio device in the Resources rail: each sink and
+  source with its level, mute and measured rate, and the live streams with
+  their owners, positions and underrun tallies.
+- **The System Information API** — `AUDIO_DEVICES`, `SELF_AUDIO_STREAMS` and
+  `GLOBAL_AUDIO_STREAMS`, answered by `audiod` through `sysinfod` and printed by
+  `sysinfo audio`. Every principal sees the devices and its own streams;
+  another principal's streams need `CAP_SYSINFO_GLOBAL`.
+- **`audio:` references** — `audio:sink/default`, `audio:sink/<id>`,
+  `audio:sink/<location>` and their `source` counterparts are listed by
+  `lib/resref`, completed by the shell from the live devices, and resolved
+  against them by `lib/audio::target`; a setting keeps the location form.
+- **The file manager** — `lib/browse::media` gains `AudioAu` (`audio/basic`,
+  `.au`, `.snd`) and `AudioOpus` (`audio/opus`, `.opus`). A player's manifest
+  associates only formats it decodes.
+- **`audioctl`** — the same controls for a terminal or a headless machine: list
+  the devices and streams, and set the default, a level or a mute.
 
 ## Refused by name
 
@@ -1643,9 +1950,8 @@ someone else's problem:
 - **A DMA-engine seam (SND5) and isochronous xHCI support (SND6)** are
   prerequisites this plan **owns and delivers**. Both are cross-cutting rather
   than audio-specific and both are specified above, shaped for their general
-  case rather than for a sound card. `plans/USB.md`'s out-of-scope list is
-  amended to point here for the isochronous half; nothing is silently diverged
-  from.
+  case rather than for a sound card. `plans/USB.md` points here for the
+  isochronous half; nothing is silently diverged from.
 - **A native VC6 HDMI encoder on the Pi (SND19's blocker)** is *not* owned
   here. Without it HDMI audio cannot land, and with it the work is a display
   change: mode set, N/CTS, InfoFrames and EDID, belonging to `plans/PI.md`.
@@ -1677,20 +1983,19 @@ SND5's design surfaced two decisions, both taken:
 SND8 inherits four facts, each needing a home before its drivers can bind or
 its metal acceptance can pass:
 
-- **Neither PWM node carries `dmas`**, so the jack's request line (DREQ 5 for
-  PWM0, per the peripherals document) has no discovered source. The image
-  builder already applies a firmware overlay (`disable-bt`); a first-party one
-  adding the property is the likely shape.
+- **Neither PWM node carries `dmas`**, so the jack's request line (DREQ 1 for
+  PWM1, whose two channels GPIO 40/41 carry to the jack, per the peripherals
+  document) has no discovered source. The image builder already applies a
+  firmware overlay (`disable-bt`); a first-party one adding the property is
+  the likely shape.
 - **PWM and I²S are `status = "disabled"`** in the pinned tree, and the walk
-  emits disabled nodes and lets drivers bind them (`plans/OPEN-DEFECTS.md`
-  D168).
+  splices a disabled node out, so neither binds until an overlay enables it.
 - **Their pins need their alternate function**, and nothing in the tree sets
   one: no pinctrl or GPIO driver exists. The firmware's `config.txt` `gpio=`
   directive can set it at boot.
-- **Memory below the legacy engines' 1 GiB ceiling has no reserve** against
-  ordinary allocations (`plans/OPEN-DEFECTS.md` D175), so on a Pi with more
-  RAM a buffer carved late on a busy system can be refused while memory above
-  the ceiling is free.
+- **Memory below the legacy engines' 1 GiB ceiling is a zone of its own**,
+  which ordinary allocations reach only after the RAM above it and never take
+  the last of (SND8a), so a buffer carved late on a busy Pi still finds it.
 
 One decision inside this plan is worth surfacing because it is visible to
 users: **HDA codecs get no quirk table.** A small number of laptops whose
@@ -1809,7 +2114,7 @@ the regression corpus with a unit test.
 guest's audio output to a file on the host, which turns an audio test from "did
 it crash" into an exact numeric assertion:
 
-- `audio_virtio_qemu_{aarch64,x86_64,riscv64}` — **landed**: boot, discover
+- `audio_qemu_{aarch64,x86_64,riscv64}` — **landed**: boot, discover
   the device, autoload the driver into its own process, hand its channel to
   `audiod`, run the `audiotone` fixture from the scripted root shell, and
   assert the host-side WAV is **sample-exact**. This is invariant 2 proved on
@@ -1830,9 +2135,14 @@ it crash" into an exact numeric assertion:
 - **Underrun accounting** — deliberately starve a stream and assert the
   reported missing frame positions are exactly the frames the host WAV shows as
   silence. A glitch the system reports wrongly is worse than one it reports.
-- **The seat vertical** — two sessions, a switch, and the assertion that the
-  departing session's samples stop at a frame boundary, do not appear in the
-  host WAV, and resume from the exact frame on switch-back.
+- **The seat vertical** — **landed** on all three targets: `audiotone seat`
+  takes the boot seat, pauses on a named frame, hands the seat over, plays on
+  while held and takes it back; the guest witnesses the service holding the
+  stream on that frame and resuming it there, and the host asserts the capture
+  is the signal exactly, silent only at the hold. The two-session form — a
+  fast user switch between two signed-in accounts, the departing session's
+  samples absent from the arriving session's turn — needs the login vertical
+  harness and is SND13.1.
 - **Decode end to end** — `play` a fixture through the sandbox, and assert the
   host WAV matches the PCM the decoder produces in a host test. That single
   assertion covers the decoder, the sandbox protocol, the client, the mixer,

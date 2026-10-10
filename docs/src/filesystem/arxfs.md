@@ -681,11 +681,16 @@ the health subsystem stays enabled (§11). The default implementation reports
 block, reached from the transaction root (exactly like the Stage-8
 scrub-progress record), stores the **last clean device-health snapshot** the
 next pass compares against, plus the volume's **accumulated
-filesystem-observed fault counters** — metadata copy-repairs and
+filesystem-observed fault counters** — metadata copy-repairs, bad copies left
+as they were (declined by a read-only handle or refused by the device), and
 both-copies-bad blocks (the Stage-3 companion-repair seam) and per-class data
 faults (`Physical` / `Aead` / `Logical`, the Stage-5 seam). Both are
 **persisted**, not rebuildable (§4): a transient fault that was repaired leaves
 no trace in the live trees, so the count is only durable if it is written down.
+A bad copy a read path meets outside a scrub — an ordinary metadata read, or
+the mount's repair of the slot and root it chose — is tallied on the handle and
+folded in by the next pass; a scrub's findings travel in its own report, so
+none is counted twice.
 The block is the single source of truth; `format` stores the initial baseline
 at mkfs time, and a crash mid-update leaves the previous committed baseline (or
 none) selected and never blocks a mount (§14). A corrupt baseline is simply

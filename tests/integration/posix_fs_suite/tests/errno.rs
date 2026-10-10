@@ -86,7 +86,13 @@ fn each_structural_conflict_surfaces_its_own_errno() {
         .mkdir_via_secured(&owner, &vol_path("outer"), &mut fs)
         .expect_err("the name is taken");
     let populated = vfs
-        .rename_via_secured(&owner, &vol_path("spare"), &vol_path("outer"), &mut fs)
+        .rename_via_secured(
+            &owner,
+            &vol_path("spare"),
+            &vol_path("outer"),
+            &mut fs,
+            tairix_abi::RenameFlags::empty(),
+        )
         .expect_err("the destination still holds an entry");
     let cycle = vfs
         .rename_via_secured(
@@ -94,6 +100,7 @@ fn each_structural_conflict_surfaces_its_own_errno() {
             &vol_path("outer"),
             &vol_path("outer/inner/outer"),
             &mut fs,
+            tairix_abi::RenameFlags::empty(),
         )
         .expect_err("a directory cannot become its own descendant");
 

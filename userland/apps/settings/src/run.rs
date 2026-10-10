@@ -45,6 +45,7 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::Cell;
 
+    use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::input::KeyInput;
@@ -55,8 +56,11 @@ mod program {
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PreviewOutcome, PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId};
+    use tairix_abi::{NoticeTopic, WaitSetOp, WaitSourceKind};
     use tairix_appconf::Registry;
     use tairix_appdata::RtHost;
+    use tairix_audio::live::{live_captures, RtAudio};
+    use tairix_audio::stream::{devices, set_control, ControlQueue, DeviceControl};
     use tairix_controls::Keystroke;
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_icon::{
@@ -65,6 +69,7 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_reclaim::PressureBand;
+    use tairix_settings::SoundReading;
     use tairix_settings::{
         notified, win_sizing, AccountFacts, DesktopAnswer, DesktopAsk, DesktopAsks, ElevateRefusal,
         Elevated, Elevation, MachineFacts, OwnAccount, Pane, PictureWanted, Renders, Roster,
@@ -135,6 +140,14 @@ mod program {
     /// the session has answered a lock, a screensaver preview, or which
     /// sources have notified.
     const DESKTOP_TOKEN: u64 = app::FIRST_APP_TOKEN + 7;
+
+    /// The wait-set token of the sound desk's wake: a round trip to the audio
+    /// service has come back.
+    const SOUND_TOKEN: u64 = app::FIRST_APP_TOKEN + 8;
+
+    /// The wait-set token both audio notices are watched under: a device, a
+    /// control or a recording moved, whoever moved it.
+    const AUDIO_NOTICE_TOKEN: u64 = app::FIRST_APP_TOKEN + 9;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -248,6 +261,62 @@ mod program {
     /// like the mount walk, and a window that waited on it would stop
     /// answering for as long as the service took.
     type Network = tairix_rt::work::Worker<(), (), Option<Vec<NetServerAddr>>>;
+
+    /// The Sound pane's round trips: apply what is asked, then read the
+    /// devices, this user's captures, and how many are recording.
+    type SoundDesk =
+        tairix_rt::work::Worker<RtAudio, Vec<(u32, DeviceControl)>, Option<SoundReading>>;
+
+    /// The sound desk's body. A refused control is stated and the devices
+    /// are read regardless, so the pane shows what the service holds.
+    fn serve_sound(
+        audio: &mut RtAudio,
+        controls: &mut Vec<(u32, DeviceControl)>,
+    ) -> Option<SoundReading> {
+        for (device_id, control) in controls.drain(..) {
+            if let Err(err) = set_control(audio, device_id, control) {
+                app::report(
+                    APP_NAME,
+                    format_args!("a sound control was refused ({err})"),
+                );
+            }
+        }
+        let listed = devices(audio, StreamDirection::Playback).and_then(|mut sinks| {
+            sinks.append(&mut devices(audio, StreamDirection::Capture)?);
+            Ok(sinks)
+        });
+        let devices = match listed {
+            Ok(devices) => devices,
+            Err(err) => {
+                app::report(
+                    APP_NAME,
+                    format_args!("the sound devices could not be read ({err}); the pane says so"),
+                );
+                return None;
+            }
+        };
+        let mut captures = Vec::new();
+        if let Err(err) = tairix_procinfo::for_each_audio_stream(
+            &IpcTransport,
+            tairix_procinfo::StreamScope::Own,
+            |stream| {
+                if stream.direction == StreamDirection::Capture {
+                    captures.push(*stream);
+                }
+                Ok(tairix_procinfo::WalkStep::Continue)
+            },
+        ) {
+            app::report(
+                APP_NAME,
+                format_args!("your recordings could not be read ({err:?})"),
+            );
+        }
+        Some(SoundReading {
+            devices,
+            captures,
+            recording: live_captures(),
+        })
+    }
 
     /// The network readings' body.
     ///
@@ -1108,6 +1177,10 @@ mod program {
                 // A desk answered. Draining is the whole of noticing it, and
                 // the answer is the loop's to adopt, so the wait ends here
                 // rather than parking again on a ready source.
+                Wake::App(AUDIO_NOTICE_TOKEN) => {
+                    self.workers.sound_moved.set(true);
+                    Ok(Parked::Interrupted)
+                }
                 Wake::App(token) if self.workers.drain(token) => Ok(Parked::Interrupted),
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
@@ -1240,6 +1313,13 @@ mod program {
         /// The desktop queued a target: drain the queue and show what it
         /// named.
         Opened,
+        /// The reader changed a sound device's control: ask the audio service.
+        Sound {
+            /// The device.
+            device_id: u32,
+            /// What to change.
+            control: DeviceControl,
+        },
         /// A picture a pane asked for is in the shared region, or was refused.
         Rendered {
             /// What was asked for.
@@ -1277,6 +1357,9 @@ mod program {
             ShellOutcome::Elevate(asked) => Acted::Elevate(asked),
             ShellOutcome::LockScreen => Acted::LockScreen,
             ShellOutcome::PreviewScreensaver(document) => Acted::PreviewScreensaver(document),
+            ShellOutcome::Sound {
+                device_id, control, ..
+            } => Acted::Sound { device_id, control },
         };
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Quit,
@@ -1368,6 +1451,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::FolderPicked { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. } => Acted::Idle,
         }
@@ -1563,6 +1647,8 @@ mod program {
         asker: &'a Asker,
         /// What only the desktop answers.
         desktop: DesktopDesk<'a>,
+        /// The audio service's controls and readings the Sound pane needs.
+        sound: SoundRead<'a>,
     }
 
     impl<'a> Desks<'a> {
@@ -1592,7 +1678,71 @@ mod program {
                     worker: &workers.desktop,
                     asks: DesktopAsks::new(),
                 },
+                sound: SoundRead {
+                    worker: &workers.sound,
+                    queue: ControlQueue::new(),
+                    asked: false,
+                    moved: &workers.sound_moved,
+                },
             }
+        }
+    }
+
+    /// The sound desk's client half: one round trip at a time, the latest
+    /// control of each kind for each device winning meanwhile.
+    struct SoundRead<'a> {
+        worker: &'a SoundDesk,
+        queue: ControlQueue,
+        /// A reading the pane wants has been asked for.
+        asked: bool,
+        /// Set by the park when the audio service announces a change.
+        moved: &'a Cell<bool>,
+    }
+
+    impl SoundRead<'_> {
+        /// Ask for a fresh reading if the pane wants one, answering whether
+        /// anything on screen changed.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if self.moved.take() {
+                shell.sound_moved();
+            }
+            if shell.sound_wanted() && !self.asked {
+                self.asked = true;
+                self.queue.refresh();
+            }
+            self.start(shell)
+        }
+
+        /// Ask for `control` on `device_id`.
+        fn ask(&mut self, shell: &mut Shell, device_id: u32, control: DeviceControl) -> bool {
+            self.queue.ask(device_id, control);
+            self.start(shell)
+        }
+
+        /// Start the round trip owed, if none is in flight.
+        fn start(&mut self, shell: &mut Shell) -> bool {
+            let Some(controls) = self.queue.next_trip() else {
+                return false;
+            };
+            if self.worker.submit(controls) {
+                return self.settle(shell);
+            }
+            false
+        }
+
+        /// Adopt every landed reading, answering whether any landed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let mut landed = false;
+            while let Some(reading) = self.worker.collect() {
+                self.queue.landed();
+                self.asked = false;
+                shell.adopt_sound(reading);
+                landed = true;
+            }
+            if landed {
+                self.start(shell);
+            }
+            landed
         }
     }
 
@@ -1623,6 +1773,7 @@ mod program {
             landed = true;
         }
         landed |= desks.desktop.settle(shell);
+        landed |= desks.sound.settle(shell);
         if !landed {
             return true;
         }
@@ -1727,6 +1878,9 @@ mod program {
                 }
                 Carried::answered_if(landed)
             }
+            Acted::Sound { device_id, control } => {
+                Carried::answered_if(desks.sound.ask(shell, *device_id, *control))
+            }
             Acted::LockScreen => {
                 // Submitted, not awaited: the desktop puts its own lock up
                 // from its own loop, and its answer arrives on the wake the
@@ -1788,6 +1942,7 @@ mod program {
             desks.network.request(shell),
             desks.accounts.request(shell),
             desks.desktop.request_sources(shell),
+            desks.sound.request(shell),
         ];
         landed.contains(&true)
     }
@@ -1998,6 +2153,9 @@ mod program {
         elevator: Arc<Elevator>,
         asker: Arc<Asker>,
         desktop: Arc<DesktopAsker>,
+        sound: Arc<SoundDesk>,
+        /// Set when the audio service announces a change, for the sound desk.
+        sound_moved: Cell<bool>,
     }
 
     impl Workers {
@@ -2061,12 +2219,21 @@ mod program {
                 ),
                 asker: started(asker, "preview-request"),
                 desktop: started(desktop, "desktop-request"),
+                sound: started(
+                    SoundDesk::new(
+                        serve_sound,
+                        RtAudio::new(),
+                        tairix_rt::sync::WorkerWake::create(),
+                    ),
+                    "sound",
+                ),
+                sound_moved: Cell::new(false),
             })
         }
 
         /// Each desk's wake, the token it is watched under, and how a refused
         /// watch is stated.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 8] {
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 9] {
             [
                 (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
                 (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
@@ -2096,6 +2263,7 @@ mod program {
                     DESKTOP_TOKEN,
                     "desktop-request wake refused",
                 ),
+                (self.sound.wake(), SOUND_TOKEN, "sound wake refused"),
             ]
         }
 
@@ -2113,6 +2281,22 @@ mod program {
                         APP_NAME,
                         app::EXIT_NO_EVENTS,
                         format_args!("{refusal} ({err})"),
+                    ));
+                }
+            }
+            for topic in [NoticeTopic::AudioDevices, NoticeTopic::AudioCapture] {
+                if tairix_rt::waitset_ctl(
+                    set,
+                    WaitSetOp::Add,
+                    WaitSourceKind::SystemNotice,
+                    u64::from(topic.as_u32()),
+                    AUDIO_NOTICE_TOKEN,
+                ) != 0
+                {
+                    return Err(app::fail(
+                        APP_NAME,
+                        app::EXIT_NO_EVENTS,
+                        "sound notice wait refused",
                     ));
                 }
             }
@@ -2148,6 +2332,7 @@ mod program {
             self.accounts.stop();
             self.elevator.stop();
             self.asker.stop();
+            self.sound.stop();
             self.desktop.stop();
         }
     }

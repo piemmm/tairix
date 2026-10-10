@@ -648,7 +648,7 @@ pub fn scan_translated<'a, T>(
 mod tests {
     use super::{dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window};
     use super::{dma_reach, BusLevel, DmaRange, DmaReach, DmaWindow, Fdt, MAX_DMA_WINDOWS};
-    use crate::fixture::DtbBuilder;
+    use crate::write::FdtWriter;
     use alloc::vec::Vec;
 
     /// A one-cell child, two-cell parent, one-cell size `dma-ranges`, the
@@ -845,7 +845,7 @@ mod tests {
     /// `#address-cells = 3` (the `phys.hi`/`phys.mid`/`phys.lo` triple),
     /// `#size-cells = 2`, with the parent root at `2`/`2`.
     fn with_pcie_dma_ranges(dma_ranges: &[u8], f: impl FnOnce(Option<(u64, u64, u64)>)) {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -947,7 +947,7 @@ mod tests {
     fn pcie_aperture_rejects_out_of_range_cells() {
         let dr = dma_ranges_entry(0x0200_0000, 0x0, 0xc000_0000);
         let blob = {
-            let mut b = DtbBuilder::new();
+            let mut b = FdtWriter::new();
             b.begin_node("");
             b.prop_u32("#address-cells", 2);
             b.prop_u32("#size-cells", 2);
@@ -975,7 +975,7 @@ mod tests {
     /// `ranges`, then hand that node to `f`. Same cells as the
     /// `dma-ranges` helper: child `3`, parent `2`, size `2`.
     fn with_pcie_ranges(ranges: &[u8], f: impl FnOnce(Option<(u64, u64, u64)>)) {
-        let mut b = DtbBuilder::new();
+        let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
@@ -1060,7 +1060,7 @@ mod tests {
     fn outbound_window_rejects_out_of_range_cells() {
         let r = ranges_entry(0x0200_0000, 0xc000_0000, 0x6_0000_0000, 0x4000_0000);
         let blob = {
-            let mut b = DtbBuilder::new();
+            let mut b = FdtWriter::new();
             b.begin_node("");
             b.prop_u32("#address-cells", 2);
             b.prop_u32("#size-cells", 2);

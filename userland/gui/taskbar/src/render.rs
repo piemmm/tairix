@@ -465,6 +465,27 @@ impl TaskbarRenderer {
             paint_readout_panel(taskbar, scale, surface);
         });
     }
+
+    /// Paint the open volume panel into a [`Surface`] using the taskbar's own
+    /// theme. The window manager places it beside the volume signal and
+    /// rounds it with
+    /// [`SoundPanelLayout::corner_radius`](crate::SoundPanelLayout::corner_radius).
+    pub fn paint_sound(
+        &self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        let Some(layout) = taskbar.sound_layout(scale) else {
+            return;
+        };
+        damage::paint_parts(surface, rects, |surface| {
+            taskbar
+                .sound()
+                .paint(&layout, scale, taskbar.theme(), surface);
+        });
+    }
 }
 
 /// The picker's whole recipe, laid across the surface in its own pixels.

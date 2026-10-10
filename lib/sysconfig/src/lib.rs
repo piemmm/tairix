@@ -94,6 +94,15 @@
 //!   *uptime* passes between steady-state re-queries. A closed set rather
 //!   than a free-form span, so no configuration can ask for a cadence that
 //!   abuses a public server; the client's own hard floor applies on top.
+//! * `audio.output`, `audio.input` — `auto` (default) or an endpoint's
+//!   location (`<16 hex digits>.<index>`, as `audioctl` lists it): the sink
+//!   and the source the machine prefers as defaults beneath any session's
+//!   own choice, and the whole choice before login and on a headless
+//!   machine. `auto` is the first device bound (`plans/SOUND.md`).
+//! * `audio.level` — a level in decibels, `0dB` (default) or an attenuation
+//!   such as `-12dB` or `-6.5dB`, to at most two decimals: what every sink
+//!   and source starts at. Never above `0dB`: a level never raises a signal
+//!   past its device's own 0 dB point.
 //!
 //! # Security
 //!
@@ -118,6 +127,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::audio::{AudioBaseline, AudioGain, AudioLocation};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::net_ipc::{
     socket_budget_for_ram, NetworkSettings, SOCKET_BUDGET_MAX_SETTABLE, SOCKET_BUDGET_MIN_SETTABLE,
@@ -587,6 +597,12 @@ pub enum Key {
     /// `input.mouse.debounce` — the pointer-button chatter window, in whole
     /// milliseconds.
     InputMouseDebounce,
+    /// `audio.output` — the sink the machine prefers as the default.
+    AudioOutput,
+    /// `audio.input` — the source the machine prefers as the default.
+    AudioInput,
+    /// `audio.level` — the level every sink and source starts at.
+    AudioLevel,
 }
 
 impl Key {
@@ -608,6 +624,9 @@ impl Key {
         Self::TimeServers,
         Self::TimeRefresh,
         Self::InputMouseDebounce,
+        Self::AudioOutput,
+        Self::AudioInput,
+        Self::AudioLevel,
     ];
 
     /// Whether this key belongs to the stack-wide `net.*` family, and so
@@ -634,8 +653,21 @@ impl Key {
             | Self::CacheSemantic
             | Self::TimeServers
             | Self::TimeRefresh
-            | Self::InputMouseDebounce => false,
+            | Self::InputMouseDebounce
+            | Self::AudioOutput
+            | Self::AudioInput
+            | Self::AudioLevel => false,
         }
+    }
+
+    /// Whether this key belongs to the machine's audio baseline, which the
+    /// device manager carries to the audio service when it reads the store.
+    #[must_use]
+    pub const fn is_audio(self) -> bool {
+        matches!(
+            self,
+            Self::AudioOutput | Self::AudioInput | Self::AudioLevel
+        )
     }
 
     /// The canonical key spelling.
@@ -658,6 +690,9 @@ impl Key {
             Self::InputMouseDebounce => "input.mouse.debounce",
             Self::TimeServers => "time.servers",
             Self::TimeRefresh => "time.refresh",
+            Self::AudioOutput => "audio.output",
+            Self::AudioInput => "audio.input",
+            Self::AudioLevel => "audio.level",
         }
     }
 
@@ -691,6 +726,12 @@ impl Key {
             Self::InputMouseDebounce => {
                 return ValueShape::Free("whole milliseconds, `0` to disable, at most 100")
             }
+            Self::AudioOutput | Self::AudioInput => {
+                return ValueShape::Free("`auto`, or an endpoint's location as `audioctl` lists it")
+            }
+            Self::AudioLevel => {
+                return ValueShape::Free("decibels at or below `0dB`, such as `-12dB` or `-6.5dB`")
+            }
         })
     }
 }
@@ -708,6 +749,24 @@ fn render_byte_size(bytes: u64) -> String {
         }
     }
     String::from(tairix_util::fmt::format_u64(bytes, &mut buf))
+}
+
+/// The spelling of "no preference" for an `audio.*` device key.
+const AUTO: &str = "auto";
+
+/// Parse `audio.output` or `audio.input`: `auto`, or a location in its one
+/// canonical spelling.
+fn parse_location(value: &str) -> Result<Option<AudioLocation>, ConfigError> {
+    if value == AUTO {
+        return Ok(None);
+    }
+    AudioLocation::parse(value)
+        .map(Some)
+        .map_err(|_| ConfigError::InvalidValue)
+}
+
+fn render_location(location: Option<AudioLocation>) -> String {
+    location.map_or_else(|| String::from(AUTO), |place| alloc::format!("{place}"))
 }
 
 /// Parse `input.mouse.debounce` — whole milliseconds, `0` disabling the filter.
@@ -824,6 +883,14 @@ pub struct SystemConfig {
     pub input_mouse_debounce_ms: u16,
     /// The steady-state clock re-query cadence (`time.refresh`).
     pub time_refresh: RefreshCadence,
+    /// The sink the machine prefers as the default (`audio.output`), or
+    /// [`None`] for the first bound.
+    pub audio_output: Option<AudioLocation>,
+    /// The source the machine prefers as the default (`audio.input`), or
+    /// [`None`] for the first bound.
+    pub audio_input: Option<AudioLocation>,
+    /// The level every sink and source starts at (`audio.level`).
+    pub audio_level: AudioGain,
 }
 
 impl Default for SystemConfig {
@@ -851,6 +918,9 @@ impl Default for SystemConfig {
             time_servers: Vec::new(),
             time_refresh: RefreshCadence::default(),
             input_mouse_debounce_ms: DEFAULT_CLICK_DEBOUNCE_MS,
+            audio_output: None,
+            audio_input: None,
+            audio_level: AudioGain::UNITY,
         }
     }
 }
@@ -881,6 +951,17 @@ impl SystemConfig {
             tcp_keepalive: self.net_tcp_keepalive.is_enabled(),
             tcp_ecn: self.net_tcp_ecn.is_enabled(),
             socket_budget_bytes: self.net_sockets_mem.resolve(total_ram_bytes),
+        }
+    }
+
+    /// The machine's audio baseline these `audio.*` keys describe, in the
+    /// form the audio service adopts.
+    #[must_use]
+    pub const fn audio_baseline(&self) -> AudioBaseline {
+        AudioBaseline {
+            output: self.audio_output,
+            input: self.audio_input,
+            level: self.audio_level,
         }
     }
 
@@ -940,6 +1021,9 @@ impl SystemConfig {
                 SocketBudget::Auto => String::from("auto"),
                 SocketBudget::Bytes(bytes) => render_byte_size(bytes),
             },
+            Key::AudioOutput => render_location(self.audio_output),
+            Key::AudioInput => render_location(self.audio_input),
+            Key::AudioLevel => alloc::format!("{}", self.audio_level),
             _ => String::from(self.closed_value(key)),
         }
     }
@@ -953,7 +1037,7 @@ impl SystemConfig {
         match key {
             Key::TimeServers => NO_TIME_SERVERS,
             // Rendered numerically by `render_value`; no fixed spelling exists.
-            Key::InputMouseDebounce => "",
+            Key::InputMouseDebounce | Key::AudioLevel => "",
             // `auto` has a spelling; an explicit budget is rendered as a
             // byte size by `render_value`.
             Key::NetSocketsMem => "auto",
@@ -970,6 +1054,9 @@ impl SystemConfig {
             Key::NetTcpSynCookies => self.net_tcp_syncookies.as_str(),
             Key::NetTcpKeepalive => self.net_tcp_keepalive.as_str(),
             Key::NetTcpEcn => self.net_tcp_ecn.as_str(),
+            // Rendered by `render_value`: a location has no fixed spelling,
+            // and `auto` is the absent preference's.
+            Key::AudioOutput | Key::AudioInput => AUTO,
         }
     }
 
@@ -1060,6 +1147,12 @@ impl SystemConfig {
             }
             Key::InputMouseDebounce => {
                 self.input_mouse_debounce_ms = parse_click_debounce_ms(value)?;
+            }
+            Key::AudioOutput => self.audio_output = parse_location(value)?,
+            Key::AudioInput => self.audio_input = parse_location(value)?,
+            Key::AudioLevel => {
+                self.audio_level =
+                    AudioGain::parse(value).map_err(|_| ConfigError::InvalidValue)?;
             }
         }
         Ok(())
@@ -1160,6 +1253,7 @@ mod tests {
     use std::string::ToString;
     use std::vec;
     use std::vec::Vec;
+    use tairix_abi::audio::{AudioBaseline, AudioGain, AudioLocation};
 
     /// The kind of `text`'s refusal, for the tests that assert what was
     /// refused rather than where.
@@ -1333,6 +1427,75 @@ mod tests {
     }
 
     #[test]
+    fn an_audio_level_has_one_spelling_and_never_raises() {
+        for (spelled, millibel) in [
+            ("0dB", 0),
+            ("-12dB", -1_200),
+            ("-6.5dB", -650),
+            ("-6.25dB", -625),
+            ("-0.05dB", -5),
+            ("-100dB", -10_000),
+        ] {
+            let mut config = SystemConfig::default();
+            assert_eq!(config.set(Key::AudioLevel, spelled), Ok(()), "{spelled}");
+            assert_eq!(config.audio_level.millibel(), millibel);
+            assert_eq!(config.render_value(Key::AudioLevel), spelled);
+        }
+        for refused in [
+            "",
+            "dB",
+            "12dB",
+            "+1dB",
+            "-0dB",
+            "-06dB",
+            "-6.50dB",
+            "-6.255dB",
+            "-6.dB",
+            "-.5dB",
+            "-6",
+            "-6 dB",
+            "-6db",
+            "auto",
+            "-99999999999dB",
+        ] {
+            assert_eq!(
+                SystemConfig::default().set(Key::AudioLevel, refused),
+                Err(ConfigError::InvalidValue),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_audio_device_preference_is_auto_or_a_location() {
+        let mut config = SystemConfig::default();
+        assert_eq!(config.render_value(Key::AudioOutput), "auto");
+        assert_eq!(config.set(Key::AudioOutput, "9f3a1c0042de7701.0"), Ok(()));
+        assert_eq!(
+            config.audio_output,
+            AudioLocation::new(0x9f3a_1c00_42de_7701, 0).ok()
+        );
+        assert_eq!(config.render_value(Key::AudioOutput), "9f3a1c0042de7701.0");
+        assert_eq!(config.set(Key::AudioInput, "auto"), Ok(()));
+        assert_eq!(config.audio_input, None);
+        for refused in ["speakers", "9F3A1C0042DE7701.0", "0000000000000000.0", ""] {
+            assert_eq!(
+                config.set(Key::AudioInput, refused),
+                Err(ConfigError::InvalidValue),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            config.audio_baseline(),
+            AudioBaseline {
+                output: config.audio_output,
+                input: None,
+                level: AudioGain::UNITY,
+            }
+        );
+    }
+
+    #[test]
     fn render_parse_round_trips_exactly() {
         for login_type in [LoginType::Text, LoginType::Graphical] {
             for cache_all in [CacheSwitch::On, CacheSwitch::Off] {
@@ -1363,6 +1526,9 @@ mod tests {
                                     ],
                                     time_refresh: RefreshCadence::TwoDays,
                                     input_mouse_debounce_ms: 40,
+                                    audio_output: AudioLocation::new(0x9f3a, 1).ok(),
+                                    audio_input: None,
+                                    audio_level: AudioGain::new(-650).expect("attenuation"),
                                 };
                                 let rendered = config.render();
                                 assert_eq!(parse_kind(&rendered), Ok(config));

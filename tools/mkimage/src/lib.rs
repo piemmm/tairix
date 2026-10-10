@@ -61,6 +61,7 @@ pub mod elfflat;
 pub mod fatboot;
 pub mod firmware;
 pub mod library;
+pub mod overlay;
 pub mod rootfs;
 
 pub use tairix_drv_fs_arxfs::{
@@ -116,6 +117,8 @@ pub enum MkimageError {
     /// the `tairix_netconfig` engine `netstack` reads it with, so shipping it
     /// would give the booted system a store its own stack rejects.
     NetworkConfig,
+    /// A first-party device-tree overlay could not be written.
+    Overlay(&'static str),
 }
 
 impl fmt::Display for MkimageError {
@@ -137,6 +140,7 @@ impl fmt::Display for MkimageError {
             Self::UsersDb(msg) => write!(f, "users database: {msg}"),
             Self::GroupsDb(msg) => write!(f, "group registry: {msg}"),
             Self::LibraryCatalog(msg) => write!(f, "program-library catalog: {msg}"),
+            Self::Overlay(msg) => write!(f, "device-tree overlay: {msg}"),
         }
     }
 }

@@ -1,6 +1,10 @@
 //! Unit tests for `audio-v1`: every request, reply and notification
 //! round-trips, and every malformed frame is refused rather than guessed at.
 
+extern crate alloc;
+
+use alloc::format;
+
 use super::*;
 use crate::driver::audio::RateSet;
 
@@ -21,7 +25,7 @@ fn descriptor() -> AudioDeviceDescriptor {
         device_id: 7,
         direction: StreamDirection::Playback,
         jack: JackState::Present,
-        is_default: true,
+        default: DefaultChoice::Inherited,
         formats: SampleFormats::EMPTY
             .with(SampleFormat::S16)
             .with(SampleFormat::F32),
@@ -32,6 +36,33 @@ fn descriptor() -> AudioDeviceDescriptor {
         ),
         gain: Some(GainRange::new(-6_400, 0, 50).expect("ordered")),
         name: AudioName::new("Headphones").expect("plain text"),
+        location: location(),
+        level: AudioGain::new(-1_250).expect("attenuation"),
+        muted: true,
+        own_level: false,
+        access: ControlAccess::Shared,
+        clock_millihertz: 47_999_812,
+        lost_frames: 0x0102_0304_0506,
+    }
+}
+
+fn location() -> AudioLocation {
+    AudioLocation::new(0x9f3a_1c00_42de_7701, 3).expect("a place")
+}
+
+fn stream_descriptor() -> StreamDescriptor {
+    StreamDescriptor {
+        stream_id: 0x10_0000_0007,
+        device_id: 4,
+        direction: StreamDirection::Capture,
+        role: StreamRole::Communication,
+        state: StreamState::Running,
+        position: Frames::new(48_000 * 61),
+        xruns: 2,
+        xrun_frames: 512,
+        owner_uid: 1001,
+        owner_pid: 0x77,
+        owner_app: Some(BundleId::new("os.tairix.recorder").expect("an identifier")),
     }
 }
 
@@ -49,11 +80,11 @@ fn stream_grant() -> StreamGrant {
     }
 }
 
-fn every_request() -> [AudioRequest; 12] {
+fn every_request() -> [AudioRequest; 19] {
     [
         AudioRequest::Enumerate {
             direction: StreamDirection::Capture,
-            index: 5,
+            after: 0x8000_0005,
         },
         AudioRequest::Open(open_params()),
         AudioRequest::Attach {
@@ -73,7 +104,7 @@ fn every_request() -> [AudioRequest; 12] {
         AudioRequest::Clock { stream_id: 42 },
         AudioRequest::Gain {
             stream_id: 42,
-            millibel: -2_000,
+            gain: AudioGain::new(-2_000).expect("attenuation"),
         },
         AudioRequest::Mute {
             stream_id: 42,
@@ -81,6 +112,28 @@ fn every_request() -> [AudioRequest; 12] {
         },
         AudioRequest::State { stream_id: 42 },
         AudioRequest::Close { stream_id: 42 },
+        AudioRequest::BindDriver {
+            endpoint_id: 0x4143_4841_4E00_0000,
+            location: 0x9f3a_1c00_42de_7701,
+        },
+        AudioRequest::UnbindDriver {
+            endpoint_id: 0x4143_4841_4E00_0000,
+        },
+        AudioRequest::SetDefault { device_id: 9 },
+        AudioRequest::SetLevel {
+            device_id: 9,
+            level: AudioGain::new(-600).expect("attenuation"),
+        },
+        AudioRequest::SetMute {
+            device_id: 9,
+            muted: true,
+        },
+        AudioRequest::ListStreams { after: 0 },
+        AudioRequest::Baseline(AudioBaseline {
+            output: Some(location()),
+            input: None,
+            level: AudioGain::new(-300).expect("attenuation"),
+        }),
     ]
 }
 
@@ -196,9 +249,13 @@ fn a_request_header_fails_closed() {
 fn a_zero_stream_id_is_refused_on_every_operation_that_names_one() {
     for request in every_request() {
         let (mut frame, len) = encoded(request);
+        // A listing's zero starts it, and these name no stream.
         if matches!(
             request,
-            AudioRequest::Enumerate { .. } | AudioRequest::Open(_)
+            AudioRequest::Enumerate { .. }
+                | AudioRequest::Open(_)
+                | AudioRequest::ListStreams { .. }
+                | AudioRequest::Baseline(_)
         ) {
             continue;
         }
@@ -215,12 +272,14 @@ fn a_zero_stream_id_is_refused_on_every_operation_that_names_one() {
 fn enumerate_fails_closed() {
     let (frame, len) = encoded(AudioRequest::Enumerate {
         direction: StreamDirection::Capture,
-        index: 5,
+        after: 5,
     });
 
-    let mut dirty = frame;
-    dirty[HEADER_LEN + enumerate::RESERVED] = 1;
-    assert_eq!(AudioRequest::decode(&dirty[..len]), Err(Errno::BadMagic));
+    for reserved in enumerate::RESERVED..enumerate::AFTER {
+        let mut dirty = frame;
+        dirty[HEADER_LEN + reserved] = 1;
+        assert_eq!(AudioRequest::decode(&dirty[..len]), Err(Errno::BadMagic));
+    }
 
     let mut undefined = frame;
     undefined[HEADER_LEN + enumerate::DIRECTION] = 9;
@@ -288,7 +347,7 @@ fn open_fails_closed_on_every_malformed_field() {
 fn gain_and_mute_refuse_their_dirty_reserved_fields() {
     let (frame, len) = encoded(AudioRequest::Gain {
         stream_id: 42,
-        millibel: -2_000,
+        gain: AudioGain::UNITY,
     });
     let mut dirty = frame;
     dirty[HEADER_LEN + level::RESERVED] = 1;
@@ -308,6 +367,38 @@ fn gain_and_mute_refuse_their_dirty_reserved_fields() {
         AudioRequest::decode(&undefined[..len]),
         Err(Errno::OutOfRange)
     );
+}
+
+/// A level above unity would lift a stream's full-scale samples over every
+/// other stream on its sink, which the clamp on those samples exists to stop.
+#[test]
+fn a_stream_level_above_unity_is_refused() {
+    let carrying = |millibel: i32| {
+        let (mut frame, len) = encoded(AudioRequest::Gain {
+            stream_id: 42,
+            gain: AudioGain::UNITY,
+        });
+        let at = HEADER_LEN + level::MILLIBEL;
+        frame[at..at + 4].copy_from_slice(&millibel.to_le_bytes());
+        AudioRequest::decode(&frame[..len])
+    };
+    for millibel in [i32::MIN, -2_000, 0] {
+        assert_eq!(
+            carrying(millibel),
+            Ok(AudioRequest::Gain {
+                stream_id: 42,
+                gain: AudioGain::new(millibel).expect("attenuation"),
+            })
+        );
+    }
+    for millibel in [1, 2_400, i32::MAX] {
+        assert_eq!(
+            carrying(millibel),
+            Err(Errno::OutOfRange),
+            "{millibel} mB would raise a stream past full scale"
+        );
+        assert_eq!(AudioGain::new(millibel), Err(Errno::OutOfRange));
+    }
 }
 
 #[test]
@@ -348,7 +439,7 @@ fn a_device_descriptor_decode_fails_closed() {
     }
 
     let mut undefined_default = wire;
-    undefined_default[4 + descriptor::DEFAULT] = 2;
+    undefined_default[4 + descriptor::DEFAULT] = 3;
     assert_eq!(
         decode_enumerate_reply(&undefined_default),
         Err(Errno::OutOfRange)
@@ -476,6 +567,34 @@ fn a_clock_report_round_trips_and_refuses_an_impossible_rate() {
 }
 
 #[test]
+fn every_role_and_state_has_a_stable_name_of_its_own() {
+    let roles: alloc::vec::Vec<&str> = (0..=u8::MAX)
+        .filter_map(|raw| StreamRole::from_u8(raw).ok())
+        .map(StreamRole::name)
+        .collect();
+    assert_eq!(
+        roles,
+        ["media", "communication", "notification", "accessibility"]
+    );
+    let states: alloc::vec::Vec<&str> = (0..=u8::MAX)
+        .filter_map(|raw| StreamState::from_u8(raw).ok())
+        .map(StreamState::name)
+        .collect();
+    assert_eq!(
+        states,
+        [
+            "idle",
+            "running",
+            "paused",
+            "draining",
+            "seat-inactive",
+            "device-lost",
+            "faulted"
+        ]
+    );
+}
+
+#[test]
 fn a_stream_report_round_trips_for_every_state() {
     for state in [
         StreamState::Idle,
@@ -484,6 +603,7 @@ fn a_stream_report_round_trips_for_every_state() {
         StreamState::Draining,
         StreamState::SeatInactive,
         StreamState::DeviceLost,
+        StreamState::Faulted,
     ] {
         let report = StreamReport {
             state,
@@ -610,22 +730,279 @@ fn a_notification_fails_closed() {
 #[test]
 fn the_reply_bound_covers_every_reply_shape() {
     assert_eq!(
-        AUDIO_MAX_REPLY, AUDIO_ENUMERATE_REPLY_LEN,
-        "the device descriptor is the widest reply"
+        AUDIO_MAX_REPLY,
+        AUDIO_ENUMERATE_REPLY_LEN.max(AUDIO_STREAMS_REPLY_LEN),
+        "a descriptor is the widest reply"
     );
 }
 
 #[test]
-fn the_driver_bind_operation_round_trips_and_refuses_a_zero_endpoint() {
+fn the_driver_bind_operation_refuses_a_zero_endpoint_or_place() {
     let request = AudioRequest::BindDriver {
         endpoint_id: 0x4143_4841_4E00_0000,
+        location: 0x77,
     };
-    let mut frame = [0u8; AUDIO_MAX_REQUEST];
-    let len = request.encode(&mut frame).expect("encoded");
+    let (frame, len) = encoded(request);
     assert_eq!(AudioRequest::decode(&frame[..len]), Ok(request));
     // No endpoint is ever id zero, so a truncated or uninitialised frame is
     // a refusal rather than a bind of whatever happened to be first.
+    for field in [8..16, 16..24] {
+        let mut zeroed = frame;
+        zeroed[field].fill(0);
+        assert_eq!(AudioRequest::decode(&zeroed[..len]), Err(Errno::OutOfRange));
+    }
+    let (frame, len) = encoded(AudioRequest::UnbindDriver { endpoint_id: 5 });
     let mut zeroed = frame;
     zeroed[8..16].fill(0);
     assert_eq!(AudioRequest::decode(&zeroed[..len]), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn a_level_has_one_spelling_and_never_raises() {
+    for (spelled, millibel) in [
+        ("0dB", 0),
+        ("-12dB", -1_200),
+        ("-6.5dB", -650),
+        ("-6.25dB", -625),
+        ("-0.05dB", -5),
+    ] {
+        let level = AudioGain::parse(spelled).expect(spelled);
+        assert_eq!(level.millibel(), millibel);
+        assert_eq!(format!("{level}"), spelled);
+    }
+    for refused in [
+        "",
+        "dB",
+        "1dB",
+        "+1dB",
+        "-0dB",
+        "-06dB",
+        "-6.50dB",
+        "-6.255dB",
+        "-6.dB",
+        "-.5dB",
+        "-6",
+        "-6 dB",
+        "-6db",
+        "-99999999999dB",
+    ] {
+        assert_eq!(
+            AudioGain::parse(refused),
+            Err(Errno::OutOfRange),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn a_location_has_one_spelling() {
+    let place = location();
+    assert_eq!(format!("{place}"), "9f3a1c0042de7701.3");
+    assert_eq!(AudioLocation::parse("9f3a1c0042de7701.3"), Ok(place));
+    for other in [
+        "9F3A1C0042DE7701.3",
+        "9f3a1c0042de771.3",
+        "9f3a1c0042de7701.03",
+        "9f3a1c0042de7701.",
+        "9f3a1c0042de7701",
+        ".3",
+        "9f3a1c0042de7701.3.",
+        "+f3a1c0042de7701.3",
+        "9f3a1c0042de7701.+3",
+        "0000000000000000.0",
+        "9f3a1c0042de7701.32",
+        "9f3a1c0042de7701.65536",
+    ] {
+        assert_eq!(
+            AudioLocation::parse(other),
+            Err(Errno::OutOfRange),
+            "{other}"
+        );
+    }
+    assert_eq!(
+        AudioLocation::parse("0000000000000001.0"),
+        AudioLocation::new(1, 0)
+    );
+}
+
+#[test]
+fn a_device_control_names_an_endpoint_and_nothing_else() {
+    for request in [
+        AudioRequest::SetDefault { device_id: 9 },
+        AudioRequest::SetLevel {
+            device_id: 9,
+            level: AudioGain::UNITY,
+        },
+        AudioRequest::SetMute {
+            device_id: 9,
+            muted: false,
+        },
+    ] {
+        let (frame, len) = encoded(request);
+        // Zero names "the default" when a stream is opened, never a device.
+        let mut zero = frame;
+        zero[8..12].fill(0);
+        assert_eq!(AudioRequest::decode(&zero[..len]), Err(Errno::OutOfRange));
+    }
+    let (frame, len) = encoded(AudioRequest::SetDefault { device_id: 9 });
+    let mut dirty = frame;
+    dirty[8 + control::VALUE] = 1;
+    assert_eq!(AudioRequest::decode(&dirty[..len]), Err(Errno::BadMagic));
+
+    let (frame, len) = encoded(AudioRequest::SetMute {
+        device_id: 9,
+        muted: true,
+    });
+    let mut undefined = frame;
+    undefined[8 + control::VALUE] = 2;
+    assert_eq!(
+        AudioRequest::decode(&undefined[..len]),
+        Err(Errno::OutOfRange)
+    );
+    let mut dirty = frame;
+    dirty[8 + control::VALUE + 3] = 1;
+    assert_eq!(AudioRequest::decode(&dirty[..len]), Err(Errno::BadMagic));
+
+    let (frame, len) = encoded(AudioRequest::SetLevel {
+        device_id: 9,
+        level: AudioGain::UNITY,
+    });
+    let mut loud = frame;
+    put_i32(&mut loud, 8 + control::VALUE, 1);
+    assert_eq!(AudioRequest::decode(&loud[..len]), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn a_baseline_carries_its_preferences_and_fails_closed() {
+    let none = AudioRequest::Baseline(AudioBaseline::DEFAULT);
+    let (frame, len) = encoded(none);
+    assert_eq!(AudioRequest::decode(&frame[..len]), Ok(none));
+
+    let (frame, len) = encoded(every_request()[18]);
+    let mut dirty = frame;
+    dirty[8 + baseline::RESERVED] = 1;
+    assert_eq!(AudioRequest::decode(&dirty[..len]), Err(Errno::BadMagic));
+    let mut dirty_location = frame;
+    dirty_location[8 + baseline::OUTPUT + 12] = 1;
+    assert_eq!(
+        AudioRequest::decode(&dirty_location[..len]),
+        Err(Errno::BadMagic)
+    );
+    // An index with no device half names no place.
+    let mut half = frame;
+    half[8 + baseline::OUTPUT..8 + baseline::OUTPUT + 8].fill(0);
+    assert_eq!(AudioRequest::decode(&half[..len]), Err(Errno::OutOfRange));
+    let mut loud = frame;
+    put_i32(&mut loud, 8 + baseline::LEVEL, 100);
+    assert_eq!(AudioRequest::decode(&loud[..len]), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn a_device_descriptor_states_its_controls() {
+    for access in [
+        ControlAccess::Shown,
+        ControlAccess::Shared,
+        ControlAccess::Own,
+    ] {
+        for default in [
+            DefaultChoice::No,
+            DefaultChoice::Inherited,
+            DefaultChoice::Preferred,
+        ] {
+            let shown = AudioDeviceDescriptor {
+                access,
+                default,
+                own_level: true,
+                ..descriptor()
+            };
+            assert_eq!(
+                decode_enumerate_reply(&encode_enumerate_reply(Ok(shown))),
+                Ok(shown)
+            );
+        }
+    }
+    let own = AudioDeviceDescriptor {
+        access: ControlAccess::Own,
+        ..descriptor()
+    };
+    let wire = encode_enumerate_reply(Ok(descriptor()));
+    let mut undefined = wire;
+    undefined[4 + descriptor::FLAGS] |= 32;
+    assert_eq!(decode_enumerate_reply(&undefined), Err(Errno::BadMagic));
+    // The room's tenant may always change what it set.
+    let mut contradictory = encode_enumerate_reply(Ok(own));
+    contradictory[4 + descriptor::FLAGS] &= !descriptor::CONTROLLABLE;
+    assert_eq!(
+        decode_enumerate_reply(&contradictory),
+        Err(Errno::OutOfRange)
+    );
+    let mut dirty = wire;
+    dirty[4 + descriptor::RESERVED3] = 1;
+    assert_eq!(decode_enumerate_reply(&dirty), Err(Errno::BadMagic));
+    // A bound device always has a place.
+    let mut nowhere = wire;
+    nowhere[4 + descriptor::LOCATION..4 + descriptor::LEVEL].fill(0);
+    assert_eq!(decode_enumerate_reply(&nowhere), Err(Errno::OutOfRange));
+    let mut loud = wire;
+    put_i32(&mut loud, 4 + descriptor::LEVEL, 1);
+    assert_eq!(decode_enumerate_reply(&loud), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn a_stream_descriptor_round_trips_with_and_without_an_application() {
+    let stream = stream_descriptor();
+    assert_eq!(
+        decode_streams_reply(&encode_streams_reply(Ok(stream))),
+        Ok(stream)
+    );
+    let daemon = StreamDescriptor {
+        owner_app: None,
+        ..stream
+    };
+    assert_eq!(
+        decode_streams_reply(&encode_streams_reply(Ok(daemon))),
+        Ok(daemon)
+    );
+    assert_eq!(
+        decode_streams_reply(&encode_streams_reply(Err(Errno::NotFound))),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn a_stream_descriptor_decode_fails_closed() {
+    let wire = encode_streams_reply(Ok(stream_descriptor()));
+    let app_len = usize::from(wire[4 + stream_descriptor::APP_LEN]);
+    let mut trailing = wire;
+    trailing[4 + stream_descriptor::APP + app_len] = b'x';
+    assert_eq!(decode_streams_reply(&trailing), Err(Errno::BadMagic));
+    let mut overlong = wire;
+    overlong[4 + stream_descriptor::APP_LEN] = 200;
+    assert_eq!(decode_streams_reply(&overlong), Err(Errno::OutOfRange));
+    let mut not_an_id = wire;
+    not_an_id[4 + stream_descriptor::APP] = b'/';
+    assert_eq!(decode_streams_reply(&not_an_id), Err(Errno::OutOfRange));
+    let mut zero = wire;
+    zero[4..12].fill(0);
+    assert_eq!(decode_streams_reply(&zero), Err(Errno::OutOfRange));
+    let mut undefined = wire;
+    undefined[4 + stream_descriptor::STATE] = 0xEE;
+    assert_eq!(decode_streams_reply(&undefined), Err(Errno::OutOfRange));
+}
+
+#[test]
+fn the_longest_spellings_are_the_bounds_stated() {
+    let floor = AudioGain::new(i32::MIN).expect("attenuation");
+    let quietest = format!("{floor}");
+    assert_eq!(quietest, "-21474836.48dB");
+    assert_eq!(quietest.len(), AudioGain::TEXT_MAX);
+    assert_eq!(
+        AudioGain::parse(&quietest),
+        Ok(floor),
+        "every level reads back"
+    );
+    assert_eq!(AudioGain::parse("-21474836.49dB"), Err(Errno::OutOfRange));
+    let last = crate::driver::audio::MAX_DEVICE_ENDPOINTS - 1;
+    let widest = format!("{}", AudioLocation::new(u64::MAX, last).expect("a place"));
+    assert_eq!(widest.len(), AudioLocation::TEXT_MAX);
 }

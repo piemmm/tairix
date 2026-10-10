@@ -30,6 +30,13 @@ pub enum Command<'a> {
         /// Request the global process list rather than the caller's own.
         all: bool,
     },
+    /// List the sound devices (`AUDIO_DEVICES`) and the sound streams: the
+    /// caller's own (`SELF_AUDIO_STREAMS`, ungated), or with `all` every
+    /// stream (`GLOBAL_AUDIO_STREAMS`, gated on `CAP_SYSINFO_GLOBAL`).
+    Audio {
+        /// Request every stream rather than the caller's own.
+        all: bool,
+    },
     /// Read kernel memory statistics (`KERNEL_MEMORY_STATS`).
     Memory,
     /// Read the detected hardware tree (`HARDWARE_TREE`).
@@ -197,6 +204,7 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
         "dma" | "iommu" => no_more(rest).map(|()| Command::Dma),
+        "audio" | "sound" => parse_audio(rest),
         "show" => one_operand(rest).map(|reference| Command::Show { reference }),
         "describe" => one_operand(rest).map(|reference| Command::Describe { reference }),
         _ => Err(SysinfoError::Usage),
@@ -227,6 +235,14 @@ fn parse_processes(args: &[&str]) -> Result<Command<'static>, SysinfoError> {
         }
     }
     Ok(Command::Processes { all })
+}
+
+fn parse_audio(args: &[&str]) -> Result<Command<'static>, SysinfoError> {
+    match args {
+        [] => Ok(Command::Audio { all: false }),
+        ["--all" | "-a"] => Ok(Command::Audio { all: true }),
+        _ => Err(SysinfoError::Usage),
+    }
 }
 
 /// Reject any trailing argument for a subcommand that takes none.
@@ -293,6 +309,11 @@ mod tests {
         assert_eq!(parse(&["dma"]), Ok(Command::Dma));
         assert_eq!(parse(&["iommu"]), Ok(Command::Dma));
         assert_eq!(parse(&["dma", "nodes"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["audio"]), Ok(Command::Audio { all: false }));
+        assert_eq!(parse(&["sound", "-a"]), Ok(Command::Audio { all: true }));
+        assert_eq!(parse(&["audio", "--all"]), Ok(Command::Audio { all: true }));
+        assert_eq!(parse(&["audio", "devices"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["audio", "-a", "-a"]), Err(SysinfoError::Usage));
     }
 
     #[test]
@@ -366,7 +387,7 @@ mod tests {
         for locale in locales {
             let path = format!("{help_root}/{locale}/sysinfo.md");
             let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-            for switch in ["`--all, -a`", "`-h, -?`"] {
+            for switch in ["`--all, -a`", "`-h, -?`", "`audio`"] {
                 assert!(
                     text.contains(switch),
                     "{locale}/sysinfo.md must document {switch}"

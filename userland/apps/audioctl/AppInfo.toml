@@ -1,0 +1,15 @@
+# Signed-AppInfo manifest source for the `audioctl` command app
+# (plans/SOUND.md SND15). Changing a control asks for nothing: the audio
+# service admits it for the session holding the room the device serves.
+# CAP_CONSOLE_WRITE covers standard output and standard error;
+# CAP_FS_ACCESS reads the bundle's own Help/; CAP_SYSINFO_GLOBAL lists every
+# principal's streams, armed only where the launching account's ceiling
+# grants it, and without it `streams --all` is refused with its reason.
+id = "os.tairix.audioctl"
+name = "audioctl"
+title = "Audioctl"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SYSINFO_GLOBAL"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "audioctl.png"

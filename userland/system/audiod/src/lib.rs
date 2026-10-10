@@ -19,8 +19,9 @@
 //! policy, [`ChannelMatrix`](tairix_audio::ChannelMatrix) at open,
 //! [`Mixer`](tairix_audio::Mixer) for the period,
 //! [`ClockModel`](tairix_audio::ClockModel) per endpoint,
-//! [`volume::resolve`](tairix_audio::volume::resolve) for the one multiply,
-//! and `convert`/`resample` for a rate or format mismatch. This crate owns no
+//! [`endpoint_level`](tairix_audio::volume::endpoint_level) for a device's
+//! level and [`stream_multiply`](tairix_audio::volume::stream_multiply) for
+//! the one multiply, and `convert`/`resample` for a rate or format mismatch. This crate owns no
 //! sample arithmetic of its own.
 //!
 //! # Regions run in both directions
@@ -44,8 +45,9 @@
 //! the per-period path allocates nothing. It reads each client ring into that
 //! stream's own scratch, so exactly **one** region is borrowed at a time —
 //! which [`RegionHost::bytes`] enforces by taking `&mut self`. The service
-//! parks on {device notify, client doorbells, control endpoint} and never
-//! spins: the device's own period interrupt is the only timer in the stack.
+//! parks on {device notify, client doorbells, control endpoint, the seat's
+//! lease} and never spins: the device's own period interrupt is the only
+//! timer in the stack.
 //!
 //! # Fail closed
 //!
@@ -65,6 +67,7 @@
 extern crate alloc;
 
 mod channel;
+mod controls;
 mod device;
 pub mod events;
 mod region;
@@ -72,7 +75,7 @@ mod service;
 
 pub use channel::{AudioChannelClient, AudioChannelTransport};
 pub use region::{RegionHost, RegionId};
-pub use service::{AudioService, Caller, Notifier};
+pub use service::{AudioService, Notifier};
 
 #[cfg(test)]
 #[path = "tests.rs"]

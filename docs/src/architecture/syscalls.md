@@ -103,7 +103,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  54 | `fs_mkdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  55 | `fs_unlink`    | `user_ptr` (path), `len`, `u32 flags`   | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  56 | `dma_free`     | `Handle handle`, `u64 cpu_va`           | `errno`       | `CAP_MEM_DMA`   | yes   |
-|  57 | `fs_rename`    | `user_ptr` (src), `len`, `user_ptr` (dst), `len` | `errno` | `CAP_FS_ACCESS` | yes |
+|  57 | `fs_rename`    | `user_ptr` (src), `len`, `user_ptr` (dst), `len`, `u32 flags` | `errno` | `CAP_FS_ACCESS` | yes |
 |  58 | `call_peer_origin` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (origin out), `len` | `u64` (bytes) | — | no |
 |  59 | `wall_time_get` | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  60 | `wall_time_set` | `user_ptr` (time), `len`, `u32 state`  | `errno` | `CAP_TIME_SET` | yes |
@@ -181,6 +181,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 135 | `touch_read`   | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 | 136 | `fs_watch`     | `u32 fd`, `u64 latency_ns`              | `errno`       | `CAP_FS_ACCESS`  | no    |
 | 137 | `fs_watch_read` | `u32 fd`, `user_ptr` (buf), `len`      | `u64` (bytes) | `CAP_FS_ACCESS`  | no    |
+| 138 | `port_admit`   | `IpcEndpoint` (own port), `IpcEndpoint` (server) | `errno` | —                       | yes     |
+| 139 | `foreground_held` | `u32 fd`                             | `u64` (`1` held, `0` not) | `CAP_CONSOLE_READ` | no |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -254,6 +256,18 @@ open asking for byte access to something that really is a link is
 `Errno::LinkLoop`; the resolve-only handle is the `lstat` posture. The design
 is `plans/SYMLINKS.md`; the resolution rules are
 `docs/src/filesystem/overview.md`.
+
+`fs_rename` (no. 57) moves a name within one volume. An empty `RenameFlags`
+word is POSIX `rename(2)`: an occupied destination is replaced, kind for kind.
+`RenameFlags::NO_REPLACE` is `renameat2(RENAME_NOREPLACE)`: the move is
+refused with `Errno::AlreadyExists` when the destination names any entry but
+the source's own, decided by the VFS under the volume's lock with the volume's
+own matching rule — so a name created after the caller looked is never
+destroyed, a sibling differing only in case is a clash on a volume that
+ignores case, and a re-spelling of the source itself (`Foo` to `foo`) renames
+it. Every rename the user types or a file manager plans uses it; a publish
+that means to replace (a settings store, an overrides file) passes the empty
+word.
 
 `fs_link` (no. 115) adds a **second name** for a node that already has one —
 POSIX `link(2)`. Both operands are absolute paths, and with an empty
@@ -491,7 +505,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_CONSOLE_WRITE`| `stream_write` (console-backed descriptors only, checked in-handler), `console_count`, `terminal_purge` |
 | `CAP_PROC_SPAWN`   | `spawn` (checked in-handler: required by every non-sandbox spawn, and admits a sandbox spawn too) |
 | `CAP_SANDBOX_SPAWN`| `spawn` (checked in-handler: canonical parser-sandbox blocks only) |
-| `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground`, `terminal_purge` (checked in-handler, in addition to the dispatcher's `CAP_CONSOLE_WRITE`) |
+| `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground`, `foreground_held`, `terminal_purge` (checked in-handler, in addition to the dispatcher's `CAP_CONSOLE_WRITE`) |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
 | `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject`, `touch_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
@@ -874,7 +888,11 @@ owner and two `CapabilitySet` wire images naming the capability a caller must
 hold to post (`send_caps`) and the capability the server must hold to serve
 (`recv_caps`); binding a restricted-sender endpoint (non-empty `send_caps`)
 requires `CAP_IPC_BIND_PRIVILEGED`, and an id already bound fails closed with
-`AlreadyExists` (the kernel never re-points a live endpoint). `call_recv`
+`AlreadyExists` (the kernel never re-points a live endpoint). An id in a link
+supplier's block is bindable only by the holder of the node's duty naming it,
+whatever the role (`plans/SUPPLIERS.md` SL1), and the endpoint registry
+reports each such bind and unbind to the hardware tree, whose node then states
+whether it serves that role (`HwNode::serves`). `call_recv`
 blocks until a request is posted, copies it into the server's buffer (a
 request larger than the buffer is left queued and refused `BufferTooSmall`,
 never lost), and writes the per-call ticket; its `CallRecvFlags` word
@@ -1169,15 +1187,15 @@ carved for a client inside its `Prepare` reply. Audited as `shm_grant`.
 Wrapper `tairix_rt::shm_grant_peer`; C stub `tairix_sys_shm_grant_peer`.
 
 `call_peer_holds(endpoint, ticket, resource)` is the grant twin of
-`call_peer_seat`, for a DMA controller: it answers `0` when one of the served
-caller's grants covers the quoted wire-encoded `HwResource`, and
-`PermissionDenied` when none does. Only the controller serving its own
-endpoint asks — the caller owns the endpoint, holds its receive capability,
-and holds the `DmaController` duty naming it — and only about what it
-programs a channel from: a `DmaRequest` line naming that endpoint, or an
-`Mmio` register window. Any other record is `OutOfRange`, so no server can
-probe the authority of whoever calls it; a record that does not decode is
-refused with its own decode error. The caller is resolved by its process
+`call_peer_seat`, for a link supplier (`plans/SUPPLIERS.md` SL1): it answers
+`0` when one of the served caller's grants covers the quoted wire-encoded
+`HwResource`, and `PermissionDenied` when none does. Only the supplier serving
+its own endpoint asks — the caller owns the endpoint, holds its receive
+capability, and holds the `LinkDuty` naming it — and only about what it
+serves: a `LinkRequest` naming that endpoint, or, for a DMA controller, the
+`Mmio` register window it is asked to program a channel from. Any other record
+is `OutOfRange`, so no server can probe the authority of whoever calls it; a
+record that does not decode is refused with its own decode error. The caller is resolved by its process
 instance, so a poster that has ended is `NotFound`. A server learns grants
 only of a task it is actively serving, and never which grant covered. The
 controller confirms a client's request line, and the register window it asks
@@ -1263,7 +1281,7 @@ right, and these descriptors carry no position (every read names its own
 offset), so a second identical entry conveys nothing the first does not.
 Once redeemed the entry is consumed, so a later grant of the same file
 legitimately mints afresh. Distinct delegations are bounded too: a grantor may
-have at most `FD_DELEGATIONS_PENDING_PER_GRANTOR` pending to one recipient, and
+have at most `FD_GRANT_PENDING_MAX` pending to one recipient, and
 a fresh one past that is refused with `LimitExceeded` while the earlier ones
 stay redeemable. The bound is charged to the grantor, so one that leaves its
 delegations unredeemed cannot exhaust a recipient's table for any other, and an
@@ -1436,6 +1454,14 @@ watch was armed with, the trailing report taken as the wait's one-shot
 deadline. A watch already spent (its directory gone) refuses with `NotFound`.
 Draining is `fs_watch_read` (no. 137). See
 [Directory watches](../filesystem/watch.md).
+
+It accepts a `Foreground` member: `id` is a descriptor naming a terminal the
+caller reads — a pty slave of its own table, or a console behind one of its
+readable inherited standard streams (anything else refuses with `NotFound`).
+It is ready when that terminal has changed hands since the member was added
+or last reported — granted, claimed, released, or cleared with a dead owner —
+an edge on the terminal's ownership generation, consumed when reported. The
+woken program asks `foreground_held` (no. 139) where it now stands.
 
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*
@@ -1881,18 +1907,23 @@ instead of re-offering it. The first-party Rust wrapper is
 `console_foreground` (no. 72) grants (or releases, `pid = 0`) the
 **controlling ownership** of the console behind readable descriptor `fd`
 — the `tcsetpgrp` analogue (`plans/SPAWN.md` SP9, `plans/DISPLAY.md` D5).
-The foreground owner is a kernel-tracked task id with two enforced
-consequences. First, **only the owner drains the console's input queue or
-changes its line discipline**: while an owner is recorded, any other
-task's `stream_read` / `stream_input_mode` on that console is refused
-with the typed `NotForeground` (errno 27) *before any input is consumed*
-— a background reader fails closed instead of being stopped by a racy
-`SIGTTIN`-style asynchronous signal; an unowned console reads openly (the
-shell at its prompt). Second, the console's **cooked-mode** line
-discipline consumes `^C`/`^Z` at arrival time (every input producer — the
-UART RX interrupt handler, the seat registry's keyboard sink — pushes
-through the console device's input filter) and queues
-`Signal::Interrupt`/`Signal::Stop` for the owner; the queueing is a
+`pid` is a live child of the caller to hand the terminal to, or the caller's
+own pid to hold the terminal itself. The foreground owner is a kernel-tracked
+task id with two enforced consequences. First, **only the owner drains the
+console's input queue or changes its line discipline**: while an owner is
+recorded, any other task's `stream_read` / `stream_input_mode` on that console
+is refused with the typed `NotForeground` (errno 27) *before any input is
+consumed* — a background reader fails closed instead of being stopped by a
+racy `SIGTTIN`-style asynchronous signal. The gate is asked again before every
+byte a parked read takes, and each change of hands wakes the parked readers to
+ask it, so a reader parked before the console changed hands takes nothing
+after; an unowned console reads openly. Second, the console's **cooked-mode**
+line discipline consumes `^C`/`^Z` at arrival time (every input producer — the
+UART RX interrupt handler, the seat registry's keyboard sink — pushes through
+the console device's input filter) and queues `Signal::Interrupt`/`Signal::Stop`
+for the owner when the owner is a **job** — a process the terminal was handed
+to. A process holding its own terminal is no job, and reads those bytes. The
+queueing is a
 single atomic store (interrupt-safe) and the scheduler-driving delivery
 runs at the next dispatcher-context drain, through the same
 `KernelProcessSignal` engine the `signal` syscall uses (installed as the
@@ -1913,10 +1944,20 @@ open the console by clearing the slot; a bad `pid` shape fails closed
 with `NotFound`. A vanished owner never wedges its console: the `exit`
 path releases the ownership immediately, and the read gate clears a
 recorded owner the process bookkeeping proves dead (task ids are never
-reused). The shell (`elsh`) marks its foreground child around every
-blocking `wait` and releases the slot at its prompt. The first-party Rust
-wrapper is `tairix_rt::console_foreground`; the C stub is
+reused). The shell (`elsh`) holds its terminal from start-up, hands it to its
+foreground child around every blocking `wait`, and takes it back after, so at
+its prompt a background job reads nothing. The first-party Rust wrapper is
+`tairix_rt::console_foreground`; the C stub is
 `tairix_sys_console_foreground`.
+
+`foreground_held` (no. 139) answers whether the caller owns the terminal
+behind readable descriptor `fd` — `1` or `0` — resolving `fd` exactly as
+`console_foreground` does (a pty slave of the caller, or the console behind an
+inherited standard stream) and changing nothing. A program that draws on its
+terminal only while it is in the foreground asks it once and watches a
+`Foreground` wait-set member for every change after. Gated on
+`CAP_CONSOLE_READ`, not audited. The Rust wrapper is
+`tairix_rt::foreground_held`; the C stub is `tairix_sys_foreground_held`.
 
 `rlimit_get` (no. 17) and `rlimit_set` (no. 18) are the settable
 `ulimit`/`rlimit`-equivalent (`AGENTS.md` §24.3). Both name a closed
@@ -2321,6 +2362,7 @@ re-validates arguments — the dispatcher does that first.
 | `yield_now`     | nothing — the handler is inert. The dispatch hook recognises the `yield` number and returns `DispatchOutcome::Reschedule { action: Yield, .. }`; the caller is suspended back to the scheduler, which re-enqueues it from the `TaskAction::Yield` its kthread reports. Re-enqueuing here as well would double-handle it, re-entrantly, from inside the in-flight `step` | Always `Ok(0)`.                                                           |
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
+| `port_admit`    | `PortRegistry::lookup(port)`; the caller must be the port's owner; then `callreg::lookup(server)` and its `owner_instance` handed to `Port::admit`, which discards every queued message another instance sent and which `Port::send` checks under the mailbox lock; senders parked for the room that frees are woken | Unbound port or endpoint → `NotFound`. Another process's port → `PermissionDenied`. |
 | `ipc_recv`      | `PortRegistry::lookup(endpoint)`; the caller is gated against the port's `required_recv_caps` **before** any message is observed (the same handler-side receive gate `call_recv` applies); then `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Caller lacking a required receive capability → `PermissionDenied` (nothing about the mailbox is revealed, message retained). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::narrow(caller, target, set, audit)`: the caller itself or a live child of it, any other process only with `CAP_USER_ADMIN` | Faulting `set_ptr` / no registered address space → `BadAddress`. A target the caller has no authority over, known or not → `PermissionDenied`. Unknown `target` named by an administrator → `NotFound`. A widening request → `DelegationWiden`. |
@@ -2350,7 +2392,7 @@ re-validates arguments — the dispatcher does that first.
 | `dma_quiesced`  | reads the caller's own load record (hardware-tree node and admission generation, kernel-attested; no argument crosses the trap) and has the installed `DmaQuarantineFacility` (`with_dma_quarantine`; default `NULL_DMA_QUARANTINE`) free, scrubbed, every block the node's quarantine holds from an earlier generation, auditing `DMA_QUARANTINE_RELEASED` with `cause=reset` (D167); a translated node has no quarantine, so its driver's call touches none and records nothing | No load record → `NotFound`. A translated node → `Ok(0)`. No quarantine wired → `NotImplemented`. Otherwise `Ok(bytes freed)`. |
 | `shm_create_dma` | demands `CAP_SHM` in the handler, resolves `handle` against the caller (owner-checked per-task grant table), validates the grant is a DMA constraint (`devres::dma_constraint`) and `len` against it, requires the caller's load record, narrows the grant's `addr_limit` to the stated `reach` (`devres::carve_limit`), then has `sharedreg::create_dma` bind the node's quarantine and the installed `SharedMemFacility` carve one block below it (`alloc_dma_region`, `DmaBacking::Contiguous`, `FrameAllocator::alloc_order_under_user`) — on a translated node the pages wherever frames are free (`DmaBacking::Scattered`, `FrameAllocator::alloc_chunks_user`), mapped end to end below it in the domain — and map it as its device snoops (`SharedMemory::dma`); translates the region's device address through `devres::translate_device_addr`, publishes the mapping, copies the id and device address out, and mints the caller the region's `Shared` grant | No `CAP_SHM`, or no load record → `PermissionDenied`. Unknown / non-owned handle → `NotFound`. Non-DMA grant, over-the-grant-maximum `len`, a reach of no bits or more than 64 or short of the window's bus side, a limit no RAM lies below, or a block the window cannot name → `OutOfRange`. `len == 0`, or past the largest contiguous block on an untranslated node → `LengthOutOfRange`. No quarantine or no DMA-capable facility wired → `NotImplemented`. A window with no room for the region, no free block below the limit, or frames the machine cannot spare past the kernel reserve and every commitment → `OutOfMemory`, the window's refused before any frame is drawn. Faulting out pointer → `BadAddress` (the region released). Otherwise `Ok(base)`. |
 | `shm_grant_peer` | checks the caller's own `Shared` grant for the region, resolves the endpoint and gates the caller against its `recv_caps` and owner, resolves the ticket to the kernel-recorded poster (`CallEndpoint::peer_origin`), then, under the capability table's read lock, the poster's instance to its live process (`CapTable::process_of_instance`), and mints that process the region grant (`AddressSpaceRegistry::delegate_grant`, which carries the covering grant's origin) | Unheld region, unknown endpoint or ticket, or an ended recipient → `NotFound`. Not the endpoint's server, or a retired region → `PermissionDenied`. Otherwise `Ok(handle)`. |
-| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, then its `DmaController` duty for the endpoint (`AddressSpaceRegistry::holds_dma_controller_duty`), resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, admits only a `DmaRequest` line naming the endpoint or an `Mmio` window, then tests the grants of the poster's live process under the capability table's read lock, so the answer is about that instance and never a successor under its number | Unknown endpoint or ticket, or a poster no longer live → `NotFound`. Not the endpoint's server, no duty for it, or no covering grant → `PermissionDenied`. Any other record → `OutOfRange`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
+| `call_peer_holds` | resolves the endpoint and gates the caller against its `recv_caps` and owner, then its `LinkDuty` for the endpoint (`AddressSpaceRegistry::holds_link_duty`), resolves the ticket to the kernel-recorded poster, copies the `HwResource` record in and decodes it canonically, admits only a `LinkRequest` naming the endpoint or, for a DMA controller's endpoint, an `Mmio` window, then tests the grants of the poster's live process under the capability table's read lock, so the answer is about that instance and never a successor under its number | Unknown endpoint or ticket, or a poster no longer live → `NotFound`. Not the endpoint's server, no duty for it, or no covering grant → `PermissionDenied`. Any other record → `OutOfRange`. Faulting pointer → `BadAddress`. Undecodable record → its decode error. Otherwise `Ok(0)`. |
 | `call_peer_node` | resolves the endpoint and gates the caller against its `recv_caps` and owner, checks the buffer holds a whole node, resolves the ticket to the kernel-recorded poster, then, under the capability table's read lock, the poster's instance to its live process (`CapTable::process_of_instance`) and that process's loaded node (`AddressSpaceRegistry::loaded_node`), and finds the node in the live tree | Not the endpoint's server → `PermissionDenied`. Buffer short of one record → `BufferTooSmall`. Unknown endpoint or ticket, a poster no longer live or loaded for no node, or a node gone from the tree → `NotFound`. Faulting pointer → `BadAddress`. Otherwise the record's length. |
 
 `spawn` also carries the **parser-sandbox mode**

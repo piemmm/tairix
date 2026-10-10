@@ -433,6 +433,16 @@ pub enum Errno {
     /// Distinct from [`NotFound`](Self::NotFound): something may well be at
     /// the path, it is just not what the handle was reading.
     Stale = 47,
+    /// The bus has no periodic bandwidth left for what was asked of it.
+    ///
+    /// Reported when selecting an interface setting whose isochronous or
+    /// interrupt endpoints the host controller cannot schedule beside the
+    /// streams it already carries. Distinct from
+    /// [`NoSpace`](Self::NoSpace) and [`OutOfMemory`](Self::OutOfMemory): the
+    /// device and the machine are healthy, the bus schedule is full, and
+    /// releasing another stream on that bus — or choosing a setting that moves
+    /// less per interval — is what can clear it.
+    NoBandwidth = 48,
 }
 
 impl Errno {
@@ -547,6 +557,7 @@ impl Errno {
             45 => Some(Self::NotAttached),
             46 => Some(Self::Deadlock),
             47 => Some(Self::Stale),
+            48 => Some(Self::NoBandwidth),
             _ => None,
         }
     }
@@ -602,6 +613,7 @@ impl fmt::Display for Errno {
             Self::NotAttached => "resource released; re-attach and retry",
             Self::Deadlock => "waiting would deadlock",
             Self::Stale => "object changed beneath the handle",
+            Self::NoBandwidth => "no bus bandwidth for the requested setting",
         };
         f.write_str(message)
     }
@@ -712,11 +724,12 @@ mod tests {
             Errno::NotAttached,
             Errno::Deadlock,
             Errno::Stale,
+            Errno::NoBandwidth,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(48), None);
+        assert_eq!(Errno::from_i32(49), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

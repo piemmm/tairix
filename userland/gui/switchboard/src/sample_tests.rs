@@ -130,6 +130,9 @@ impl Fixture {
             SysinfoQueryId::CACHE_LEDGERS,
             SysinfoQueryId::SEAT_LIST,
             SysinfoQueryId::CRASH_RECORD,
+            SysinfoQueryId::AUDIO_DEVICES,
+            SysinfoQueryId::SELF_AUDIO_STREAMS,
+            SysinfoQueryId::GLOBAL_AUDIO_STREAMS,
         ] {
             records.insert(paged, Vec::new());
         }

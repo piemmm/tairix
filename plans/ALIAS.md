@@ -655,8 +655,8 @@ Examples:
 
 ```text
 audio:sink/default
-audio:sink/speakers
-audio:source/microphone
+audio:sink/3
+audio:sink/00a1b2c3d4e5f607.0
 audio:source/default
 ```
 
@@ -666,6 +666,13 @@ Rules:
 - `audio:sink/default` and `audio:source/default` are policy selectors, not
   stable hardware identities. Dangerous or persistent configuration must pin
   the underlying identity where applicable.
+- An id names a device for one boot. A location — the device's hashed place in
+  the hardware tree and its endpoint's index, `<16 hex digits>.<index>` — names
+  it across boots and replugs into the same port, and is what persistent
+  configuration keeps. Each has one spelling.
+- The namespace is the audio service's (`NamespaceBacking::Service`): it names
+  devices to open a stream on or change the controls of, so the kernel
+  resolver refuses it as no stream of its own (`NotAStream`).
 
 ### 6.12 `gpu:`
 

@@ -12,17 +12,26 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::num::NonZeroU32;
+
+use alloc::collections::VecDeque;
 
 use super::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
 use crate::domain::{ControllerDomainEvent, ControllerHealth, CONTROLLER_GRACE_NS};
 use crate::serve::UrbReply;
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
+use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::usb_urb::{
-    decode_completion, UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN,
+    decode_completion, iso_notify_endpoint_for, IsoGrant, IsoLayout, IsoNotify, IsoStartParams,
+    UrbRequest, UsbDirection, UsbRequest, UsbSpeed, UsbTransferType, ISO_GRANT_REPLY_LEN,
+    USB_REQUEST_MAX_LEN,
 };
-use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+use tairix_abi::{
+    DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId, PROC_ID_LEN,
+};
+use tairix_inline::BitSet256;
 use tairix_usb::device::{DeviceIdentity, HubEvent, SerialNumber};
-use tairix_usb::transport::{UrbEngine, UrbScope};
+use tairix_usb::transport::{IsoSlotDone, IsoStreamShape, UrbEngine, UrbScope};
 
 /// The id the mock binds transport slot 0's endpoint at; slot `n` is
 /// `ENDPOINT_BASE + n`.
@@ -47,6 +56,19 @@ enum Step {
         ticket: u64,
         result: Result<u32, Errno>,
     },
+    Granted {
+        endpoint: u64,
+        ticket: u64,
+        grant: IsoGrant,
+    },
+    Delegated {
+        region: u64,
+        ticket: u64,
+    },
+    Notified {
+        port: u64,
+        notice: IsoNotify,
+    },
     Reset,
 }
 
@@ -54,7 +76,7 @@ type Journal = Rc<RefCell<Vec<Step>>>;
 
 struct Buffer {
     region: u64,
-    bytes: [u8; 16],
+    bytes: Vec<u8>,
     journal: Journal,
 }
 
@@ -81,6 +103,14 @@ struct Script {
     fault: Option<DriverError>,
     gone: bool,
     interrupt_calls: usize,
+    /// The interface and stream operations the engine was asked for.
+    operations: Vec<UsbRequest>,
+    /// What the next interface operation answers.
+    refusal: Option<DriverError>,
+    /// What each `iso_take` answers, oldest first; then `Ok(None)`.
+    takes: VecDeque<Result<Option<IsoSlotDone>, DriverError>>,
+    /// The region bytes each `iso_queue` was handed, by length.
+    queued_regions: Vec<usize>,
 }
 
 struct Engine<'a>(&'a mut Script);
@@ -99,14 +129,17 @@ impl UrbEngine for Engine<'_> {
     }
 
     fn scope(&self) -> Option<UrbScope> {
+        let mut interfaces = BitSet256::new();
+        interfaces.insert(0);
         Some(UrbScope {
-            interface: 0,
+            interfaces,
             endpoints: u32::MAX << 2,
         })
     }
 
     fn interrupt_in(
         &mut self,
+        _endpoint: u8,
         _request: usize,
         data: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
@@ -130,7 +163,66 @@ impl UrbEngine for Engine<'_> {
     fn bulk_out(&mut self, _endpoint: u8, _data: &[u8]) -> Result<Option<usize>, DriverError> {
         Err(DriverError::NotFound)
     }
+
+    fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<(), DriverError> {
+        self.0.operations.push(UsbRequest::SetInterface {
+            interface,
+            alternate,
+        });
+        self.0.refusal.take().map_or(Ok(()), Err)
+    }
+
+    fn claim_interface(&mut self, interface: u8) -> Result<(), DriverError> {
+        self.0
+            .operations
+            .push(UsbRequest::ClaimInterface { interface });
+        self.0.refusal.take().map_or(Ok(()), Err)
+    }
+
+    fn iso_start(
+        &mut self,
+        endpoint: u8,
+        layout: IsoLayout,
+    ) -> Result<IsoStreamShape, DriverError> {
+        self.0
+            .operations
+            .push(UsbRequest::IsoStart(IsoStartParams { endpoint, layout }));
+        self.0.refusal.take().map_or(
+            Ok(IsoStreamShape {
+                interval_microframes: 8,
+                speed: UsbSpeed::Full,
+            }),
+            Err,
+        )
+    }
+
+    fn iso_queue(&mut self, endpoint: u8, slot: u16, region: &[u8]) -> Result<(), DriverError> {
+        self.0
+            .operations
+            .push(UsbRequest::IsoQueue { endpoint, slot });
+        self.0.queued_regions.push(region.len());
+        self.0.refusal.take().map_or(Ok(()), Err)
+    }
+
+    fn iso_stop(&mut self, endpoint: u8) -> Result<(), DriverError> {
+        self.0.operations.push(UsbRequest::IsoStop { endpoint });
+        Ok(())
+    }
+
+    fn iso_take(
+        &mut self,
+        _endpoint: u8,
+        _region: &mut [u8],
+    ) -> Result<Option<IsoSlotDone>, DriverError> {
+        self.0.takes.pop_front().unwrap_or(Ok(None))
+    }
 }
+
+/// The pid the mock kernel attests for every caller.
+const CALLER_PID: u64 = 0x2A;
+
+/// The instance the mock HCD runs as.
+const INSTANCE: ProcId = ProcId::from_raw([0x7E; PROC_ID_LEN]);
 
 /// What the mock kernel turns down, standing in for exhausted resources.
 #[derive(Default)]
@@ -140,6 +232,10 @@ struct Refusals {
     watches: usize,
     buffers: bool,
     emits: bool,
+    /// What a delegation answers, when refused.
+    grant: Option<Errno>,
+    /// Ports whose notifications the kernel refuses.
+    notices: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -274,7 +370,7 @@ impl Seam for Mock {
         true
     }
 
-    fn create_buffer(&mut self) -> Option<Buffer> {
+    fn create_buffer(&mut self, len: usize) -> Option<Buffer> {
         if self.refuse.buffers {
             return None;
         }
@@ -282,9 +378,38 @@ impl Seam for Mock {
         self.journal.borrow_mut().push(Step::Map(self.next_region));
         Some(Buffer {
             region: self.next_region,
-            bytes: [0; 16],
+            bytes: vec![0; len],
             journal: Rc::clone(&self.journal),
         })
+    }
+
+    fn caller_pid(&mut self, _endpoint: u64, _ticket: u64) -> Result<u64, Errno> {
+        Ok(CALLER_PID)
+    }
+
+    fn grant_peer(&mut self, region: u64, _endpoint: u64, ticket: u64) -> Result<u64, Errno> {
+        if let Some(errno) = self.refuse.grant {
+            return Err(errno);
+        }
+        self.journal
+            .borrow_mut()
+            .push(Step::Delegated { region, ticket });
+        Ok(0x100 + region)
+    }
+
+    fn self_instance(&self) -> ProcId {
+        INSTANCE
+    }
+
+    fn notify(&mut self, port: u64, notice: &IsoNotify) -> Result<(), Errno> {
+        if self.refuse.notices.contains(&port) {
+            return Err(Errno::WouldBlock);
+        }
+        self.journal.borrow_mut().push(Step::Notified {
+            port,
+            notice: *notice,
+        });
+        Ok(())
     }
 
     fn receive(
@@ -302,11 +427,25 @@ impl Seam for Mock {
     }
 
     fn reply(&mut self, endpoint: u64, reply: UrbReply) {
-        self.journal.borrow_mut().push(Step::Reply {
-            endpoint,
-            ticket: reply.ticket,
-            result: decode_completion(&reply.bytes[..reply.len]),
-        });
+        let bytes = &reply.bytes[..reply.len];
+        let step = match (reply.len, IsoGrant::decode(bytes)) {
+            (ISO_GRANT_REPLY_LEN, Ok(grant)) => Step::Granted {
+                endpoint,
+                ticket: reply.ticket,
+                grant,
+            },
+            (STATUS_REPLY_LEN, _) => Step::Reply {
+                endpoint,
+                ticket: reply.ticket,
+                result: decode_status_reply(bytes).map(|()| 0),
+            },
+            _ => Step::Reply {
+                endpoint,
+                ticket: reply.ticket,
+                result: decode_completion(bytes),
+            },
+        };
+        self.journal.borrow_mut().push(step);
     }
 
     fn emit(&mut self, node: &HwNode) -> Option<u32> {
@@ -405,16 +544,19 @@ fn reply(endpoint: u64, ticket: u64, result: Result<u32, Errno>) -> Step {
 }
 
 fn urb(transfer_type: UsbTransferType, endpoint: u8) -> Vec<u8> {
-    let urb = UrbRequest {
+    request(UsbRequest::Transfer(UrbRequest {
         endpoint,
         transfer_type,
         direction: UsbDirection::In,
-        buffer: 0,
         length: 8,
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x08, 0x00],
-    };
-    let mut buf = [0u8; URB_REQUEST_LEN];
-    let n = urb.encode(&mut buf).expect("encodes");
+    }))
+}
+
+/// The frame `request` travels as.
+fn request(request: UsbRequest) -> Vec<u8> {
+    let mut buf = [0u8; USB_REQUEST_MAX_LEN];
+    let n = request.encode(&mut buf).expect("encodes");
     buf[..n].to_vec()
 }
 
@@ -1070,4 +1212,381 @@ fn a_report_poll_while_the_controller_recovers_waits_without_reaching_it() {
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
     assert!(mock.steps().is_empty(), "held for the next attempt");
     assert_eq!(mock.script(0).interrupt_calls, 0);
+}
+
+/// Setting 1's OUT data endpoint, and a layout for it.
+const DATA: u8 = 0x01;
+
+fn layout() -> IsoLayout {
+    IsoLayout::new(4, 8, 192).expect("a valid layout")
+}
+
+/// A table publishing one audio function, with a stream started on `DATA`
+/// by `ticket` 0x70: the mock, the table, the node's endpoint and the
+/// stream's notify port.
+fn streaming() -> (Mock, Interfaces<Buffer>, ControllerHealth, u64, u64) {
+    let (mut mock, mut interfaces, emitted) =
+        published(vec![Some(identity(0, 0x0A51, 0x01_01_00))]);
+    let mut health = ControllerHealth::new(0);
+    let (_, _, endpoint, _) = emitted[0];
+    mock.post(
+        endpoint,
+        0x70,
+        request(UsbRequest::IsoStart(IsoStartParams {
+            endpoint: DATA,
+            layout: layout(),
+        })),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    mock.steps();
+    (
+        mock,
+        interfaces,
+        health,
+        endpoint,
+        iso_notify_endpoint_for(CALLER_PID, DATA),
+    )
+}
+
+#[test]
+fn a_malformed_frame_is_answered_fail_closed_and_reaches_nothing() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(keyboard(1))]);
+    let mut health = ControllerHealth::new(0);
+    let (_, _, endpoint, _) = emitted[0];
+    let poll = report_poll();
+    let truncated = poll[..poll.len() - 1].to_vec();
+    mock.post(endpoint, 0x61, truncated.clone());
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [reply(endpoint, 0x61, Err(Errno::LengthOutOfRange))]
+    );
+    mock.faulted = true;
+    mock.reset_fails = true;
+    assert!(interfaces.recover(&mut health, &mut mock));
+    mock.steps();
+    mock.post(endpoint, 0x62, truncated);
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [reply(endpoint, 0x62, Err(Errno::LengthOutOfRange))]
+    );
+    assert_eq!(mock.script(0).interrupt_calls, 0);
+}
+
+#[test]
+fn interface_operations_are_answered_with_their_outcome() {
+    let (mut mock, mut interfaces, emitted) =
+        published(vec![Some(identity(0, 0x0A51, 0x01_01_00))]);
+    let mut health = ControllerHealth::new(0);
+    let (_, _, endpoint, _) = emitted[0];
+    mock.post(
+        endpoint,
+        1,
+        request(UsbRequest::ClaimInterface { interface: 1 }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    mock.script(0).refusal = Some(DriverError::NoBandwidth);
+    mock.post(
+        endpoint,
+        2,
+        request(UsbRequest::SetInterface {
+            interface: 1,
+            alternate: 1,
+        }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [
+            reply(endpoint, 1, Ok(0)),
+            reply(endpoint, 2, Err(Errno::NoBandwidth))
+        ]
+    );
+    assert_eq!(
+        mock.script(0).operations,
+        [
+            UsbRequest::ClaimInterface { interface: 1 },
+            UsbRequest::SetInterface {
+                interface: 1,
+                alternate: 1
+            }
+        ]
+    );
+}
+
+#[test]
+fn a_started_stream_is_granted_a_region_of_its_own_and_its_callers_port() {
+    let (mut mock, mut interfaces, emitted) =
+        published(vec![Some(identity(0, 0x0A51, 0x01_01_00))]);
+    let mut health = ControllerHealth::new(0);
+    let (_, _, endpoint, node_region) = emitted[0];
+    let params = IsoStartParams {
+        endpoint: DATA,
+        layout: layout(),
+    };
+    mock.post(endpoint, 0x70, request(UsbRequest::IsoStart(params)));
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    let steps = mock.steps();
+    let region = node_region + 1;
+    assert_eq!(
+        steps,
+        [
+            Step::Map(region),
+            Step::Delegated {
+                region,
+                ticket: 0x70
+            },
+            Step::Granted {
+                endpoint,
+                ticket: 0x70,
+                grant: IsoGrant {
+                    region_grant: 0x100 + region,
+                    grantor: INSTANCE,
+                    notify: iso_notify_endpoint_for(CALLER_PID, DATA),
+                    interval_microframes: 8,
+                    speed: UsbSpeed::Full,
+                    stream: NonZeroU32::MIN,
+                },
+            },
+        ]
+    );
+    // Queuing reads the stream's own region, never the node's URB buffer.
+    mock.post(
+        endpoint,
+        0x71,
+        request(UsbRequest::IsoQueue {
+            endpoint: DATA,
+            slot: 2,
+        }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(mock.steps(), [reply(endpoint, 0x71, Ok(0))]);
+    assert_eq!(mock.script(0).queued_regions, [layout().region_len()]);
+}
+
+#[test]
+fn a_stream_whose_region_cannot_be_delegated_is_stopped_again() {
+    let (mut mock, mut interfaces, emitted) =
+        published(vec![Some(identity(0, 0x0A51, 0x01_01_00))]);
+    let mut health = ControllerHealth::new(0);
+    let (_, _, endpoint, _) = emitted[0];
+    mock.refuse.grant = Some(Errno::NotFound);
+    mock.post(
+        endpoint,
+        0x70,
+        request(UsbRequest::IsoStart(IsoStartParams {
+            endpoint: DATA,
+            layout: layout(),
+        })),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    let steps = mock.steps();
+    assert!(steps.contains(&reply(endpoint, 0x70, Err(Errno::NotFound))));
+    assert!(
+        steps.contains(&Step::Unmap(emitted[0].3 + 1)),
+        "the region went"
+    );
+    assert_eq!(
+        mock.script(0).operations.last(),
+        Some(&UsbRequest::IsoStop { endpoint: DATA })
+    );
+}
+
+#[test]
+fn finished_slots_are_notified_in_order() {
+    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
+    let done = |slot| IsoSlotDone {
+        slot,
+        skipped: u32::from(slot),
+        microframe: 1000 + u64::from(slot) * 64,
+    };
+    mock.script(0).takes = VecDeque::from([Ok(Some(done(0))), Ok(Some(done(1)))]);
+    mock.now = 55;
+    interfaces.deliver_streams(&mut mock);
+    let notices: Vec<_> = mock
+        .steps()
+        .into_iter()
+        .map(|step| match step {
+            Step::Notified { port: to, notice } => {
+                assert_eq!(to, port);
+                notice
+            }
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [0, 1].map(|slot| IsoNotify::SlotDone {
+            endpoint: DATA,
+            stream: NonZeroU32::MIN,
+            slot,
+            skipped: u32::from(slot),
+            microframe: 1000 + u64::from(slot) * 64,
+            completed_at: 55,
+        })
+    );
+}
+
+#[test]
+fn a_stream_started_again_on_an_endpoint_is_numbered_afresh() {
+    let (mut mock, mut interfaces, mut health, endpoint, port) = streaming();
+    mock.post(
+        endpoint,
+        0x71,
+        request(UsbRequest::IsoStop { endpoint: DATA }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    mock.steps();
+    mock.post(
+        endpoint,
+        0x72,
+        request(UsbRequest::IsoStart(IsoStartParams {
+            endpoint: DATA,
+            layout: layout(),
+        })),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    let granted = mock.steps().into_iter().find_map(|step| match step {
+        Step::Granted { grant, .. } => Some(grant.stream),
+        _ => None,
+    });
+    let second = NonZeroU32::MIN.saturating_add(1);
+    assert_eq!(granted, Some(second));
+    mock.script(0).takes = VecDeque::from([Ok(Some(IsoSlotDone {
+        slot: 0,
+        skipped: 0,
+        microframe: 0,
+    }))]);
+    interfaces.deliver_streams(&mut mock);
+    assert_eq!(
+        mock.steps(),
+        [Step::Notified {
+            port,
+            notice: IsoNotify::SlotDone {
+                endpoint: DATA,
+                stream: second,
+                slot: 0,
+                skipped: 0,
+                microframe: 0,
+                completed_at: mock.now,
+            },
+        }]
+    );
+}
+
+#[test]
+fn a_stream_that_cannot_be_told_or_that_halts_ends() {
+    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
+    mock.refuse.notices.push(port);
+    mock.script(0).takes = VecDeque::from([Ok(Some(IsoSlotDone {
+        slot: 0,
+        skipped: 0,
+        microframe: 0,
+    }))]);
+    interfaces.deliver_streams(&mut mock);
+    assert_eq!(
+        mock.script(0).operations.last(),
+        Some(&UsbRequest::IsoStop { endpoint: DATA })
+    );
+    assert!(mock.notes.contains(&Note::StreamEnded {
+        index: 0,
+        endpoint: DATA,
+        reason: Errno::WouldBlock
+    }));
+    let steps = mock.steps();
+    assert_eq!(steps.len(), 1, "only the region's release: {steps:?}");
+    assert!(matches!(steps[0], Step::Unmap(_)));
+
+    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
+    mock.script(0).takes = VecDeque::from([Err(DriverError::DeviceFault)]);
+    interfaces.deliver_streams(&mut mock);
+    let steps = mock.steps();
+    assert_eq!(
+        steps[0],
+        Step::Notified {
+            port,
+            notice: IsoNotify::Halted {
+                endpoint: DATA,
+                stream: NonZeroU32::MIN,
+                reason: Errno::DeviceFault
+            }
+        }
+    );
+    // A stream that ended answers no more queues.
+    mock.script(0).takes.clear();
+    interfaces.deliver_streams(&mut mock);
+    assert!(mock.steps().is_empty());
+}
+
+#[test]
+fn a_departing_device_ends_its_streams_before_its_node_goes() {
+    let (mut mock, mut interfaces, _health, _endpoint, port) = streaming();
+    mock.table[0] = None;
+    interfaces.reconcile(&mut mock);
+    let steps = mock.steps();
+    let halted = position(
+        &steps,
+        &Step::Notified {
+            port,
+            notice: IsoNotify::Halted {
+                endpoint: DATA,
+                stream: NonZeroU32::MIN,
+                reason: Errno::NotFound,
+            },
+        },
+    );
+    assert!(halted < position(&steps, &Step::Remove(1)));
+}
+
+#[test]
+fn a_controller_reset_ends_every_stream_reissuably() {
+    let (mut mock, mut interfaces, mut health, endpoint, port) = streaming();
+    mock.faulted = true;
+    assert!(interfaces.recover(&mut health, &mut mock));
+    let steps = mock.steps();
+    assert!(steps.contains(&Step::Notified {
+        port,
+        notice: IsoNotify::Halted {
+            endpoint: DATA,
+            stream: NonZeroU32::MIN,
+            reason: Errno::WouldBlock
+        }
+    }));
+    mock.post(
+        endpoint,
+        0x72,
+        request(UsbRequest::IsoQueue {
+            endpoint: DATA,
+            slot: 0,
+        }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [reply(endpoint, 0x72, Err(Errno::NotFound))],
+        "the stream went with the reset"
+    );
+}
+
+#[test]
+fn stream_operations_wait_out_a_recovery() {
+    let (mut mock, mut interfaces, mut health, endpoint, _port) = streaming();
+    mock.faulted = true;
+    mock.reset_fails = true;
+    assert!(interfaces.recover(&mut health, &mut mock));
+    mock.steps();
+    mock.post(
+        endpoint,
+        0x73,
+        request(UsbRequest::IsoQueue {
+            endpoint: DATA,
+            slot: 0,
+        }),
+    );
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(
+        mock.steps(),
+        [reply(endpoint, 0x73, Err(Errno::WouldBlock))]
+    );
 }
