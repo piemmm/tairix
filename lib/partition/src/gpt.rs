@@ -47,7 +47,7 @@ pub const TYPE_GUID_ARXFS_ROOT: [u8; 16] = [
 /// partition, stored in on-disk (mixed-endian) byte order:
 /// `52555354-4653-5359-5354-000000000002` (`"RUST"`/`"FS"`/`"SY"`/`"ST"`
 /// …), a sibling of [`TYPE_GUID_ARXFS_ROOT`] so the boot path tells the
-/// read-only `/System` volume apart from the encrypted data root by role
+/// read-only `/System` volume apart from the data root by role
 /// (the design-B pre-unlock store, `plans/PI.md`).
 pub const TYPE_GUID_ARXFS_SYSTEM: [u8; 16] = [
     0x54, 0x53, 0x55, 0x52, 0x53, 0x46, 0x59, 0x53, 0x53, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,

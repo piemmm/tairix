@@ -61,8 +61,10 @@ pub struct IconId(pub u64);
 /// free-form asset string. Adding a kind is a reviewed one-line change.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum StatusKind {
-    /// Network connectivity.
+    /// Network connectivity: some interface is connected.
     Network,
+    /// No interface is connected.
+    NetworkOffline,
     /// Audio output volume.
     Volume,
     /// Audio output, muted.
@@ -79,6 +81,7 @@ impl StatusKind {
     pub const fn icon(self) -> IconKind {
         match self {
             Self::Network => IconKind::Network,
+            Self::NetworkOffline => IconKind::NetworkOffline,
             Self::Volume => IconKind::Volume,
             Self::Muted => IconKind::VolumeMuted,
             Self::Recording => IconKind::Microphone,

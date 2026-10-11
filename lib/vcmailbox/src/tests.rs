@@ -1275,7 +1275,7 @@ const TEST_VL805_DEV_ADDR: u32 = 0x10_0000;
 
 #[test]
 fn xhci_reset_lays_out_the_dev_addr_tag() {
-    let words = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    let words = encode_xhci_reset();
     // 7 used words: 2 header + a 4-word tag ([tag, value-len, request,
     // value]) + 1 end marker.
     assert_eq!(words[0], 7 * 4, "message byte length");
@@ -1294,7 +1294,7 @@ fn xhci_reset_round_trips_through_a_healthy_firmware() {
     // value word (the echoed `dev_addr`), which the metal bring-up logs
     // to confirm the firmware processed the request.
     let mut firmware = MockFirmware::healthy();
-    let reply = exchanged(&mut firmware, encode_xhci_reset(TEST_VL805_DEV_ADDR));
+    let reply = exchanged(&mut firmware, encode_xhci_reset());
     assert_eq!(
         decode_xhci_reset_response(&reply).expect("reset accepted"),
         TEST_VL805_DEV_ADDR
@@ -1305,20 +1305,20 @@ fn xhci_reset_round_trips_through_a_healthy_firmware() {
 fn xhci_reset_decode_fails_closed_on_a_bad_header() {
     // A genuine healthy response: OK header *and* the tag's response bit
     // stamped (the mock answers exactly as the firmware does).
-    let mut ok = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    let mut ok = encode_xhci_reset();
     MockFirmware::healthy().respond(&mut ok);
     // The honoured tag's response value word (the echoed `dev_addr`) is
     // surfaced for the bring-up diagnostic.
     assert_eq!(decode_xhci_reset_response(&ok), Ok(TEST_VL805_DEV_ADDR));
 
-    let mut err = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    let mut err = encode_xhci_reset();
     err[1] = CODE_RESPONSE_ERROR;
     assert_eq!(
         decode_xhci_reset_response(&err),
         Err(MailboxError::FirmwareError)
     );
 
-    let mut unknown = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    let mut unknown = encode_xhci_reset();
     unknown[1] = 0x1234_5678;
     assert_eq!(
         decode_xhci_reset_response(&unknown),
@@ -1334,7 +1334,7 @@ fn xhci_reset_decode_rejects_an_unhonoured_tag() {
     // as a successful reload — the decode requires the per-tag response
     // bit and fails closed otherwise, so the metal
     // bring-up reports `Failed` rather than a false `Reloaded`.
-    let mut unhonoured = encode_xhci_reset(TEST_VL805_DEV_ADDR);
+    let mut unhonoured = encode_xhci_reset();
     unhonoured[1] = CODE_RESPONSE_OK; // header OK, tag code word still 0.
     assert_eq!(
         decode_xhci_reset_response(&unhonoured),
@@ -1407,6 +1407,18 @@ fn firmware_revision_decode_fails_closed() {
 }
 
 // --- Real-time clock registers -------------------------------------------
+
+/// The selectors are the firmware's register numbers, which this crate's own
+/// mock shares and so cannot check: they are pinned here to the enumeration
+/// Linux's `rtc-rpi` driver sends (`RTC_TIME` first, `RTC_BBAT_VOLTS`
+/// eighth), and the clock ids to `raspberrypi-firmware.h`.
+#[test]
+fn the_selectors_are_the_firmware_s_own_numbers() {
+    assert_eq!(RtcRegister::Time.as_u32(), 0);
+    assert_eq!(RtcRegister::BackupVolts.as_u32(), 7);
+    assert_eq!(FirmwareClock::Arm.as_u32(), 3);
+    assert_eq!(FirmwareClock::Emmc2.as_u32(), 12);
+}
 
 #[test]
 fn rtc_query_lays_out_the_get_tag() {
@@ -1942,6 +1954,24 @@ fn a_gpio_write_fails_closed_on_a_bad_header_or_unhonoured_tag() {
     assert_eq!(
         decode_gpio_state_write_response(&unhonoured),
         Err(MailboxError::FirmwareError)
+    );
+}
+
+/// A reply whose GPIO tag declares no value buffer and ends on the message's
+/// last word is refused, never read past the tag.
+#[test]
+fn a_gpio_answer_with_no_value_buffer_on_the_last_word_is_malformed() {
+    let mut reply = [0u32; PROPERTY_WORDS];
+    reply[1] = CODE_RESPONSE_OK;
+    let last = PROPERTY_WORDS - TAG_HEADER_WORDS;
+    let filler = last - HEADER_WORDS - TAG_HEADER_WORDS;
+    reply[2] = TAG_GET_FIRMWARE_REVISION;
+    reply[3] = u32::try_from(filler * 4).expect("fits");
+    reply[last] = TAG_SET_GPIO_STATE;
+    reply[last + 2] = TAG_RESPONSE_BIT;
+    assert_eq!(
+        decode_gpio_state_write_response(&reply),
+        Err(MailboxError::MalformedResponse)
     );
 }
 

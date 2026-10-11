@@ -100,10 +100,10 @@ flags:
 boot the production `fs_*` mount table (`kernel/tairix-kernel`'s
 `system_mount`) wires two on-disk `ARXFS` volumes into that layout:
 
-- the **encrypted, writable root volume** (`ARXFSRoot`) is mounted as
-  `/` (`MountTable::back_root`). It is the persistent home of `/`,
-  `/Users`, `/Apps`, `/Storage`, and the writable `/System` exceptions;
-- the **read-only, well-known-keyed `/System` volume** (`ARXFSSystem`)
+- the **writable root volume** (`ARXFSRoot`), plaintext or encrypted, is
+  mounted as `/` (`MountTable::back_root`). It is the persistent home of
+  `/`, `/Users`, `/Apps`, `/Storage`, and the writable `/System` exceptions;
+- the **read-only, plaintext `/System` volume** (`ARXFSSystem`)
   is mounted *over* it at `/System`, carrying the immutable kernel image,
   drivers, and libraries.
 
@@ -126,11 +126,11 @@ This is **disjoint sub-mounting**, never a union/overlay "merge" of two
 `/System` trees: no path is served by both volumes, so resolution stays
 deterministic and fail-closed. Consequently the two volumes carry
 **non-overlapping** content — the immutable `/System` subtree lives only
-on `ARXFSRoot`'s read-only sibling, and the encrypted root authors only
+on `ARXFSRoot`'s read-only sibling, and the root volume authors only
 the writable-state subtree (`/System/Logs`, `/System/Settings`,
 `/System/Security`) plus the four top-level directories.
 
-Until the encrypted root is unlocked, the writable root driver is not yet
+Until the root volume is mounted, the writable root driver is not yet
 registered and every operation on `/` and its writable subtrees fails
 closed (`Errno::NotImplemented`), never a silent fallback to the
 read-only `/System`.

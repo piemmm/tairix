@@ -35,7 +35,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Prng;
 use tairix_reclaim::{
     CacheBudget, FreeMemorySource, MemoryPressure, PinnedAccounting, PinnedLedger, PinnedShare,
@@ -235,9 +235,8 @@ impl Block for LedgerBlock {
     }
 }
 
-/// Volume key every fixture is formatted under. ARXFS is encrypted by default
-/// and sealing is part of what a write costs, so there is no plaintext variant
-/// to measure against.
+/// Volume key every fixture is formatted under. Both protections lay out and
+/// write the same blocks, so the ledger one measures is the other's.
 const TEST_KEY: VolumeKey = [0x71; VOLUME_KEY_LEN];
 
 /// Deterministic stand-in for the platform RNG seam. Test scaffolding only.
@@ -322,7 +321,8 @@ fn volume(
     let ledger = Rc::new(RefCell::new(Ledger::default()));
     let device = LedgerBlock::new(block_size, device_bytes / u64::from(block_size), &ledger);
     publish_boot_hash_key();
-    let fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0x2f)).expect("format");
+    let fs =
+        ARXFS::format(device, 64, Keying::Key(&TEST_KEY), &mut TestEntropy(0x2f)).expect("format");
     let fs = match publish {
         Publish::PerOperation => fs,
         Publish::Batched => fs.with_writeback_host(
@@ -1342,7 +1342,7 @@ fn a_read_only_mount_pins_nothing() {
     let pinned = Arc::new(PinnedAccounting::new());
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
-    let mut fs = ARXFS::open_read_only(device, &TEST_KEY)
+    let mut fs = ARXFS::open_read_only(device, Keying::Key(&TEST_KEY))
         .expect("the volume mounts read-only")
         .with_writeback_bound(SMALL_MACHINE_BYTES, gauge, Arc::clone(&pinned))
         .expect("a read-only mount is bounded like any other");

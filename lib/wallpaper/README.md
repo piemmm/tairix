@@ -56,10 +56,14 @@ key's own closed vocabulary:
 | `density`   | `compact` \| `normal` \| `comfortable`             | `normal`                                      |
 | `motion`    | `full` \| `reduced`                                | `full`                                        |
 | `scale`     | a bare decimal percentage in `Scale`'s own range   | `100`                                         |
+| `resolution`| `native`, or `WxH` from `tairix_geometry::STANDARD_SIZES` | `native`                              |
 
-`SettingsKey::PINBOARD` and `SettingsKey::APPEARANCE` are the two groups: the
-backdrop and the icons on it, and how every surface is drawn. They share one
-document because they share one owner and one published scope. The four
+`SettingsKey::PINBOARD`, `SettingsKey::APPEARANCE` and `SettingsKey::DISPLAY`
+are the groups this table lists: the backdrop and the icons on it, how every
+surface is drawn, and the size the desktop is drawn at. They share one
+document because they share one owner and one published scope.
+`Resolution::on` resolves a stored size against the output, falling back to
+the output's own where it does not offer that size. The four
 appearance value sets are `tairix_abi::desktop`'s own, imported rather than
 restated, because the session publishes them to every application over the
 window channel.

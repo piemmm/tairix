@@ -20,7 +20,7 @@ use crate::view::resources::{
 };
 use crate::view::test_support::{
     bounds, centre, click, font, key, model, moved, refresh, report as reported_by, shot, turn,
-    unreported_change, DETENT_PX, PRESS, RELEASE,
+    unreported_change, with_taller_pane, DETENT_PX, PRESS, RELEASE,
 };
 use crate::view::{RailSubject, Section, Switchboard, SwitchboardModel};
 
@@ -567,7 +567,7 @@ fn long_rail_model() -> SwitchboardModel {
     m.resources
         .devices
         .splice(after_storage..after_storage, disks);
-    m
+    with_taller_pane(m, DeviceId::Cpu, 2)
 }
 
 /// The screen on the long rail, laid out once.

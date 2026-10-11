@@ -289,8 +289,7 @@ fn audit_mutation(
     iface: [u8; IF_NAME_LEN],
     applied: Result<(), Errno>,
 ) -> Result<(), Errno> {
-    let name_len = iface.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
-    let name = core::str::from_utf8(&iface[..name_len]).unwrap_or("?");
+    let name = tairix_abi::net_ipc::if_name_str(&iface);
     match applied {
         Ok(()) => {
             emit(

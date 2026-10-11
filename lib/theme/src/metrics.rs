@@ -13,7 +13,7 @@
 //! time, so the same theme stays a comfortable physical size across panel
 //! densities.
 
-use crate::motion::Density;
+use crate::motion::{Contrast, Density};
 
 /// Corner radii and border thickness, in logical pixels at the reference
 /// density (scaled to physical pixels by `tairix_geometry::Scale`).
@@ -238,12 +238,13 @@ pub struct Metrics {
 ///
 /// One step either side of normal, applied to the same three metrics, so the
 /// axis is a single number per density rather than three hand-tuned tables
-/// that could disagree about which way "compact" goes.
+/// that could disagree about which way "compact" goes. Compact stops where a
+/// slider's knob and its borders still fit inside the control's height.
 const fn spacing_percent(density: Density) -> u32 {
     match density {
-        Density::Compact => 85,
+        Density::Compact => 87,
         Density::Normal => 100,
-        Density::Comfortable => 120,
+        Density::Comfortable => 115,
     }
 }
 
@@ -292,5 +293,38 @@ impl Metrics {
             control_gap: scaled(self.control_gap, percent),
             ..self
         }
+    }
+
+    /// These metrics drawn at `contrast`, whose edges are [`edge_weight`]
+    /// times as heavy: a control is never shorter than a slider's knob with
+    /// its focus ring, two rims wide, clear above and below it, so the
+    /// heavier rim is never paid for by shrinking the knob it rings.
+    ///
+    /// A floor in logical pixels holds at every scale, because each length
+    /// is scaled down to a whole pixel and the scaled sum is never less than
+    /// the sum of the scaled parts.
+    #[must_use]
+    pub const fn at_contrast(self, contrast: Contrast) -> Self {
+        let rim = self.border_thickness * edge_weight(contrast);
+        let fits_ringed_knob = self.slider_knob + 4 * rim;
+        Self {
+            control_height: if self.control_height < fits_ringed_knob {
+                fits_ringed_knob
+            } else {
+                self.control_height
+            },
+            ..self
+        }
+    }
+}
+
+/// How many times as heavy `contrast` draws an edge — a rim, a rule, a rail,
+/// a seam, a focus outline: twice under either heavier contrast, so an edge
+/// strengthens before any glow is added.
+#[must_use]
+pub const fn edge_weight(contrast: Contrast) -> u32 {
+    match contrast {
+        Contrast::Normal => 1,
+        Contrast::High | Contrast::Monochrome => 2,
     }
 }

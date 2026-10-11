@@ -52,6 +52,9 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The volume taper the panel's slider is read through.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The one interface-address spelling the network readout shows, shared with
+# the command-line tools and the Switchboard.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
 # The shared reclaimable-memory model (plans/SMARTRAM.md section 6.4): the
 # renderer's notification-glyph cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an

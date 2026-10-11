@@ -21,7 +21,7 @@ use crate::testkit::{has_pixel, marks_elision, premul};
 
 const W: u32 = 160;
 const H: u32 = 28;
-const ROW_H: u32 = 28;
+const ROW_H: u32 = 24;
 const BORDER: u32 = 1;
 
 fn choices() -> Vec<alloc::string::String> {

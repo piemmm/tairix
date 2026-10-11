@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::notify_ipc::NotifyRequest;
-use tairix_abi::switchboard_ipc::TraySummary;
+use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
 use tairix_browse::{DirectorySource, GridView};
 use tairix_controls::damage::{self, Repaint};
@@ -245,6 +245,10 @@ pub struct DesktopShell {
     style: u64,
     /// The look [`DESKTOP_RESTYLED`] last spoke for.
     announced_style: u64,
+    /// Whether the desktop changed size since a frame last showed it whole
+    /// at its size, owing [`report_resized`](Self::report_resized) an
+    /// announcement.
+    resize_unannounced: bool,
     /// The sources that have posted a notice since the desktop started.
     notify_sources: NotifySources,
     /// The application this session runs as, which is what tells its own
@@ -267,6 +271,24 @@ pub struct DesktopShell {
     /// the product carries no counter.
     #[cfg(test)]
     settled: SettleWork,
+}
+
+/// Where a `size` prompt opens on `screen`: centred across it a third of the
+/// way down, moved wholly onto it where it fits.
+#[must_use]
+pub fn prompt_origin(screen: Rect, (width, height): (u32, u32)) -> Point {
+    Rect::new(
+        screen
+            .left()
+            .saturating_add_unsigned(screen.width.saturating_sub(width) / 2),
+        screen
+            .top()
+            .saturating_add_unsigned(screen.height.saturating_sub(height) / 3),
+        width,
+        height,
+    )
+    .clamped_onto(screen)
+    .origin
 }
 
 /// How many times the shell has run each piece of its per-frame work.
@@ -377,6 +399,7 @@ impl DesktopShell {
             thumbs: WindowThumbnails::new(),
             style: 0,
             announced_style: 0,
+            resize_unannounced: false,
             notify_sources: NotifySources::new(),
             own_app: None,
             audit: sink,
@@ -667,6 +690,26 @@ impl DesktopShell {
         self.sync_active_frame(compositor);
         self.present(compositor);
         Some(window)
+    }
+
+    /// Open a session prompt — a question the session itself puts to the
+    /// user — through [`open_window`](Self::open_window), centred across the
+    /// screen a third of the way down and wholly on it where it fits.
+    ///
+    /// The one place a prompt goes: a prompt is undecorated and cannot be
+    /// moved, so one opened at a fixed point would strand its buttons off a
+    /// screen smaller or denser than the one that point was chosen for.
+    pub fn open_prompt(
+        &mut self,
+        compositor: &mut Compositor,
+        surface: Surface,
+        title: impl Into<String>,
+    ) -> Option<WindowId> {
+        let origin = prompt_origin(
+            compositor.screen_rect(),
+            (surface.width(), surface.height()),
+        );
+        self.open_window(compositor, origin, surface, title)
     }
 
     /// Open a top-level window of client extent `client` at `origin` whose
@@ -1093,6 +1136,33 @@ impl DesktopShell {
         self.announced_style = self.style;
         if revealed {
             report(self.session.active_theme().appearance());
+        }
+    }
+
+    /// Note that the desktop is now drawn at a new size, which
+    /// [`report_resized`](Self::report_resized) announces once it is shown
+    /// whole.
+    pub const fn note_resized(&mut self) {
+        self.resize_unannounced = true;
+    }
+
+    /// Announce, through `report`, that the frame just handed to the display
+    /// shows the desktop whole at `screen`, its new size: the wallpaper fitted
+    /// to that size, or none, has arrived and finished dissolving in. Until
+    /// then the frame still carries the old ground, cropped or stretched.
+    ///
+    /// `revealed` says whether the desktop has been shown at all; a resize
+    /// before the reveal is part of the desktop the reveal announced.
+    pub fn report_resized(&mut self, revealed: bool, screen: Rect, report: impl FnOnce(Rect)) {
+        let fitted = self.wallpaper.as_ref().is_none_or(|picture| {
+            (picture.width(), picture.height()) == (screen.width, screen.height)
+        });
+        if !self.resize_unannounced || !fitted || !self.backdrop_settled() {
+            return;
+        }
+        self.resize_unannounced = false;
+        if revealed {
+            report(screen);
         }
     }
 
@@ -1555,7 +1625,19 @@ impl DesktopShell {
             event,
             self.router.pointer(),
             &chain_geometry(&self.session, compositor),
+            now_ns,
         );
+    }
+
+    /// Let `chain` settle a crossing whose deadline has passed, answering
+    /// whether it changed and so owes a presentation.
+    pub fn tick_menu_chain(
+        &self,
+        compositor: &Compositor,
+        chain: &mut MenuChain,
+        now_ns: u64,
+    ) -> bool {
+        chain.tick(now_ns, &chain_geometry(&self.session, compositor))
     }
 
     /// Take the next key record from `keyboard`, keeping the seat's modifiers
@@ -1575,7 +1657,7 @@ impl DesktopShell {
         compositor: &mut Compositor,
         now_ns: u64,
     ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
-        let polled = keyboard.poll_record(now_ns)?;
+        let polled = keyboard.poll_record(now_ns, self.router.focused())?;
         if let Some((edge @ InputEvent::ModifiersChanged { .. }, _)) = polled {
             let _ = self.router.handle(
                 edge,
@@ -2030,6 +2112,19 @@ impl DesktopShell {
     /// the model only ever renders what the desktop's own service published.
     pub fn set_tray_summary(&mut self, compositor: &mut Compositor, summary: Option<TraySummary>) {
         if self.session.taskbar_mut().set_tray_summary(summary) {
+            self.present(compositor);
+        }
+    }
+
+    /// Adopt the network report the Switchboard published (`None` once it is
+    /// gone) into the bar's network signal and readout, re-presenting when
+    /// either moved.
+    pub fn set_network_report(
+        &mut self,
+        compositor: &mut Compositor,
+        report: Option<NetworkReport>,
+    ) {
+        if self.session.taskbar_mut().set_network(report) {
             self.present(compositor);
         }
     }

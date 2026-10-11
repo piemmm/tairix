@@ -252,7 +252,7 @@ never reaches the service.
 ## No service, or no store: read the defaults, refuse the writes
 
 `open` never fails, and neither does `open_published`. A store the service
-cannot serve — early boot before the encrypted root is unlocked, a crashed
+cannot serve — early boot before the root is mounted, a crashed
 service, a caller the kernel admitted from no signed bundle — leaves the
 bundle's shipped defaults standing (the published scope simply empty) and
 records the reason in `store_refusal`. The application therefore starts and behaves, can say

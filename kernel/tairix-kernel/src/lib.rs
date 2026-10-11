@@ -98,10 +98,10 @@ pub mod dispatch_core;
 // `lib/log`.
 pub mod fatal_bridge;
 
-// The production root-volume unlock + users-database load composition
-// (`plans/PI.md` §3 P11 root-mount increment, Chunk A): turns the on-FAT
-// `root.unlock` descriptor, the typed passphrase, and the encrypted root
-// block device into the validated `users-v1` database
+// The production root-volume mount + users-database load composition
+// (`plans/PI.md` §3 P11 root-mount increment): turns the root block device —
+// with, for an encrypted root, the on-FAT `root.unlock` descriptor and the
+// typed passphrase — into the validated `users-v1` database
 // `kernel/core::load_users_db_source` serves. `tairix-kernel`
 // (`Layer::Tooling`) is the one layer permitted to name both the `arxfs`
 // driver and `kernel/core`. It is architecture-neutral
@@ -275,7 +275,7 @@ pub mod virtual_bus;
 // `plans/PI.md`): wraps the one brought-up bootstrap-floor
 // block device behind a `lib/sync` lock so it can back two concurrent
 // partition windows — the read-only `/System` driver-store mount and the
-// encrypted-root unlock window — over a single disk (SMP
+// root-unlock window — over a single disk (SMP
 // serialisation). Architecture-neutral and host-tested on the CI host;
 // gated, like the `unlock_service` boot path that wraps the device in it,
 // on the two instruction sets where the boot path compiles.
@@ -374,7 +374,7 @@ pub mod block_cache;
 // dispatch hook serves the `fs_*` syscalls through, and `install_system_mount`
 // (a second, park-safe `'static` window onto the boot disk's `/System`
 // volume, published once the disk is up). The production identity half is
-// installed by `root_mount` at the encrypted-root unlock. It names
+// installed by `root_mount` at the root unlock. It names
 // `tairix_drv_fs_arxfs` and the kernel-core mount service, and consumes the
 // `shared_block` window, so it is gated like `shared_block` on the two
 // instruction sets where the boot path compiles; its bounds/forwarding unit
@@ -384,7 +384,7 @@ pub mod system_mount;
 
 // The root-volume storage the `CAP_USER_ADMIN` account-administration
 // engine commits through (`plans/CAPABILITY_USE.md` CU4): the type-erased
-// admin window onto the writable encrypted root, its crash-safe database
+// admin window onto the writable root, its crash-safe database
 // persistence, and owned home-directory provisioning. Depends only on the
 // arxfs driver and kernel/core seams, so it compiles — and its unit tests
 // run — on the CI host as well as every kernel target.
@@ -426,7 +426,7 @@ pub mod driver_store_server;
 
 // The architecture-neutral root-unlock / driver-store orchestration
 // (`plans/PI.md` design B): the two-task tail every port's bootstrap-floor
-// block bring-up feeds — the spawned interactive encrypted-root unlock and
+// block bring-up feeds — the spawned interactive root unlock and
 // the persistent capability-gated driver-store serve loop the user-space
 // `devmgr` autoloads through. A port injects only its console-0 seam
 // (`UnlockConsole`) and its `ProcessSpawn` producer, so the tail is never

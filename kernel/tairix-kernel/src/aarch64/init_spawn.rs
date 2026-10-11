@@ -250,9 +250,9 @@ impl InitSpawn for Aarch64InitSpawn {
         // (`plans/PI.md` P11 Chunk B-2 INCREMENT (2)).
         // Admitted onto the boot CPU's run queue *before* `admit_init`
         // diverges into the dispatch loop, the kthread brings up the bound
-        // root block device over the production device-IRQ path, prompts
-        // for the passphrase on the primary console, mounts the encrypted
-        // root, and publishes the users database into `LATE_USERS_DB` so
+        // root block device over the production device-IRQ path, mounts the
+        // root — prompting on the primary console for an encrypted root's
+        // passphrase — and publishes the users database into `LATE_USERS_DB` so
         // `login` can authenticate. With no bound disk (the QEMU `virt`
         // shape without a planted root, a headless Pi) it starts nothing,
         // opens the console-0 gate, and PID 1 runs unchanged.

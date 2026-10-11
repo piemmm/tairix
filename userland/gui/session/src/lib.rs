@@ -178,6 +178,7 @@ extern crate alloc;
 pub mod aids;
 pub mod apps;
 pub mod assets;
+mod choice;
 pub mod cli;
 pub mod clipboard;
 pub mod clock;
@@ -205,6 +206,7 @@ pub mod pace;
 pub mod picker;
 pub mod pinboard;
 pub mod presenter;
+pub mod resolution;
 pub mod saver;
 pub mod seat;
 pub mod session;
@@ -249,19 +251,19 @@ pub use config::{
     DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SETTINGS_LABEL,
     SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
-pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
+pub use confirm::{Answer, ConfirmPrompt};
 pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-    LaunchDocument, PinboardChange, DESKTOP_MARGIN,
+    LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
 pub use drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
 pub use elevate::{
-    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, ELEVATE_PROMPT_SHOWN,
-    ELEVATE_PROMPT_SHOWN_MESSAGE, NOT_STARTED_REASON, REFUSED_REASON,
-    WIN_HEIGHT as ELEVATE_WIN_HEIGHT, WIN_WIDTH as ELEVATE_WIN_WIDTH,
+    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE,
+    NOT_STARTED_REASON, REFUSED_REASON, WIN_HEIGHT as ELEVATE_WIN_HEIGHT,
+    WIN_WIDTH as ELEVATE_WIN_WIDTH,
 };
 pub use fade::{
     BackdropFade, ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
@@ -292,12 +294,17 @@ pub use picker::{
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
+pub use resolution::{
+    resolution_ask, ResizedRecord, ResolutionAsk, ResolutionPrompt, Trial, TrialEnd, TrialOutcome,
+    DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE,
+    TRIAL_SECONDS, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE,
+};
 pub use saver::{SaverIdentity, SaverSetup, Screensaver, Waking, PREVIEW_STEADY_NS};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
-    load_pinboard, publish_pinboard, serve_pinboard_apply, InputPolicy, LoadedPinboard,
-    PinboardApplyRefusal,
+    load_pinboard, publish_pinboard, serve_pinboard_apply, AskedSettings, InputPolicy,
+    LoadedPinboard, PinboardApplied, PinboardApplyRefusal,
 };
 pub use shell::{
     DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, DESKTOP_RESTYLED,

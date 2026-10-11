@@ -252,8 +252,8 @@ pub struct UsersDbAlreadyInstalled;
 /// volume's database into after it has unlocked and read it (option A,
 /// in-kernel unlock — `plans/PI.md` P11 Chunk B-2).
 ///
-/// The encrypted root is unlocked only *after* the console keyboard is
-/// live (the operator types the passphrase), which is past the point
+/// The root is mounted only *after* the console keyboard is live (where an
+/// encrypted root's passphrase is typed), which is past the point
 /// where [`BootInfo::with_users_db`](crate::BootInfo::with_users_db) is
 /// consumed. The dispatch hook therefore holds a `&'static LateUsersDb`
 /// from boot and reads [`text`](UsersDbSource::text) on every
@@ -268,7 +268,7 @@ pub struct UsersDbAlreadyInstalled;
 /// them differently. Under design B (`plans/PI.md` P11) `login` is spawned
 /// **before** the in-kernel unlock kthread mounts the root and prompts for
 /// the passphrase on the same console; if `login` prompted `Username:`
-/// straight away it would draw over the `Root passphrase:` prompt and the
+/// straight away it would draw over the `ARXFS passphrase:` prompt and the
 /// two would compete for the one keyboard. So:
 ///
 /// * **Pending** (not installed, not [`resolve`](Self::resolve)d):

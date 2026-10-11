@@ -137,7 +137,7 @@ pub const SERVICE_ENROLMENT_DENIED: EventId = EventId(9_027);
 /// A service was **stopped because the administrator's enrolment override
 /// became readable** and disables it. Pre-unlock the manager obeys the
 /// image's enrolment layer alone, so a service the administrator disabled runs
-/// until the override document on the encrypted root can be read; this records
+/// until the override document on the root volume can be read; this records
 /// the moment that narrowing is applied.
 pub const SERVICE_ENROLMENT_REVOKED: EventId = EventId(9_028);
 /// A named readiness condition was withdrawn: the last ready service

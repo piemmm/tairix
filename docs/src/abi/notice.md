@@ -43,12 +43,13 @@ blocking I/O an interactive surface may not perform.
 
 | Topic | Payload | Published by | Read by |
 |---|---|---|---|
-| `Desktop` | `DesktopInfo` (46 bytes) | the holder of a seat's live display lease | every windowed application |
+| `Desktop` | `DesktopInfo` (54 bytes) | the holder of a seat's live display lease | every windowed application |
 | `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation | the file manager's places rail |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
 | `DisplayLease` | the boot seat's lease word and its holder's login session (`DisplayLease`, 24 bytes) | the kernel, from its seat registry | the display and audio services alone |
 | `AudioCapture` | the capture streams moving frames (`u32`, 4 bytes) | the audio service | the session's recording indicator |
 | `AudioDevices` | how many times a device or its controls changed (`u64`, 8 bytes) | the audio service | the session, which remembers its user's controls |
+| `Network` | how many times an interface's presence, link, addresses or address states changed (`u64`, 8 bytes) | the network stack | the Switchboard, which re-reads the interfaces for the bar's network signal |
 
 The set is closed and deliberately small. A topic exists only where a *state*
 must be agreed; an occurrence a subscriber must witness individually — a
@@ -65,7 +66,8 @@ never reads a shape the publisher could not have meant. `Notice::encode` /
 retention. It is a containment bound, not a capacity: it is what stops a
 topic's payload growing into a channel. It is derived from the closed topic set
 as the widest topic's own record — today the desktop's, which carries the
-screen, the scale, the four theme axes and the double-click interval.
+desktop's size and its output's, the scale, the four theme axes, the
+double-click interval and the text.
 
 ## Authority
 
@@ -80,14 +82,18 @@ Publishing is authorised per topic, and no topic needed a new capability:
   the reserved `AUDIO_ENDPOINT` — the audio service, which holds every stream
   and every device, so no program can hide its own recording from the
   indicator or fake a change to the devices.
+- **`Network`** admits only the process bound to `NETSTACK_ENDPOINT` — the
+  network stack, which owns every interface, so no program can fake or hide a
+  change to them.
 - **`Mounts`**, **`MemoryPressure`** and **`DisplayLease`** are kernel-owned: a
   userland publish to any of them is refused with `PermissionDenied`.
 
 *Reading* is ungated for every topic but one. `Desktop`, `Mounts`,
-`MemoryPressure`, `AudioCapture` and `AudioDevices` are machine-wide facts no
-principal owns —
-whether a sound device is in use is public on every system — so gating them
-would only force applications to guess at facts the system knows.
+`MemoryPressure`, `AudioCapture`, `AudioDevices` and `Network` are
+machine-wide facts no principal owns — whether a sound device is in use is
+public on every system, and the network edge says only that something moved,
+never what — so gating them would only force applications to guess at facts
+the system knows.
 `DisplayLease` is not such a fact: when a console lease is taken and given up
 is what the seat inventory reports only under `CAP_SYSINFO_HW`. It is read,
 subscribed to and woken for only by the two services that own the seat's
@@ -127,6 +133,16 @@ Each generation comes from its topic's own source of truth:
 - `AudioCapture`'s is a counter bumped only when the published count differs,
   as `Desktop`'s is, and `AudioDevices`' is bumped whenever the audio service's
   change count moves.
+- `Network`'s is bumped whenever the stack's change count moves. The stack
+  counts a change only when the interface-state records it would answer
+  differ from the ones it last published.
+
+A counted topic outlives its publisher, and publishing the value in force wakes
+nobody, so a restarted service counting from zero could repeat the count its
+last instance left and strand every subscriber on that instance's state. Both
+publishers take their counts up through `tairix_rt::changenotice::ChangeNotice`,
+which resumes one past the count on the board and announces each count once;
+the restarted service's first announcement is therefore always an edge.
 
 ## The query/edge pairing
 

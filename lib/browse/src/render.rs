@@ -47,7 +47,7 @@ use tairix_controls::{
     Toolbar, FULL_COLOUR,
 };
 use tairix_font::{BitmapFont, Cut, ELLIPSIS};
-use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
@@ -3479,11 +3479,6 @@ pub fn properties_attr_editor_rect(window: Rect, scale: Scale, theme: &Theme) ->
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
     AttrsLayout::resolve(body, scale, theme, font).map(|attrs| attrs.editor)
-}
-
-/// Saturating `u32` → `i32`.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// The action-button index of the destructive **Delete** action in the

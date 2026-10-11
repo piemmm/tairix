@@ -62,18 +62,19 @@ use tairix_controls::damage;
 use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{
-    paint_framed_surface_plate, paint_surface_plate, plate_border, ChromeLayer, ControlRole,
-    ControlState, ScrollOrientation, ScrollView,
+    paint_framed_surface_plate, paint_surface_plate, plate_border, plate_content_inset,
+    ChromeLayer, ControlRole, ControlState, ScrollOrientation, ScrollView,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_hash::BuildFastHash;
 use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
-use tairix_theme::{Palette, TextRole};
+use tairix_theme::Palette;
 
+use crate::clock::CLOCK_ROLE;
 use crate::layout::{local_rect, BarLayout};
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
 use crate::notifications::{NotificationArea, NotifySeverity, TransientNotification};
@@ -310,9 +311,7 @@ impl TaskbarRenderer {
             generation: self.icon_generation,
         };
         let origin = layout.bar.origin;
-        // The clock is a de-emphasised annotation, set a step smaller like
-        // every other caption on the desktop.
-        let clock_font = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
+        let clock_font = BitmapFont::for_role(theme.fonts(), CLOCK_ROLE, scale);
 
         // The bar wears the same plate as the popups it opens; its regions are
         // laid out in screen space, so the interior the plate reports is moot.
@@ -451,7 +450,7 @@ impl TaskbarRenderer {
     /// `rects` are the surface's own rectangles to paint; a collapsed readout
     /// paints nothing. The window manager places the surface beside the
     /// capsule and rounds it with
-    /// [`TrayReadoutLayout::corner_radius`](crate::TrayReadoutLayout::corner_radius)
+    /// [`ReadoutLayout::corner_radius`](crate::ReadoutLayout::corner_radius)
     /// — the same popup radius the readout plate draws for itself, kept in
     /// step by construction.
     pub fn paint_tray_readout(
@@ -463,6 +462,22 @@ impl TaskbarRenderer {
     ) {
         damage::paint_parts(surface, rects, |surface| {
             paint_readout_panel(taskbar, scale, surface);
+        });
+    }
+
+    /// Paint the open network readout into a [`Surface`] using the taskbar's
+    /// own theme. The window manager places it outward from the network signal
+    /// and rounds it with
+    /// [`ReadoutLayout::corner_radius`](crate::ReadoutLayout::corner_radius).
+    pub fn paint_network_readout(
+        &self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        damage::paint_parts(surface, rects, |surface| {
+            paint_network_panel(taskbar, scale, surface);
         });
     }
 
@@ -486,6 +501,31 @@ impl TaskbarRenderer {
                 .paint(&layout, scale, taskbar.theme(), surface);
         });
     }
+}
+
+/// The network readout's whole recipe: the floating plate, then each
+/// interface's facts inside the control inset.
+fn paint_network_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
+    let Some(layout) = taskbar.network_readout_layout(scale) else {
+        return;
+    };
+    let theme = taskbar.theme();
+    let (width, height) = (layout.panel.width, layout.panel.height);
+    if paint_surface_plate(
+        surface,
+        (0, 0, width, height),
+        (layout.corner_radius, plate_border(theme, scale)),
+        theme,
+        (theme.palette().surface_raised, ChromeLayer::Ground),
+    )
+    .is_none()
+    {
+        return;
+    }
+    let content = Rect::new(0, 0, width, height).inset(plate_content_inset(theme, scale));
+    taskbar
+        .network_facts()
+        .render(surface, content, scale, theme);
 }
 
 /// The picker's whole recipe, laid across the surface in its own pixels.
@@ -689,14 +729,18 @@ fn paint_trailing(
         );
     }
 
-    draw_label(
-        surface,
-        origin,
-        layout.clock,
-        clock_label,
-        palette.on_surface.into(),
-        clock_font,
-    );
+    // A time cut short reads as a different time, so a label the region
+    // cannot hold whole is not drawn at all.
+    if clock_font.text_width(clock_label) <= layout.clock.width {
+        draw_label(
+            surface,
+            origin,
+            layout.clock,
+            clock_label,
+            palette.on_surface.into(),
+            clock_font,
+        );
+    }
 }
 
 /// Draw `text` centred inside the screen-space `rect`, clipped to it. Text
@@ -798,9 +842,4 @@ fn local_point(point: Point, origin: Point) -> Point {
 /// coordinate that would fall before the bar's origin to zero.
 fn local(coord: i32, origin: i32) -> u32 {
     u32::try_from(i64::from(coord) - i64::from(origin)).unwrap_or(0)
-}
-
-/// Saturating `u32` → `i32`.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }

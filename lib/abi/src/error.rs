@@ -443,6 +443,13 @@ pub enum Errno {
     /// releasing another stream on that bus — or choosing a setting that moves
     /// less per interval — is what can clear it.
     NoBandwidth = 48,
+    /// A person was asked and did not agree, or let the question lapse.
+    ///
+    /// The answer to a request held until someone answered a prompt: the
+    /// desktop session answers a trial of a new desktop resolution this way
+    /// when it is reverted or runs out, so the caller returns to what it had
+    /// rather than reporting a fault.
+    Declined = 49,
 }
 
 impl Errno {
@@ -558,6 +565,7 @@ impl Errno {
             46 => Some(Self::Deadlock),
             47 => Some(Self::Stale),
             48 => Some(Self::NoBandwidth),
+            49 => Some(Self::Declined),
             _ => None,
         }
     }
@@ -614,6 +622,7 @@ impl fmt::Display for Errno {
             Self::Deadlock => "waiting would deadlock",
             Self::Stale => "object changed beneath the handle",
             Self::NoBandwidth => "no bus bandwidth for the requested setting",
+            Self::Declined => "declined at a prompt",
         };
         f.write_str(message)
     }
@@ -725,11 +734,12 @@ mod tests {
             Errno::Deadlock,
             Errno::Stale,
             Errno::NoBandwidth,
+            Errno::Declined,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(49), None);
+        assert_eq!(Errno::from_i32(50), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

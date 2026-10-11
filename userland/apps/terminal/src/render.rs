@@ -43,7 +43,7 @@
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::Rect;
+use tairix_geometry::{to_i32, Rect};
 use tairix_raster::{Color, Surface};
 use tairix_vt::{char_width, Cell, CONTINUATION};
 
@@ -437,9 +437,4 @@ fn draw_glyph(surface: &mut Surface, font: BitmapFont, x: u32, y: u32, ch: char,
         ch.encode_utf8(&mut utf8),
         color,
     );
-}
-
-/// Saturating `u32` → `i32`.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }

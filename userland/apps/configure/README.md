@@ -16,8 +16,8 @@ render are the shared `lib/sysconfig` engine — the same engine every
 boot-time consumer (the login service's `os.loginType`, the cache manager's
 `cache.*`, the network stack's `net.*`) reads through, so producer and
 consumer can never diverge. Settings take effect at the point their
-consumer parses or applies the store: the store lives on the encrypted root
-volume, so it is read only after the `ARXFS passphrase:` unlock.
+consumer parses or applies the store: the store lives on the root volume, so
+it is read only once the root is mounted.
 
 The registry spans three families: `os.*` (the login default), `cache.*`
 (the SMARTRAM caching switches), and `net.*` — the stack-wide network

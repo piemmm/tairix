@@ -2260,7 +2260,7 @@ fn run_phases<A: KernelArch>(
     // text) and publish it into the boot path's identity cell, so
     // spawn-as-user and filesystem group resolution for the system
     // accounts work from first boot, before any volume is mounted. The
-    // encrypted-root unlock later replaces the cell's table with the
+    // root unlock later replaces the cell's table with the
     // merged system∪human table. The verifier emits its own audit record
     // on the `audit_sink`; we still emit our phase markers on the
     // diagnostic `log_sink` so the two streams stay aligned. A boot path

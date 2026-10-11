@@ -832,7 +832,7 @@ on two **kernel-attested** witnesses — an `APP_LOADED` naming the greeter's
 bundle in the system service store, then a reply the display service serves
 on `DISPLAY_ENDPOINT` after it — because a userland record reaches the
 diagnostic sink alone and could be forged or truncated by user space. So the
-login screen is provably login's own choice, reached after the encrypted root
+login screen is provably login's own choice, reached after the root
 mounted and its settings store answered "no configuration" rather than "not
 here". The sibling autoload verticals plant `os.loginType text` precisely
 because their scripts drive a shell.

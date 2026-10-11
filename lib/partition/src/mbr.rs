@@ -38,10 +38,10 @@ pub const PART_TYPE_ARXFS: u8 = 0x7f;
 ///
 /// `0x7e` is a sibling "reserved for individual or local use" type,
 /// distinct from [`PART_TYPE_ARXFS`] so the boot path tells the read-only
-/// `/System` volume apart from the encrypted data root by role. Like every
-/// type byte it is a routing hint, never a trusted input: the volume is
-/// still mounted under its own key and its bundles still verified against
-/// the load gate's trust anchor.
+/// `/System` volume apart from the data root by role. Like every type byte it
+/// is a routing hint, never a trusted input: the volume's own superblock still
+/// decides how it opens, and its bundles are still verified against the load
+/// gate's trust anchor.
 pub const PART_TYPE_ARXFS_SYSTEM: u8 = 0x7e;
 
 /// A partition entry with this type byte is unused; it is skipped on read

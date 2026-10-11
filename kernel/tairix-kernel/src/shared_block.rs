@@ -6,7 +6,7 @@
 //! (`crate::root_storage` / `crate::aarch64::root_unlock`), yet two
 //! independent consumers need to read it: the read-only signed-bundle
 //! `/System` driver store (`crate::root_mount::autoload_system_drivers`)
-//! and the encrypted-root unlock window
+//! and the root-unlock window
 //! (`crate::root_mount::unlock_root_disk_interactively`). Until now they
 //! used the one device *sequentially* — the `/System` window was borrowed,
 //! dropped, then the device was moved by value into the unlock — so the
@@ -37,7 +37,7 @@
 //! or deadlock a single CPU outright. The [`SleepLock`] instead parks the
 //! contending window off the run queue and wakes it when the holder releases,
 //! so two concurrent windows (the `/System` driver-store window and the
-//! encrypted-root unlock window) can safely drive one disk
+//! root-unlock window) can safely drive one disk
 //! (`docs/src/architecture/sync.md`).
 //!
 //! Architecture-neutral: the layer names no
@@ -153,7 +153,7 @@ impl<B: Block> SharedBlock<B> {
 // single place that vouches for sharing a brought-up block device across the
 // tasks that drive it (disk access is a common,
 // capability-checked kernel service, reached by the disk-owning kthread, the
-// driver-store serve kthread, and the encrypted-root unlock kthread over one
+// driver-store serve kthread, and the root-unlock kthread over one
 // `&'static SharedBlock`). The auto-derived `Send`/`Sync` are conservatively
 // withheld because a concrete `B` (e.g. `VirtioBlk`) holds raw `NonNull`
 // pointers into the device's MMIO register window and DMA region. Asserting
@@ -190,7 +190,7 @@ unsafe impl<B: Block> Sync for SharedBlock<B> {}
 /// operation.
 ///
 /// Handles are independent and several may be open at once — e.g. the
-/// read-only `/System` driver-store window and the encrypted-root unlock
+/// read-only `/System` driver-store window and the root-unlock
 /// window over the one boot disk, or one window per mounted partition of a
 /// runtime-attached disk.
 ///
@@ -315,7 +315,7 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
 ///
 /// The bootstrap floor brings up exactly **one** block device, which the
 /// boot path uses for two things at once — autoloading the signed `/System`
-/// driver store and unlocking the encrypted root — as concurrent windows
+/// driver store and mounting the root — as concurrent windows
 /// onto that one disk ([`SharedBlock`]). Under Design D the `/System` store
 /// must stay reachable *after* boot for on-demand and reactive (hotplug)
 /// driver loads, and `/System` must stay mounted
@@ -326,8 +326,8 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
 /// service — and the [`SharedBlock`] it owns — is itself leaked to `'static`
 /// and shared by `&'static` across two independent preemptive tasks: the
 /// disk-owning **driver-store serve** task (which binds and answers the store
-/// IPC endpoint, independent of the user-data passphrase) and the
-/// **encrypted-root unlock** task. Each reaches the disk through a fresh
+/// IPC endpoint, independent of the user-data volume's protection) and the
+/// **root-unlock** task. Each reaches the disk through a fresh
 /// [`SharedBlockHandle`] from [`Self::window`], serialised against the other
 /// by the `SharedBlock` lock (disk access is a common,
 /// capability-checked kernel service). [`Self::hold`] parks the calling task
@@ -364,7 +364,7 @@ impl<B: Block> DriverStoreService<B> {
 
     /// A fresh read-only window onto the boot disk holding the `/System`
     /// driver store. Each call hands out an independent [`SharedBlockHandle`];
-    /// the `SharedBlock` lock serialises device operations across windows, so the autoload window and the encrypted-root unlock
+    /// the `SharedBlock` lock serialises device operations across windows, so the autoload window and the root-unlock
     /// window never interleave a device operation.
     #[must_use]
     pub fn window(&self) -> BorrowedBlockWindow<'_, B> {
@@ -693,7 +693,7 @@ mod tests {
         // The service owns the boot disk's `SharedBlock` and serves the
         // `/System` store through independent windows: a write through one
         // window is visible through a second, exactly as the boot autoload
-        // window and the encrypted-root unlock window share one disk.
+        // window and the root-unlock window share one disk.
         let device = MeteredBlock::new(MemBlock::new(), kernel_block_device(0), &SINK);
         let io = device.io_source();
         let service = DriverStoreService::new(SharedBlock::new(device).unwrap(), io);

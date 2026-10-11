@@ -73,6 +73,7 @@ use crate::input::{
     TouchpadSettings, REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
 };
 use crate::notify::NotifyPolicy;
+use crate::resolution::Resolution;
 use crate::saver::{
     CellSize, CpuUse, Pace, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource,
     SlideshowOptions, StarDensity,
@@ -513,6 +514,8 @@ pub enum SettingsKey {
     Motion,
     /// `scale` — the UI scale, as a percentage of the reference density.
     Scale,
+    /// `resolution` — the size the desktop is drawn at.
+    Resolution,
     /// `font.family` — the family interface text is drawn in.
     FontFamily,
     /// `font.size` — the body size in points.
@@ -616,7 +619,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -627,6 +630,7 @@ impl SettingsKey {
         Self::Density,
         Self::Motion,
         Self::Scale,
+        Self::Resolution,
         Self::FontFamily,
         Self::FontSize,
         Self::CursorSet,
@@ -698,6 +702,10 @@ impl SettingsKey {
         Self::CursorLocate,
         Self::CursorShadow,
     ];
+
+    /// The key deciding the size the desktop is drawn at: what the Settings
+    /// application's Displays pane edits.
+    pub const DISPLAY: [Self; 1] = [Self::Resolution];
 
     /// The keys deciding which notices reach the desktop: what the Settings
     /// application's Notifications pane edits.
@@ -771,6 +779,7 @@ impl SettingsKey {
             Self::Density => "density",
             Self::Motion => "motion",
             Self::Scale => "scale",
+            Self::Resolution => "resolution",
             Self::FontFamily => "font.family",
             Self::FontSize => "font.size",
             Self::CursorSet => "cursor.set",
@@ -900,6 +909,8 @@ pub struct DesktopSettings {
     pub motion: Motion,
     /// The UI scale every logical length is resolved through.
     pub scale: Scale,
+    /// The size the desktop is drawn at.
+    pub resolution: Resolution,
     /// The family interface text is drawn in.
     pub text_family: TextFamily,
     /// The body size every text role derives from.
@@ -957,6 +968,7 @@ impl Default for DesktopSettings {
             density: Density::Normal,
             motion: Motion::Full,
             scale: Scale::ONE,
+            resolution: Resolution::Native,
             text_family: TextFamily::Theme,
             text_size: TextSize::Theme,
             cursor_set: CursorSetId::builtin(),
@@ -1043,6 +1055,7 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::Density => put(&mut settings.density, Density::from_value(value)),
         SettingsKey::Motion => put(&mut settings.motion, Motion::from_value(value)),
         SettingsKey::Scale => put(&mut settings.scale, parse_scale(value)),
+        SettingsKey::Resolution => put(&mut settings.resolution, Resolution::from_value(value)),
         // Whether the store holds the family is asked where it is resolved:
         // a choice outlives the image that shipped it.
         SettingsKey::FontFamily => put(&mut settings.text_family, TextFamily::from_value(value)),
@@ -1174,6 +1187,7 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::Density => settings.density.as_str().to_string(),
         SettingsKey::Motion => settings.motion.as_str().to_string(),
         SettingsKey::Scale => format!("{}", settings.scale.percent()),
+        SettingsKey::Resolution => settings.resolution.render_value(),
         SettingsKey::FontFamily => settings.text_family.render_value(),
         SettingsKey::FontSize => settings.text_size.render_value(),
         SettingsKey::CursorSet => settings.cursor_set.name().to_string(),

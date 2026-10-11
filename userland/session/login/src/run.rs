@@ -122,7 +122,7 @@ mod program {
     const MAX_ATTEMPTS: u32 = 3;
 
     /// Bound on a single `users_db_wait` park while the database is
-    /// [`DbLoad::Pending`] (the encrypted root is still being unlocked).
+    /// [`DbLoad::Pending`] (the root is still being mounted).
     ///
     /// The kernel wakes the wait the instant the unlock reaches a terminal
     /// outcome, so this is only a safety net: should a wake ever be missed,
@@ -1257,8 +1257,8 @@ mod program {
     /// syscall and classify it for [`supervise`] as a [`DbLoad`].
     ///
     /// * `WouldBlock` (the kernel's pending signal) → [`DbLoad::Pending`]:
-    ///   the encrypted root is still being unlocked, so `login` waits
-    ///   without prompting and leaves the console to the `Root passphrase:`
+    ///   the root is still being mounted, so `login` waits without prompting
+    ///   and leaves the console to an encrypted root's `ARXFS passphrase:`
     ///   prompt (`plans/PI.md` P11).
     /// * A delivered, valid database → [`DbLoad::Present`].
     /// * Any other refusal (no database held once the unlock resolved, no
@@ -1273,8 +1273,8 @@ mod program {
     /// (`plans/SPAWN.md` `SP5b`) — a pre-prompt allocation would fail and the
     /// console would never reach `login:`. The pending and absent paths
     /// allocate nothing; parsing a *successfully delivered* database
-    /// allocates, which is only reachable once the encrypted root that
-    /// holds it is unlocked (`plans/PI.md` P11). [`supervise`] calls this
+    /// allocates, which is only reachable once the root that holds it is
+    /// mounted (`plans/PI.md` P11). [`supervise`] calls this
     /// before each round, so a database installed after `login` started —
     /// the design-B order, where `login` is spawned before the in-kernel
     /// unlock kthread mounts the root — is picked up by the next round
@@ -1492,8 +1492,8 @@ mod program {
     /// [`supervise`] reloads the user database (and so re-wires the
     /// [`UsersAuthenticator`] or the fail-closed deny-all authenticator)
     /// before every round, so a database installed after this process
-    /// started — design B spawns `login` before the encrypted root is
-    /// unlocked — is picked up by the next round rather than a stale
+    /// started — design B spawns `login` before the root is mounted — is
+    /// picked up by the next round rather than a stale
     /// "no database" answer being cached for the process's lifetime
     /// (`plans/PI.md` P11). It returns only when a round reports the console
     /// dead; PID 1 relaunches `login`.
@@ -1528,8 +1528,8 @@ mod program {
         // the round that created them.
         let mut live = LiveSessions::new();
         let mut budget = AttemptBudget::new();
-        // While the database read is `Pending` (the encrypted root is still
-        // being unlocked) `supervise` calls this to **block** until the
+        // While the database read is `Pending` (the root is still being
+        // mounted) `supervise` calls this to **block** until the
         // database becomes available, so the in-kernel unlock kthread runs
         // and `login` neither prompts nor reads the console. The kernel
         // parks the task off the run queue and wakes it the instant the

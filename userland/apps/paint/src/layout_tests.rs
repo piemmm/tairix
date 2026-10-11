@@ -5,7 +5,7 @@ use super::{Faces, Floor, Layout, Needs, LEAST_WELL, MIN_CANVAS, MOST_WELL};
 use crate::pane::{Arrangement, PaneKind, Side};
 use crate::view::MOST_WELLS;
 
-const SLOT: u32 = 28;
+const SLOT: u32 = 24;
 
 fn needs(wells: usize) -> Needs {
     Needs {
@@ -93,7 +93,8 @@ fn the_bands_tile_the_window_without_overlapping() {
     assert_eq!(layout.palette().bottom(), layout.status().top());
     assert_eq!(layout.view_strip().width, 188);
     assert!(layout.controls().right() < layout.view_strip().left());
-    assert_eq!(layout.view_strip().right(), layout.top().right() - 8);
+    let gap = tairix_geometry::to_i32(registry.active().metrics().control_gap);
+    assert_eq!(layout.view_strip().right(), layout.top().right() - gap);
     assert_eq!(layout.picker().height, 300);
     assert!(
         layout.picker().top() > layout.wells().bottom(),
@@ -188,9 +189,10 @@ fn the_least_window_seats_its_bars_and_the_largest_palette_round_a_canvas() {
         least.controls().width >= floor.controls,
         "every setting of every tool's bar seated"
     );
+    let metrics = theme.metrics();
     assert_eq!(
         least.controls().height,
-        28 * 3 + 8 * 2,
+        metrics.control_height * 3 + metrics.control_gap * 2,
         "three rows a gap apart"
     );
     assert!(least.canvas().width >= MIN_CANVAS);
@@ -198,7 +200,7 @@ fn the_least_window_seats_its_bars_and_the_largest_palette_round_a_canvas() {
     assert!(least.tools().height >= floor.tool_box.1, "a tool showing");
     assert_eq!(
         least.dock_on(Side::Right).rect.width,
-        Layout::dock_inner_width(theme, Scale::ONE) + 16,
+        Layout::dock_inner_width(theme, Scale::ONE) + 2 * theme.metrics().control_gap,
         "the dock at its width"
     );
 }
@@ -339,7 +341,7 @@ fn panes_stack_down_a_dock_and_one_past_the_room_shows_its_band() {
     );
     assert_eq!(
         both.dock_on(Side::Left).rect.width,
-        Layout::dock_inner_width(theme, Scale::ONE) + 16,
+        Layout::dock_inner_width(theme, Scale::ONE) + 2 * theme.metrics().control_gap,
         "the dock as broad as its broadest pane"
     );
     assert!(both.dock_on(Side::Right).rect.is_empty());

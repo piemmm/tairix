@@ -44,6 +44,19 @@ crate owns that protocol once:
   and check the register selector the firmware echoed, so a firmware that
   stamps success without processing the tag, or answers about a different
   register, is a fault rather than a plausible wall time.
+- the **admission policy** (`admit_request`): the one table of requests the
+  user-space mailbox service forwards. Each is one tag, pinned word for word
+  to the shape its driver sends, and admitted only from the driver the kernel
+  attests is loaded for that tag's device. Every other tag — code execution,
+  GPU memory, voltage, one-time-programmable bits, GPIO, framebuffer
+  allocation, even the revision probe — is refused, and a malformed buffer is
+  refused before any tag in it is trusted.
+- the **client devices**: `FIRMWARE_FRAMEBUFFER_KEY`, `RPI_RTC_KEY`,
+  `FIRMWARE_CLOCKS_KEY` and `VL805_KEY` (with `VL805_FIRMWARE_DEV_ADDR`, the
+  one address the xHCI reset may name). Each driver's bind table is built from
+  its key, so the device it binds is the device its requests are judged
+  against. `SERVICE_CAPS` beside `BIND_KEYS` is the service's own capability
+  set, the single source its bundle's manifest is authored from.
 
 ## Why it lives in `lib/` (the §2.20 / §2.22 carve-out, legitimately)
 

@@ -1991,10 +1991,10 @@ until one is installed it fails closed with `NotImplemented`, and a wired
 holder with no database fails closed with `NotFound` — a system without
 accounts refuses every login rather than inventing one (`AGENTS.md`
 §5.4.5). The `LateUsersDb` holder (the in-kernel-unlock boot path,
-`plans/PI.md` P11) adds one more state: while the encrypted root is still
-being unlocked the read returns **`WouldBlock`** — the live-but-not-ready
-signal — so `login` *waits without prompting* and leaves the console to
-the concurrent `ARXFS passphrase:` prompt; once the unlock resolves the
+`plans/PI.md` P11) adds one more state: while the root is still being
+mounted the read returns **`WouldBlock`** — the live-but-not-ready
+signal — so `login` *waits without prompting* and leaves the console to an
+encrypted root's concurrent `ARXFS passphrase:` prompt; once the mount resolves the
 read returns the installed database, or `NotImplemented` if the unlock
 produced none (the deny-all prompt then runs). An undersized buffer is refused whole with `BufferTooSmall` (a
 credential database is never truncated, `AGENTS.md` §2.9); a buffer sized
@@ -2343,7 +2343,7 @@ emit `SYSCALL_INVOKED`; the pre-dispatch refusals (`PERMISSION_DENIED`,
 | 5004  | Error | `SYSCALL_HANDLER_REJECTED`    | Owning subsystem rejected the call. |
 | 5005  | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | An audited handler returned `WouldBlock` — the `abi-v1` "nothing yet, retry" signal (not a rejection: every check passed, no security decision was taken). Recorded at `Debug`, below the default `Info` filter, so a caller that legitimately polls while pending cannot flood the log; available for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
 | 5006  | Debug | `SYSCALL_HANDLER_NOT_FOUND`   | An audited handler returned `NotFound` — the "no such object" answer (not a rejection: every check passed, and a genuine authorisation refusal is `PermissionDenied`, which the secured VFS never masks as `NotFound`). Recorded at `Debug`, below the default `Info` filter, so a routine existence probe — e.g. `login` opening the optional `system.conf` store and the desktop bundle each round — cannot flood the boot log; available for probing/enumeration forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
-| 5007  | Debug | `SYSCALL_HANDLER_UNAVAILABLE` | An audited handler returned `NotImplemented` — the subsystem is absent from this build or not up yet. No security decision was taken: every dispatcher check passed and the handler simply had nothing behind it. Recorded at `Debug`, below the default `Info` filter, so a layered lookup that tries an optional source before its fallback — the device manager reading a settings override off the not-yet-mounted encrypted root, then taking the shipped default — cannot flood the boot log. A genuine authorisation refusal is `PermissionDenied` and stays at `Error`. |
+| 5007  | Debug | `SYSCALL_HANDLER_UNAVAILABLE` | An audited handler returned `NotImplemented` — the subsystem is absent from this build or not up yet. No security decision was taken: every dispatcher check passed and the handler simply had nothing behind it. Recorded at `Debug`, below the default `Info` filter, so a layered lookup that tries an optional source before its fallback — the device manager reading a settings override off the not-yet-mounted root, then taking the shipped default — cannot flood the boot log. A genuine authorisation refusal is `PermissionDenied` and stays at `Error`. |
 | 5008  | Debug | `SYSCALL_HANDLER_PEER_CLOSED` | An audited handler returned `BrokenPipe` — the other end of the caller's channel is gone, as when a supervisor writes to a pipe whose only reader, a worker, has just died. No security decision was taken, and the supervisor meets it routinely, so it is recorded at `Debug` rather than reported as a rejection. |
 
 Adding an event takes the next free identifier and a new row in this

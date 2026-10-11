@@ -584,10 +584,7 @@ fn a_press_on_the_visible_part_of_a_card_cut_by_the_viewport_selects_it() {
 
     // Half a card down: the first card is cut by the viewport's top edge.
     let half = Switchboard::card_item_height(Scale::ONE, &theme) / 2;
-    let turn = tairix_input::InputEvent::PointerScrolled {
-        dx: 0,
-        dy: i32::try_from(half).unwrap_or(0) * 5 / 2,
-    };
+    let turn = crate::view::test_support::wheel_pixels(half);
     let _ = crate::view::test_support::pointer(&mut sb, b, Scale::ONE, &theme, &turn);
     assert_eq!(sb.scroll_offset(), u64::from(half));
     let shown = card_slot(&sb, b, &theme, 0);

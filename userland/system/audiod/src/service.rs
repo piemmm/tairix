@@ -392,6 +392,13 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         self.changes
     }
 
+    /// Count on from `from`, the count the notice board resumes at, so this
+    /// service's announcements continue an earlier instance's rather than
+    /// repeating them.
+    pub fn resume_changes(&mut self, from: u64) {
+        self.changes = from;
+    }
+
     /// Every bound device, with its slot.
     fn present(&self) -> impl Iterator<Item = (usize, &Device)> {
         self.devices

@@ -162,6 +162,10 @@ pub const BOND_DOWN: EventId = EventId(16_027);
 /// rather than serving predictable ones.
 pub const SERVICE_UNAVAILABLE: EventId = EventId(16_028);
 
+/// The network notice could not be published: surfaces that follow the
+/// interfaces keep what they last read until the next change.
+pub const NOTICE_UNAVAILABLE: EventId = EventId(16_029);
+
 /// The message [`SYN_COOKIES_ENGAGED`] carries. Named here because the
 /// connection-exhaustion QEMU vertical (`plans/NETWORK.md` N16b) gates its
 /// run on this text appearing in the serial transcript, so the wording is
@@ -179,7 +183,9 @@ mod tests {
     };
     use super::{BOND_CONFIG_APPLIED, BOND_CONFIG_REFUSED, BOND_DOWN, BOND_FAILOVER, BOND_UP};
     use super::{DHCP6_LEASE_ACQUIRED, DHCP6_LEASE_LOST, DHCP_LEASE_ACQUIRED, DHCP_LEASE_LOST};
-    use super::{MULTICAST_FILTER_REFUSED, SERVICE_UNAVAILABLE, SYN_COOKIES_ENGAGED};
+    use super::{
+        MULTICAST_FILTER_REFUSED, NOTICE_UNAVAILABLE, SERVICE_UNAVAILABLE, SYN_COOKIES_ENGAGED,
+    };
 
     #[test]
     fn ids_are_inside_reserved_range() {
@@ -212,6 +218,7 @@ mod tests {
             SYN_COOKIES_ENGAGED,
             MULTICAST_FILTER_REFUSED,
             SERVICE_UNAVAILABLE,
+            NOTICE_UNAVAILABLE,
         ] {
             assert!(id.0 >= NETSTACK_RANGE_START && id.0 < NETSTACK_RANGE_END);
         }
@@ -248,6 +255,7 @@ mod tests {
             SYN_COOKIES_ENGAGED.0,
             MULTICAST_FILTER_REFUSED.0,
             SERVICE_UNAVAILABLE.0,
+            NOTICE_UNAVAILABLE.0,
         ];
         ids.sort_unstable();
         for w in ids.windows(2) {

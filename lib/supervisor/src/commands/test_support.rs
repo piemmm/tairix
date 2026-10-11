@@ -10,7 +10,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::dispatch::Session;
-use crate::{MountOutcome, Report, SupInput, SupervisorEvent, SupervisorHost, TestOutcome};
+use crate::{
+    MountOutcome, Report, RootLock, SupInput, SupervisorEvent, SupervisorHost, TestOutcome,
+};
 
 /// A [`Report`] that accumulates everything written to it.
 #[derive(Default)]
@@ -69,7 +71,6 @@ impl SupInput for MockInput {
 }
 
 /// A [`SupervisorHost`] returning canned data and recording actions.
-#[derive(Default)]
 pub struct MockHost {
     /// Every audit event the engine emitted, in order.
     pub audits: Vec<SupervisorEvent>,
@@ -80,14 +81,40 @@ pub struct MockHost {
     /// Whether the `memtest` takeover seam was invoked.
     pub takeover_requested: bool,
     mount_result: Option<MountOutcome>,
+    /// How the root is locked, `None` for a disk that cannot say.
+    root_lock: Option<RootLock>,
+    /// Whether the last `mount` was handed a passphrase.
+    mounted_with_passphrase: Option<bool>,
     scan_result: Option<TestOutcome>,
     last_scan_device: Option<String>,
+}
+
+impl Default for MockHost {
+    /// A host with nothing recorded, over an encrypted root.
+    fn default() -> Self {
+        Self {
+            audits: Vec::new(),
+            rebooted: false,
+            powered_off: false,
+            takeover_requested: false,
+            mount_result: None,
+            root_lock: Some(RootLock::Passphrase),
+            mounted_with_passphrase: None,
+            scan_result: None,
+            last_scan_device: None,
+        }
+    }
 }
 
 impl MockHost {
     /// Set the result the next `mount` returns.
     pub fn set_mount_result(&mut self, result: MountOutcome) {
         self.mount_result = Some(result);
+    }
+
+    /// Set how the root is locked, `None` for a disk that cannot say.
+    pub fn set_root_lock(&mut self, lock: Option<RootLock>) {
+        self.root_lock = lock;
     }
 
     /// Set the result the next `test disk` returns.
@@ -176,7 +203,12 @@ impl SupervisorHost for MockHost {
         self.scan_result.unwrap_or(TestOutcome::Passed)
     }
 
-    fn mount(&mut self, _passphrase: &[u8], _out: &mut dyn Report) -> MountOutcome {
+    fn root_lock(&mut self) -> Option<RootLock> {
+        self.root_lock
+    }
+
+    fn mount(&mut self, passphrase: Option<&[u8]>, _out: &mut dyn Report) -> MountOutcome {
+        self.mounted_with_passphrase = Some(passphrase.is_some());
         self.mount_result.unwrap_or(MountOutcome::Failed)
     }
 
@@ -274,6 +306,18 @@ impl MockSession {
     /// Set the next `mount` result.
     pub fn set_mount_result(&mut self, result: MountOutcome) {
         self.host.set_mount_result(result);
+    }
+
+    /// Set how the root is locked.
+    pub fn set_root_lock(&mut self, lock: Option<RootLock>) {
+        self.host.set_root_lock(lock);
+    }
+
+    /// Whether the last `mount` was handed a passphrase; `None` when none
+    /// was attempted.
+    #[must_use]
+    pub fn mounted_with_passphrase(&self) -> Option<bool> {
+        self.host.mounted_with_passphrase
     }
 
     /// Set the next `test disk` result.

@@ -133,7 +133,7 @@ fn mbr_round_trips_the_three_partition_design_b_layout() {
     let sector = mbr::encode(&parts).expect("encodes");
 
     // The `/System` entry carries its own distinct type byte, separate from
-    // the encrypted data root's.
+    // the data root's.
     assert_eq!(sector[446 + 4], mbr::PART_TYPE_ARXFS_SYSTEM);
     assert_ne!(mbr::PART_TYPE_ARXFS_SYSTEM, mbr::PART_TYPE_ARXFS);
 

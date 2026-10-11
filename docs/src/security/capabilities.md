@@ -349,7 +349,7 @@ each operation whole-or-not-at-all through one commit path:
 - **Disk first, then live.** The edited `users-v1`/`groups-v1` texts are
   persisted crash-safely to `/System/Security` (a temp node carrying the
   original's security record, renamed over it) through a dedicated
-  writable window onto the encrypted root, and only then are the live
+  writable window onto the root volume, and only then are the live
   users-database text and identity table swapped — so a change binds at
   the **next** spawn/login while running processes keep the sets they
   were derived with (the revoke model above). Creating an account also

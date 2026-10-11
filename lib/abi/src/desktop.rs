@@ -517,7 +517,10 @@ impl DesktopText {
 ///
 /// Opaque and validated on the way in: a desktop with a zero-sized screen
 /// or a zero scale cannot be constructed, so no consumer has to defend
-/// against one. The scale is carried as a percentage of the reference
+/// against one. The screen is the desktop's own extent, which may be smaller
+/// than the output it is resampled onto; the output's extent is carried too,
+/// so an application offering a desktop resolution offers what the output
+/// can show. The scale is carried as a percentage of the reference
 /// density — the number `tairix_geometry::Scale` is spelled in — and the
 /// bounds of a *usable* scale belong to that type, not to the wire: the
 /// window client resolves the percentage into a `Scale` and refuses a
@@ -526,6 +529,8 @@ impl DesktopText {
 pub struct DesktopInfo {
     screen_width_px: u32,
     screen_height_px: u32,
+    output_width_px: u32,
+    output_height_px: u32,
     scale_percent: u16,
     appearance: Appearance,
     contrast: Contrast,
@@ -542,19 +547,23 @@ const DOUBLE_CLICK_OFFSET: usize = 16;
 /// follows it.
 const TEXT_OFFSET: usize = DOUBLE_CLICK_OFFSET + Duration64::WIRE_LEN;
 
+/// Byte offset of the output's width in an encoded [`DesktopInfo`]; its
+/// height follows it.
+const OUTPUT_OFFSET: usize = TEXT_OFFSET + 2 + FONT_FAMILY_KEY_LEN;
+
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
     /// scale percentage (2), appearance (1), one reserved byte that must be
     /// zero, contrast (1), density (1), motion (1), a second reserved byte
     /// that must be zero, the double-click interval (12), the text size (2)
     /// and the text family (16) — a zero size and an all-zero family where
-    /// the user chose none.
-    pub const WIRE_LEN: usize = TEXT_OFFSET + 2 + FONT_FAMILY_KEY_LEN;
+    /// the user chose none — then the output's width (4) and height (4).
+    pub const WIRE_LEN: usize = OUTPUT_OFFSET + 8;
 
-    /// The desktop with a `screen_width_px` × `screen_height_px` screen,
-    /// drawn at `scale_percent` of the reference density in `appearance`,
-    /// on the theme's own contrast, density and motion, pairing presses under
-    /// [`DOUBLE_CLICK_DEFAULT`].
+    /// The desktop with a `screen_width_px` × `screen_height_px` screen at
+    /// its output's own size, drawn at `scale_percent` of the reference
+    /// density in `appearance`, on the theme's own contrast, density and
+    /// motion, pairing presses under [`DOUBLE_CLICK_DEFAULT`].
     ///
     /// [`with_axes`](Self::with_axes) derives the same desktop on other
     /// axes, so a caller that only knows the extent and the appearance —
@@ -577,6 +586,8 @@ impl DesktopInfo {
         Ok(Self {
             screen_width_px,
             screen_height_px,
+            output_width_px: screen_width_px,
+            output_height_px: screen_height_px,
             scale_percent,
             appearance,
             contrast: Contrast::Normal,
@@ -584,6 +595,28 @@ impl DesktopInfo {
             motion: Motion::Full,
             double_click: DOUBLE_CLICK_DEFAULT,
             text: None,
+        })
+    }
+
+    /// The same desktop resampled onto an `output_width_px` ×
+    /// `output_height_px` output.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an output smaller than the screen on either
+    /// axis: a desktop is never drawn larger than what shows it.
+    pub const fn with_output(
+        self,
+        output_width_px: u32,
+        output_height_px: u32,
+    ) -> Result<Self, Errno> {
+        if output_width_px < self.screen_width_px || output_height_px < self.screen_height_px {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            output_width_px,
+            output_height_px,
+            ..self
         })
     }
 
@@ -631,6 +664,18 @@ impl DesktopInfo {
     #[must_use]
     pub const fn screen_height_px(&self) -> u32 {
         self.screen_height_px
+    }
+
+    /// The output's width in physical pixels; never less than the screen's.
+    #[must_use]
+    pub const fn output_width_px(&self) -> u32 {
+        self.output_width_px
+    }
+
+    /// The output's height in physical pixels; never less than the screen's.
+    #[must_use]
+    pub const fn output_height_px(&self) -> u32 {
+        self.output_height_px
     }
 
     /// The desktop UI scale, as a percentage of the reference density;
@@ -712,8 +757,10 @@ impl DesktopInfo {
         out[DOUBLE_CLICK_OFFSET..TEXT_OFFSET].copy_from_slice(&self.double_click.to_le_bytes());
         if let Some(text) = self.text {
             put_u16(out, TEXT_OFFSET, text.size_px);
-            out[TEXT_OFFSET + 2..].copy_from_slice(&text.family.to_wire());
+            out[TEXT_OFFSET + 2..OUTPUT_OFFSET].copy_from_slice(&text.family.to_wire());
         }
+        put_u32(out, OUTPUT_OFFSET, self.output_width_px);
+        put_u32(out, OUTPUT_OFFSET + 4, self.output_height_px);
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -724,8 +771,8 @@ impl DesktopInfo {
     /// * [`Errno::BufferTooSmall`] — `bytes` does not hold a whole record
     ///   at `at`.
     /// * [`Errno::OutOfRange`] — a zero extent, a zero scale, an
-    ///   appearance code this version does not define, or a double-click
-    ///   interval outside its bounds.
+    ///   appearance code this version does not define, a double-click
+    ///   interval outside its bounds, or an output smaller than the screen.
     /// * [`Errno::TimestampOutOfRange`] — a double-click interval whose
     ///   nanosecond field is not canonical.
     /// * [`Errno::BadMagic`] — either reserved byte is not zero, or a
@@ -751,8 +798,12 @@ impl DesktopInfo {
         )
         .with_double_click(Duration64::from_bytes(
             &record[DOUBLE_CLICK_OFFSET..TEXT_OFFSET],
-        )?)?;
-        Ok(desktop.with_text(decode_text(&record[TEXT_OFFSET..])?))
+        )?)?
+        .with_output(
+            read_u32(record, OUTPUT_OFFSET),
+            read_u32(record, OUTPUT_OFFSET + 4),
+        )?;
+        Ok(desktop.with_text(decode_text(&record[TEXT_OFFSET..OUTPUT_OFFSET])?))
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -784,7 +835,8 @@ fn decode_text(field: &[u8]) -> Result<Option<DesktopText>, Errno> {
 mod tests {
     use super::{
         Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, ScreensaverKind,
-        DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET, TEXT_OFFSET,
+        DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
+        OUTPUT_OFFSET, TEXT_OFFSET,
     };
     use crate::font_ipc::FamilyKey;
     use crate::time::Duration64;
@@ -863,7 +915,9 @@ mod tests {
     fn the_text_choice_round_trips_and_its_absence_is_all_zero() {
         assert_eq!(desktop().text(), None);
         let bytes = desktop().to_le_bytes();
-        assert!(bytes[TEXT_OFFSET..].iter().all(|&byte| byte == 0));
+        assert!(bytes[TEXT_OFFSET..OUTPUT_OFFSET]
+            .iter()
+            .all(|&byte| byte == 0));
         let family = FamilyKey::new("noto-serif").expect("a well-formed key");
         let text = DesktopText::new(family, 18).expect("a non-zero size");
         let info = desktop().with_text(Some(text));
@@ -887,8 +941,29 @@ mod tests {
         bad_family[TEXT_OFFSET + 2] = b'/';
         assert_eq!(DesktopInfo::from_bytes(&bad_family), Err(Errno::OutOfRange));
         let mut nameless = info.to_le_bytes();
-        nameless[TEXT_OFFSET + 2..].fill(0);
+        nameless[TEXT_OFFSET + 2..OUTPUT_OFFSET].fill(0);
         assert_eq!(DesktopInfo::from_bytes(&nameless), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn the_output_round_trips_and_is_never_smaller_than_the_screen() {
+        assert_eq!(
+            (desktop().output_width_px(), desktop().output_height_px()),
+            (1920, 1080),
+            "a desktop is at its output's own size unless it says otherwise"
+        );
+        let resampled = DesktopInfo::new(1280, 720, 100, Appearance::Dark)
+            .and_then(|info| info.with_output(1920, 1080))
+            .expect("an output larger than the desktop");
+        assert_eq!(
+            DesktopInfo::from_bytes(&resampled.to_le_bytes()),
+            Ok(resampled)
+        );
+        assert_eq!(desktop().with_output(1919, 1080), Err(Errno::OutOfRange));
+        assert_eq!(desktop().with_output(1920, 0), Err(Errno::OutOfRange));
+        let mut shrunk = resampled.to_le_bytes();
+        shrunk[OUTPUT_OFFSET..OUTPUT_OFFSET + 4].copy_from_slice(&1000u32.to_le_bytes());
+        assert_eq!(DesktopInfo::from_bytes(&shrunk), Err(Errno::OutOfRange));
     }
 
     #[test]

@@ -29,6 +29,10 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
   far end. The file manager's and the desktop's grids and the picture choice
   all lay their tiles out through it, and `within` narrows each cell to one
   part of it — a tile's picture — over the same count and stride.
+- `desktop_modes` — the sizes a graphical desktop may take on an output: its
+  native size first, then each standard VESA/CEA size smaller on both axes,
+  no smaller than `DESKTOP_MIN`, within 1% of the output's shape. The session
+  that applies a size and every surface that offers one read this one list.
 
 All edge arithmetic widens through `i64`/`u32` so a pathological coordinate
 saturates rather than wrapping — it fails closed (`AGENTS.md` §2.9). `Scale`

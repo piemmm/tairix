@@ -118,32 +118,13 @@ impl Submission {
 
 #[cfg(test)]
 mod tests {
-    use tairix_abi::{SyscallNumber, SYSCALL_MAX_ARGS};
+    use tairix_abi::SyscallNumber;
     use tairix_abi_trap::seam;
+    use tairix_abi_trap::seam::{capture, no_trap, refusal};
 
     use super::{Errno, Submission};
 
     const DEADLINE_NS: u64 = 250_000_000;
-
-    /// Run `call` with the trap seam armed to answer `ret`, handing back the
-    /// `(number, args)` it recorded.
-    fn capture(ret: u64, call: impl FnOnce()) -> (u64, [u64; SYSCALL_MAX_ARGS]) {
-        seam::arm(ret);
-        call();
-        seam::last_call().expect("exactly one trap")
-    }
-
-    /// Arm the seam and assert `call` issued no trap at all.
-    fn no_trap(call: impl FnOnce()) {
-        seam::arm(0);
-        call();
-        assert!(seam::last_call().is_none(), "no trap may be issued");
-    }
-
-    /// The negative register the kernel encodes `errno` as.
-    fn refusal(errno: Errno) -> u64 {
-        u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
-    }
 
     fn channel() -> Submission {
         Submission::new(DEADLINE_NS)

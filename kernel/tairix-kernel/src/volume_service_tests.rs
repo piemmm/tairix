@@ -39,7 +39,7 @@ use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
 use tairix_caps::CapabilitySet;
-use tairix_drv_fs_arxfs::{EntropySource, ARXFS, SYSTEM_VOLUME_KEY};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::fs::{FilesystemService, FinalLink};
@@ -1336,13 +1336,13 @@ impl EntropySource for FixtureEntropy {
     }
 }
 
-/// Format an ARXFS image under the well-known volume key the attach path
-/// opens a removable ARXFS volume with, carrying one regular file.
+/// Format a plaintext ARXFS image, as the attach path opens a removable
+/// ARXFS volume, carrying one regular file.
 fn arxfs_image(payload: &[u8]) -> (RamBlock, [u8; 16]) {
     let mut fs = ARXFS::format(
         RamBlock::new(SECTORS_8MIB),
         ARXFS_INODES,
-        &SYSTEM_VOLUME_KEY,
+        Keying::Plaintext,
         &mut FixtureEntropy { next: 1 },
     )
     .expect("format the fixture volume");

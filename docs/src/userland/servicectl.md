@@ -80,11 +80,11 @@ done, and exits `1`, because the record stands and the next boot obeys it.
 | Layer | Where | Written by |
 |---|---|---|
 | Vendor | the `enrolled` directives of PID 1's startup configuration | the build |
-| Administrator | `/System/Settings/Services/overrides` on the encrypted root | PID 1, on a request |
+| Administrator | `/System/Settings/Services/overrides` on the root volume | PID 1, on a request |
 
 The split is forced by the volume layout, not chosen: the whole
-`/System/Settings` subtree resolves to the writable encrypted root, so nothing
-there can be read before the unlock — and PID 1 must know what to bring up
+`/System/Settings` subtree resolves to the writable root volume, so nothing
+there can be read before the root is mounted — and PID 1 must know what to bring up
 before then — while the pre-unlock volume is read-only, so nothing there can be
 written at runtime. The vendor layer is therefore not a document at all: no file
 under `/System` is reliably readable at the instant the manager decides, and the

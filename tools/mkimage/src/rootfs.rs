@@ -1,7 +1,7 @@
 //! `ARXFS` root-partition authoring.
 //!
-//! The root partition is a genuine encrypted `ARXFS` volume laid down by
-//! the real driver (`tairix-drv-fs-arxfs`) and pre-populated with the
+//! The root partition is a genuine `ARXFS` volume laid down by the real
+//! driver (`tairix-drv-fs-arxfs`) and pre-populated with the
 //! authoritative top-level layout: exactly `/System`, `/Users`, `/Apps`,
 //! and `/Storage`. It is the **writable** volume mounted as `/`, so under
 //! `/System` it carries **only** the writable-state subtree
@@ -19,18 +19,16 @@
 //! kernel can build its identity table without running the installer; an
 //! installer image ships neither.
 //!
-//! `ARXFS` has no plaintext mode: the volume is provisioned under a
-//! caller-supplied volume key, and mounting it requires that key. The
-//! image builder draws a fresh random key per image and hands it back to
-//! the operator (`crate::build_rpi_image`); it is never stored inside the
-//! image.
+//! The root is plaintext unless the image is built with an encrypted root
+//! (`crate::VolumeProtection`), whose key `crate::build_rpi_image` derives from
+//! the debug passphrase and hands back to the operator; it is never stored
+//! inside the image. The `/System` volume is always plaintext: it holds no
+//! secret, and its bundles carry their own signatures.
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{
-    plant_nested_file, EntropySource, Security, VolumeKey, ARXFS, SYSTEM_VOLUME_KEY,
-};
+use tairix_drv_fs_arxfs::{plant_nested_file, EntropySource, Keying, Security, ARXFS};
 use tairix_users::provision_home_shape;
 
 use crate::device::MemBlock;
@@ -65,15 +63,15 @@ pub const SYSTEM_SUBDIRS: [&str; 13] = [
     "Services",
 ];
 
-/// The writable-state `/System` subtree the **encrypted root** volume ships
+/// The writable-state `/System` subtree the **root** volume ships
 /// (`build_root_partition`). These are the only `/System` paths that resolve
 /// to the writable root volume at runtime: `Logs` and `Settings` are the
 /// writable exceptions mounted over the read-only `/System`, and `Security`
-/// holds the encrypted user/group databases (read by the boot-time
-/// `/System/Security` reader off this volume, where the secret belongs — it
-/// is never placed on the well-known-keyed `ARXFSSystem` volume). The
-/// immutable subdirectories in [`SYSTEM_SUBDIRS`] are deliberately absent
-/// here; they live only on `ARXFSSystem`.
+/// holds the user/group databases (read by the boot-time `/System/Security`
+/// reader off this volume, which an installation may encrypt — they are never
+/// placed on the read-only `ARXFSSystem` volume). The immutable
+/// subdirectories in [`SYSTEM_SUBDIRS`] are deliberately absent here; they
+/// live only on `ARXFSSystem`.
 pub const WRITABLE_SYSTEM_SUBDIRS: [&str; 3] = ["Logs", "Settings", "Security"];
 
 /// Number of inodes the root volume is formatted with: ample for the
@@ -128,7 +126,7 @@ const TIME_STATE_DIR_MODE: u32 = 0o755;
 /// enrolled (public configuration, not a secret).
 const SERVICE_OVERRIDES_DIR_MODE: u32 = 0o755;
 
-/// Everything seeded onto the encrypted root beyond the directory
+/// Everything seeded onto the root volume beyond the directory
 /// skeleton. Every image profile seeds both account databases (the
 /// canonical default system/service set at minimum, `plans/USERS.md`), so
 /// they are not optional; the home directories follow the seeded
@@ -156,22 +154,22 @@ pub struct RootSeed<'a> {
 }
 
 /// Author the `ARXFS` root partition: format `sectors` sectors under
-/// `volume_key`, create the directory skeleton, and lay down everything
-/// `seed` describes ([`RootSeed`]).
+/// `keying`, create the directory skeleton, and lay down everything `seed`
+/// describes ([`RootSeed`]).
 ///
 /// # Errors
 ///
 /// [`MkimageError::RootPartition`] if formatting, any directory creation,
-/// or a database write fails (including an entropy failure while
-/// provisioning the volume's key hierarchy — never a weakly-keyed volume).
+/// or a database write fails, an entropy failure included: an encrypted root
+/// is never laid on predictable key material.
 pub fn build_root_partition(
     sectors: u64,
-    volume_key: &VolumeKey,
+    keying: Keying<'_>,
     entropy: &mut dyn EntropySource,
     seed: &RootSeed<'_>,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::RootPartition)?;
-    let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, volume_key, entropy)
+    let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, keying, entropy)
         .map_err(MkimageError::RootPartition)?;
     let root = fs.root();
 
@@ -213,20 +211,20 @@ fn create_home_dir(
 }
 
 /// Author the read-only, signed-bundle `/System` partition, sized by
-/// [`tairix_syshelp::build_system_volume`]: formatted under the non-secret
-/// well-known [`SYSTEM_VOLUME_KEY`] with the `/System` skeleton **at the
-/// volume root** (the volume *is* `/System` once mounted), carrying the
-/// discovered system payload, `drivers`, `apps` and `network_conf`.
+/// [`tairix_syshelp::build_system_volume`]: a plaintext volume with the
+/// `/System` skeleton **at the volume root** (the volume *is* `/System` once
+/// mounted), carrying the discovered system payload, `drivers`, `apps` and
+/// `network_conf`.
 ///
 /// This is the design-B pre-unlock store (`plans/PI.md`): it holds no secret,
-/// so the kernel mounts it read-only before the encrypted root is unlocked.
+/// so the kernel mounts it read-only before it mounts the root.
 /// The bundles arrive composed and signed; this only plants them, and the
 /// load gate refuses a tampered one.
 ///
 /// `network_conf` is the per-interface network configuration the image ships.
 /// It lives here rather than under the `/System/Settings` view because its
-/// only reader, the device manager, reads it before the encrypted root that
-/// backs that view is unlocked. It is parsed and re-rendered through the one
+/// only reader, the device manager, reads it before the root that backs that
+/// view is mounted. It is parsed and re-rendered through the one
 /// `tairix_netconfig` engine `netstack` reads it with, so an image can never
 /// ship an addressing default its own stack rejects.
 ///
@@ -234,7 +232,7 @@ fn create_home_dir(
 ///
 /// [`MkimageError::NetworkConfig`] if `network_conf` does not parse, or
 /// [`MkimageError::SystemPartition`] if formatting (including an entropy
-/// failure provisioning the volume's key hierarchy) or planting fails.
+/// failure drawing the volume's identity) or planting fails.
 pub fn build_system_partition(
     entropy: &mut dyn EntropySource,
     drivers: &[(&[&[u8]], &[u8])],
@@ -252,7 +250,7 @@ pub fn build_system_partition(
     let network = [(network_path.as_slice(), network_conf.as_bytes())];
     tairix_syshelp::build_system_volume(&[drivers, apps, &network], |sectors| {
         let dev = MemBlock::new(sectors).map_err(MkimageError::SystemPartition)?;
-        let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, &SYSTEM_VOLUME_KEY, entropy)
+        let mut fs = ARXFS::format(dev, ROOT_INODE_HINT, Keying::Plaintext, entropy)
             .map_err(MkimageError::SystemPartition)?;
         let root = fs.root();
         create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
@@ -290,7 +288,7 @@ impl tairix_syshelp::SystemVolume for SystemVolume {
 }
 
 /// Lay the **writable-state** `/System` subtree under `system` on the
-/// encrypted data root: the [`WRITABLE_SYSTEM_SUBDIRS`] (`Logs`, `Settings`,
+/// data root: the [`WRITABLE_SYSTEM_SUBDIRS`] (`Logs`, `Settings`,
 /// and `Security` with its `Keys`/`Policy`), the seeded users database and
 /// matching group registry under `Security` (every profile carries the
 /// default system/service accounts), and — for a debug image — the baked
@@ -353,7 +351,7 @@ fn write_machine_id_file(
 }
 
 /// Create the [`SYSTEM_SUBDIRS`] under `system`, with `Keys` and `Policy`
-/// inside `Security`. The one definition both the encrypted-root and the
+/// inside `Security`. The one definition both the root and the
 /// `/System`-volume authoring paths reuse; `wrap` tags
 /// the failure with the partition the caller is authoring.
 fn create_system_subdirs(
@@ -373,8 +371,8 @@ fn create_system_subdirs(
 }
 
 /// Create the fixed `Keys` and `Policy` subdirectories under a `Security` node.
-/// The one definition both the read-only `/System` volume and the encrypted
-/// root's writable-state subtree author their `Security/{Keys, Policy}`
+/// The one definition both the read-only `/System` volume and the root
+/// volume's writable-state subtree author their `Security/{Keys, Policy}`
 /// through, so the two cannot drift; `wrap` tags the failure with the partition
 /// the caller is authoring.
 fn create_security_subdirs(
@@ -545,7 +543,7 @@ mod tests {
     };
 
     const TEST_SECTORS: u64 = 131_072; // 64 MiB, the production root size.
-    const TEST_KEY: VolumeKey = [0x42; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
+    const TEST_KEY: tairix_drv_fs_arxfs::VolumeKey = [0x42; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
 
     /// Stand-in database texts: the seeding contract is "the given text is
     /// written verbatim", so the tests only need recognisable bytes (the
@@ -595,7 +593,11 @@ mod tests {
     }
 
     fn build() -> Vec<u8> {
-        build_root_partition(TEST_SECTORS, &TEST_KEY, &mut TestEntropy(7), &TEST_SEED)
+        build_keyed(Keying::Plaintext)
+    }
+
+    fn build_keyed(keying: Keying<'_>) -> Vec<u8> {
+        build_root_partition(TEST_SECTORS, keying, &mut TestEntropy(7), &TEST_SEED)
             .expect("root partition builds")
     }
 
@@ -608,14 +610,14 @@ mod tests {
         );
 
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("the volume mounts under its key");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("the plaintext root mounts");
         let root = fs.root();
         for name in TOP_LEVEL_DIRS {
             fs.lookup(root, name.as_bytes())
                 .unwrap_or_else(|_| panic!("/{name} exists"));
         }
         let system = fs.lookup(root, b"System").expect("/System exists");
-        // The encrypted root carries ONLY the writable-state /System subtree;
+        // The root carries ONLY the writable-state /System subtree;
         // the immutable content lives on the read-only ARXFSSystem volume.
         for sub in WRITABLE_SYSTEM_SUBDIRS {
             fs.lookup(system, sub.as_bytes())
@@ -643,7 +645,7 @@ mod tests {
     fn system_volume_network_conf(network_conf: &str) -> Result<Vec<u8>, MkimageError> {
         let bytes = build_system_partition(&mut TestEntropy(11), &[], &[], network_conf)?;
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &SYSTEM_VOLUME_KEY).expect("the system volume mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("the system volume mounts");
         let mut node = fs.root();
         let path = SystemConfigFile::Network.volume_path();
         let mut components = path.split('/').peekable();
@@ -665,7 +667,7 @@ mod tests {
         // The device manager reads this document through the pre-unlock store
         // endpoint, which serves the read-only `/System` volume at the ABI's
         // volume-relative path. Planting it anywhere else — the `/System`
-        // *view* path on the encrypted root, say — leaves it unread and the
+        // *view* path on the root volume, say — leaves it unread and the
         // machine with no managed interface.
         let bytes = system_volume_network_conf(TEST_NETWORK).expect("the volume builds");
         let text = core::str::from_utf8(&bytes).expect("utf-8");
@@ -688,7 +690,7 @@ mod tests {
             .expect("the payload alone builds");
         let mut fs = ARXFS::open(
             MemBlock::from_bytes(alone.clone()).expect("whole sectors"),
-            &SYSTEM_VOLUME_KEY,
+            Keying::Plaintext,
         )
         .expect("the payload volume mounts");
         let space = fs.stats().expect("the volume reports its space");
@@ -714,7 +716,7 @@ mod tests {
 
         let mut fs = ARXFS::open(
             MemBlock::from_bytes(grown).expect("whole sectors"),
-            &SYSTEM_VOLUME_KEY,
+            Keying::Plaintext,
         )
         .expect("the grown volume mounts");
         let mut node = fs.root();
@@ -739,11 +741,11 @@ mod tests {
 
     #[test]
     fn the_writable_root_ships_no_network_config() {
-        // A second copy on the encrypted root would be read by nothing while
+        // A second copy on the root volume would be read by nothing while
         // looking authoritative: an operator editing it would see no effect.
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let settings = fs.lookup(system, b"Settings").expect("Settings exists");
@@ -768,7 +770,7 @@ mod tests {
     fn the_writable_root_ships_the_seeded_program_library() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let settings = fs.lookup(system, b"Settings").expect("Settings exists");
@@ -790,14 +792,21 @@ mod tests {
     }
 
     #[test]
-    fn the_wrong_key_is_refused() {
-        let bytes = build();
-        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let wrong: VolumeKey = [0x43; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
+    fn an_encrypted_root_mounts_under_its_key_alone() {
+        let bytes = build_keyed(Keying::Key(&TEST_KEY));
+        let device = || MemBlock::from_bytes(bytes.clone()).expect("whole sectors");
+        let wrong: tairix_drv_fs_arxfs::VolumeKey = [0x43; tairix_drv_fs_arxfs::VOLUME_KEY_LEN];
         assert_eq!(
-            ARXFS::open(dev, &wrong).err(),
+            ARXFS::open(device(), Keying::Key(&wrong)).err(),
             Some(DriverError::PermissionDenied)
         );
+        assert_eq!(
+            ARXFS::open(device(), Keying::Plaintext).err(),
+            Some(DriverError::PermissionDenied)
+        );
+        let mut fs = ARXFS::open(device(), Keying::Key(&TEST_KEY)).expect("its key mounts it");
+        let root = fs.root();
+        fs.lookup(root, b"System").expect("the skeleton is there");
     }
 
     #[test]
@@ -808,7 +817,11 @@ mod tests {
                 Err(DriverError::DeviceFault)
             }
         }
-        assert!(build_root_partition(TEST_SECTORS, &TEST_KEY, &mut NoEntropy, &TEST_SEED).is_err());
+        for keying in [Keying::Plaintext, Keying::Key(&TEST_KEY)] {
+            assert!(
+                build_root_partition(TEST_SECTORS, keying, &mut NoEntropy, &TEST_SEED).is_err()
+            );
+        }
     }
 
     #[test]
@@ -816,7 +829,7 @@ mod tests {
         let text = TEST_USERS;
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -835,7 +848,7 @@ mod tests {
         let text = TEST_GROUPS;
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -855,7 +868,7 @@ mod tests {
 
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let users = fs.lookup(root, b"Users").expect("/Users exists");
         let home = fs.lookup(users, b"root").expect("/Users/root exists");
@@ -876,7 +889,7 @@ mod tests {
 
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let users = fs.lookup(root, b"Users").expect("/Users exists");
         let home = fs.lookup(users, b"root").expect("/Users/root exists");
@@ -917,7 +930,7 @@ mod tests {
 
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let users = fs.lookup(root, b"Users").expect("/Users exists");
         let home = fs.lookup(users, b"root").expect("/Users/root exists");
@@ -954,7 +967,7 @@ mod tests {
     fn an_installer_shaped_root_ships_no_log_attestation_key() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -982,7 +995,7 @@ mod tests {
             .to_vec();
         let bytes = build_root_partition(
             TEST_SECTORS,
-            &TEST_KEY,
+            Keying::Plaintext,
             &mut TestEntropy(7),
             &RootSeed {
                 log_attestation_key: Some(&key_file),
@@ -991,7 +1004,7 @@ mod tests {
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -1020,7 +1033,7 @@ mod tests {
         let id = [0xA7u8; MACHINE_ID_LEN];
         let bytes = build_root_partition(
             TEST_SECTORS,
-            &TEST_KEY,
+            Keying::Plaintext,
             &mut TestEntropy(7),
             &RootSeed {
                 machine_id: Some(&id),
@@ -1029,7 +1042,7 @@ mod tests {
         )
         .expect("root partition builds");
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");
@@ -1052,7 +1065,7 @@ mod tests {
     fn an_unseeded_root_ships_no_machine_id() {
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
-        let mut fs = ARXFS::open(dev, &TEST_KEY).expect("mounts");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let security = fs.lookup(system, b"Security").expect("Security exists");

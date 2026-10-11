@@ -1,7 +1,7 @@
 //! The pre-boot **Supervisor** console engine (`lib/supervisor`).
 //!
 //! The Supervisor is a small, built-in command monitor an operator can drop
-//! into from the boot screen *before* the encrypted root is mounted — a
+//! into from the boot screen *before* the root is mounted — a
 //! "quick busybox, but different" for inspecting and controlling the machine
 //! while it is still at the bootstrap floor. The boot path draws a brief
 //! `[Press ESC for supervisor]` window; pressing `ESC` there (or at the
@@ -92,9 +92,9 @@ pub enum SupervisorExit {
     /// console) carries [`BootSession::Unset`], leaving the stored default in
     /// charge. The boot path records it for the `boot_session_get` syscall.
     ContinueBoot(BootSession),
-    /// The operator mounted the root from inside the Supervisor (a real,
-    /// passphrase-checked unlock). The boot path continues **without** a
-    /// second passphrase prompt.
+    /// The operator mounted the root from inside the Supervisor (a real
+    /// mount, passphrase-checked when the root is encrypted). The boot path
+    /// continues **without** a second prompt.
     Mounted,
 }
 
@@ -110,16 +110,26 @@ pub enum TestOutcome {
     Aborted,
 }
 
+/// How the root volume the host would mount is locked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RootLock {
+    /// A plaintext root, mounted with no passphrase.
+    Plaintext,
+    /// An encrypted root, unlocked by a passphrase.
+    Passphrase,
+}
+
 /// The result of a Supervisor `mount` attempt.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MountOutcome {
-    /// The typed passphrase unlocked the root and it is now mounted.
+    /// The root is mounted.
     Mounted,
     /// The passphrase was wrong (the master key never unwrapped). No oracle:
     /// exactly like the normal unlock's wrong-passphrase path.
     WrongPassphrase,
     /// A structural failure the disk itself cannot satisfy (no table, no
-    /// partition, an unreadable/invalid descriptor). Retrying cannot help.
+    /// partition, an unreadable, invalid or contradicted descriptor).
+    /// Retrying cannot help.
     Failed,
 }
 
@@ -303,11 +313,16 @@ pub trait SupervisorHost {
         abort: &mut dyn FnMut() -> bool,
     ) -> TestOutcome;
 
-    /// Attempt the **real** root unlock under `passphrase` (no oracle, no
-    /// fail-open), rendering the outcome. The engine reads the passphrase
-    /// into a zeroized buffer and passes it here; the buffer is wiped by the
-    /// caller after this returns.
-    fn mount(&mut self, passphrase: &[u8], out: &mut dyn Report) -> MountOutcome;
+    /// How the root volume is locked, or `None` when the disk cannot say —
+    /// [`Self::mount`] then reports why.
+    fn root_lock(&mut self) -> Option<RootLock>;
+
+    /// Attempt the **real** root mount (no oracle, no fail-open), rendering
+    /// the outcome: an encrypted root under `passphrase`, a plaintext one with
+    /// `None`. A root not locked as the call assumes is refused, never
+    /// mounted. The engine reads a passphrase into a zeroized buffer and
+    /// passes it here; the buffer is wiped by the caller after this returns.
+    fn mount(&mut self, passphrase: Option<&[u8]>, out: &mut dyn Report) -> MountOutcome;
 
     /// Reset the machine. On success this never returns; if it returns, the
     /// platform could not reboot and the engine reports the failure.

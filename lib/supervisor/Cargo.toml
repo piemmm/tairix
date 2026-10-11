@@ -22,6 +22,10 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 
+# The volatile erase applied to the `mount` passphrase buffer: a plain
+# `fill(0)` after its last read is a dead store an optimiser may delete.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
 [dev-dependencies]
 # The fuzz harness draws its inputs through the shared seed/budget
 # seam; the REPL line/command parser consumes untrusted console bytes.

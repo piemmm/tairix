@@ -264,16 +264,19 @@ impl Theme {
     /// The same theme drawn on `axes`.
     ///
     /// The one place the desktop's accessibility axes are laid over a
-    /// theme: the contrast and the motion policy are carried as they are,
-    /// and the density is applied by deriving this theme's own metric table
-    /// at that density ([`Metrics::at_density`]) rather than swapping in a
-    /// second table. A custom theme therefore gets the same treatment as a
+    /// theme: the motion policy is carried as it is, and the density and the
+    /// contrast are applied by deriving this theme's own metric table at them
+    /// ([`Metrics::at_density`], [`Metrics::at_contrast`]) rather than
+    /// swapping in a second table. A custom theme therefore gets the same treatment as a
     /// built-in with no work of its own, and nothing anywhere else has to
     /// know how an axis reaches the pixels.
     #[must_use]
     pub fn with_axes(self, axes: Accessibility) -> Self {
         Self {
-            metrics: self.metrics.at_density(axes.density),
+            metrics: self
+                .metrics
+                .at_density(axes.density)
+                .at_contrast(axes.contrast),
             motion: self.motion.with_reduced_motion(axes.motion.is_reduced()),
             density: axes.density,
             contrast: axes.contrast,
@@ -532,9 +535,9 @@ fn common_metrics() -> Metrics {
         border_thickness: 1,
         scrollbar_breadth: 14,
         min_thumb_length: 24,
-        control_height: 28,
-        control_inset: 10,
-        control_gap: 8,
+        control_height: 24,
+        control_inset: 9,
+        control_gap: 7,
         control_corner_radius: 6,
         selection_backdrop_blur: 6,
         seam_thickness: 2,

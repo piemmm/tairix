@@ -30,11 +30,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
-
-/// Volume key the suite formats its arxfs test volume with. `ARXFS` is
-/// encrypted-by-default (`docs/src/filesystem/arxfs-spec.md` §5).
-const SUITE_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 
 /// Deterministic stand-in for the platform RNG seam: a byte counter that gives
 /// `ARXFS::format` distinct, reproducible key material and UUID. Test
@@ -206,8 +202,8 @@ pub fn cred_with_groups<'a>(
 }
 
 /// Build a default-layout [`Vfs`] (owner `(ROOT_UID, ROOT_GID)`) with a
-/// freshly formatted `arxfs` volume mounted at [`MOUNT`], and return both
-/// the VFS and the live driver.
+/// freshly formatted plaintext `arxfs` volume — a shipped root's protection —
+/// mounted at [`MOUNT`], and return both the VFS and the live driver.
 ///
 /// The mount carries [`MountFlags::READ_ONLY`] when `read_only` is set, so
 /// the suite can exercise the read-only-mount refusal on a backed
@@ -223,7 +219,7 @@ pub fn arxfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
     let fs = ARXFS::format(
         VecBlock::new(TOTAL_SECTORS),
         INODE_COUNT,
-        &SUITE_KEY,
+        Keying::Plaintext,
         &mut SuiteEntropy { next: 1 },
     )
     .expect("format the fixed-geometry arxfs test volume");
@@ -265,7 +261,7 @@ pub fn remount(fs: LiveFs) -> LiveFs {
     let block = fs
         .into_block()
         .expect("the volume closes before it is remounted");
-    ARXFS::open(block, &SUITE_KEY).expect("re-open the volume just written")
+    ARXFS::open(block, Keying::Plaintext).expect("re-open the volume just written")
 }
 
 /// A default-layout [`Vfs`] (owner `(ROOT_UID, ROOT_GID)`) with no driver

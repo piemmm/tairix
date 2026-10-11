@@ -119,7 +119,7 @@ where
     /// mounted volume, **appending** its bytes to `buf`.
     ///
     /// The device manager needs `network.conf` / `system.conf` before the
-    /// encrypted root is unlocked — while the general VFS path is not yet
+    /// root is mounted — while the general VFS path is not yet
     /// mounted — but this always-mounted read-only `/System` service can
     /// reach them. The read is confined strictly below
     /// [`SYSTEM_VOLUME_SETTINGS_PATH`] and runs under the same bootstrap

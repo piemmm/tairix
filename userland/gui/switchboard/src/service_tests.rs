@@ -4,8 +4,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::net_ipc::{NetInterfaceStateRecord, NET_IF_MAX_ADDRS};
 use tairix_abi::switchboard_ipc::{
-    CommandSection, FrameReport, OwnerBundleDir, SeatReport, SwitchboardCommand,
+    CommandSection, FrameReport, NetworkReport, OwnerBundleDir, SeatReport, SwitchboardCommand,
 };
 use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
 use tairix_abi::{Errno, PowerAction, ProcId};
@@ -15,8 +16,8 @@ use crate::model::TASK_HISTORY_LEN;
 use crate::publish::KEEPALIVE_NS;
 use crate::sample::{DegradedField, ScopeVerdicts};
 use crate::test_host::{
-    process_record, DeadTransport, ProcessListTransport, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
-    PROC_CONTROL_AUTHORITY, SYSTEM_POWER_AUTHORITY,
+    if_name, process_record, DeadTransport, NetStateTransport, ProcessListTransport, RecordingHost,
+    DEFAULT_UID, NO_AUTHORITY, PROC_CONTROL_AUTHORITY, SYSTEM_POWER_AUTHORITY,
 };
 use crate::view::Section;
 use crate::wait::required_members;
@@ -105,6 +106,89 @@ fn an_unchanged_summary_is_only_re_published_on_the_keepalive() {
 
     cycle(&mut service, &mut host, KEEPALIVE_NS);
     assert_eq!(host.published.len(), 2);
+}
+
+/// The network report goes to the session once and again only when it
+/// changes: not on every sample, and not for an edge that reads the same.
+#[test]
+fn the_network_report_is_published_once_until_it_changes() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    cycle(&mut service, &mut host, 0);
+    assert_eq!(
+        host.networks,
+        [NetworkReport::UNMEASURED],
+        "an instance that may not read the interfaces says so once"
+    );
+    cycle(&mut service, &mut host, KEEPALIVE_NS);
+    service.network_moved(&mut host, &DeadTransport, &NO_AUTHORITY);
+    assert_eq!(host.networks.len(), 1);
+}
+
+#[test]
+fn a_network_report_held_back_by_back_pressure_is_offered_again_next_sample() {
+    let mut host = RecordingHost::new();
+    host.network_refusal = Some(Errno::WouldBlock);
+    let mut service = service();
+    cycle(&mut service, &mut host, 0);
+    assert_eq!(
+        host.networks.len(),
+        1,
+        "offered, and the session could not take it"
+    );
+    host.network_refusal = None;
+    cycle(&mut service, &mut host, KEEPALIVE_NS);
+    assert_eq!(host.networks, [NetworkReport::UNMEASURED; 2]);
+    cycle(&mut service, &mut host, 2 * KEEPALIVE_NS);
+    assert_eq!(host.networks.len(), 2, "and never again once it is taken");
+}
+
+/// A report the session refused is not one it holds: it is stated once and
+/// offered again at every sample until the session takes it.
+#[test]
+fn a_refused_network_report_is_stated_once_and_offered_until_taken() {
+    let mut host = RecordingHost::new();
+    host.network_refusal = Some(Errno::TimedOut);
+    let mut service = service();
+    cycle(&mut service, &mut host, 0);
+    cycle(&mut service, &mut host, KEEPALIVE_NS);
+    assert_eq!(host.networks.len(), 2, "still pending after the refusal");
+    let stated = |host: &RecordingHost| {
+        host.refusals
+            .iter()
+            .filter(|(action, _)| action == "publish the network report")
+            .count()
+    };
+    assert_eq!(stated(&host), 1, "a refusal is stated once");
+
+    host.network_refusal = None;
+    cycle(&mut service, &mut host, 2 * KEEPALIVE_NS);
+    assert_eq!(host.networks.len(), 3);
+    cycle(&mut service, &mut host, 3 * KEEPALIVE_NS);
+    assert_eq!(host.networks.len(), 3, "taken, so never again");
+    assert_eq!(stated(&host), 1);
+}
+
+/// A notice whose interfaces read differently is a new report for the
+/// session.
+#[test]
+fn a_changed_network_report_is_published_again() {
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
+    cycle(&mut service, &mut host, 0);
+    assert_eq!(host.networks, [NetworkReport::UNMEASURED]);
+    let one = NetStateTransport(alloc::vec![NetInterfaceStateRecord {
+        name: if_name(b"eth0"),
+        link_up: true,
+        addr_count: 0,
+        addrs: [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS],
+    }]);
+    service.network_moved(&mut host, &one, &NO_AUTHORITY);
+    assert_eq!(host.networks.len(), 2);
+    assert!(host.networks[1].is_measured());
+    assert_eq!(host.networks[1].interfaces().count(), 1);
+    service.network_moved(&mut host, &one, &NO_AUTHORITY);
+    assert_eq!(host.networks.len(), 2, "the same interfaces again");
 }
 
 #[test]

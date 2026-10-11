@@ -35,7 +35,7 @@
 //! summary and the few pages that carry used bits, never a bitmap page per
 //! terabyte.
 //!
-//! Every region block is sealed with the ordinary keyed block header, so a
+//! Every region block is sealed with the ordinary block header, so a
 //! torn, stale, misdirected, or bit-rotted page is detected and turned into a
 //! rebuild rather than silently trusted. The region is deliberately **not**
 //! mirrored: a second copy would only protect state the authoritative trees

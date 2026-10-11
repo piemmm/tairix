@@ -449,10 +449,12 @@ typedef struct tairix_lock_conflict {
 * outside the set, or a length that is not the topic's own, is rejected with
 * TAIRIX_E_OUT_OF_RANGE / TAIRIX_E_LENGTH_OUT_OF_RANGE. Publishing is
 * authorised per topic: the desktop topic admits only the holder of a seat's
-* live display lease, and every kernel-owned topic admits nobody. */
-#define TAIRIX_NOTICE_PAYLOAD_MAX 46u
+* live display lease, the audio topics only the process bound to the audio
+* service's endpoint, the network topic only the one bound to the network
+* stack's, and every kernel-owned topic admits nobody. */
+#define TAIRIX_NOTICE_PAYLOAD_MAX 54u
 #define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 46u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 54u
 #define TAIRIX_NOTICE_TOPIC_MOUNTS 1u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_MOUNTS 0u
 #define TAIRIX_NOTICE_TOPIC_MEMORY_PRESSURE 2u
@@ -463,6 +465,8 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_NOTICE_PAYLOAD_LEN_AUDIO_CAPTURE 4u
 #define TAIRIX_NOTICE_TOPIC_AUDIO_DEVICES 5u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_AUDIO_DEVICES 8u
+#define TAIRIX_NOTICE_TOPIC_NETWORK 6u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_NETWORK 8u
 
 /* latency_watch() — declare the calling thread's interactive frame budget in
 * nanoseconds. Returns the budget actually armed: the value clamped up to

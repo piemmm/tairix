@@ -104,6 +104,14 @@ pub enum NoticeTopic {
     /// the process the kernel attests bound the reserved audio rendezvous,
     /// and readable by any process, as the devices themselves are.
     AudioDevices = 5,
+    /// The machine's network interfaces moved: one appeared or went, its link
+    /// changed, or its addresses or an address's state did. The payload is the
+    /// network stack's own count of such changes, as a `u64`. Published by the
+    /// network stack alone, the process the kernel attests bound the reserved
+    /// stack rendezvous, and readable by any process: it says only that
+    /// something moved, and what moved is read under the reader's own
+    /// authority.
+    Network = 6,
 }
 
 impl NoticeTopic {
@@ -127,6 +135,7 @@ impl NoticeTopic {
             3 => Ok(Self::DisplayLease),
             4 => Ok(Self::AudioCapture),
             5 => Ok(Self::AudioDevices),
+            6 => Ok(Self::Network),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -157,18 +166,19 @@ impl NoticeTopic {
             Self::MemoryPressure => 1,
             Self::DisplayLease => DisplayLease::WIRE_LEN,
             Self::AudioCapture => 4,
-            Self::AudioDevices => 8,
+            Self::AudioDevices | Self::Network => 8,
         }
     }
 
     /// Every topic, for a caller that must cover them all.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Desktop,
         Self::Mounts,
         Self::MemoryPressure,
         Self::DisplayLease,
         Self::AudioCapture,
         Self::AudioDevices,
+        Self::Network,
     ];
 }
 
@@ -201,6 +211,12 @@ pub enum Notice {
         /// The audio service's count of changes so far.
         changes: u64,
     },
+    /// [`NoticeTopic::Network`]: the interfaces moved; read them to learn
+    /// how.
+    Network {
+        /// The network stack's count of changes so far.
+        changes: u64,
+    },
 }
 
 impl Notice {
@@ -214,6 +230,35 @@ impl Notice {
             Self::DisplayLease(_) => NoticeTopic::DisplayLease,
             Self::AudioCapture { .. } => NoticeTopic::AudioCapture,
             Self::AudioDevices { .. } => NoticeTopic::AudioDevices,
+            Self::Network { .. } => NoticeTopic::Network,
+        }
+    }
+
+    /// A counted `topic`'s payload carrying `changes`, or `None` for a topic
+    /// whose payload is not a count.
+    #[must_use]
+    pub const fn counted(topic: NoticeTopic, changes: u64) -> Option<Self> {
+        match topic {
+            NoticeTopic::AudioDevices => Some(Self::AudioDevices { changes }),
+            NoticeTopic::Network => Some(Self::Network { changes }),
+            NoticeTopic::Desktop
+            | NoticeTopic::Mounts
+            | NoticeTopic::MemoryPressure
+            | NoticeTopic::DisplayLease
+            | NoticeTopic::AudioCapture => None,
+        }
+    }
+
+    /// The count a counted payload carries.
+    #[must_use]
+    pub const fn changes(&self) -> Option<u64> {
+        match self {
+            Self::AudioDevices { changes } | Self::Network { changes } => Some(*changes),
+            Self::Desktop(_)
+            | Self::Mounts
+            | Self::MemoryPressure { .. }
+            | Self::DisplayLease(_)
+            | Self::AudioCapture { .. } => None,
         }
     }
 
@@ -240,6 +285,9 @@ impl Notice {
             NoticeTopic::AudioDevices => Ok(Self::AudioDevices {
                 changes: read_u64(bytes, 0),
             }),
+            NoticeTopic::Network => Ok(Self::Network {
+                changes: read_u64(bytes, 0),
+            }),
         }
     }
 
@@ -260,7 +308,9 @@ impl Notice {
             Self::MemoryPressure { band } => slot[0] = *band,
             Self::DisplayLease(lease) => slot.copy_from_slice(&lease.to_le_bytes()),
             Self::AudioCapture { live } => slot.copy_from_slice(&live.to_le_bytes()),
-            Self::AudioDevices { changes } => slot.copy_from_slice(&changes.to_le_bytes()),
+            Self::AudioDevices { changes } | Self::Network { changes } => {
+                slot.copy_from_slice(&changes.to_le_bytes());
+            }
         }
         Ok(len)
     }
@@ -288,11 +338,12 @@ mod tests {
         assert_eq!(NoticeTopic::DisplayLease.as_u32(), 3);
         assert_eq!(NoticeTopic::AudioCapture.as_u32(), 4);
         assert_eq!(NoticeTopic::AudioDevices.as_u32(), 5);
+        assert_eq!(NoticeTopic::Network.as_u32(), 6);
         for topic in NoticeTopic::ALL {
             assert_eq!(NoticeTopic::from_u32(topic.as_u32()), Ok(topic));
             assert_eq!(NoticeTopic::from_u64(u64::from(topic.as_u32())), Ok(topic));
         }
-        assert_eq!(NoticeTopic::from_u32(6), Err(Errno::OutOfRange));
+        assert_eq!(NoticeTopic::from_u32(7), Err(Errno::OutOfRange));
         assert_eq!(NoticeTopic::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -320,6 +371,7 @@ mod tests {
             Notice::DisplayLease(DisplayLease::held(4, ProcId::from_raw([0x51; 16]))),
             Notice::AudioCapture { live: 2 },
             Notice::AudioDevices { changes: 9 },
+            Notice::Network { changes: 11 },
         ] {
             let mut buf = [0xAAu8; NOTICE_PAYLOAD_MAX];
             let topic = notice.topic();
@@ -329,6 +381,21 @@ mod tests {
             // Nothing beyond the payload is touched.
             assert!(buf[len..].iter().all(|&b| b == 0xAA), "{topic:?}");
         }
+    }
+
+    #[test]
+    fn only_the_counted_topics_carry_a_count() {
+        for topic in NoticeTopic::ALL {
+            let counted = Notice::counted(topic, 7);
+            let is_counted = matches!(topic, NoticeTopic::AudioDevices | NoticeTopic::Network);
+            assert_eq!(counted.is_some(), is_counted, "{topic:?}");
+            if let Some(notice) = counted {
+                assert_eq!(notice.topic(), topic);
+                assert_eq!(notice.changes(), Some(7));
+            }
+        }
+        assert_eq!(Notice::Mounts.changes(), None);
+        assert_eq!(Notice::AudioCapture { live: 2 }.changes(), None);
     }
 
     #[test]

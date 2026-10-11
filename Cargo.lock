@@ -142,6 +142,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -274,6 +275,7 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -627,6 +629,7 @@ checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
  "cpufeatures",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -1484,6 +1487,7 @@ dependencies = [
  "tairix-inline",
  "tairix-keymap",
  "tairix-log",
+ "tairix-netconfig",
  "tairix-parallel",
  "tairix-path",
  "tairix-procinfo",
@@ -1732,6 +1736,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
+ "tairix-log",
  "tairix-rt",
  "tairix-vcmailbox",
 ]
@@ -3770,6 +3775,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -3915,6 +3921,7 @@ dependencies = [
  "tairix-icon",
  "tairix-input",
  "tairix-log",
+ "tairix-procinfo",
  "tairix-proglib",
  "tairix-raster",
  "tairix-reclaim",
@@ -7595,6 +7602,7 @@ name = "tairix-vcmailbox"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
 ]
 
 [[package]]

@@ -12,8 +12,8 @@
 //!   each screendump on the desktop session's own announcements: the system
 //!   menu drawn, the Settings window's first frame on screen, each pane's
 //!   frame on screen (the window wears the pane's title, and the session
-//!   announces the frame that carries a new title), and the desktop redrawn in
-//!   the appearance chosen.
+//!   announces the frame that carries a new title), the desktop redrawn in
+//!   the appearance chosen, and drawn whole at the resolution chosen.
 //! - The **guest** kernel's audit sink sees kernel audit records only, so it
 //!   gates on those: the bundle a load names, the window channel's create
 //!   reply, and each commit of the desktop's published settings document,
@@ -43,12 +43,11 @@ include!(concat!(env!("OUT_DIR"), "/contract.rs"));
 /// renamed over the live one.
 pub const RENAME_OP: &str = "rename";
 
-/// How many times the script changes the desktop's look through the Settings
-/// Appearance pane: its appearance to the one it did not boot in, then its
-/// density to compact.
-/// Each is one commit of the published document, and reaching this many is
-/// the guest's PASS.
-pub const APPEARANCE_CHANGES: u32 = 2;
+/// How many changes the script makes to the desktop's settings through
+/// Settings: its appearance to the one it did not boot in, a smaller
+/// resolution kept, then its density to compact. Each is one commit of the
+/// published document, and reaching this many is the guest's PASS.
+pub const DESKTOP_CHANGES: u32 = 3;
 
 /// Whether `path` is the desktop session's own published settings document:
 /// `…/<the desktop's publisher>/<the published file>`.

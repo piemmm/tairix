@@ -57,6 +57,8 @@ pub struct TaskbarRepaint {
     pub readout: Repaint,
     /// The volume panel.
     pub sound: Repaint,
+    /// The network signal's readout.
+    pub network: Repaint,
 }
 
 impl TaskbarRepaint {
@@ -68,6 +70,7 @@ impl TaskbarRepaint {
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
         sound: Repaint::clean(),
+        network: Repaint::clean(),
     };
 
     /// The whole bar strip.
@@ -78,6 +81,7 @@ impl TaskbarRepaint {
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
         sound: Repaint::clean(),
+        network: Repaint::clean(),
     };
 
     /// The whole program-library popup.
@@ -88,6 +92,7 @@ impl TaskbarRepaint {
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
         sound: Repaint::clean(),
+        network: Repaint::clean(),
     };
 
     /// The whole window picker.
@@ -98,6 +103,7 @@ impl TaskbarRepaint {
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
         sound: Repaint::clean(),
+        network: Repaint::clean(),
     };
 
     /// The whole notification popover.
@@ -108,6 +114,7 @@ impl TaskbarRepaint {
         notifications: Repaint::Whole,
         readout: Repaint::clean(),
         sound: Repaint::clean(),
+        network: Repaint::clean(),
     };
 
     /// The whole expanded readout.
@@ -118,6 +125,7 @@ impl TaskbarRepaint {
         notifications: Repaint::clean(),
         readout: Repaint::Whole,
         sound: Repaint::clean(),
+        network: Repaint::clean(),
     };
 
     /// The whole volume panel.
@@ -128,6 +136,18 @@ impl TaskbarRepaint {
         notifications: Repaint::clean(),
         readout: Repaint::clean(),
         sound: Repaint::Whole,
+        network: Repaint::clean(),
+    };
+
+    /// The whole network readout.
+    pub const NETWORK: Self = Self {
+        bar: Repaint::clean(),
+        library: Repaint::clean(),
+        picker: Repaint::clean(),
+        notifications: Repaint::clean(),
+        readout: Repaint::clean(),
+        sound: Repaint::clean(),
+        network: Repaint::Whole,
     };
 
     /// Every surface, whole — a theme, scale, or edge change alters the
@@ -139,6 +159,7 @@ impl TaskbarRepaint {
         notifications: Repaint::Whole,
         readout: Repaint::Whole,
         sound: Repaint::Whole,
+        network: Repaint::Whole,
     };
 
     /// Whether any surface owes anything.
@@ -149,7 +170,8 @@ impl TaskbarRepaint {
             && self.picker.is_clean()
             && self.notifications.is_clean()
             && self.readout.is_clean()
-            && self.sound.is_clean())
+            && self.sound.is_clean()
+            && self.network.is_clean())
     }
 }
 
@@ -170,5 +192,6 @@ impl BitOrAssign for TaskbarRepaint {
         self.notifications.merge(rhs.notifications);
         self.readout.merge(rhs.readout);
         self.sound.merge(rhs.sound);
+        self.network.merge(rhs.network);
     }
 }

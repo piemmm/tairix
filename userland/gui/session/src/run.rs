@@ -135,32 +135,37 @@ mod program {
         serve_pinboard_apply, serve_switchboard_request, size_state_name, tool_move_event,
         window_control_alternate_event, window_control_event, Acquisition, AidPolicy, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
-        BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
-        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
-        DocumentRelay, DragEnd, DragPlace, DragSurface, ElevatePrompt, Elevator, FrameContent,
-        FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack,
-        IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource,
-        Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed,
-        LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport, OwnerBundleGate, OwnerWindow,
-        PickAccess, PickEnd, PickStep, Prepared, PresentedOwners, PreviewBudget, PreviewDone,
-        PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Routed,
-        SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
-        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
-        WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
-        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
-        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop,
+        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface, ElevatePrompt, Elevator,
+        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
+        HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
+        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport,
+        OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied,
+        PinboardApplyRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob,
+        PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, ResizedRecord, ResolutionAsk,
+        ResolutionPrompt, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
+        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd, TrialOutcome,
+        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESIZED,
+        DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
         LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+        SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN,
+        TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
         WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
-    use tairix_desktop_session::{preview_source, ScreensaverPreview, ScreensaverServe};
+    use tairix_desktop_session::{
+        preview_source, resolution_ask, ScreensaverPreview, ScreensaverServe,
+    };
     use tairix_display::{
         DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper, SwitchedOff,
     };
@@ -188,8 +193,8 @@ mod program {
     };
     use tairix_theme::Accessibility;
     use tairix_wallpaper::{
-        CpuUse, DesktopSettings, RaytraceOptions, ScreensaverKind, MAX_WALLPAPER_BYTES,
-        WALLPAPER_STORE,
+        merge_applied, CpuUse, DesktopSettings, RaytraceOptions, Resolution, ScreensaverKind,
+        MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
     };
     use tairix_window::{
         app, Activation, CallerIdentity, ClientRegion, DragConclusion, DragReport, EventSink,
@@ -797,10 +802,13 @@ mod program {
     /// drag, dropped on nothing, rather than carried on past the unlock. A lock
     /// that could not be put up says so rather than leaving the user believing
     /// the screen is secured.
-    #[allow(clippy::too_many_arguments)] // Everything a lock takes down, threaded explicitly.
     fn lock_screen(
         lock: &mut ScreenLock,
-        (confirm, elevate): (&mut ConfirmPrompt, &mut ElevatePrompt),
+        (confirm, elevate, resolution): (
+            &mut ConfirmPrompt,
+            &mut ElevatePrompt,
+            &mut ResolutionPrompt,
+        ),
         named: (&str, &str),
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -809,6 +817,7 @@ mod program {
     ) {
         confirm.abandon(shell, compositor);
         elevate.abandon(shell, compositor);
+        resolution.abandon(shell, compositor);
         if let Some(ended) = shell.end_drag(compositor, false) {
             // A source whose port has gone is torn down by its next delivery.
             let _ = server.conclude_drag(sink, ended.source, ended.ended);
@@ -1140,6 +1149,13 @@ mod program {
                 value: LogFieldValue::Str(appearance.as_str()),
             };
             log_info(DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, &[field]);
+        });
+        shell.report_resized(fade.revealed(), compositor.screen_rect(), |screen| {
+            let record = ResizedRecord {
+                width: screen.width,
+                height: screen.height,
+            };
+            log_info(DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, &record.fields());
         });
         apps.report_newly_shown(|owner| {
             let mut hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
@@ -1570,8 +1586,206 @@ mod program {
     /// One definition, read by the first bring-up and by a resume onto a
     /// screen the next account re-moded, so the bar cannot come back laid
     /// out differently from how it started.
-    fn bar_config(mode: &DisplayMode) -> TaskbarConfig {
-        TaskbarConfig::bottom_bar(mode.width_px, mode.height_px)
+    fn bar_config(screen: Rect) -> TaskbarConfig {
+        TaskbarConfig::bottom_bar(screen.width, screen.height)
+    }
+
+    /// Lay the bar, the backdrop and its icons out over the screen the
+    /// compositor now draws, and put them on it.
+    fn lay_out_screen<S: DirectorySource>(
+        compositor: &mut Compositor,
+        shell: &mut DesktopShell,
+        desktop: &mut Desktop<S>,
+        pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
+    ) {
+        shell.set_output_layout(bar_config(compositor.screen_rect()), compositor);
+        prepare_wallpaper(
+            pinboard,
+            wallpapers,
+            shell,
+            desktop,
+            compositor,
+            tairix_rt::clock_get(),
+        );
+        // The new work area may show icons the old one did not; the whole
+        // layer is presented next, so no cell needs marking.
+        let shown = shell.desktop_layout(compositor, desktop);
+        desktop.resolve_occupancy(&shown, &mut Region::new());
+        shell.present_desktop(compositor, desktop);
+    }
+
+    /// Everything a change to the desktop's size re-lays.
+    struct Resize<'a, S: DirectorySource, C, T> {
+        compositor: &'a mut Compositor,
+        shell: &'a mut DesktopShell,
+        desktop: &'a mut Desktop<S>,
+        pinboard: &'a mut PinboardPanel,
+        wallpapers: &'a Wallpapers,
+        windows: &'a mut SessionWindows,
+        menu: &'a mut MenuChain,
+        pointer: &'a mut DeviceInputSource<C, T>,
+    }
+
+    /// Say that the desktop could not be drawn at `size`, so the one before it
+    /// stands.
+    fn report_undrawable(size: (u32, u32)) {
+        app::report(
+            APP_NAME,
+            format_args!("the desktop could not be drawn at {}x{}", size.0, size.1),
+        );
+    }
+
+    /// What drawing the desktop at a size came to.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Resized {
+        /// Drawn at the new size; the windows are owed what changed.
+        Changed,
+        /// Already drawn at it.
+        Unchanged,
+        /// The size could not be drawn, and the one before it stands.
+        Refused,
+    }
+
+    /// Draw the desktop at `size` on its output: the screen re-laid, the
+    /// windows fitted onto it, any menu or tip taken down, the pointer held on
+    /// it, and every application told. The caller delivers what the windows
+    /// are owed. Never called while the screen is locked or a screensaver is
+    /// up, whose surfaces cover the size they were drawn at.
+    fn resize_desktop<S: DirectorySource, C, T>(
+        size: (u32, u32),
+        parts: &mut Resize<'_, S, C, T>,
+    ) -> Resized {
+        let before = parts.compositor.screen_rect();
+        if !parts.compositor.set_desktop_size(size.0, size.1) {
+            report_undrawable(size);
+            return Resized::Refused;
+        }
+        let screen = parts.compositor.screen_rect();
+        if screen == before {
+            return Resized::Unchanged;
+        }
+        lay_out_screen(
+            parts.compositor,
+            parts.shell,
+            parts.desktop,
+            parts.pinboard,
+            parts.wallpapers,
+        );
+        let work_area = parts.shell.work_area(parts.compositor);
+        parts.windows.refit(parts.compositor, work_area);
+        if parts.menu.dismiss() {
+            present_menu_chain(parts.menu, parts.shell, parts.compositor, parts.windows);
+        }
+        if parts.shell.dismiss_tooltip() {
+            let _ = parts.shell.present_tooltip(parts.compositor);
+        }
+        if let Ok(at) = parts.pointer.set_screen(screen, parts.compositor.scale()) {
+            parts.shell.track_pointer(at, parts.compositor);
+        }
+        publish_desktop(parts.compositor);
+        parts.shell.note_resized();
+        Resized::Changed
+    }
+
+    /// A pinboard call asking for a resolution other than the one drawn: the
+    /// size it asks for, and the trial that holds the call.
+    struct TrialAsk {
+        size: (u32, u32),
+        trial: Trial,
+    }
+
+    /// Draw the size `ask` names and put it to the user. One that cannot be
+    /// drawn is refused at once, and one that cannot be asked is answered
+    /// declined; the resolution in force is drawn again either way by the
+    /// convergence that follows.
+    fn begin_trial<S: DirectorySource, C, T>(
+        ask: TrialAsk,
+        prompt: &mut ResolutionPrompt,
+        parts: &mut Resize<'_, S, C, T>,
+    ) -> Option<TrialPlacements> {
+        let TrialAsk { size, trial } = ask;
+        let before = parts.compositor.placements();
+        if resize_desktop(size, parts) == Resized::Refused {
+            reply_pinboard(trial.ticket, Err(Errno::OutOfMemory));
+            return None;
+        }
+        let placements = TrialPlacements {
+            before,
+            after: parts.compositor.placements(),
+        };
+        match prompt.ask(trial, tairix_rt::clock_get(), parts.shell, parts.compositor) {
+            Ok(()) => log_info(TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, &[]),
+            Err(trial) => {
+                io::write_stderr_line(
+                    "desktop: the new resolution could not be put to you, so it was not kept",
+                );
+                reply_pinboard(trial.ticket, Err(Errno::Declined));
+            }
+        }
+        Some(placements)
+    }
+
+    /// Where the windows sat before a trial's size was drawn and where its
+    /// refit left them, so a reverted trial puts back what the refit moved.
+    struct TrialPlacements {
+        before: Vec<tairix_wm::Placement>,
+        after: Vec<tairix_wm::Placement>,
+    }
+
+    /// Put a trial's end into effect. A kept resolution's request is merged
+    /// over the settings in force and persisted, its call answered once the
+    /// store has spoken and the size held on screen until then; a reverted
+    /// one's call is answered declined.
+    fn conclude_trial<S: DirectorySource>(
+        end: TrialEnd,
+        publisher: &Publisher,
+        pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        match end {
+            TrialEnd::Reverted(trial) => {
+                reply_pinboard(trial.ticket, Err(Errno::Declined));
+                log_info(
+                    TRIAL_CONCLUDED,
+                    TRIAL_CONCLUDED_MESSAGE,
+                    &TrialOutcome::Reverted.fields(),
+                );
+            }
+            TrialEnd::Kept(trial) => {
+                match merge_applied(&publisher.base(desktop.settings()), &trial.request) {
+                    Ok(settings) => {
+                        publisher.keep(trial.ticket);
+                        if request_pinboard_settings(
+                            settings,
+                            publisher,
+                            Some(trial.ticket),
+                            pinboard,
+                            wallpapers,
+                            desktop,
+                            shell,
+                            compositor,
+                            tairix_rt::clock_get(),
+                        ) {
+                            shell.present_desktop(compositor, desktop);
+                        }
+                    }
+                    Err(refusal) => {
+                        let refusal = PinboardApplyRefusal::Undecodable(refusal);
+                        app::report(APP_NAME, format_args!("{}", refusal.reason()));
+                        reply_pinboard(trial.ticket, Err(refusal.errno()));
+                        log_info(
+                            TRIAL_CONCLUDED,
+                            TRIAL_CONCLUDED_MESSAGE,
+                            &TrialOutcome::Refused.fields(),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Create the shared frame region for `mode`, grant it to the display
@@ -1672,6 +1886,7 @@ mod program {
         desktop: &'a mut Desktop<S>,
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
+        windows: &'a mut SessionWindows,
         fade: &'a mut ScreenFade,
         set: u64,
     }
@@ -1745,22 +1960,30 @@ mod program {
             if !self.compositor.set_mode(mode) {
                 return Err(Errno::NotSupported);
             }
-            self.shell
-                .set_output_layout(bar_config(&mode), self.compositor);
-            prepare_wallpaper(
-                self.pinboard,
-                self.wallpapers,
+            // The resolution the user chose, where this output offers it, is
+            // drawn before the first frame rather than corrected after it.
+            let size = self
+                .desktop
+                .settings()
+                .resolution
+                .on((mode.width_px, mode.height_px));
+            if !self.compositor.set_desktop_size(size.0, size.1) {
+                report_undrawable(size);
+            }
+            lay_out_screen(
+                self.compositor,
                 self.shell,
                 self.desktop,
-                self.compositor,
-                tairix_rt::clock_get(),
+                self.pinboard,
+                self.wallpapers,
             );
-            // The new work area may show icons the old one did not; the whole
-            // layer is presented next, so no cell needs marking.
-            let shown = self.shell.desktop_layout(self.compositor, self.desktop);
-            self.desktop.resolve_occupancy(&shown, &mut Region::new());
-            self.shell.present_desktop(self.compositor, self.desktop);
+            let work_area = self.shell.work_area(self.compositor);
+            self.windows.refit(self.compositor, work_area);
             Ok(())
+        }
+
+        fn publish_desktop(&mut self) {
+            publish_desktop(self.compositor);
         }
 
         fn repaint_all(&mut self, _mode: DisplayMode) -> Result<(), Errno> {
@@ -1843,7 +2066,7 @@ mod program {
         // bring-up with no cached cursor, glyph, or icon artwork.
         let _ = tairix_procinfo::pressure::refresh();
         let mut shell = DesktopShell::new(
-            bar_config(&mode),
+            bar_config(Rect::new(0, 0, mode.width_px, mode.height_px)),
             SEAT_PRIMARY,
             frame_len,
             tairix_rt::pressure::gauge(),
@@ -2146,6 +2369,28 @@ mod program {
         // the user's own sort order and icon arrangement rather than
         // re-sorting a frame later.
         let mut pinboard = load_pinboard(&mut desktop, &mut shell, &mut compositor, sandbox);
+        // The resolution the user chose is drawn from the first frame, where
+        // this output offers it; nothing is on the screen yet to re-lay.
+        let output = (mode.width_px, mode.height_px);
+        let size = desktop.settings().resolution.on(output);
+        if size != output {
+            if compositor.set_desktop_size(size.0, size.1) {
+                shell.set_output_layout(bar_config(compositor.screen_rect()), &mut compositor);
+                if let Ok(at) = pointer.set_screen(compositor.screen_rect(), compositor.scale()) {
+                    shell.track_pointer(at, &mut compositor);
+                }
+            } else {
+                report_undrawable(size);
+            }
+        }
+        // What the live size was last brought to, so the loop re-lays the
+        // screen only when the resolution or the output it is drawn on moved.
+        let mut sized_for: Option<(Resolution, (u32, u32))> =
+            Some((desktop.settings().resolution, output));
+        // Where the windows sat around the open trial's resize, and those of a
+        // reverted trial, put back once its convergence has redrawn the size.
+        let mut trial_placements: Option<TrialPlacements> = None;
+        let mut owed_placements: Option<TrialPlacements> = None;
         desktop.relist();
         // The wallpaper the desktop layer is painted over: read under the
         // session's own identity and fitted to this screen in the sandbox
@@ -2562,6 +2807,9 @@ mod program {
         // console's broker, never to an application; an unanswered prompt
         // offers nothing.
         let mut elevate = ElevatePrompt::new();
+        // A new desktop resolution on trial: drawn at once, put to the user,
+        // and kept only if they keep it.
+        let mut resolution = ResolutionPrompt::new();
         // The screen lock, and the account it re-verifies. `USER` is what
         // login exported for this session; it names whose password the
         // prompt is asking for and nothing more — the broker reads the
@@ -2734,6 +2982,86 @@ mod program {
                     saver.machine_unmonitored(&mut compositor);
                 }
             }
+            // A trial's countdown moves on whatever wake finds it due, and one
+            // that has ended is put into effect here, where the settings and
+            // the screen are both at hand.
+            let _ = resolution.tick(tairix_rt::clock_get(), &mut shell, &mut compositor);
+            if let Some(end) = resolution.take_ended() {
+                let placements = trial_placements.take();
+                if matches!(end, TrialEnd::Reverted(_)) {
+                    owed_placements = placements;
+                }
+                conclude_trial(
+                    end,
+                    &publisher,
+                    &mut pinboard,
+                    &wallpapers,
+                    &mut desktop,
+                    &mut shell,
+                    &mut compositor,
+                );
+                sized_for = None;
+            }
+            if let Some(answered) = publisher.take_kept_answered() {
+                sized_for = None;
+                let outcome = match answered {
+                    Ok(()) => TrialOutcome::Kept,
+                    Err(_) => TrialOutcome::Refused,
+                };
+                log_info(TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, &outcome.fields());
+            }
+            // Outside a trial, the desktop is drawn at the resolution the
+            // settings in force name, wherever this output offers it. A lock
+            // or a screensaver covers the size it was drawn at, so the desktop
+            // waits for both to go.
+            if !resolution.is_open()
+                && !publisher.publishing()
+                && !switch.is_background()
+                && !lock.is_locked()
+                && !saver.is_shown()
+            {
+                let output = compositor.mode();
+                let wanted = (
+                    desktop.settings().resolution,
+                    (output.width_px, output.height_px),
+                );
+                if sized_for != Some(wanted) {
+                    sized_for = Some(wanted);
+                    let resized = resize_desktop(
+                        wanted.0.on(wanted.1),
+                        &mut Resize {
+                            compositor: &mut compositor,
+                            shell: &mut shell,
+                            desktop: &mut desktop,
+                            pinboard: &mut pinboard,
+                            wallpapers: &wallpapers,
+                            windows: &mut windows,
+                            menu: &mut menu,
+                            pointer: &mut pointer,
+                        },
+                    );
+                    if resized == Resized::Changed {
+                        if let Some(placed) = owed_placements.take() {
+                            let work_area = shell.work_area(&compositor);
+                            windows.restore_placements(
+                                &mut compositor,
+                                (&placed.before, &placed.after),
+                                work_area,
+                            );
+                        }
+                        deliver_owed_events(
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps.service,
+                            &mut menu,
+                        );
+                    }
+                }
+            }
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
             // one is holding back, a composited frame the pacer is holding
@@ -2768,11 +3096,13 @@ mod program {
                 park = shell.taskbar_park_deadline_ns(now_ns, park);
                 park = shell.backdrop_park_deadline_ns(now_ns, park);
                 park = shell.tooltip_park_deadline_ns(now_ns, park);
+                park = menu.park_deadline_ns(now_ns, park);
                 park = shell.pointer_aids_park_deadline_ns(now_ns, park);
                 park = fade.park_deadline_ns(now_ns, park);
                 park = clock.park_deadline_ns(now_ns, park);
                 park = lock.park_deadline_ns(now_ns, park);
                 park = elevate.park_deadline_ns(now_ns, park);
+                park = resolution.park_deadline_ns(now_ns, park);
                 park = keyboard.park_deadline_ns(now_ns, park);
                 park = pointer.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
@@ -2821,7 +3151,7 @@ mod program {
                         IdleAction::Lock => {
                             lock_screen(
                                 &mut lock,
-                                (&mut confirm, &mut elevate),
+                                (&mut confirm, &mut elevate, &mut resolution),
                                 (account, shown_name),
                                 &mut shell,
                                 &mut compositor,
@@ -2877,11 +3207,7 @@ mod program {
                 }) {
                     wallpapers.want_slide(source);
                 }
-                // A pointer at rest produces no events either, so this is what
-                // shows the tip whose dwell has elapsed.
-                if shell.tooltip_tick(now_ns) {
-                    shell.present_tooltip(&mut compositor);
-                }
+                serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
                 shell.advance_window_thumbnails(&mut compositor);
                 animate(
                     &mut fade,
@@ -2954,7 +3280,7 @@ mod program {
                     // Read before the bridge borrows the picker: a menu may
                     // not be drawn over a lock screen or the trusted picker,
                     // and an accepted open is answered `SeatBusy` instead.
-                    let seat_held = seat_held(&lock, &picker, &confirm, &elevate);
+                    let seat_held = seat_held(&lock, &picker, (&confirm, &elevate, &resolution));
                     let n = {
                         let mut bridge = ShellWindowHost {
                             shell: &mut shell,
@@ -3021,7 +3347,7 @@ mod program {
                     if shell.take_lock_request() {
                         lock_screen(
                             &mut lock,
-                            (&mut confirm, &mut elevate),
+                            (&mut confirm, &mut elevate, &mut resolution),
                             (account, shown_name),
                             &mut shell,
                             &mut compositor,
@@ -3188,17 +3514,55 @@ mod program {
                 if let Ok(Some(ServedCall { ticket, len })) =
                     tairix_rt::call_recv_ready(PINBOARD_ENDPOINT, &mut request)
                 {
-                    serve_pinboard(
+                    let asked = serve_pinboard(
                         &publisher,
                         &mut pinboard,
                         &wallpapers,
                         &mut desktop,
                         &mut shell,
                         &mut compositor,
-                        self_origin.uid(),
+                        (
+                            self_origin.uid(),
+                            resolution.is_open() || publisher.keeping(),
+                            lock.is_locked() || saver.is_shown(),
+                        ),
                         ticket,
                         &request[..len],
                     );
+                    if let Some(ask) = asked {
+                        let placements = begin_trial(
+                            ask,
+                            &mut resolution,
+                            &mut Resize {
+                                compositor: &mut compositor,
+                                shell: &mut shell,
+                                desktop: &mut desktop,
+                                pinboard: &mut pinboard,
+                                wallpapers: &wallpapers,
+                                windows: &mut windows,
+                                menu: &mut menu,
+                                pointer: &mut pointer,
+                            },
+                        );
+                        // A trial that could not be put to the user is
+                        // reverted at once, its placements with it.
+                        if resolution.is_open() {
+                            trial_placements = placements;
+                        } else {
+                            owed_placements = placements;
+                        }
+                        sized_for = None;
+                        deliver_owed_events(
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps.service,
+                            &mut menu,
+                        );
+                    }
                 }
             } else if token == HOLDBACK_TOKEN {
                 // An app drained its full event mailbox, so what the session
@@ -3552,12 +3916,13 @@ mod program {
                         // A reaped child is gone, not hung: drop its delivery
                         // evidence so a recycled task id starts clean. And a
                         // reaped Switchboard can publish nothing more — clear
-                        // the tray feed so the capsule falls back to calm
-                        // rather than freezing a dead service's last summary.
+                        // its feeds so the bar states nothing rather than
+                        // freezing a dead service's last reading.
                         sink.forget_owner(pid);
                         if switchboard_pid == Some(pid) {
                             switchboard_pid = None;
                             shell.set_tray_summary(&mut compositor, None);
+                            shell.set_network_report(&mut compositor, None);
                             saver.machine_unmonitored(&mut compositor);
                         }
                         machine_watch.forget(pid);
@@ -3593,24 +3958,22 @@ mod program {
                             desktop: &mut desktop,
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
+                            windows: &mut windows,
                             fade: &mut fade,
                             set,
                         };
-                        let mode = match switch.resume(&mut screen) {
-                            Ok(mode) => mode,
-                            Err(failure) => {
-                                app::report(
-                                    APP_NAME,
-                                    format_args!("{} ({:?})", failure.reason(), failure.errno()),
-                                );
-                                shell.teardown(&mut compositor);
-                                return EXIT_RESUME_FAILED;
-                            }
-                        };
+                        if let Err(failure) = switch.resume(&mut screen) {
+                            app::report(
+                                APP_NAME,
+                                format_args!("{} ({:?})", failure.reason(), failure.errno()),
+                            );
+                            shell.teardown(&mut compositor);
+                            return EXIT_RESUME_FAILED;
+                        }
                         // The pointer is clamped to the screen, so it is
-                        // rebuilt for the mode now in force rather than left
+                        // rebuilt for the screen now drawn rather than left
                         // on the one this session came up with.
-                        let screen_rect = Rect::new(0, 0, mode.width_px, mode.height_px);
+                        let screen_rect = compositor.screen_rect();
                         let (channel, touch) = pointer.into_channels();
                         let Ok(rebuilt) = DeviceInputSource::new(channel, touch, screen_rect)
                         else {
@@ -3626,6 +3989,22 @@ mod program {
                         // idleness so the screen does not blank or lock at once.
                         drive_pointer(&mut pointer, &input_policy);
                         idle.input(tairix_rt::clock_get());
+                        // The windows the resume fitted to the screen are
+                        // owed their new extents.
+                        sized_for = Some((
+                            desktop.settings().resolution,
+                            (compositor.mode().width_px, compositor.mode().height_px),
+                        ));
+                        deliver_owed_events(
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps.service,
+                            &mut menu,
+                        );
                     }
                     Ok(SessionWake::End) => {
                         io::write_stderr_line(
@@ -3731,6 +4110,7 @@ mod program {
                         picker: &mut picker,
                         confirm: &mut confirm,
                         elevate: &mut elevate,
+                        resolution: &mut resolution,
                         account,
                         shown_name,
                         identity: &identity,
@@ -3854,6 +4234,7 @@ mod program {
                 prompts_style = shell.style_generation();
                 confirm.repaint(&mut shell, &mut compositor);
                 elevate.repaint(&mut shell, &mut compositor);
+                resolution.repaint(&mut shell, &mut compositor);
             }
             // One window thumbnail per wake, so a hover picker over a
             // screenful of windows fills in across the turns the loop was
@@ -3865,6 +4246,7 @@ mod program {
             // the whole frame, as on the deadline path above: the animation
             // and the frame report's rate limit share it.
             let now_ns = tairix_rt::clock_get();
+            serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
             // A lone press of Ctrl typed this wake shows where the pointer
             // is, unless a button or the wheel went with it: Ctrl-click and
             // Ctrl-wheel are gestures of their own.
@@ -3894,7 +4276,7 @@ mod program {
                 &mut compositor,
                 &mut server,
                 &mut sink,
-                seat_held(&lock, &picker, &confirm, &elevate),
+                seat_held(&lock, &picker, (&confirm, &elevate, &resolution)),
             );
             // One present per frame deadline: the compositor accumulates the
             // damage the pumped events and served presents produced, and the
@@ -5078,6 +5460,19 @@ mod program {
         /// Signalled when a publish is submitted, and on teardown.
         work: tairix_rt::sync::Condvar,
         wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
+        /// The call of a resolution the user kept, watched until it is
+        /// answered: its size stays drawn until the store has spoken.
+        kept: tairix_rt::sync::Mutex<KeptCall>,
+        /// The newest settings asked to be published, until it lands.
+        asked: tairix_rt::sync::Mutex<AskedSettings>,
+    }
+
+    /// The kept resolution's pinboard call, and what it was answered once it
+    /// has been.
+    #[derive(Default)]
+    struct KeptCall {
+        ticket: Option<u64>,
+        answered: Option<Result<(), Errno>>,
     }
 
     /// A publish the desktop wants, and the pinboard call waiting on it.
@@ -5092,6 +5487,8 @@ mod program {
         /// The `PINBOARD_ENDPOINT` call to answer, for a publish a foreign
         /// application asked for. `None` for one the desktop asked itself.
         ticket: Option<u64>,
+        /// Which ask it is, in the order asked.
+        number: u64,
     }
 
     /// What publishing the desktop's settings produced: the settings to adopt,
@@ -5099,6 +5496,7 @@ mod program {
     struct PublishAnswer {
         outcome: Result<LoadedPinboard, Errno>,
         ticket: Option<u64>,
+        number: u64,
     }
 
     impl Publisher {
@@ -5108,7 +5506,66 @@ mod program {
                 desk: tairix_rt::sync::Mutex::new(tairix_util::defer::JobDesk::new()),
                 work: tairix_rt::sync::Condvar::new(),
                 wake,
+                kept: tairix_rt::sync::Mutex::new(KeptCall::default()),
+                asked: tairix_rt::sync::Mutex::new(AskedSettings::new()),
             }
+        }
+
+        /// The settings the session's own next change is made over: the newest
+        /// it has asked to publish, or `adopted` once every ask has landed. So
+        /// a change of its own never undoes one still on its way to the store.
+        fn base(&self, adopted: &DesktopSettings) -> DesktopSettings {
+            self.asked.lock().base(adopted)
+        }
+
+        /// Whether a publish asked for has yet to land: the settings in force
+        /// are about to change, so nothing is drawn from them meanwhile.
+        fn publishing(&self) -> bool {
+            self.asked.lock().outstanding()
+        }
+
+        /// Note that ask `number` has landed, adopted or refused.
+        fn landed(&self, number: u64) {
+            self.asked.lock().landed(number);
+        }
+
+        /// Answer the pinboard call `ticket`, noting it if it is the kept
+        /// resolution's.
+        ///
+        /// Every way a call this publisher took ends — adopted, overtaken, or
+        /// displaced — is answered here, so a kept resolution can never wait
+        /// on an answer that was given somewhere else.
+        fn answer(&self, ticket: u64, outcome: Result<(), Errno>) {
+            reply_pinboard(ticket, outcome);
+            let mut kept = self.kept.lock();
+            if kept.ticket == Some(ticket) {
+                kept.answered = Some(outcome);
+            }
+        }
+
+        /// Watch `ticket`, the call of a resolution the user just kept.
+        fn keep(&self, ticket: u64) {
+            *self.kept.lock() = KeptCall {
+                ticket: Some(ticket),
+                answered: None,
+            };
+        }
+
+        /// Whether a kept resolution's call is still unanswered.
+        fn keeping(&self) -> bool {
+            let kept = self.kept.lock();
+            kept.ticket.is_some() && kept.answered.is_none()
+        }
+
+        /// What the kept resolution's call was answered, if it has been since
+        /// this was last asked, forgetting it if so.
+        fn take_kept_answered(&self) -> Option<Result<(), Errno>> {
+            let mut kept = self.kept.lock();
+            let answered = kept.answered;
+            if answered.is_some() {
+                *kept = KeptCall::default();
+            }
+            answered
         }
 
         /// One publisher's whole life: park until settings are submitted,
@@ -5132,6 +5589,7 @@ mod program {
                 let answer = PublishAnswer {
                     outcome: publish_pinboard(&mut RtHost, &job.settings),
                     ticket: job.ticket,
+                    number: job.number,
                 };
                 // A publish the user's next gesture superseded while it ran is
                 // dropped for *adoption* — the queued one will replace what it
@@ -5142,7 +5600,7 @@ mod program {
                 if self.desk.lock().deliver(answer) {
                     self.wake.nudge();
                 } else if let Some(ticket) = ticket {
-                    reply_pinboard(ticket, outcome);
+                    self.answer(ticket, outcome);
                 }
             }
         }
@@ -5155,6 +5613,7 @@ mod program {
         /// change nobody will serve would leave the desktop showing settings it
         /// never adopted.
         fn submit(&self, settings: DesktopSettings, ticket: Option<u64>) -> Option<PublishAnswer> {
+            let number = self.asked.lock().ask(&settings);
             let submitted = {
                 let mut desk = self.desk.lock();
                 if desk.stopping() {
@@ -5162,9 +5621,14 @@ mod program {
                     return Some(PublishAnswer {
                         outcome: publish_pinboard(&mut RtHost, &settings),
                         ticket,
+                        number,
                     });
                 }
-                desk.submit(PublishJob { settings, ticket })
+                desk.submit(PublishJob {
+                    settings,
+                    ticket,
+                    number,
+                })
             };
             if submitted.wake {
                 self.work.notify_one();
@@ -5174,7 +5638,7 @@ mod program {
             // saying so beats leaving its caller parked.
             if let Some(displaced) = submitted.displaced {
                 if let Some(ticket) = displaced.ticket {
-                    reply_pinboard(ticket, Err(Errno::Busy));
+                    self.answer(ticket, Err(Errno::Busy));
                 }
             }
             None
@@ -5966,6 +6430,7 @@ mod program {
         picker: &'a mut SessionPicker<S, F>,
         confirm: &'a mut ConfirmPrompt,
         elevate: &'a mut ElevatePrompt,
+        resolution: &'a mut ResolutionPrompt,
         account: &'a str,
         shown_name: &'a str,
         identity: &'a RtWindowIdentity,
@@ -6027,7 +6492,11 @@ mod program {
                 seat.compositor,
                 self.windows,
                 seat.menu,
-                seat_held(seat.lock, self.picker, self.confirm, self.elevate),
+                seat_held(
+                    seat.lock,
+                    self.picker,
+                    (self.confirm, self.elevate, self.resolution),
+                ),
                 &mut LaunchCtx {
                     launched: self.launched,
                     apps: &self.apps.service,
@@ -6051,8 +6520,7 @@ mod program {
                 self.server,
                 self.sink,
                 self.picker,
-                self.confirm,
-                self.elevate,
+                (self.confirm, self.elevate, self.resolution),
                 seat.lock,
                 seat.menu,
                 self.account,
@@ -6121,6 +6589,7 @@ mod program {
                     desktop: self.desktop,
                     pinboard: self.pinboard,
                     wallpapers: self.wallpapers,
+                    windows: self.windows,
                     fade: self.fade,
                     set: self.set,
                 },
@@ -6582,6 +7051,25 @@ mod program {
 
     /// Reconcile the compositor against the chain, resolving the owner's and
     /// the attached window's compositor windows the session holds.
+    /// Serve what a pointer at rest is owed and no event says: a tip whose
+    /// dwell has elapsed, and a crossed menu row rested on until it chose.
+    /// Run ahead of both of the loop's presents, so a client that keeps the
+    /// loop busy holds neither off and the frame carries them.
+    fn serve_rest(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        menu: &mut MenuChain,
+        windows: &SessionWindows,
+        now_ns: u64,
+    ) {
+        if shell.tooltip_tick(now_ns) {
+            shell.present_tooltip(compositor);
+        }
+        if shell.tick_menu_chain(compositor, menu, now_ns) {
+            present_menu_chain(menu, shell, compositor, windows);
+        }
+    }
+
     fn present_menu_chain(
         menu: &mut MenuChain,
         shell: &mut DesktopShell,
@@ -6621,23 +7109,58 @@ mod program {
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        session_uid: u32,
+        (session_uid, deciding, covered): (u32, bool, bool),
         ticket: u64,
         request: &[u8],
-    ) {
-        let attested = attest_pinboard(session_uid, desktop.settings(), ticket, request);
-        let settings = match attested {
-            Ok(settings) => settings,
+    ) -> Option<TrialAsk> {
+        // Merged over what is on its way to the store, so an apply arriving
+        // before the last one has landed does not undo it.
+        let attested = attest_pinboard(
+            session_uid,
+            &publisher.base(desktop.settings()),
+            ticket,
+            request,
+        );
+        let applied = match attested {
+            Ok(applied) => applied,
             Err(err) => {
                 reply_pinboard(ticket, Err(err));
-                return;
+                return None;
             }
         };
+        // While the user is deciding about a resolution, one change is in
+        // hand: another could only race the answer.
+        if deciding {
+            reply_pinboard(ticket, Err(Errno::Busy));
+            return None;
+        }
+        let output = compositor.mode();
+        match resolution_ask(
+            applied.settings.resolution,
+            desktop.settings().resolution,
+            (output.width_px, output.height_px),
+            covered,
+        ) {
+            ResolutionAsk::Same => {}
+            ResolutionAsk::Trial(size) => {
+                return Some(TrialAsk {
+                    size,
+                    trial: Trial {
+                        request: alloc::string::String::from(applied.document.as_str()),
+                        ticket,
+                    },
+                });
+            }
+            ResolutionAsk::Covered => {
+                reply_pinboard(ticket, Err(Errno::Busy));
+                return None;
+            }
+        }
         // The call is answered when the store has spoken, not now, so the
         // chooser still learns whether its document was actually published —
         // and this loop does not wait to find out.
         if request_pinboard_settings(
-            settings,
+            applied.settings,
             publisher,
             Some(ticket),
             pinboard,
@@ -6649,6 +7172,7 @@ mod program {
         ) {
             shell.present_desktop(compositor, desktop);
         }
+        None
     }
 
     /// Attest a pending pinboard call against the session's own identity and
@@ -6664,7 +7188,7 @@ mod program {
         in_effect: &DesktopSettings,
         ticket: u64,
         request: &[u8],
-    ) -> Result<DesktopSettings, Errno> {
+    ) -> Result<PinboardApplied, Errno> {
         let origin = tairix_rt::peer_origin(PINBOARD_ENDPOINT, ticket)?;
         serve_pinboard_apply(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
             let msg = refusal.reason();
@@ -6808,8 +7332,11 @@ mod program {
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
-        confirm: &mut ConfirmPrompt,
-        elevate: &mut ElevatePrompt,
+        (confirm, elevate, resolution): (
+            &mut ConfirmPrompt,
+            &mut ElevatePrompt,
+            &mut ResolutionPrompt,
+        ),
         lock: &mut ScreenLock,
         menu: &mut MenuChain,
         account: &str,
@@ -6892,6 +7419,11 @@ mod program {
                         if let Some(answer) = confirm.handle_click(local, shell, compositor) {
                             report_power_relay(answer, *switchboard);
                         }
+                    }
+                    // A press on the resolution prompt answers it; the serve
+                    // loop puts the answer into effect.
+                    if resolution.wm_id() == Some(window) {
+                        let _ = resolution.handle_click(local, shell, compositor);
                     }
                     // A press on the showing credential prompt answers it the
                     // same way: only the continuing button offers what was
@@ -6999,6 +7531,10 @@ mod program {
                             if let Some(answer) = confirm.handle_key(&record, shell, compositor) {
                                 report_power_relay(answer, *switchboard);
                             }
+                        }
+                    } else if resolution.wm_id() == Some(window) {
+                        if let Some(record) = key {
+                            let _ = resolution.handle_key(&record, shell, compositor);
                         }
                     } else if elevate.wm_id() == Some(window) {
                         // The credential prompt consumes its own keys, so a
@@ -7324,7 +7860,7 @@ mod program {
                 // — the same service an application's `OpenMenu` reaches.
                 open_bar_menu(
                     request,
-                    seat_held(lock, picker, confirm, elevate),
+                    seat_held(lock, picker, (confirm, elevate, resolution)),
                     menu,
                     shell,
                     compositor,
@@ -7419,7 +7955,7 @@ mod program {
             }
             ShellOutcome::Taskbar(TaskbarResponse::LockSession) => lock_screen(
                 lock,
-                (confirm, elevate),
+                (confirm, elevate, resolution),
                 (account, shown_name),
                 shell,
                 compositor,
@@ -7434,6 +7970,7 @@ mod program {
                 // session gives back.
                 confirm.abandon(shell, compositor);
                 elevate.abandon(shell, compositor);
+                resolution.abandon(shell, compositor);
                 return Routed::SwitchUser;
             }
             ShellOutcome::Taskbar(TaskbarResponse::LogOut) => {
@@ -7442,6 +7979,7 @@ mod program {
                 // unwind through the one owner-checked release.
                 confirm.abandon(shell, compositor);
                 elevate.abandon(shell, compositor);
+                resolution.abandon(shell, compositor);
                 lock.abandon(compositor);
                 return Routed::EndSession;
             }
@@ -7454,6 +7992,26 @@ mod program {
                         "desktop: could not ask for confirmation; nothing was done",
                     );
                 }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::OpenNetworkSettings) => {
+                // The network's settings are a section of Settings: a running
+                // Settings is handed the pane, a fresh one opens on it.
+                let _ = LaunchCtx {
+                    launched,
+                    apps: &apps.service,
+                    server,
+                    sink,
+                    windows,
+                    identity,
+                }
+                .launch(
+                    shell,
+                    compositor,
+                    SETTINGS_RUN_PATH,
+                    SETTINGS_LABEL,
+                    &[tairix_netconfig::SETTINGS_PANE.as_bytes()],
+                    Some(LaunchTarget::Pane(tairix_netconfig::SETTINGS_PANE)),
+                );
             }
             ShellOutcome::Taskbar(TaskbarResponse::SetDateTime) => {
                 // The session holds no authority to set a clock and never
@@ -7542,7 +8100,7 @@ mod program {
                     );
                 }
                 if let Some(remembered) = landed.remember {
-                    let mut settings = desktop.settings().clone();
+                    let mut settings = publisher.base(desktop.settings());
                     settings.sound = remembered;
                     let _ = request_pinboard_settings(
                         settings,
@@ -8085,8 +8643,15 @@ mod program {
                 ask_for_desktop_call(call, files, desktop, shell, compositor, launch);
                 false
             }
-            Some(DesktopAction::AdoptSettings(settings)) => request_pinboard_settings(
-                *settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor,
+            Some(DesktopAction::EditSettings(edit)) => request_pinboard_settings(
+                edit.applied_to(publisher.base(desktop.settings())),
+                publisher,
+                None,
+                pinboard,
+                wallpapers,
+                desktop,
+                shell,
+                compositor,
                 now_ns,
             ),
             // Wallpaper is a section of Settings, not an application beside
@@ -8150,7 +8715,6 @@ mod program {
     /// Ask the file worker for `call`, settling it here when it was answered
     /// at once — carried out on this thread for want of a worker, or refused
     /// because too many are waiting.
-    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn ask_for_desktop_call<S: DirectorySource>(
         call: DesktopCall,
         files: &Files,
@@ -8170,7 +8734,6 @@ mod program {
     /// A document launches its application with the descriptor opened for it;
     /// a folder or shortcut made is shown. A refusal is stated on `stderr`
     /// with the kernel's own reason and leaves the desktop as it was.
-    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn settle_desktop_call<S: DirectorySource>(
         done: DesktopAnswer,
         desktop: &mut Desktop<S>,
@@ -8228,7 +8791,7 @@ mod program {
     ) -> bool {
         publisher.submit(settings, ticket).is_some_and(|answer| {
             adopt_publish(
-                answer, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+                answer, publisher, pinboard, wallpapers, desktop, shell, compositor, now_ns,
             )
         })
     }
@@ -8238,7 +8801,6 @@ mod program {
     /// re-prepare the wallpaper.
     ///
     /// Answers whether the desktop layer needs a whole repaint.
-    #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
     fn collect_publish<S: DirectorySource>(
         publisher: &Publisher,
         pinboard: &mut PinboardPanel,
@@ -8250,7 +8812,7 @@ mod program {
     ) -> bool {
         publisher.collect().is_some_and(|answer| {
             adopt_publish(
-                answer, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+                answer, publisher, pinboard, wallpapers, desktop, shell, compositor, now_ns,
             )
         })
     }
@@ -8264,6 +8826,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
     fn adopt_publish<S: DirectorySource>(
         answer: PublishAnswer,
+        publisher: &Publisher,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -8272,13 +8835,14 @@ mod program {
         now_ns: u64,
     ) -> bool {
         if let Some(ticket) = answer.ticket {
-            reply_pinboard(
+            publisher.answer(
                 ticket,
                 answer.outcome.as_ref().map(|_| ()).map_err(|err| *err),
             );
         }
-        let published = match answer.outcome {
-            Ok(published) => published,
+        publisher.landed(answer.number);
+        let landed = match answer.outcome {
+            Ok(landed) => landed,
             Err(err) => {
                 app::report(
                     APP_NAME,
@@ -8287,11 +8851,11 @@ mod program {
                 return false;
             }
         };
-        for warning in &published.warnings {
+        for warning in &landed.warnings {
             let _ = write!(Stderr, "{warning}");
         }
-        let wanted = published.settings.clone();
-        let Some(change) = desktop.apply_settings(published.settings) else {
+        let wanted = landed.settings.clone();
+        let Some(change) = desktop.apply_settings(landed.settings) else {
             return false;
         };
         let papered = change.backdrop.wallpaper

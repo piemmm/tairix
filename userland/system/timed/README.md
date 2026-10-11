@@ -70,7 +70,7 @@ The default names no server. TAIRiX has no NTP-pool vendor zone, and RFC 8633
 machine that has been given no server simply never queries and says so in the
 log. Naming one is the operator's or the installer's decision.
 
-The store lives on the encrypted root and this is a boot-floor service, so its
+The store lives on the root volume and this is a boot-floor service, so its
 first read normally happens before that root is mounted. There is no userland
 event for "the root is mounted", so the store is re-read on a bounded, doubling
 schedule folded into the reactor's own deadline — about seventeen minutes of

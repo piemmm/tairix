@@ -6,20 +6,19 @@ Binding under `AGENTS.md` (§3, §15.18).
 
 | Stage | What | State |
 |---|---|---|
-| M0 | Row model (`AppMenu`) + the icon-bar declaration carrying it | **landed** |
-| M1a | Variable-length request framing: per-op wire length, exact-length decode | **landed** |
-| M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **landed** |
-| M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | **landed** |
-| M1d | ~~Attached-window row kind~~ — deleted in M3.4 (D19) | **superseded** |
-| M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | **landed** |
-| M3.1 | Migrate `userland/apps/terminal`, delete its shell | **landed** |
-| M3.2 | Migrate the pinboard backdrop menu, delete its shell | **landed** |
-| M3.3 | Migrate `userland/apps/files`, delete its shell | **landed** |
-| M3.4 | Migrate the bar's four menu subjects, delete `BarMenu` | **landed** |
-| M3.5 | ~~The bar's start menu~~ — **not in scope** (decision 3) | **settled** |
-| M4 | Plate as a cached damage-reporting surface | **landed** |
-| M5 | Plates are floating chrome: 80% opacity over the shared chrome blur | **landed** |
-| M6 | A row may act *and* open a child: quick-entry fields, candidate submenus with their own icons | **landed** |
+| M0 | Row model (`AppMenu`) + the icon-bar declaration carrying it | **done** |
+| M1a | Variable-length request framing: per-op wire length, exact-length decode | **done** |
+| M1b | Model: per-plate rows, submenu depth, titles, shortcuts, `About`→`Info` | **done** |
+| M1c | The per-gesture open: anchor in, `Chosen`/`Dismissed`/`Refused` out | **done** |
+| M2 | The service: bands, drag, arrival-open, attach/detach, grab, lifetime | **done** |
+| M3.1 | Migrate `userland/apps/terminal`, delete its shell | **done** |
+| M3.2 | Migrate the pinboard backdrop menu, delete its shell | **done** |
+| M3.3 | Migrate `userland/apps/files`, delete its shell | **done** |
+| M3.4 | Migrate the bar's four menu subjects, delete `BarMenu` | **done** |
+| M4 | Plate as a cached damage-reporting surface | **done** |
+| M5 | Plates are floating chrome: 80% opacity over the shared chrome blur | **done** |
+| M6 | A row may act *and* open a child: quick-entry fields, candidate submenus with their own icons | **done** |
+| M7 | Submenus survive the crossing: no-row points keep the child and its row's highlight, and aim intent with a settle deadline (§1.3) | **done** |
 
 Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
 moves to 80% opacity as one shared value, and the blur stays the one the
@@ -179,20 +178,38 @@ chain, still holds the grab, and still closes on an outside press. Nothing
 an app can send pins a menu open; the only thing that moves a plate is the
 user's own drag.
 
-### 1.3 Submenus open on arrival, and there is no timer
+### 1.3 Submenus open on arrival; crossings aimed at a child wait
 
-A submenu opens when the pointer **arrives on** its parent row — no click,
-no hover delay, no timer. Two placement and closing rules make that
-deterministic without one:
+A submenu opens when the pointer **arrives on** its parent row — no click and
+no hover delay. A child plate is **edge-adjacent** to its parent, and three
+rules decide when an open child closes:
 
-- A child plate is **edge-adjacent** to its parent, so there is no dead gap
-  for the pointer to cross and no diagonal-travel dead zone.
-- An open child closes when the pointer **settles on a different row of the
-  same parent plate**, or when the chain dismisses — *never* merely because
-  the pointer left the parent row's rectangle. Travelling from a parent row
-  into its own child therefore cannot close what it is travelling to.
+- **A point on no row changes nothing.** The parent's rim, a group break and
+  the strip under the band lie between rows, never on a different one, so the
+  pointer crossing the parent's edge into the child keeps the child open and
+  the parent row highlighted (`Menu::hold`).
+- **A crossing aimed at the child waits.** The child's band puts its first
+  row level with the parent's *next* row, so a path aimed at the child's rows
+  crosses that sibling. A motion sample landing on a sibling of the open row is
+  deferred while it lies in the triangle from the apex to the child's near
+  edge, or within `AIM_SLACK` of the apex. The apex is where the pointer last
+  stood on the open row, or where it was when the child opened — a key that
+  opens one records the seat pointer — and it stays put while the path
+  crosses the siblings, so a slow or stepped path is judged by its heading
+  rather than by its last step. Reaching the child ends the deferral. Turning
+  away chooses the sibling at once. A move onto the band, or onto no row, ends
+  it without choosing.
+- **A rest settles.** A deferral still standing `SUBMENU_SETTLE_NS` (300 ms)
+  after its last sample becomes the choice of the row under the pointer. The
+  wait is a deadline folded into the session's park and resolved by
+  `MenuChain::tick` on whatever wake finds it due, so a busy client cannot
+  hold it off; never a poll. A chain with nothing waiting asks for no wake.
 
-A disabled submenu row opens nothing (fail closed).
+Edge-adjacency alone is not enough: the path to a child crosses the parent's
+rim and the sibling beneath the open row, which is what the two rules above
+are for. A disabled submenu row opens nothing (fail closed); the pointer
+resting on one borrows the open row's highlight so its Authority Mark can be
+read, and the open row takes it back once the pointer is anywhere else.
 
 ### 1.4 The children that are not plates of rows
 
@@ -1005,8 +1022,9 @@ rather than pushing and swallowing a refusal.
 - One chain can be open per seat, no app draws a menu pixel, and every menu
   in the desktop — the apps' and the desktop's own — comes from the one
   service.
-- Every plate has a title band and drags by it; submenus open on arrival
-  with no timer; the information panel hangs where a submenu would and dies
+- Every plate has a title band and drags by it; submenus open on arrival,
+  and a crossing aimed at an open child waits out `SUBMENU_SETTLE_NS` rather
+  than closing it; the information panel hangs where a submenu would and dies
   with the chain.
 - The info panel's text is the session's, from the signed manifest.
 - Every migrated surface's menu code is **deleted**, not left beside the new

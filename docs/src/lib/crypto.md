@@ -167,6 +167,14 @@ the same reason the keystream writes straight into the caller's
 destinations: the scratch ends the call holding derived key material, and
 the holder is the only party that can wipe it.
 
+Every upstream state that holds a secret wipes itself on drop: the hash, MAC,
+cipher and key-exchange crates are each built with their `zeroize` feature, and
+the NIST-curve crates wipe their secret keys unconditionally, so a hash's buffer
+of what it was fed, an HMAC's keyed midstate (the two hash cores it holds), and
+a cipher's key schedule are cleared when the call that used them ends.
+`hash_and_mac_states_wipe_themselves_on_drop` stops compiling if a feature is
+dropped.
+
 ## Backend availability and the boot-time self-test (`backend`)
 
 `backend` is TAIRiX's authoritative crypto backend-availability decision and

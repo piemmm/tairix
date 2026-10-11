@@ -410,6 +410,8 @@ pub struct Shell {
     /// The cursor sets the desktop offers besides the built-in one, empty
     /// until it has answered.
     cursor_sets: Vec<CursorSetId>,
+    /// The output the desktop is drawn on, once the desktop has said.
+    output: Option<(u32, u32)>,
     /// The font store's families and the theme's own text, once listed.
     text: Option<TextChoices>,
     /// The mounted volumes the caller last read for the Storage pane, empty
@@ -507,6 +509,7 @@ impl Shell {
             body: Body::Statement,
             catalog: Vec::new(),
             cursor_sets: Vec::new(),
+            output: None,
             text: None,
             volumes: Vec::new(),
             wanted: Wanted::default(),
@@ -541,6 +544,18 @@ impl Shell {
     pub fn adopt_cursor_sets(&mut self, sets: Vec<CursorSetId>) {
         self.cursor_sets = sets;
         self.restate_body();
+    }
+
+    /// Adopt the size of the output the desktop is drawn on, which decides
+    /// the resolutions on offer; a pane that offers none is left as it is.
+    pub fn adopt_output(&mut self, output: (u32, u32)) {
+        if self.output == Some(output) {
+            return;
+        }
+        self.output = Some(output);
+        if self.body.composition() == Some(Composition::Displays) {
+            self.restate_body();
+        }
     }
 
     /// Adopt the families the font store lists, and `theme`, the fonts the
@@ -1122,6 +1137,7 @@ impl Shell {
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
             text: self.text.as_ref(),
+            output: self.output,
             volumes: &self.volumes,
             config: self.config.as_ref(),
             machine: &self.machine,

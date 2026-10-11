@@ -93,7 +93,7 @@ exactly as the kernel text is. The kernel's sec boot phase builds and
 installs that half into the live identity cell before any volume exists
 (`tairix_kernel_core::system_identity_table`), so spawn-as-user and
 filesystem group resolution for the system accounts work from first boot
-on every architecture; the encrypted-root unlock later replaces the held
+on every architecture; the root unlock later replaces the held
 table with the merge of the same compiled half and the on-disk human
 records (`build_identity_table`). The merge **fails closed on any on-disk
 record that collides with the compiled identity** — a system-band uid or

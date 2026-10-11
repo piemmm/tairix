@@ -14,6 +14,14 @@
 
 use alloc::string::String;
 
+use tairix_font::BitmapFont;
+use tairix_geometry::Scale;
+use tairix_theme::{TextRole, Theme};
+
+/// The role the clock's label is set in: the body face rather than a
+/// caption's, because the time is read at a glance from across the bar.
+pub(crate) const CLOCK_ROLE: TextRole = TextRole::Body;
+
 /// The label a caller sets when no wall-clock time has been established.
 ///
 /// `HH:mm`-shaped, so the clock keeps its place and its width, and
@@ -27,6 +35,34 @@ pub const UNSET_LABEL: &str = "--:--";
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Clock {
     label: String,
+}
+
+/// What the clock's room at `scale` is measured from: the face its label is
+/// set in and the padding either side of it.
+#[must_use]
+pub(crate) fn clock_room_key(theme: &Theme, scale: Scale) -> (BitmapFont, u32) {
+    (
+        BitmapFont::for_role(theme.fonts(), CLOCK_ROLE, scale),
+        scale.scale_length(theme.metrics().control_inset),
+    )
+}
+
+/// The room along a horizontal bar its clock needs: the widest label it can
+/// be given in `font` — an `HH:mm` reading with every digit as wide as the
+/// widest, or [`UNSET_LABEL`] — with `pad` either side, so a region this long
+/// shows whatever minute it is whole.
+#[must_use]
+pub(crate) fn clock_room((font, pad): (BitmapFont, u32)) -> u32 {
+    const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let digit = DIGITS
+        .iter()
+        .map(|digit| font.text_width(digit))
+        .max()
+        .unwrap_or(0);
+    let reading = digit.saturating_mul(4).saturating_add(font.text_width(":"));
+    reading
+        .max(font.text_width(UNSET_LABEL))
+        .saturating_add(pad.saturating_mul(2))
 }
 
 impl Clock {

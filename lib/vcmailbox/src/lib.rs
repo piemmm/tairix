@@ -50,8 +50,9 @@ use core::ptr::NonNull;
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
+use tairix_abi::driver::pci::CLASS_USB_XHCI;
 use tairix_abi::time::MonotonicClock;
-use tairix_abi::{DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
 
 #[cfg(test)]
 mod tests;
@@ -75,6 +76,42 @@ pub const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 /// power is the firmware's to switch, which no generic driver can reach.
 pub const FIRMWARE_FRAMEBUFFER_COMPATIBLE: &[u8] = b"brcm,bcm2708-fb";
 
+// The devices whose drivers the mailbox service answers. Each driver's bind
+// table is built from its key here, so the device the kernel attests a caller
+// is loaded for is exactly the one its requests are admitted against.
+
+/// The scan-out surface the firmware allocated: its driver may blank it.
+pub const FIRMWARE_FRAMEBUFFER_KEY: HwMatchKey =
+    match HwMatchKey::compatible(FIRMWARE_FRAMEBUFFER_COMPATIBLE) {
+        Ok(key) => key,
+        // A too-long literal fails const evaluation; this never runs.
+        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+    };
+
+/// The real-time clock the Pi 5's PMIC carries, which is not memory-mapped:
+/// its driver may read the clock and set it.
+pub const RPI_RTC_KEY: HwMatchKey = match HwMatchKey::compatible(b"raspberrypi,rpi-rtc") {
+    Ok(key) => key,
+    Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+};
+
+/// The firmware's clock interface: its driver may read the ARM clock's rates
+/// and set it.
+pub const FIRMWARE_CLOCKS_KEY: HwMatchKey =
+    match HwMatchKey::compatible(b"raspberrypi,firmware-clocks") {
+        Ok(key) => key,
+        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+    };
+
+/// The VL805 USB host controller (VIA `1106:3483`, an xHCI function), whose
+/// firmware only the `VideoCore` can reload: its driver may ask it to.
+pub const VL805_KEY: HwMatchKey = HwMatchKey::pci(0x1106, 0x3483, CLASS_USB_XHCI);
+
+/// The firmware's encoding of the VL805's PCI address
+/// (`bus << 20 | slot << 15 | func << 12`): bus 1, device 0, function 0, where
+/// the board wires it.
+pub const VL805_FIRMWARE_DEV_ADDR: u32 = 0x0010_0000;
+
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
@@ -93,6 +130,19 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     },
 )];
+
+/// The capabilities the mailbox service's signed bundle requests: the single
+/// source its bundle's manifest is authored from and its host is built with.
+pub const SERVICE_CAPS: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::MEM_DMA,
+    CapabilityId::IRQ_BIND,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
+
+mod admit;
+pub use admit::{admit_request, Refusal};
 
 #[cfg(any(test, feature = "mock-firmware"))]
 pub mod mock;
@@ -148,6 +198,13 @@ pub const PROPERTY_WORDS: usize = MAILBOX_PROPERTY_WORDS;
 
 /// Byte length of the property message ([`PROPERTY_WORDS`] words).
 pub const PROPERTY_LEN_BYTES: usize = PROPERTY_WORDS * 4;
+
+/// A message's two header words: its byte length and its code.
+const HEADER_WORDS: usize = 2;
+
+/// A tag's three header words: its id, its value buffer's byte length and its
+/// code.
+const TAG_HEADER_WORDS: usize = 3;
 
 /// Request header code: "process request".
 const CODE_REQUEST: u32 = 0;
@@ -265,7 +322,7 @@ impl FramebufferRequest {
 /// order, then the end tag.
 fn request(tags: &[(u32, &[u32])]) -> [u32; PROPERTY_WORDS] {
     let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2;
+    let mut at = HEADER_WORDS;
     for &(tag, values) in tags {
         at = push_tag(&mut words, at, tag, values);
     }
@@ -282,11 +339,10 @@ fn request(tags: &[(u32, &[u32])]) -> [u32; PROPERTY_WORDS] {
 fn push_tag(words: &mut [u32; PROPERTY_WORDS], at: usize, tag: u32, values: &[u32]) -> usize {
     words[at] = tag;
     words[at + 1] = words_to_bytes(values.len());
-    words[at + 2] = 0;
-    for (i, &v) in values.iter().enumerate() {
-        words[at + 3 + i] = v;
-    }
-    at + 3 + values.len()
+    words[at + 2] = CODE_REQUEST;
+    let first = at + TAG_HEADER_WORDS;
+    words[first..first + values.len()].copy_from_slice(values);
+    first + values.len()
 }
 
 /// Byte count of `words` message words. The message is bounded by
@@ -408,52 +464,104 @@ struct TagValue<'a> {
 /// truncation case, so it is failed closed rather than clamped
 /// (the firmware is external input).
 fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, MailboxError> {
-    let (at, buf_words) = locate_tag(words, tag)?;
-    let code = words[at + 2];
-    if code & TAG_RESPONSE_BIT == 0 {
+    let found = locate_tag(words, tag)?;
+    if found.code & TAG_RESPONSE_BIT == 0 {
         return Err(MailboxError::MalformedResponse);
     }
-    let resp_bytes = code & !TAG_RESPONSE_BIT;
+    let resp_bytes = found.code & !TAG_RESPONSE_BIT;
     // `resp_bytes > buf_bytes` is the firmware signalling it wanted to send
     // more than we provisioned; we always size every tag's value buffer to
     // `max(request, response)`, so for our fixed-layout tags this is a fault,
     // not the benign truncation case — fail closed (see the doc comment).
     let resp_words =
         usize::try_from(resp_bytes / 4).map_err(|_| MailboxError::MalformedResponse)?;
-    if !resp_bytes.is_multiple_of(4) || resp_words > buf_words {
+    if !resp_bytes.is_multiple_of(4) || resp_words > found.values.len() {
         return Err(MailboxError::MalformedResponse);
     }
     Ok(TagValue {
-        words: &words[at + 3..at + 3 + resp_words],
+        words: &found.values[..resp_words],
     })
 }
 
-/// Walk the message to `tag`, returning the index of its header and the
-/// length of its value buffer in words; a malformed walk or an absent tag
-/// fails.
-fn locate_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<(usize, usize), MailboxError> {
-    let mut at = 2;
-    loop {
-        if at + 3 > PROPERTY_WORDS {
-            return Err(MailboxError::MalformedResponse);
+/// Walk the message to `tag`; a malformed walk or an absent tag fails.
+fn locate_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<Tag<'_>, MailboxError> {
+    let mut tags = Tags::new(words);
+    while let Some(found) = tags
+        .next()
+        .map_err(|Malformed| MailboxError::MalformedResponse)?
+    {
+        if found.id == tag {
+            return Ok(found);
         }
-        let id = words[at];
+    }
+    Err(MailboxError::MalformedResponse)
+}
+
+/// One tag of a property message.
+struct Tag<'a> {
+    id: u32,
+    /// Its request or response code word.
+    code: u32,
+    /// Its value buffer.
+    values: &'a [u32],
+}
+
+/// A message whose framing does not hold together.
+struct Malformed;
+
+/// A walk over a property message's tags, from the first to the end tag. It
+/// reads nothing past the words it is given, so a caller bounds it by the
+/// length it trusts.
+struct Tags<'a> {
+    words: &'a [u32],
+    at: usize,
+}
+
+impl<'a> Tags<'a> {
+    /// Walk the tags of `words`, whose first words are the message header.
+    fn new(words: &'a [u32]) -> Self {
+        Self {
+            words,
+            at: HEADER_WORDS,
+        }
+    }
+
+    /// The next tag, or `None` at the end tag, whose index [`Self::at`] then
+    /// holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Malformed`] when a tag's header or value buffer runs past the words,
+    /// its value length is not whole words, or no end tag is reached.
+    fn next(&mut self) -> Result<Option<Tag<'a>>, Malformed> {
+        let id = *self.words.get(self.at).ok_or(Malformed)?;
         if id == 0 {
-            return Err(MailboxError::MalformedResponse);
+            return Ok(None);
         }
-        let buf_bytes = words[at + 1];
-        if !buf_bytes.is_multiple_of(4) {
-            return Err(MailboxError::MalformedResponse);
+        let header = self
+            .words
+            .get(self.at..self.at + TAG_HEADER_WORDS)
+            .ok_or(Malformed)?;
+        if !header[1].is_multiple_of(4) {
+            return Err(Malformed);
         }
-        let buf_words =
-            usize::try_from(buf_bytes / 4).map_err(|_| MailboxError::MalformedResponse)?;
-        if at + 3 + buf_words > PROPERTY_WORDS {
-            return Err(MailboxError::MalformedResponse);
-        }
-        if id == tag {
-            return Ok((at, buf_words));
-        }
-        at += 3 + buf_words;
+        let len = usize::try_from(header[1] / 4).map_err(|_| Malformed)?;
+        let first = self.at + TAG_HEADER_WORDS;
+        let values = self
+            .words
+            .get(first..first.checked_add(len).ok_or(Malformed)?)
+            .ok_or(Malformed)?;
+        self.at = first + len;
+        Ok(Some(Tag {
+            id,
+            code: header[2],
+            values,
+        }))
+    }
+
+    /// The word index the walk has reached.
+    const fn at(&self) -> usize {
+        self.at
     }
 }
 
@@ -762,16 +870,11 @@ pub fn decode_blank_screen_response(
 
 // --- VL805 xHCI firmware reload ------------------------------------------
 
-/// Encode the `TAG_NOTIFY_XHCI_RESET` property message carrying the
-/// VL805's `dev_addr`.
-///
-/// Public so the VL805 device driver (`drivers/bus/usb/vl805`) can build
-/// the firmware-reload message and run it over the board-neutral
-/// [`MailboxChannel`](tairix_abi::driver::mailbox::MailboxChannel) seam
-/// without re-deriving the property layout.
+/// Encode the `TAG_NOTIFY_XHCI_RESET` property message naming the VL805 at
+/// [`VL805_FIRMWARE_DEV_ADDR`], the one address the mailbox service admits.
 #[must_use]
-pub fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
-    request(&[(TAG_NOTIFY_XHCI_RESET, &[dev_addr])])
+pub fn encode_xhci_reset() -> [u32; PROPERTY_WORDS] {
+    request(&[(TAG_NOTIFY_XHCI_RESET, &[VL805_FIRMWARE_DEV_ADDR])])
 }
 
 /// Validate the firmware's answer to an xHCI-reset notification and
@@ -816,18 +919,17 @@ const TAG_SET_RTC_REG: u32 = 0x0003_8087;
 ///
 /// The firmware selects the register with the tag's first value word; the
 /// second carries the value. Only the two this crate's consumer needs are
-/// spelled — the counter and the backup-cell voltage — because a selector
-/// with no caller would be surface with no reader. The discriminants are the
-/// firmware's own, so they are not renumbered.
+/// spelled. The discriminants are the firmware's own, in the order of the
+/// register enumeration Linux's `rtc-rpi` driver sends.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum RtcRegister {
     /// The 32-bit seconds counter, Unix epoch.
-    Time = 1,
+    Time = 0,
     /// The backup cell's charge voltage in millivolts, or zero when no cell
     /// is fitted — the only honest evidence the counter survives a power
     /// cycle.
-    BackupVolts = 8,
+    BackupVolts = 7,
 }
 
 impl RtcRegister {
@@ -1160,10 +1262,9 @@ pub fn decode_gpio_state_write_response(words: &[u32; PROPERTY_WORDS]) -> Result
         CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
         _ => return Err(MailboxError::MalformedResponse),
     }
-    let (at, buf_words) = locate_tag(words, TAG_SET_GPIO_STATE)?;
-    match (buf_words, words[at + 3]) {
-        (0, _) => Err(MailboxError::MalformedResponse),
-        (_, 0) => Ok(()),
+    match locate_tag(words, TAG_SET_GPIO_STATE)?.values {
+        [] => Err(MailboxError::MalformedResponse),
+        [0, ..] => Ok(()),
         _ => Err(MailboxError::FirmwareError),
     }
 }

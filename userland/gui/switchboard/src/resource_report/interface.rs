@@ -11,14 +11,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetServerAddr, IF_NAME_LEN,
+    if_name_bytes, NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetServerAddr, IF_NAME_LEN,
 };
 use tairix_controls::PressureKind;
 use tairix_procinfo::display::{format_bytes, format_duration, format_rate};
 use tairix_procinfo::{render_if_addr, render_server};
 use tairix_theme::SignalRole;
 
-use super::{kind_name, mac, reading, trim_nul};
+use super::{mac, reading};
 use crate::model::{display_name, RateTrace, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
@@ -44,7 +44,7 @@ pub(super) fn device(
     ResourceDevice {
         id,
         group: RailGroup::Network,
-        name: display_name(trim_nul(&iface.name)),
+        name: display_name(if_name_bytes(&iface.name)),
         kind: PressureKind::Network,
         reading: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
         trend: trace.clone(),
@@ -97,7 +97,7 @@ pub(crate) fn served_rates<'a>(
         .net_rates
         .as_ref()?
         .iter()
-        .find(|rate| trim_nul(&rate.name) == trim_nul(name))
+        .find(|rate| rate.name == *name)
 }
 
 /// Which way the traffic is going, how fast, and over what span.
@@ -140,18 +140,17 @@ fn blocks(sample: &Sample, iface: &NetInterfaceFactsRecord) -> Vec<PaneBlock> {
 
 /// What the link is and what it is addressed as.
 fn link_block(sample: &Sample, iface: &NetInterfaceFactsRecord) -> BlockBody {
-    let state = sample.net_state.as_ref().and_then(|states| {
-        states
-            .iter()
-            .find(|s| trim_nul(&s.name) == trim_nul(&iface.name))
-    });
+    let state = sample
+        .net_state
+        .as_ref()
+        .and_then(|states| states.iter().find(|s| s.name == iface.name));
     let mut facts = alloc::vec![
         ReadingFact::text(
             "Interface",
             format!(
                 "{} · {}",
-                display_name(trim_nul(&iface.name)),
-                kind_name(iface.kind)
+                display_name(if_name_bytes(&iface.name)),
+                iface.kind.name()
             ),
         ),
         ReadingFact::new(
@@ -195,10 +194,7 @@ fn counters_block(sample: &Sample, iface: &NetInterfaceFactsRecord) -> BlockBody
             Unmeasured::from_absence(sample.absence(DegradedField::NetInterfaceCounters)),
         ));
     };
-    let Some(record) = records
-        .iter()
-        .find(|r| trim_nul(&r.name) == trim_nul(&iface.name))
-    else {
+    let Some(record) = records.iter().find(|r| r.name == iface.name) else {
         return BlockBody::Absence(absence_statement(
             "this interface's counters",
             Unmeasured::Unavailable,

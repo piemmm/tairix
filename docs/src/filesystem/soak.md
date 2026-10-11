@@ -2,7 +2,10 @@
 
 The filesystem soak stress-tests the three first-party filesystems —
 `arxfs`, `ext4`, and `fat32` — entirely in RAM, with no real disk and
-no `mkfs` shell-out (`AGENTS.md` §12 / §2.12). It lives in the
+no `mkfs` shell-out (`AGENTS.md` §12 / §2.12). arxfs runs under both its
+protections: the `arxfs` and `arxfs-random` targets encrypt the volume, and
+their `arxfs-plaintext` and `arxfs-plaintext-random` twins format it with no
+key, as a shipped root is. It lives in the
 `tairix-test-fs-soak` crate (`tests/integration/fs_soak`) and is driven
 by `cargo xtask fssoak`.
 
@@ -35,10 +38,10 @@ The exerciser is deterministic: every content byte is the shared
 and the offset, so any failure reproduces from the seed printed in the
 error.
 
-## The randomized `arxfs-random` target
+## The randomized `arxfs-random` targets
 
-Alongside the fixed-sequence exerciser, a fourth target —
-`arxfs-random` — drives arxfs through a **randomized, model-checked**
+Alongside the fixed-sequence exerciser, `arxfs-random` and its plaintext twin
+`arxfs-plaintext-random` drive arxfs through a **randomized, model-checked**
 body (`random_exercise`). A filesystem is a critical system, so it must
 be known to work for *any* operation order, not just one scripted path;
 this target exercises the filesystem **in a different manner on every
@@ -79,7 +82,7 @@ cleanly rather than papering over a driver gap.
 ## Running it
 
 ```
-cargo xtask fssoak --list             # the registry (arxfs/ext4/fat32/arxfs-random)
+cargo xtask fssoak --list             # the registry: every target above
 cargo xtask fssoak --quick            # per-PR / smoke budget, ≥ 5 s each
 cargo xtask fssoak --soak             # nightly budget, ≥ 24 h each
 cargo xtask fssoak --target ext4 --secs 30
@@ -119,8 +122,8 @@ alongside the fuzz, proptest, and repeated-test jobs. Every job gets the
 whole wall-clock budget and they overlap, so the window is the budget,
 not the sum of the jobs. The registry is the single source of truth —
 `soak.sh` enumerates `cargo xtask fssoak --list` and never hard-codes
-the filesystem list, so `arxfs-random` runs concurrently with the
-fixed-sequence `arxfs`/`ext4`/`fat32` jobs. Each ≥ 1 GiB volume in
+the filesystem list, so the randomized targets run concurrently with the
+fixed-sequence ones. Each ≥ 1 GiB volume in
 flight needs its own GiB of runner RAM.
 
 ## Block-size note

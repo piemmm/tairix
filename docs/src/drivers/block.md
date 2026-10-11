@@ -526,7 +526,7 @@ payload.
 
 The boot path brings up exactly **one** bootstrap-floor block device, yet two
 independent consumers must read it during bring-up — the read-only signed
-`/System` driver-store mount and the encrypted-root unlock window — and, under
+`/System` driver-store mount and the root-unlock window — and, under
 Design D, the `/System` store must stay reachable for on-demand and reactive
 (hotplug) driver loads (`AGENTS.md` §18.3 / §18.4). One disk must therefore
 back two concurrent partition windows.
@@ -602,7 +602,7 @@ stays live for free, and the proven IRQ-wait / cooperative-yield device-driving
 model is unchanged (`AGENTS.md` §2.17 — no security or correctness regression
 on a metal-confirmed path).
 
-After running the boot autoload and the encrypted-root unlock through two
+After running the boot autoload and the root unlock through two
 concurrent windows, logging the outcome, and releasing the console-0 gate to
 `login`, the service calls `DriverStoreService::hold`, which **parks** the
 kthread for life owning the `SharedBlock` — a real park, never a busy-yield

@@ -1252,7 +1252,7 @@ pub fn try_boot(
     // Hand the shared identity cell to the core: the sec phase
     // publishes the compiled-in system identity into it, so the
     // system/service accounts resolve (spawn-as-user, filesystem
-    // groups) from first boot; a later encrypted-root unlock replaces
+    // groups) from first boot; a later root unlock replaces
     // the held table with the merged system∪human table.
     .with_spawn_identity(&crate::root_mount::LATE_IDENTITY)
     // Install the PID 1 spawn seam (`plans/PI.md` RV-P3): once every init
@@ -1281,8 +1281,8 @@ pub fn try_boot(
     .with_app_store(&crate::app_store::APP_STORE)
     // Hand the syscall dispatch hook the shared set-once credential cell: the
     // in-kernel root-unlock kthread publishes the mounted root volume's
-    // database into it once the operator's passphrase unlocks the encrypted
-    // root. Until that install the cell fails every `users_db_read` closed, so
+    // database into it once the root is mounted. Until that install the cell
+    // fails every `users_db_read` closed, so
     // login refuses every attempt until a root is mounted.
     .with_users_db(&crate::root_mount::LATE_USERS_DB)
     .with_groups_db(&crate::root_mount::LATE_GROUPS_DB)

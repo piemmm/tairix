@@ -17,7 +17,6 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::NetIfKind;
 use tairix_abi::rlimit::{LimitKind, RLIMIT_INFINITY};
 use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
@@ -367,16 +366,6 @@ fn health_text(record: &VolumeIoHealthRecord) -> String {
     faults.join(", ")
 }
 
-/// An interface name's bytes up to its first NUL — the wire carries a
-/// fixed-width field, not a fixed-width name.
-pub(crate) fn trim_nul(name: &[u8]) -> &[u8] {
-    let end = name
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(name.len());
-    name.get(..end).unwrap_or(name)
-}
-
 /// A hardware address in the conventional colon-separated hexadecimal.
 fn mac(bytes: [u8; 6]) -> String {
     let mut out = String::new();
@@ -387,15 +376,6 @@ fn mac(bytes: [u8; 6]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
-}
-
-/// An interface's kind as display text.
-const fn kind_name(kind: NetIfKind) -> &'static str {
-    match kind {
-        NetIfKind::Ethernet => "ethernet",
-        NetIfKind::Loopback => "loopback",
-        NetIfKind::Bond => "bond",
-    }
 }
 
 /// A limit's name in the words the resource-limit facility uses.

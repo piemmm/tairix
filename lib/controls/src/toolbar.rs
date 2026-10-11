@@ -26,13 +26,13 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{edge_weight, Theme};
 
 use crate::button::{IconButton, SplitAction, SplitButton};
 use crate::damage;
 use crate::paint::{
-    grab_after, heavy_contrast, paint_chevron, plate_border, route_pointer, surface_rect, to_i32,
-    withheld, ChevronDir,
+    grab_after, paint_chevron, plate_border, route_pointer, surface_rect, to_i32, withheld,
+    ChevronDir,
 };
 use crate::scroll::{wheel_steps, ScrollModel, ScrollOrientation, ScrollRange};
 use crate::state::{ControlState, RenderInvariant};
@@ -682,7 +682,7 @@ impl Toolbar {
         let thickness = scale
             .scale_length(theme.metrics().seam_thickness)
             .max(1)
-            .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 });
+            .saturating_mul(edge_weight(theme.contrast()));
         let (x, y, w, h) = match self.orientation {
             ScrollOrientation::Horizontal => {
                 let seam = thickness.min(h);

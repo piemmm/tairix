@@ -2448,3 +2448,14 @@ fn the_change_count_moves_with_each_change_and_not_otherwise() {
         .expect("anybody's room");
     assert_eq!(fixture.service.changes(), set, "nothing moved");
 }
+
+/// A service resumed past an earlier instance's count goes on from it, so its
+/// first announcement is never the count that instance left.
+#[test]
+fn a_resumed_change_count_goes_on_from_where_it_was_resumed() {
+    let mut fixture = Fixture::new();
+    fixture.service.resume_changes(42);
+    assert_eq!(fixture.service.changes(), 42);
+    fixture.bind();
+    assert!(fixture.service.changes() > 42, "binding is a change");
+}

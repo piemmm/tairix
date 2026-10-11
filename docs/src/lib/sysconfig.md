@@ -21,10 +21,10 @@ its key's set, a duplicate, an oversized document (`ConfigError`). An
 default (`SystemConfig::default`), which is how a fresh installation and a
 pre-unlock boot behave.
 
-The store lives inside `/System/Settings` on the encrypted root volume, so
-it can only be read after the operator's `ARXFS passphrase:`
-unlocks the root — a boot-time consumer therefore parses it post-unlock by
-construction, and runs on defaults before that. Write authority is the
+The store lives inside `/System/Settings` on the root volume, so it can only
+be read once the root is mounted — after its passphrase, when the root is
+encrypted — and a boot-time consumer therefore parses it post-mount by
+construction, running on defaults before that. Write authority is the
 existing `/System/Settings` per-inode policy under the caller's
 kernel-attested identity: no new capability exists for it, and an ordinary
 account can read the settings but not change them.
@@ -57,7 +57,7 @@ the user-space network stack (`netstack`). Because `netstack` is the
 network-parsing sandbox and holds **no** filesystem capability, it cannot
 read the store itself: the **device manager** (`devmgr`, which already
 drives the stack's admin endpoint) reads these keys — the administrator's
-document at the canonical path when the encrypted root is mounted, the
+document at the canonical path when the root is mounted, the
 shipped default off the read-only `/System` volume before that — and
 delivers them whenever they differ from what the stack last accepted, over
 the capability-gated

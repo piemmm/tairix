@@ -51,10 +51,10 @@
 use tairix_abi::driver::mailbox::MailboxChannel;
 use tairix_abi::driver::rtc::{Rtc, RtcStatus};
 use tairix_abi::time::{Duration64, Time64};
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost};
 use tairix_vcmailbox::{
     decode_rtc_register_response, decode_rtc_register_write_response, encode_rtc_register_query,
-    encode_rtc_register_write, MailboxError, RtcRegister,
+    encode_rtc_register_write, MailboxError, RtcRegister, RPI_RTC_KEY,
 };
 
 #[cfg(test)]
@@ -66,28 +66,16 @@ mod tests;
 /// signal that the load-time gate cleared. The bytes spell `"RPRT"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x5250_5254_0000_0001;
 
-/// Device-tree `compatible` string this driver binds to — the Raspberry Pi
-/// binding name for the firmware-mediated clock, so a discovery source that
-/// already speaks that vocabulary needs no translation.
-pub const RPI_RTC_COMPATIBLE: &[u8] = b"raspberrypi,rpi-rtc";
-
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from, so the
-/// match data can never drift from the driver.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    match HwMatchKey::compatible(RPI_RTC_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
-)];
+/// match data can never drift from the driver. The device is the mailbox
+/// service's own definition of it, so this driver binds exactly the device
+/// its requests are admitted for.
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(BIND_PRIORITY, RPI_RTC_KEY)];
 
 /// Counter value that means the chip has never been programmed since it lost
 /// power. Refused on write as well as disbelieved on read, so the two agree.

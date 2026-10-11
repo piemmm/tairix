@@ -362,7 +362,7 @@ mod program {
     ///
     /// A store this service cannot fully parse yields the defaults — which
     /// name no server, so the service simply never queries — rather than a
-    /// guess at a partial intent. Before the encrypted root is mounted the
+    /// guess at a partial intent. Before the root is mounted the
     /// path has no backing at all, which is indistinguishable from a
     /// volume-less boot and equally yields the defaults; the caller's bounded
     /// re-read ladder is what separates the two, by outlasting the unlock.
@@ -475,8 +475,8 @@ mod program {
         };
 
         // Built immediately, from whatever is knowable right now — which on a
-        // boot-floor service is usually neither the store (the encrypted root
-        // is not mounted yet) nor a lease (no NIC is up), so it is usually the
+        // boot-floor service is usually neither the store (the root is not
+        // mounted yet) nor a lease (no NIC is up), so it is usually the
         // built-in fallback. Waiting here instead would hold the boot up
         // behind a service nothing else is waiting for, and the fallback tier
         // is exactly what makes waiting unnecessary.
@@ -540,7 +540,7 @@ mod program {
                 return EXIT_UNAVAILABLE;
             }
 
-            // The re-selection rung, if one is due: the encrypted root may
+            // The re-selection rung, if one is due: the root may
             // have been mounted, or a DHCP lease acquired, since the last
             // attempt. Only a *strictly better* tier replaces the servers in
             // use — an equal-tier change (a renewed lease naming a different

@@ -413,7 +413,7 @@ pub fn arxfs_round_trip<Tr: Transport>(
     if geo.block_count != image::TOTAL_SECTORS || geo.block_size as usize != image::SECTOR_BYTES {
         return Err("arxfs device geometry mismatch");
     }
-    let mut fs = ARXFS::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "arxfs mount")?;
+    let mut fs = ARXFS::open(blk, image::FIXTURE_KEYING).map_err(|_| "arxfs mount")?;
     env.log("virtio-qemu: arxfs volume mounted");
 
     let root = fs.root();
@@ -474,7 +474,7 @@ pub fn users_db_load<Tr: Transport>(
     use tairix_test_arxfs_image as image;
 
     let blk = VirtioBlk::open(transport, vhost).map_err(|_| "virtio-blk open")?;
-    let mut fs = ARXFS::open(blk, &image::FIXTURE_VOLUME_KEY).map_err(|_| "users-root mount")?;
+    let mut fs = ARXFS::open(blk, image::FIXTURE_KEYING).map_err(|_| "users-root mount")?;
     env.log("virtio-qemu: users-root volume mounted");
 
     let db = tairix_kernel_core::load_users_db(&mut fs, env.audit_sink())

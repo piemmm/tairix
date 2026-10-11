@@ -526,7 +526,6 @@ fn dhcp6_drive_to_bound(c: &mut Stack) {
 fn has_dhcp6_addr(c: &Stack) -> bool {
     c.iface()
         .ipv6_addresses()
-        .iter()
         .any(|a| a.origin == crate::iface::AddrOrigin::Dhcp)
 }
 
@@ -545,12 +544,9 @@ fn dhcp6_acquires_a_lease_end_to_end() {
     let reply = dhcp6_server_frame(7, req_xid, 3600, 7200, 1800, 2880);
     let out = c.on_frame_collect(&reply, t(2));
     assert!(
-        c.iface()
-            .ipv6_addresses()
-            .iter()
-            .any(|a| a.addr == DHCP6_LEASED
-                && a.prefix_len == 128
-                && a.origin == crate::iface::AddrOrigin::Dhcp),
+        c.iface().ipv6_addresses().any(|a| a.addr == DHCP6_LEASED
+            && a.prefix_len == 128
+            && a.origin == crate::iface::AddrOrigin::Dhcp),
         "the leased IA_NA address is applied as a host /128"
     );
     assert!(out.events.iter().any(|e| matches!(
@@ -2630,7 +2626,7 @@ fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
     let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234, STACK_HASH_KEY);
     config.iface.ipv6_enabled = false;
     let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
-    assert!(a.iface().ipv6_addresses().is_empty());
+    assert!(a.iface().ipv6_addresses().next().is_none());
     // No DAD NS is emitted at bring-up for a disabled family.
     assert!(a.advance_collect(t(0)).frames.is_empty());
     // An inbound RA cannot SLAAC-configure a disabled interface: it is
@@ -2640,7 +2636,7 @@ fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
     let out = a.on_frame_collect(&ra, t(2));
     assert!(out.frames.is_empty());
     assert_eq!(a.counters().rx_dropped, before + 1);
-    assert!(a.iface().ipv6_addresses().is_empty());
+    assert!(a.iface().ipv6_addresses().next().is_none());
 }
 
 #[test]
@@ -2665,9 +2661,9 @@ fn disabling_ipv6_at_runtime_flushes_addresses_and_clears_routes() {
     a.on_frame_collect(&ra, t(2));
     a.advance_collect(t(2));
     a.advance_collect(t(3));
-    assert!(!a.iface().ipv6_addresses().is_empty());
+    assert!(a.iface().ipv6_addresses().next().is_some());
     a.set_ipv6_enabled(false, t(4));
-    assert!(a.iface().ipv6_addresses().is_empty());
+    assert!(a.iface().ipv6_addresses().next().is_none());
     // An off-link v6 destination now has no route (the router list was
     // cleared), so origination fails closed rather than using a stale one.
     let off_link = Ipv6Addr::new(0x2001, 0x0DB8, 0xFF, 0, 0, 0, 0, 1);

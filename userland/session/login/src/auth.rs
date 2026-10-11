@@ -72,7 +72,7 @@ impl Authenticator for UsersAuthenticator<'_> {
 
 /// An [`Authenticator`] wired when no user database is held: every attempt
 /// is refused with the same error, so an installer image — or a boot that
-/// has not yet unlocked the encrypted root that carries the database — sits
+/// has not yet mounted the root that carries the database — sits
 /// at a prompt that grants nothing (fail closed, never
 /// invent an account). Paired with [`UsersAuthenticator`] by
 /// [`supervise`](crate::supervise::supervise), which wires this whenever a

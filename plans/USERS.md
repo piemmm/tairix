@@ -54,7 +54,7 @@ Status: **U1–U4 done**.
 
 3. **The on-disk databases hold human accounts only, inside the user
    band — enforced fail-closed at the identity merge.** The
-   encrypted-root unlock replaces the boot table with the merge of the
+   root unlock replaces the boot table with the merge of the
    compiled half and the loaded `/System/Security/{Users,Groups}`
    records (`tairix_kernel_core::build_identity_table`, also the
    `users_admin` engine's re-verification path). The merge refuses any

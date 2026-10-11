@@ -59,6 +59,7 @@ mod program {
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::fs::{DirEntries, FS_IO_MAX};
+    use tairix_abi::net_ipc::if_name_str;
     use tairix_abi::origin::{CapabilitySummary, Origin};
     use tairix_abi::sysinfo::RECLAIM_CLASS_NAMES;
     use tairix_abi::time::Time64;
@@ -271,7 +272,7 @@ mod program {
                     }
                     let mut names = Vec::new();
                     for_each_net_interface(&transport, |record| {
-                        names.push(if_name_string(&record.name));
+                        names.push(String::from(if_name_str(&record.name)));
                         Ok(WalkStep::Continue)
                     })
                     .map_err(walk_errno)?;
@@ -285,7 +286,7 @@ mod program {
                     // bond names are the distinct owners.
                     let mut names: Vec<String> = Vec::new();
                     for_each_net_bond_member(&transport, |record| {
-                        let name = if_name_string(&record.bond);
+                        let name = String::from(if_name_str(&record.bond));
                         if !name.is_empty() && !names.contains(&name) {
                             names.push(name);
                         }
@@ -343,18 +344,6 @@ mod program {
             ListError::Call(CallError::PermissionDenied) => Errno::PermissionDenied,
             ListError::Call(CallError::Service(errno)) | ListError::Sink(errno) => errno,
         }
-    }
-
-    /// A NUL-padded interface-name field as text, lossily decoded: a name the
-    /// stack reports with a non-UTF-8 byte becomes a replacement character
-    /// rather than dropping the interface — and the completion engine drops
-    /// any name it could not spell back as a selector segment anyway.
-    fn if_name_string(name: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
-        let len = name
-            .iter()
-            .position(|&byte| byte == 0)
-            .unwrap_or(name.len());
-        String::from_utf8_lossy(&name[..len]).into_owned()
     }
 
     /// The POSIX job-control stop signal number (SIGTSTP) the shell reports

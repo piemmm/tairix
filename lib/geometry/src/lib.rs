@@ -26,6 +26,8 @@
 //! [`GridRun`] is the one placement of equal cells along an axis, and
 //! [`GridFill`] what a line of them does with the space left over, so every
 //! grid of tiles on the desktop lays out and hit-tests through one arithmetic.
+//!
+//! [`desktop_modes`] is the one list of sizes a desktop may take on an output.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -34,10 +36,12 @@
 extern crate alloc;
 
 mod grid;
+mod modes;
 mod region;
 mod scale;
 
 pub use grid::{GridFill, GridRun};
+pub use modes::{desktop_modes, DESKTOP_MIN, STANDARD_SIZES};
 pub use region::Region;
 pub use scale::{Scale, REFERENCE_DPI};
 

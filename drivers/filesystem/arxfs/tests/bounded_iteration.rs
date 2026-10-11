@@ -37,7 +37,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
-    EntropySource, PassVerdict, ScrubBudget, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN,
+    EntropySource, Keying, PassVerdict, ScrubBudget, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN,
 };
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PinnedAccounting, PressureBand, ReportedPressure};
@@ -259,7 +259,7 @@ fn fragmented_volume(files: u32, runs: u64) -> ARXFS<SparseBlock> {
         block_count: DEVICE_BLOCKS,
     };
     publish_boot_hash_key();
-    let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xA1))
+    let mut fs = ARXFS::format(device, 64, Keying::Key(&TEST_KEY), &mut TestEntropy(0xA1))
         .expect("format the fixture volume");
     let root = fs.root();
     for file in 0..files {
@@ -297,7 +297,7 @@ fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
         block_count: DEVICE_BLOCKS,
     };
     publish_boot_hash_key();
-    let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xB2))
+    let mut fs = ARXFS::format(device, 64, Keying::Key(&TEST_KEY), &mut TestEntropy(0xB2))
         .expect("format the fixture volume");
     let root = fs.root();
     fs.create(root, b"big", NodeKind::RegularFile)
@@ -526,7 +526,8 @@ fn a_map_rebuild_walks_every_tree_within_a_fixed_budget() {
         let fs = fragmented_volume(files, runs);
         let mut device = fs.into_block().expect("the volume closes");
         device.block_count = DEVICE_BLOCKS * 4;
-        let mut fs = ARXFS::open(device, &TEST_KEY).expect("reopen on a larger device");
+        let mut fs =
+            ARXFS::open(device, Keying::Key(&TEST_KEY)).expect("reopen on a larger device");
         let (added, peak, allocs) = measure(|| fs.grow());
         assert_eq!(
             added,
@@ -614,7 +615,7 @@ fn bounded_fragmented_volume(extents: u64) -> ARXFS<SparseBlock> {
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
     publish_boot_hash_key();
-    let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xC3))
+    let mut fs = ARXFS::format(device, 64, Keying::Key(&TEST_KEY), &mut TestEntropy(0xC3))
         .expect("format the fixture volume")
         .with_writeback_bound(
             FLOOR_MACHINE_BYTES,

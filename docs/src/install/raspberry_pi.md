@@ -29,9 +29,9 @@ Two image profiles exist (`--profile`, default `debug`):
 | Region | Contents |
 | --- | --- |
 | Sector 0 | MBR: three primary partitions, `0x55AA` signature |
-| Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, `root.unlock` |
-| Partition 2 (`0x7E`, ARXFS, sized to its content, directly after partition 1) | read-only, signed-bundle `/System` volume (the §16.2 skeleton); keyed by the non-secret well-known `SYSTEM_VOLUME_KEY` (effectively unencrypted — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6), mounted read-only before unlock (the design-B pre-unlock driver store, `plans/PI.md`) |
-| Partition 3 (`0x7F`, ARXFS, 64 MiB, directly after partition 2) | encrypted data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; unlocked by a passphrase-derived key |
+| Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, and `root.unlock` for an encrypted root only |
+| Partition 2 (`0x7E`, ARXFS, sized to its content, directly after partition 1) | read-only, signed-bundle `/System` volume (the §16.2 skeleton), plaintext — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6 — and mounted read-only before the root (the design-B pre-unlock driver store, `plans/PI.md`) |
+| Partition 3 (`0x7F`, ARXFS, 64 MiB, directly after partition 2) | data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; plaintext, or encrypted under a passphrase-derived key with `--encrypt-root` |
 
 The read-only `/System` volume carries, beside its signed driver and app
 bundles, the **discovered system payload**: each command app's
@@ -52,12 +52,13 @@ it ships instead of failing against a fixed partition size, and is never more
 than one grain larger than it needs to be. The kernel finds every partition by
 its MBR type, never by offset.
 
-`root.unlock` is the root volume's plaintext key-derivation descriptor
-(`AGENTS.md` §11): the per-volume random salt and PBKDF2 iteration count
-the bootstrap reads — before anything is decrypted — to turn the
-operator passphrase into the volume key. It is the analogue of a LUKS
-header and carries no secret. The passphrase is never stored on the
-image.
+`root.unlock`, present only beside an encrypted root, is its plaintext
+key-derivation descriptor (`AGENTS.md` §11): the per-volume random salt and
+PBKDF2 iteration count the bootstrap reads — before anything is decrypted — to
+turn the operator passphrase into the volume key. It is the analogue of a LUKS
+header and carries no secret. The passphrase is never stored on the image. The
+boot refuses a disk whose boot partition disagrees with its root: a descriptor
+beside a plaintext root, or an encrypted root with none.
 
 `kernel8.img` is the freestanding aarch64 `tairix-kernel` ELF (release
 profile, linked at `0x8_0000` by `aarch64-rpi4.ld`) flattened to the raw
@@ -119,41 +120,24 @@ cargo xtask image --target aarch64-rpi
 
 This one step builds the aarch64 kernel, fetches any missing firmware
 blob from the pinned source, verifies the firmware against the
-manifest, and writes (for the default `debug` profile; pass
-`--profile installer` for the installer image):
+manifest, and writes `images/tairix-aarch64-rpi-debug.img`, the flashable
+image, for the default `debug` profile; pass `--profile installer` for the
+installer image.
 
-- `images/tairix-aarch64-rpi-debug.img` — the flashable image.
-- `images/tairix-aarch64-rpi-debug.rootkey` — the derived root volume key
-  (64 hex digits, owner-readable only).
-
-ARXFS has no plaintext mode, so the root partition is always encrypted.
-Its volume key is **derived from a passphrase** (`AGENTS.md` §11): the
-build provisions a per-volume `root.unlock` descriptor (random salt +
-PBKDF2 cost), runs the profile's passphrase through it to a 256-bit key,
-and provisions the root under that key. The passphrase is fixed by the
-profile (`tairix_mkimage::passphrase_for`):
-
-- **`installer`** — a **blank** passphrase. The bootstrap tries the blank
-  passphrase silently *first*, so the installer image unlocks with **no
-  prompt** at all and boots straight into the first-boot installer
-  (`AGENTS.md` §11), which re-provisions the root under the user's chosen
-  passphrase.
-- **`debug`** — the passphrase `root` (matching the seeded `root` / `root`
-  account). The blank attempt fails, so the bootstrap draws the
-  `ARXFS passphrase:` prompt; type `root` to unlock. A wrong entry
-  is refused after a short delay and re-prompted indefinitely (the root
-  cannot mount without the right passphrase), so mistype freely.
-
-Either way the volume is fully encrypted under a real, salt-derived key.
-The `.rootkey` file is that derived key, written for mounting the volume
-on a host; it can equally be re-derived from the on-image `root.unlock`
-descriptor and the profile's passphrase.
-
-A shippable, user-installed root is different: the first-boot installer
-(`AGENTS.md` §11, PLAN.md Stage 8) provisions the volume under a
-passphrase the **user chooses**, writes its `root.unlock` descriptor,
-and the production boot then prompts for that passphrase before mounting.
-A blank default is never used for a user's own data.
+The root partition is **plaintext** in both profiles, so the image boots with
+no passphrase. A debug image can be asked for with an encrypted root instead,
+`--encrypt-root`: the build provisions a per-volume `root.unlock` descriptor
+(random salt + PBKDF2 cost), runs the debug passphrase `root` through it to a
+256-bit key, and formats the root under that key. The boot then draws the
+`ARXFS passphrase:` prompt; type `root` to unlock. A wrong entry is refused
+after a short delay and re-prompted indefinitely (the root cannot mount without
+the right passphrase), so mistype freely. That build also writes
+`images/tairix-aarch64-rpi-debug.rootkey`, the derived key (64 hex digits,
+owner-readable only), for mounting the volume on a host; it can equally be
+re-derived from the on-image descriptor and the passphrase. An installer image
+is never encrypted: whether to encrypt a real installation is the first-boot
+installer's question to its user (`AGENTS.md` §11, PLAN.md Stage 8), which
+formats the root under the passphrase the user chooses.
 
 ## Flashing and first boot
 

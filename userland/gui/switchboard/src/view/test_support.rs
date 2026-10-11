@@ -58,6 +58,45 @@ pub(super) fn turn(detents: i32) -> InputEvent {
 /// How far one detent scrolls a list at the fixture's unit scale.
 pub(super) const DETENT_PX: u64 = WHEEL_STEP as u64;
 
+/// `m` with `device`'s pane made taller by `blocks` more blocks of facts, so
+/// a test can scroll it as far as it needs whatever the density.
+pub(super) fn with_taller_pane(
+    mut m: SwitchboardModel,
+    device: DeviceId,
+    blocks: usize,
+) -> SwitchboardModel {
+    let pane = m
+        .resources
+        .devices
+        .iter_mut()
+        .find(|candidate| candidate.id == device)
+        .expect("the fixture carries the device");
+    for block in 0..blocks {
+        pane.blocks.push(PaneBlock::full(
+            "KERNEL",
+            BlockBody::Facts(
+                (0..4)
+                    .map(|fact| {
+                        ReadingFact::text(alloc::format!("fact {block}.{fact}"), "measured")
+                    })
+                    .collect(),
+            ),
+        ));
+    }
+    m
+}
+
+/// A wheel turn that scrolls exactly `pixels` at the fixture's unit scale:
+/// the fewest units whose share of a detent reaches that many pixels.
+pub(super) fn wheel_pixels(pixels: u32) -> InputEvent {
+    let per_detent = u64::try_from(SCROLL_UNITS_PER_DETENT).expect("a positive detent");
+    let units = (u64::from(pixels) * per_detent).div_ceil(DETENT_PX);
+    InputEvent::PointerScrolled {
+        dx: 0,
+        dy: i32::try_from(units).expect("a turn fits the wire"),
+    }
+}
+
 /// A populated model with enough items to overflow a modest viewport.
 ///
 /// Its Resources report deliberately spans the surface's honest range: the

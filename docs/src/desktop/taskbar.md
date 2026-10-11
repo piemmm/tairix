@@ -92,7 +92,11 @@ From the leading end to the trailing end:
 - **Clock** — immediately before the account capsule. Its display text is
   held by a `Clock` model whose label the caller sets (formatting a `Time64`
   value into a string is an upstream concern, `AGENTS.md` §21); the bar stores
-  only the text to draw.
+  only the text to draw. The label is set in the body face, a step above a
+  caption, and follows the chosen text size. On a horizontal bar the region is
+  at least `clock_extent` and grows to the widest `HH:mm` reading at that size
+  (`clock_room`); a label a region cannot hold whole is not drawn, because a
+  time cut short reads as another time.
 - **Account capsule** — anchored to the very trailing end, immovable
   (`plans/NEW-TASKBAR.md` T9). The `SwitchboardTray` model derives the shared
   `tairix-controls` `TraySignal` capsule from the Switchboard service's
@@ -255,6 +259,8 @@ account:
 | `picker`        | the hover window picker                                 |
 | `notifications` | the notification popover                               |
 | `readout`       | the Switchboard capsule's expanded instrument readout  |
+| `sound`         | the volume panel                                       |
+| `network`       | the network signal's readout                           |
 
 Each account is either `Whole` — every pixel, which is what a change to the
 *model* owes when it has no rectangle smaller than the surface, such as a new
@@ -433,7 +439,7 @@ colour role from the `Palette`. Its last argument is the caller's
   beads, bar-seated like every other icon on the strip, so it carries no
   outline of its own — and `TaskbarRenderer::paint_tray_readout` paints the
   expanded instrument readout as its own popover surface, rounding itself at
-  `TrayReadoutLayout::corner_radius`.
+  `ReadoutLayout::corner_radius`.
 
 On top of those plates, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
@@ -556,6 +562,48 @@ Authority Mark and asks for nothing. A report arriving mid-drag cannot pull
 the slider from under the pointer, and an output that goes away takes the
 panel with it. The panel has its own repaint account (`TaskbarRepaint::SOUND`)
 and window.
+
+## The network signal, its readout, and its menu
+
+The session hands the bar the network report the Switchboard publishes
+(`Taskbar::set_network`; see [the Switchboard](switchboard.md#channel)). The
+bar draws one signal for the machine's network, ahead of every other status
+signal:
+
+- `Network` while any interface has link and a preferred address beyond the
+  link and the machine (a link-local, loopback or still-tentative address does
+  not connect anything);
+- `NetworkOffline` while interfaces are reported and none is connected;
+- no signal at all when the report is unmeasured or names no interface. A
+  Switchboard that may not read the interfaces is not a machine that is
+  offline.
+
+**Hovering** the signal opens its readout (`Taskbar::network_readout_layout`),
+a popover window of its own: each interface by name with its condition
+(*Connected*, *No address*, *No link*), then each of its addresses with its
+prefix and any state other than preferred, then how many interfaces the
+report could not name. The fact list is built once per report, so neither a
+pointer sample nor a paint formats an address. The readout follows the same
+hover rule as the capsule's (`tairix_controls::readout_hover`): it stays open
+while the pointer is on the signal, on the readout, or on the bar's rim
+between them, and closes once the pointer is anywhere else or leaves the bar's
+surfaces. Its plate is sized from the facts plus the rim and padding on every
+side (`tairix_controls::plate_content_inset`), so nothing it states is elided,
+and held to the room between the bar and the screen edge across from it, so a
+long report never runs back over the bar. A signal arriving or leaving beside
+the network signal moves its slot; the readout then closes rather than hang
+from where the signal was, and the pointer's next motion opens it again.
+
+A **secondary** press opens the network menu, one table
+(`network_menu::ROWS`):
+
+| Row | What it is |
+|---|---|
+| Network Settings… | opens Settings at the pane that configures the interfaces (`tairix_netconfig::SETTINGS_PANE`); disabled *Not installed* without a settings bundle |
+| Network Activity… | opens the Switchboard on its Resources section |
+
+A primary press is claimed and inert, as on every status signal but volume.
+The readout has its own repaint account (`TaskbarRepaint::NETWORK`) and window.
 
 ## The program-library popup
 

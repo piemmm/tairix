@@ -28,6 +28,7 @@ use core::slice;
 use alloc::vec::Vec;
 
 use tairix_colour::{Hue, Rgb};
+use tairix_parallel::JobRunner;
 use tairix_reclaim::CachedBytes;
 use tairix_util::{fallible, mathf};
 
@@ -35,7 +36,9 @@ use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::{Paint, Pattern};
-use crate::resample::{resample_pixels, Region, ResampleError, ResampleScratch};
+use crate::resample::{
+    resample_pixels, resample_pixels_window, Region, ResampleError, ResampleScratch,
+};
 use crate::round::{round_rect_coverage, round_rect_radius};
 use crate::scan::{FillRule, SampleSpace, ScanFill, ScanScratch, MAX_DRAWING_EXTENT};
 
@@ -571,6 +574,37 @@ impl Surface {
             (dest.width, dest.height),
             &mut dest.pixels,
             scratch,
+        )
+    }
+
+    /// Resample the whole of this surface onto the whole of `dest`, writing
+    /// only `window` of it, in bands spread across `runner`, each working in
+    /// one slot of `scratch`.
+    ///
+    /// For a picture resampled every frame onto a larger one a damaged
+    /// rectangle at a time: each window is exactly that rectangle of the
+    /// whole resample, so the destination never holds a seam. The band count
+    /// is at most `scratch`'s length, and `dest`'s clip window is not
+    /// consulted.
+    ///
+    /// # Errors
+    ///
+    /// Every geometry refusal [`resample_window`](crate::resample_window)
+    /// states, and [`ResampleError::OutOfMemory`] when `scratch` is empty or
+    /// a slot could not grow.
+    pub fn resample_window_into(
+        &self,
+        dest: &mut Self,
+        window: Region,
+        scratch: &mut [ResampleScratch],
+        runner: &dyn JobRunner,
+    ) -> Result<(), ResampleError> {
+        resample_pixels_window(
+            (self.width, self.height, &self.pixels),
+            (dest.width, dest.height, &mut dest.pixels),
+            window,
+            scratch,
+            runner,
         )
     }
 

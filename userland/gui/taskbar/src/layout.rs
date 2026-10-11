@@ -33,12 +33,12 @@
 
 use alloc::vec::Vec;
 
-use tairix_controls::{plate_border, ControlRole, Panel, TraySignal};
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_controls::{plate_border, ControlRole, Panel};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use crate::edge::{Edge, Orientation};
-use crate::library::{panel_origin, probe_chrome};
+use crate::library::{panel_origin, probe_chrome, room_beside, to_u32};
 use crate::taskbar::TaskbarConfig;
 
 /// The element of the taskbar under a pointer, returned by
@@ -119,10 +119,13 @@ impl BarLayout {
         config: &TaskbarConfig,
         theme: &Theme,
         scale: Scale,
-        app_count: usize,
-        icon_count: usize,
+        clock_room: u32,
+        (app_count, icon_count): (usize, usize),
     ) -> Self {
-        let scaled = config.scaled(scale);
+        let mut scaled = config.scaled(scale);
+        if scaled.edge.orientation() == Orientation::Horizontal {
+            scaled.clock_extent = scaled.clock_extent.max(clock_room);
+        }
         let config = &scaled;
         let metrics = theme.metrics();
         let orientation = config.edge.orientation();
@@ -380,27 +383,17 @@ impl NotificationsLayout {
         count: usize,
         card_height: impl Fn(usize, u32) -> u32,
     ) -> Self {
-        let (screen_width, screen_height) = screen;
         let metrics = theme.metrics();
         let corner_radius = scale.scale_length(metrics.window_corner_radius);
         let pad = scale.scale_length(metrics.control_gap);
-        let width = scale
-            .scale_length(NOTIF_POPUP_WIDTH)
-            .min(screen_width)
-            .max(1);
+        let (room_width, available) = room_beside(edge, bar.bar, screen);
+        let width = scale.scale_length(NOTIF_POPUP_WIDTH).min(room_width).max(1);
 
         let chrome = probe_chrome(&notif_panel(Point::ORIGIN), width, scale, theme);
         let inner_width = chrome
             .content_width
             .saturating_sub(pad.saturating_mul(2))
             .max(1);
-
-        // Space available for the panel on the popover's side of the bar.
-        let available = match edge {
-            Edge::Bottom => u32::try_from(bar.bar.top()).unwrap_or(0),
-            Edge::Top => screen_height.saturating_sub(u32::try_from(bar.bar.bottom()).unwrap_or(0)),
-            Edge::Left | Edge::Right => screen_height,
-        };
 
         // Which cards fit: the model order, capped by the display maximum and
         // by the vertical room (chrome overhead + a pad above the first card,
@@ -483,17 +476,17 @@ impl NotificationsLayout {
     }
 }
 
-/// The computed geometry of the Switchboard capsule's expanded readout: the
-/// popup panel and the radius the window manager rounds it with.
+/// The computed geometry of a hover readout — the Switchboard capsule's or the
+/// network signal's: the popup panel and the radius the window manager rounds
+/// it with.
 ///
-/// The readout opens outward from the Switchboard slot through the same
-/// shared origin rule as the library popup and the notification popover,
-/// sized from the capsule's own
-/// [`readout_size`](tairix_controls::TraySignal::readout_size) and clamped
-/// to the screen. The radius is the popup radius the readout plate itself
-/// draws, so the window's rounding and the plate's can never disagree.
+/// A readout opens outward from the slot it explains through the same shared
+/// origin rule as the library popup and the notification popover, sized from
+/// what it shows and clamped to the screen. The radius is the popup radius the
+/// readout plate itself draws, so the window's rounding and the plate's can
+/// never disagree.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct TrayReadoutLayout {
+pub struct ReadoutLayout {
     /// The whole readout panel.
     pub panel: Rect,
     /// The corner radius the window manager applies to the readout — the
@@ -501,25 +494,26 @@ pub struct TrayReadoutLayout {
     pub corner_radius: u32,
 }
 
-impl TrayReadoutLayout {
-    /// Compute the readout panel for `signal`, opened outward from the
-    /// Switchboard slot of `bar` (pinned to `edge`) at the desktop `scale`
+impl ReadoutLayout {
+    /// Compute a readout panel `size` (width, height) across, opened outward
+    /// from `anchor` on `bar` (pinned to `edge`) and held to the room a
+    /// `screen` (width, height) leaves beside the bar, at the desktop `scale`
     /// under `theme`.
     #[must_use]
     pub(crate) fn compute(
         edge: Edge,
         bar: &BarLayout,
-        screen_width: u32,
-        screen_height: u32,
+        anchor: Rect,
+        (width, height): (u32, u32),
+        screen: (u32, u32),
         scale: Scale,
         theme: &Theme,
-        signal: &TraySignal,
     ) -> Self {
         let corner_radius = scale.scale_length(theme.metrics().popup_corner_radius);
-        let (width, height) = signal.readout_size(scale, theme);
-        let width = width.min(screen_width).max(1);
-        let height = height.min(screen_height).max(1);
-        let origin = panel_origin(edge, bar.bar, bar.switchboard, width, height);
+        let (room_width, room_height) = room_beside(edge, bar.bar, screen);
+        let width = width.min(room_width).max(1);
+        let height = height.min(room_height).max(1);
+        let origin = panel_origin(edge, bar.bar, anchor, width, height);
         Self {
             panel: Rect::new(origin.x, origin.y, width, height),
             corner_radius,
@@ -628,15 +622,4 @@ pub(crate) fn local_rect(rect: Rect, origin: Point) -> Rect {
 /// The index of the first slot containing `point`, ignoring empty slots.
 fn index_of(rects: &[Rect], point: Point) -> Option<usize> {
     rects.iter().position(|rect| rect.contains(point))
-}
-
-/// Saturating `u32` → `i32`; an out-of-range coordinate clamps to
-/// [`i32::MAX`] rather than wrapping.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
-}
-
-/// Saturating `usize` → `u32`.
-fn to_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
 }

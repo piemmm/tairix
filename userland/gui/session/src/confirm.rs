@@ -17,16 +17,12 @@
 //! cancellation, so nothing irreversible can follow from a prompt the user
 //! did not answer.
 
-use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::input::KeyInput;
 use tairix_abi::PowerAction;
-use tairix_controls::{
-    damage, Button, ControlRole, ControlState, Dialog, DialogAction, FocusState, PointerState,
-};
-use tairix_geometry::Scale;
-use tairix_wm::{
-    Compositor, InputEvent, Key, NamedKey, Point, PointerButton, Rect, Surface, WindowId,
-};
+use tairix_controls::{Button, ControlRole, ControlState, Dialog, FocusState};
+use tairix_wm::{Compositor, Point, WindowId};
 
+use crate::choice::{Choice, ChoicePrompt};
 use crate::shell::DesktopShell;
 
 /// The prompt window's width in pixels.
@@ -40,22 +36,6 @@ pub const WIN_WIDTH: u32 = 460;
 /// text, and the action band beneath them.
 pub const WIN_HEIGHT: u32 = 170;
 
-/// Top-left of the prompt window, in screen pixels.
-///
-/// One deterministic spot, clear of the first window-cascade slots, exported
-/// so a host-side observer drives the prompt where the session actually puts
-/// it rather than at a re-derived guess.
-pub const CONFIRM_ORIGIN: Point = Point::new(240, 200);
-
-/// Index of the safe button in the dialog's action band.
-///
-/// Leading, and the one that holds keyboard focus when the prompt opens, so
-/// the answer a stray `Enter` gives is "no".
-const CANCEL_ACTION: usize = 0;
-
-/// Index of the confirming button.
-const CONFIRM_ACTION: usize = 1;
-
 /// How the user answered a confirmation prompt.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Answer {
@@ -66,12 +46,10 @@ pub enum Answer {
     Declined,
 }
 
-/// One showing prompt: what it is asking about, its compositor window, and
-/// the shared dialog behind it.
+/// One showing prompt: what it is asking about, and the question itself.
 struct ActivePrompt {
     action: PowerAction,
-    wm: WindowId,
-    dialog: Dialog,
+    prompt: ChoicePrompt,
 }
 
 /// The session's confirmation-prompt slot.
@@ -97,7 +75,7 @@ impl ConfirmPrompt {
     /// rather than to any served window.
     #[must_use]
     pub fn wm_id(&self) -> Option<WindowId> {
-        self.active.as_ref().map(|active| active.wm)
+        self.active.as_ref().map(|active| active.prompt.wm())
     }
 
     /// The transition the showing prompt is asking about, if one is up.
@@ -121,22 +99,24 @@ impl ConfirmPrompt {
         if self.active.is_some() {
             return false;
         }
-        let dialog = build_dialog(action);
-        let Some(surface) = render_surface(&dialog, compositor.scale(), shell) else {
+        let Some(prompt) = ChoicePrompt::open(
+            build_dialog(action),
+            (WIN_WIDTH, WIN_HEIGHT),
+            title(action),
+            shell,
+            compositor,
+        ) else {
             return false;
         };
-        let Some(wm) = shell.open_window(compositor, CONFIRM_ORIGIN, surface, title(action)) else {
-            return false;
-        };
-        self.active = Some(ActivePrompt { action, wm, dialog });
+        self.active = Some(ActivePrompt { action, prompt });
         true
     }
 
     /// Apply one key press to the showing prompt.
     ///
-    /// `Escape` declines outright. `Enter`/`Space` activate whichever button
-    /// holds focus, which is the safe one when the prompt opens, so
-    /// confirming always takes a deliberate move to the other button.
+    /// `Escape` declines outright. `Enter` activates whichever button holds
+    /// focus, which is the safe one when the prompt opens, so confirming
+    /// always takes a deliberate move to the other button.
     ///
     /// Returns the answer once the user has given one; the prompt window is
     /// already closed by then.
@@ -146,24 +126,8 @@ impl ConfirmPrompt {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
-        let KeyInput::Pressed { key, .. } = key else {
-            return None;
-        };
-        match key {
-            KeyValue::Named(NamedKeyCode::Escape) => self.conclude(shell, compositor, false),
-            KeyValue::Named(NamedKeyCode::Tab | NamedKeyCode::Left | NamedKeyCode::Right) => {
-                self.move_focus(shell, compositor);
-                None
-            }
-            KeyValue::Named(NamedKeyCode::Enter) => {
-                let action = {
-                    let active = self.active.as_mut()?;
-                    active.dialog.on_key(Key::Named(NamedKey::Enter))
-                };
-                self.resolve(action, shell, compositor)
-            }
-            _ => None,
-        }
+        let choice = self.active.as_mut()?.prompt.key(key, shell, compositor)?;
+        self.conclude(shell, compositor, choice)
     }
 
     /// Apply one primary-button press at the prompt-window-local position
@@ -178,43 +142,12 @@ impl ConfirmPrompt {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
-        let scale = compositor.scale();
-        let w = scale.scale_length(WIN_WIDTH);
-        let h = scale.scale_length(WIN_HEIGHT);
-        let bounds = Rect::new(0, 0, w, h);
-        let theme = shell.session().active_theme().clone();
-        let mut damage = damage::sink();
-        let action = {
-            let active = self.active.as_mut()?;
-            // A button resolves on the completed click, so the press and the
-            // release are both fed at the same point the user pressed.
-            let _ = active.dialog.on_pointer(
-                &InputEvent::PointerMoved { to: local },
-                bounds,
-                scale,
-                &theme,
-                &mut damage,
-            );
-            let _ = active.dialog.on_pointer(
-                &InputEvent::PointerPressed {
-                    button: PointerButton::Primary,
-                },
-                bounds,
-                scale,
-                &theme,
-                &mut damage,
-            );
-            active.dialog.on_pointer(
-                &InputEvent::PointerReleased {
-                    button: PointerButton::Primary,
-                },
-                bounds,
-                scale,
-                &theme,
-                &mut damage,
-            )
-        };
-        self.resolve(action, shell, compositor)
+        let choice = self
+            .active
+            .as_mut()?
+            .prompt
+            .click(local, shell, compositor)?;
+        self.conclude(shell, compositor, choice)
     }
 
     /// Take the prompt down without an answer, declining the transition.
@@ -222,67 +155,29 @@ impl ConfirmPrompt {
     /// Used when the session is tearing the desktop down or the theme it was
     /// drawn against is gone: an unanswered prompt is never a confirmation.
     pub fn abandon(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
-        let _ = self.conclude(shell, compositor, false);
+        let _ = self.conclude(shell, compositor, Choice::Declined);
     }
 
     /// Repaint the showing prompt, so a theme switch behind it redraws it in
     /// the appearance now in use. A surface that cannot be built leaves the
     /// previous frame up rather than failing.
     pub fn repaint(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        if let Some(surface) = render_surface(&active.dialog, compositor.scale(), shell) {
-            let _ = compositor.set_surface(active.wm, surface);
-        }
-    }
-
-    /// Turn a dialog action into an answer, ignoring anything that is not one
-    /// of the prompt's two buttons.
-    fn resolve(
-        &mut self,
-        action: Option<DialogAction>,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-    ) -> Option<Answer> {
-        match action {
-            Some(DialogAction::ActionActivated {
-                index: CONFIRM_ACTION,
-            }) => self.conclude(shell, compositor, true),
-            Some(DialogAction::ActionActivated {
-                index: CANCEL_ACTION,
-            }) => self.conclude(shell, compositor, false),
-            // A band that reported some other index is not one of the two
-            // buttons this prompt built; answering nothing leaves the prompt
-            // up rather than guessing which way the user meant it.
-            _ => None,
-        }
-    }
-
-    /// Move keyboard focus to the other button and repaint, so the focus ring
-    /// the user is steering by is the one on screen.
-    fn move_focus(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
         if let Some(active) = self.active.as_mut() {
-            let focused = focused_index(&active.dialog);
-            let next = usize::from(focused == Some(CANCEL_ACTION));
-            set_focus(&mut active.dialog, next);
+            active.prompt.repaint(shell, compositor);
         }
-        self.repaint(shell, compositor);
     }
 
-    /// Close the prompt window and produce the answer.
     fn conclude(
         &mut self,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        confirmed: bool,
+        choice: Choice,
     ) -> Option<Answer> {
         let active = self.active.take()?;
-        let _ = shell.close_window(compositor, active.wm);
-        Some(if confirmed {
-            Answer::Confirmed(active.action)
-        } else {
-            Answer::Declined
+        active.prompt.close(shell, compositor);
+        Some(match choice {
+            Choice::Accepted => Answer::Confirmed(active.action),
+            Choice::Declined => Answer::Declined,
         })
     }
 }
@@ -330,40 +225,4 @@ pub(crate) fn build_dialog(action: PowerAction) -> Dialog {
     Dialog::new(title(action))
         .with_message(message(action))
         .with_actions(alloc::vec![cancel, confirm])
-}
-
-/// Which action button currently holds keyboard focus, if any.
-fn focused_index(dialog: &Dialog) -> Option<usize> {
-    dialog
-        .actions()
-        .iter()
-        .position(|button| button.state().focus.focused)
-}
-
-/// Give keyboard focus to the button at `index` and take it from the others,
-/// so exactly one focus ring is drawn and `Enter` can only mean one thing.
-fn set_focus(dialog: &mut Dialog, index: usize) {
-    for (position, button) in dialog.actions_mut().iter_mut().enumerate() {
-        let focus = if position == index {
-            FocusState::FOCUSED
-        } else {
-            FocusState::default()
-        };
-        button.set_state(
-            button
-                .state()
-                .with_focus(focus)
-                .with_pointer(PointerState::None),
-        );
-    }
-}
-
-/// Paint the prompt at the window's physical extents through the active theme.
-fn render_surface(dialog: &Dialog, scale: Scale, shell: &DesktopShell) -> Option<Surface> {
-    let theme = shell.session().active_theme();
-    let w = scale.scale_length(WIN_WIDTH);
-    let h = scale.scale_length(WIN_HEIGHT);
-    let mut surface = Surface::new(w, h)?;
-    dialog.render(&mut surface, Rect::new(0, 0, w, h), scale, theme);
-    Some(surface)
 }

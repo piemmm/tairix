@@ -91,8 +91,8 @@ pub static COMMANDS: &[Command] = &[
     Command {
         name: "mount",
         aliases: &[],
-        summary: "unlock and mount the root now (prompts for the passphrase)",
-        help: "mount\n\n  Prompt for the ARXFS passphrase and perform the real root unlock\n  now. On success the boot continues without a second prompt. A wrong\n  passphrase or a structural failure is reported; nothing is bypassed.",
+        summary: "mount the root now (prompting for its passphrase when it is encrypted)",
+        help: "mount\n\n  Mount the root now, prompting for the ARXFS passphrase when the\n  root is encrypted. On success the boot continues without a second\n  prompt. A wrong passphrase or a structural failure is reported;\n  nothing is bypassed.",
         handler: commands::control::cmd_mount,
     },
     Command {
@@ -402,7 +402,7 @@ mod tests {
     fn help_for_one_command_shows_its_body() {
         let mut session = MockSession::new(&[]);
         dispatch(b"help mount", &mut session.session());
-        assert!(session.output_contains("real root unlock"));
+        assert!(session.output_contains("Mount the root now"));
     }
 
     #[test]

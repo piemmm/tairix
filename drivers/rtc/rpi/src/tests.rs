@@ -10,13 +10,11 @@ use core::cell::RefCell;
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::rtc::Rtc;
 use tairix_abi::time::{Duration64, Time64};
-use tairix_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey, HW_COMPATIBLE_MAX,
-};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
 use tairix_vcmailbox::mock::MockFirmware;
 use tairix_vcmailbox::{MailboxTransport, RtcRegister};
 
-use super::{register, RpiRtc, BIND_KEYS, RPI_RTC_COMPATIBLE};
+use super::{register, RpiRtc, BIND_KEYS};
 
 /// A channel backed by the mock firmware, adapting its `&mut self` transport
 /// onto the `&self` channel the class seam uses — the same `RefCell` shape
@@ -95,9 +93,8 @@ fn register_requires_the_load_capability() {
 #[test]
 fn the_bind_table_names_the_device_tree_identity() {
     assert_eq!(BIND_KEYS.len(), 1);
-    let expected = HwMatchKey::compatible(RPI_RTC_COMPATIBLE).expect("fits");
+    let expected = HwMatchKey::compatible(b"raspberrypi,rpi-rtc").expect("fits");
     assert_eq!(BIND_KEYS[0].key, expected);
-    assert!(RPI_RTC_COMPATIBLE.len() <= HW_COMPATIBLE_MAX);
 }
 
 #[test]

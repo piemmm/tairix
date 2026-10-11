@@ -190,6 +190,24 @@ impl<C, T> DeviceInputSource<C, T> {
         self.recogniser.set_settings(settings);
     }
 
+    /// Resolve motion against `screen` from now on, holding the pointer where
+    /// it is but inside it, and answer where that is: the desktop it moves
+    /// over changed size.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an empty `screen`, which keeps the one in
+    /// force.
+    pub fn set_screen(&mut self, screen: Rect, scale: Scale) -> Result<Point, Errno> {
+        if screen.is_empty() {
+            return Err(Errno::OutOfRange);
+        }
+        self.screen = screen;
+        self.carry = (0, 0);
+        self.set_density(scale);
+        Ok(self.displace(0, 0))
+    }
+
     /// The density the screen is drawn at: a touchscreen that states no size
     /// of its own covers the screen, whose size this gives.
     pub fn set_density(&mut self, scale: Scale) {
@@ -633,6 +651,26 @@ mod tests {
         assert_eq!(
             DeviceInputSource::new(QueueChannel::new(&[]), TouchQueue::default(), Rect::EMPTY)
                 .map(|_| ()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_smaller_screen_holds_the_pointer_inside_it_and_motion_follows() {
+        let mut source = source(&[PointerInput::MovedBy { dx: 1000, dy: 1000 }]);
+        assert_eq!(
+            source.set_screen(Rect::new(0, 0, 320, 200), Scale::ONE),
+            Ok(Point::new(319, 199)),
+            "the centre of the old screen lies past the new one's corner"
+        );
+        assert_eq!(
+            source.poll(0),
+            Ok(Some(InputEvent::PointerMoved {
+                to: Point::new(319, 199)
+            }))
+        );
+        assert_eq!(
+            source.set_screen(Rect::EMPTY, Scale::ONE),
             Err(Errno::OutOfRange)
         );
     }

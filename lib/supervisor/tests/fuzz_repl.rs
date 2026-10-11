@@ -20,7 +20,8 @@
 //! loop to a wall-clock budget.
 
 use tairix_supervisor::{
-    run_supervisor, MountOutcome, Report, SupInput, SupervisorEvent, SupervisorHost, TestOutcome,
+    run_supervisor, MountOutcome, Report, RootLock, SupInput, SupervisorEvent, SupervisorHost,
+    TestOutcome,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -96,11 +97,15 @@ impl SupInput for ScriptInput<'_> {
 }
 
 /// A [`SupervisorHost`] that renders a short line for every query and returns
-/// canned control outcomes. `mount` varies its result by the typed
-/// passphrase's length so the fuzzer reaches every `mount` branch; `reboot`
+/// canned control outcomes. The root's lock cycles through encrypted,
+/// plaintext and unreadable, and `mount` varies its result by the typed
+/// passphrase's length, so the fuzzer reaches every `mount` branch; `reboot`
 /// and `poweroff` return (as an unsupported platform would), so the REPL
 /// stays and the run terminates.
-struct FuzzHost;
+#[derive(Default)]
+struct FuzzHost {
+    locks_asked: usize,
+}
 
 impl SupervisorHost for FuzzHost {
     fn version(&mut self, out: &mut dyn Report) {
@@ -153,11 +158,15 @@ impl SupervisorHost for FuzzHost {
         out.line("scan");
         TestOutcome::Passed
     }
-    fn mount(&mut self, passphrase: &[u8], out: &mut dyn Report) -> MountOutcome {
+    fn root_lock(&mut self) -> Option<RootLock> {
+        self.locks_asked += 1;
+        [Some(RootLock::Passphrase), Some(RootLock::Plaintext), None][self.locks_asked % 3]
+    }
+    fn mount(&mut self, passphrase: Option<&[u8]>, out: &mut dyn Report) -> MountOutcome {
         out.line("mount");
         // Reach every mount branch across iterations without ever echoing the
         // secret: the outcome is a pure function of the passphrase length.
-        match passphrase.len() % 3 {
+        match passphrase.map_or(0, <[u8]>::len) % 3 {
             0 => MountOutcome::Mounted,
             1 => MountOutcome::WrongPassphrase,
             _ => MountOutcome::Failed,
@@ -180,7 +189,7 @@ fn repl_never_panics(script: &[u8]) {
         bytes: script,
         pos: 0,
     };
-    let mut host = FuzzHost;
+    let mut host = FuzzHost::default();
     let _ = run_supervisor(&mut out, &mut input, &mut host);
     // Silence the byte counter without dropping the "no panic" coverage.
     core::hint::black_box(out.bytes);

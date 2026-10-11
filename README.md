@@ -27,7 +27,7 @@ Here are some screenshots of TAIRiX running, showcasing the current state of the
 </tr>
   <tr>
     <td align="center"><a href="docs/screenshots/transparency-blur-compositor.png"><img src="docs/screenshots/transparency-blur-compositor.png" alt="Compositor with transparency/blur support" width="240"></a><br><sub>Compositor with transparency/blur support</sub></td>
-    <td align="center"><a href="docs/screenshots/boot-filesystem-unlock.png"><img src="docs/screenshots/boot-filesystem-unlock.png" alt="Boot: encrypted filesystem unlock" width="240"></a><br><sub>Filesystem unlock</sub></td>
+    <td align="center"><a href="docs/screenshots/boot-filesystem-unlock.png"><img src="docs/screenshots/boot-filesystem-unlock.png" alt="Boot: encrypted filesystem unlock" width="240"></a><br><sub>Encrypted root unlock</sub></td>
     <td align="center"><a href="docs/screenshots/user-login.png"><img src="docs/screenshots/user-login.png" alt="User login" width="240"></a><br><sub>User login</sub></td>
     <td align="center"><a href="docs/screenshots/booted-and-logged-in.png"><img src="docs/screenshots/booted-and-logged-in.png" alt="Booted and logged in" width="240"></a><br><sub>Logged in</sub></td>
    </tr>
@@ -132,8 +132,8 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | POSIX owner / mode / ACL | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Per-inode capability gate | ✓ | — | — | — | — |
 | 64-bit ns timestamps (pre-1970 / post-2038) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Encryption at rest | ✓ always-on | ✓ fscrypt | — | — | ✓ |
-| Checksummed metadata | ✓ keyed + mirrored | ✓ | ✓ | ✓ | ✓ |
+| Encryption at rest | ✓ chosen at format | ✓ fscrypt | — | — | ✓ |
+| Checksummed metadata | ✓ mirrored, keyed when encrypted | ✓ | ✓ | ✓ | ✓ |
 | Data checksums | ✓ | — | ✓ | — | ✓ |
 | Metadata self-heal (redundant copies) | ✓ | — | ✓ DUP | — | ✓ |
 | Data self-heal (redundancy) | ▢ | — | ✓ RAID | — | ✓ replicas |
@@ -188,7 +188,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Speculation barriers on syscall / context switch (§19.1) | Spectre / MDS / L1TF / MMIO stale data | ✓ | ✓ | ✓ | ✓ host |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |
 | Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
-| Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
+| Root encrypted at its owner's choice, swap always encrypted (§4, §11) | Secret/data recovery at rest; on a plaintext root the files, password hashes, sealed app secrets and the signing and log-attestation keys under `/System/Security/Keys` are protected only by the disk staying in its owner's hands, so whoever reads it offline can forge sealed audit segments | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA carves and MMIO grants (§4, §18.1) | A driver reaching device registers or memory it was not granted | ✓ | ✓ | ✓ | — |
 | DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
 | A malformed description of the DMA translation units fails closed: nothing it would have described masters DMA; on x86_64 `iommu.malformed=unconfined` publishes it untranslated instead, audited and listed by `sysinfo dma` (`plans/IOMMU.md` IOM1, IOM14) | A firmware table bug leaving every device's DMA unconfined on a machine that has a unit | ✓ DMAR, IVRS, VIOT | ✓ device tree | ✓ device tree | — |

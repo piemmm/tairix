@@ -32,7 +32,7 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_keymap::modifiers_from_abi;
-use tairix_wm::{InputEvent, Key, NamedKey};
+use tairix_wm::{InputEvent, Key, NamedKey, WindowId};
 
 use crate::switchuser::park_within;
 
@@ -101,6 +101,8 @@ struct Held {
     record: KeyInput,
     /// Monotonic nanoseconds of the next repeat, or `None` when it will not.
     next_ns: Option<u64>,
+    /// The window that held the keyboard when the key went down.
+    focus: Option<WindowId>,
 }
 
 /// A source that decodes [`KeyInput`] records from a [`KeyInputChannel`] and
@@ -298,7 +300,10 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
     /// Once the channel is empty a repeat of the held key that has come due
     /// is answered, one per drain: a loop that was late repeats once rather
     /// than catching up in a burst. A press of the key already held is the
-    /// device's own repeat and is dropped.
+    /// device's own repeat and is dropped. A key held while the keyboard
+    /// moves to another window, `focus`, stops repeating: what it was pressed
+    /// for was not that window, as a prompt opened under a held `Enter` is
+    /// not.
     ///
     /// Crate-private: drains go through [`DesktopShell::poll_key`](crate::DesktopShell::poll_key).
     ///
@@ -308,6 +313,7 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
     pub(crate) fn poll_record(
         &mut self,
         now_ns: u64,
+        focus: Option<WindowId>,
     ) -> Result<Option<(InputEvent, KeyInput)>, Errno> {
         while let Some(bytes) = self.channel.next_record()? {
             let record = KeyInput::from_bytes(&bytes)?;
@@ -329,6 +335,7 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
                         next_ns: self.repeat.interval.map(|_| {
                             now_ns.saturating_add(self.repeat.delay.saturating_total_nanos())
                         }),
+                        focus,
                     });
                 }
                 KeyInput::Released { key, .. } => {
@@ -342,13 +349,16 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
             }
             return Ok(Some((event, record)));
         }
-        Ok(self.take_due(now_ns))
+        Ok(self.take_due(now_ns, focus))
     }
 
     /// The held key's repeat, if it is due at `now_ns`, scheduling the next.
-    fn take_due(&mut self, now_ns: u64) -> Option<(InputEvent, KeyInput)> {
+    fn take_due(&mut self, now_ns: u64, focus: Option<WindowId>) -> Option<(InputEvent, KeyInput)> {
         let interval = self.repeat.interval?;
         let held = self.held.as_mut()?;
+        if held.focus != focus {
+            held.next_ns = None;
+        }
         if held.next_ns.is_none_or(|due| due > now_ns) {
             return None;
         }
@@ -377,7 +387,7 @@ mod tests {
     fn poll<C: KeyInputChannel>(
         source: &mut KeyboardInputSource<C>,
     ) -> Result<Option<InputEvent>, Errno> {
-        Ok(source.poll_record(0)?.map(|(event, _)| event))
+        Ok(source.poll_record(0, None)?.map(|(event, _)| event))
     }
 
     /// An in-memory channel that yields queued records, optionally faulting.
@@ -430,7 +440,7 @@ mod tests {
         for (index, record) in records.iter().enumerate() {
             source.channel_mut().records.push_back(record.to_le_bytes());
             let at = u64::try_from(index).expect("small") * 1_000_000;
-            while source.poll_record(at).expect("well-formed").is_some() {}
+            while source.poll_record(at, None).expect("well-formed").is_some() {}
         }
         source.take_ctrl_tap()
     }
@@ -441,7 +451,7 @@ mod tests {
             QueueChannel::new(&[modifiers(true, false), modifiers(false, false)]),
             REPEAT,
         );
-        while source.poll_record(5).expect("well-formed").is_some() {}
+        while source.poll_record(5, None).expect("well-formed").is_some() {}
         assert_eq!(
             source.take_ctrl_tap(),
             Some(super::CtrlTap { pressed_ns: 5 })
@@ -501,13 +511,13 @@ mod tests {
     fn ctrl_held_too_long_is_no_tap() {
         let mut source =
             KeyboardInputSource::new(QueueChannel::new(&[modifiers(true, false)]), REPEAT);
-        while source.poll_record(0).expect("well-formed").is_some() {}
+        while source.poll_record(0, None).expect("well-formed").is_some() {}
         source
             .channel_mut()
             .records
             .push_back(modifiers(false, false).to_le_bytes());
         while source
-            .poll_record(super::TAP_HOLD_MAX_NS + 1)
+            .poll_record(super::TAP_HOLD_MAX_NS + 1, None)
             .expect("well-formed")
             .is_some()
         {}
@@ -626,7 +636,7 @@ mod tests {
     }
 
     fn typed<C: KeyInputChannel>(source: &mut KeyboardInputSource<C>, now_ns: u64) -> Option<char> {
-        match source.poll_record(now_ns) {
+        match source.poll_record(now_ns, None) {
             Ok(Some((
                 InputEvent::KeyPressed {
                     key: Key::Char(c), ..
@@ -646,6 +656,38 @@ mod tests {
         assert_eq!(typed(&mut source, 500 * MS), None, "one repeat per instant");
         assert_eq!(typed(&mut source, 549 * MS), None);
         assert_eq!(typed(&mut source, 550 * MS), Some('a'));
+    }
+
+    /// A prompt opened under a held `Enter` must not be answered by its
+    /// repeats: the key was pressed for the window before it.
+    #[test]
+    fn a_key_held_while_the_keyboard_moves_to_another_window_stops_repeating() {
+        let mut comp = crate::tests::compositor();
+        let before = comp.add_window(
+            tairix_wm::Point::new(0, 0),
+            tairix_wm::Surface::new(8, 8).expect("a surface"),
+        );
+        let prompt = comp.add_window(
+            tairix_wm::Point::new(10, 10),
+            tairix_wm::Surface::new(8, 8).expect("a surface"),
+        );
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[press('a')]), REPEAT);
+        assert!(matches!(source.poll_record(0, Some(before)), Ok(Some(_))));
+        assert!(matches!(
+            source.poll_record(500 * MS, Some(before)),
+            Ok(Some(_))
+        ));
+        assert_eq!(
+            source.poll_record(550 * MS, Some(prompt)),
+            Ok(None),
+            "no repeat reaches the window that gained the keyboard"
+        );
+        assert_eq!(source.poll_record(10_000 * MS, Some(before)), Ok(None));
+        assert_eq!(
+            source.park_deadline_ns(0, u64::MAX),
+            u64::MAX,
+            "and no wake is armed"
+        );
     }
 
     /// A loop that was late repeats once, not once for every interval it
@@ -672,7 +714,7 @@ mod tests {
         // The two device repeats are consumed without surfacing; the release
         // is the next record the source answers.
         assert!(matches!(
-            source.poll_record(MS),
+            source.poll_record(MS, None),
             Ok(Some((InputEvent::KeyReleased { .. }, _)))
         ));
         assert_eq!(
@@ -689,12 +731,12 @@ mod tests {
             REPEAT,
         );
         assert_eq!(typed(&mut source, 0), Some('a'));
-        let _ = source.poll_record(MS);
+        let _ = source.poll_record(MS, None);
         assert!(
             source.repeat_due(600 * MS),
             "releasing another key leaves the held one repeating"
         );
-        let _ = source.poll_record(MS);
+        let _ = source.poll_record(MS, None);
         assert!(!source.repeat_due(600 * MS), "its own release stops it");
 
         let mut shifted = KeyboardInputSource::new(
@@ -710,7 +752,7 @@ mod tests {
             REPEAT,
         );
         assert_eq!(typed(&mut shifted, 0), Some('a'));
-        let _ = shifted.poll_record(MS);
+        let _ = shifted.poll_record(MS, None);
         assert!(!shifted.repeat_due(600 * MS));
     }
 
@@ -723,7 +765,7 @@ mod tests {
         let mut source =
             KeyboardInputSource::new(QueueChannel::new(&[press('a'), press('a')]), off);
         assert_eq!(typed(&mut source, 0), Some('a'));
-        assert_eq!(source.poll_record(10_000 * MS), Ok(None));
+        assert_eq!(source.poll_record(10_000 * MS, None), Ok(None));
         assert_eq!(source.park_deadline_ns(0, u64::MAX), u64::MAX);
     }
 

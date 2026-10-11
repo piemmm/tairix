@@ -483,3 +483,28 @@ fn an_undamaged_present_is_not_a_frame() {
     assert!(comp.present(&mut display).is_ok());
     assert_eq!(comp.frame_totals().frames, settled.frames + 1);
 }
+
+#[test]
+fn a_desktop_drawn_smaller_than_its_output_reports_counts_the_decoder_accepts() {
+    let mut comp = compositor();
+    let id = add(&mut comp, 4, 4, 20, 10, Color::rgb(9, 9, 9));
+    assert!(comp.set_desktop_size(32, 24));
+    first_frame(&mut comp);
+    comp.move_window(id, Point::new(8, 8));
+    comp.composite();
+    // A fade step moves only the reveal: damage the frame redraws.
+    assert!(comp.set_reveal(128));
+    comp.composite();
+
+    let totals = comp.frame_totals();
+    assert_eq!(
+        totals.screen_px,
+        32 * 24,
+        "the desktop the frames were drawn on"
+    );
+    assert_eq!(
+        totals.encoded_px, totals.damaged_px,
+        "every damaged desktop pixel reached the scan-out once: {totals:?}"
+    );
+    assert_eq!(decoded(totals), Ok(totals));
+}

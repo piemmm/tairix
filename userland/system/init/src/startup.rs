@@ -170,7 +170,7 @@ pub const DEFAULT_CONFIG: &str = "\
 # authority; `confd` (plans/APPDATA.md) owns every application's settings
 # store and is a boot-floor service because a headless machine needs it as
 # much as a desktop does — it binds its endpoint straight away and answers a
-# typed refusal until the encrypted root is unlocked. `audiod`
+# typed refusal until the root is mounted. `audiod`
 # (plans/SOUND.md) is the one mixer and the sole holder of CAP_AUDIO_DEVICE,
 # launched before `devmgr` for the reason `netstack` is: it must be ready to
 # adopt the sound-device channels `devmgr` hands it. `timed`

@@ -161,8 +161,9 @@ is its first live boot on the current tree.
 ### F4 — the whole-disk image, `image` and `run`
 
 Delivered by `plans/BOOTLOADER.md` B4 (GPT encode in `lib/partition`, the ESP
-carrying the loader, the kernel and `root.unlock`, then the `/System` store
-and the encrypted root). The ESP holds no other file; everything else is on
+carrying the loader, the kernel and — for an encrypted root — `root.unlock`,
+then the `/System` store and the root). The ESP holds no other file;
+everything else is on
 the `/System` volume.
 
 The composition `build_rpi_image` performs above its boot partition (users

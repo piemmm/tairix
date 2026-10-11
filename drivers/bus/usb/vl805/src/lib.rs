@@ -41,15 +41,15 @@
 //! window, DMA-aliased buffer, cache coherency) stay behind the host's
 //! `MailboxChannel` implementation and the `VideoCore` client
 //! (`lib/vcmailbox`). The property-message *layout* lives once in
-//! `lib/vcmailbox` ([`encode_xhci_reset`] and friends); this crate only
-//! sequences the policy.
+//! `lib/vcmailbox` ([`encode_xhci_reset`] and friends), and so does the
+//! VL805's identity ([`VL805_KEY`]), which the mailbox service admits the
+//! reload request against; this crate only sequences the policy.
 //!
 //! # Public surface & capabilities
 //!
 //! Per the only public *function* is [`register`]; the
-//! firmware policy is exposed as [`reload_firmware`] and
-//! [`probe_firmware_revision`], composed by the host over a
-//! [`MailboxChannel`]. The
+//! firmware policy is exposed as [`reload_firmware`], composed by the host
+//! over a [`MailboxChannel`]. The
 //! [`wiring`] module composes the firmware reload with publishing the
 //! controller as an xHCI hardware-tree node. Loading requires
 //! [`CapabilityId::DRV_LOAD`]; the mailbox doorbell/buffer access is gated
@@ -61,13 +61,9 @@
 #![deny(missing_docs)]
 
 use tairix_abi::driver::mailbox::MailboxChannel;
-use tairix_abi::driver::pci::CLASS_USB_XHCI;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost};
 
-use tairix_vcmailbox::{
-    decode_firmware_revision_response, decode_xhci_reset_response, encode_firmware_revision_query,
-    encode_xhci_reset, MailboxError,
-};
+use tairix_vcmailbox::{decode_xhci_reset_response, encode_xhci_reset, MailboxError, VL805_KEY};
 
 pub mod wiring;
 
@@ -80,12 +76,6 @@ mod tests;
 /// matching the other drivers' marker convention.
 const REGISTER_HANDLE_MARKER: u64 = 0x564C_3830_3500_0001;
 
-/// The VL805's PCI vendor id (VIA Technologies).
-pub const VL805_PCI_VENDOR: u16 = 0x1106;
-
-/// The VL805's PCI device id (VL805 USB 3.0 host controller).
-pub const VL805_PCI_DEVICE: u16 = 0x3483;
-
 /// The bind priority [`BIND_KEYS`] carries.
 ///
 /// An exact vendor:device match ranks **above** the generic xHCI
@@ -94,23 +84,12 @@ pub const VL805_PCI_DEVICE: u16 = 0x3483;
 /// specificity decides).
 const BIND_PRIORITY: u16 = 20;
 
-/// This driver's hardware bind table: the VL805 USB
-/// host controller, matched by its exact PCI vendor:device id
-/// ([`VL805_PCI_VENDOR`]`:`[`VL805_PCI_DEVICE`]). The single source of
-/// truth the signed-manifest bind table is authored from and `devmgr`
-/// resolves a discovered node against.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    // The class is matched exactly, so an EHCI or OHCI function on the same
-    // device id could not bind this driver.
-    HwMatchKey::pci(VL805_PCI_VENDOR, VL805_PCI_DEVICE, CLASS_USB_XHCI),
-)];
-
-/// The Pi firmware's encoded VL805 PCI address
-/// (`bus << 20 | slot << 15 | func << 12`) for the hardwired bus-1,
-/// device-0, function-0 controller, carried as the `NOTIFY_XHCI_RESET`
-/// request value.
-pub const VL805_FIRMWARE_DEV_ADDR: u32 = 0x0010_0000;
+/// This driver's hardware bind table: the VL805 USB host controller, matched
+/// by its exact PCI identity ([`VL805_KEY`]), class included, so an EHCI or
+/// OHCI function on the same device id could not bind this driver. The single
+/// source of truth the signed-manifest bind table is authored from and
+/// `devmgr` resolves a discovered node against.
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(BIND_PRIORITY, VL805_KEY)];
 
 /// Stable reason reported when the VL805 firmware reload is refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -209,8 +188,7 @@ pub enum FirmwareResetOutcome {
 ///
 /// Verifies the host already granted [`CapabilityId::DRV_LOAD`] and returns
 /// the registration marker handle. No hardware is touched here; the
-/// firmware policy runs in [`reload_firmware`] / [`probe_firmware_revision`]
-/// over a host-supplied
+/// firmware policy runs in [`reload_firmware`] over a host-supplied
 /// [`MailboxChannel`].
 ///
 /// # Errors
@@ -226,30 +204,6 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
         return Err(DriverError::PermissionDenied);
     }
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
-}
-
-/// Probe the runtime mailbox by asking the `VideoCore` for its firmware
-/// revision over `channel`.
-///
-/// A *liveness probe*, not a feature: the firmware-revision tag reads a
-/// constant and mutates no device state, so running it immediately before
-/// the heavier [`reload_firmware`] localises a failure — a probe failure
-/// means the mailbox path itself is broken, while a probe success followed
-/// by a reload timeout means the firmware is specifically dropping the
-/// reset tag (measure, don't guess). The composing
-/// host logs the outcome.
-///
-/// # Errors
-///
-/// A [`FirmwareResetFailure`] re-derived from the transport
-/// ([`MailboxChannel::exchange`]) or the decode
-/// ([`decode_firmware_revision_response`]).
-pub fn probe_firmware_revision(channel: &dyn MailboxChannel) -> Result<u32, FirmwareResetFailure> {
-    let mut message = encode_firmware_revision_query();
-    channel
-        .exchange(&mut message)
-        .map_err(FirmwareResetFailure::from_driver_error)?;
-    decode_firmware_revision_response(&message).map_err(FirmwareResetFailure::from_mailbox_error)
 }
 
 /// Ask the `VideoCore` to (re)load the VL805 xHCI controller's firmware
@@ -273,7 +227,7 @@ pub fn probe_firmware_revision(channel: &dyn MailboxChannel) -> Result<u32, Firm
 /// liveness gate is the controller's capability block at `Xhci::open`, so the host logs a failure but need not abort on it.
 #[must_use]
 pub fn reload_firmware(channel: &dyn MailboxChannel) -> FirmwareResetOutcome {
-    let mut message = encode_xhci_reset(VL805_FIRMWARE_DEV_ADDR);
+    let mut message = encode_xhci_reset();
     if let Err(err) = channel.exchange(&mut message) {
         return FirmwareResetOutcome::Failed {
             reason: FirmwareResetFailure::from_driver_error(err),

@@ -1,7 +1,7 @@
 //! The root-volume storage the `CAP_USER_ADMIN` account-administration
 //! engine commits through (`plans/CAPABILITY_USE.md` CU4).
 //!
-//! `/System/Security` lives on the **writable encrypted root volume**,
+//! `/System/Security` lives on the **writable root volume**,
 //! which the VFS mount layout deliberately shadows with the read-only
 //! `/System` volume — the account databases are reachable only through the
 //! driver backing the root volume, exactly like the boot-time load.
@@ -30,7 +30,7 @@ use tairix_kernel_core::{SleepLock, UserAdminBacking, VfsError};
 use tairix_users::{provision_home_shape, HomeShapeError, HOME_MODE};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
-/// mounted encrypted root volume.
+/// mounted root volume.
 pub struct RootAdminBacking<F: 'static> {
     /// The root volume's single registered driver, shared with the `fs_*`
     /// path (`LateFilesystem::register` returns this lock). A sleep lock,
@@ -208,7 +208,7 @@ mod tests {
 
     use tairix_abi::driver::block::Block;
     use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
-    use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+    use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
     use tairix_users::{
         appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS,
         HOME_SUBDIRS,
@@ -273,8 +273,8 @@ mod tests {
     /// `LateFilesystem::register` leaks the production instance.
     fn backing() -> RootAdminBacking<ARXFS<VecBlock>> {
         let block = VecBlock(alloc::vec![0u8; 4 * 1024 * 1024]);
-        let mut fs =
-            ARXFS::format(block, 64, &KEY, &mut TestEntropy(3)).expect("test volume formats");
+        let mut fs = ARXFS::format(block, 64, Keying::Key(&KEY), &mut TestEntropy(3))
+            .expect("test volume formats");
         let root = fs.root();
         let system = fs
             .create(root, b"System", NodeKind::Directory)

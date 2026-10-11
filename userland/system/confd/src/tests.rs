@@ -885,7 +885,7 @@ fn a_failed_commit_leaves_the_edits_staged_for_a_retry() {
 
 #[test]
 fn an_unreachable_volume_answers_a_typed_refusal_not_a_default() {
-    // The service comes up before the encrypted root is unlocked. An early
+    // The service comes up before the root is mounted. An early
     // caller must be told the store cannot be reached, never handed a value.
     let (mut svc, mut fs) = service();
     fs.fail_all(Errno::DeviceOffline);

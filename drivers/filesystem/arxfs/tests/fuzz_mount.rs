@@ -6,9 +6,10 @@
 //! dedupe index from them, decoding every `ChunkRecord` and reverse-reference
 //! record). All are self-identifying metadata (`header` / `superblock` /
 //! `transaction` / `btree` / `dedupe`) read from a backing store that, on a
-//! real system, may have been written by anything. The base image is
-//! populated with several files, a multi-extent file, **duplicate-content
-//! files, a reflink, and a symbolic link** so the sweep spends its time near
+//! real system, may have been written by anything. The base images —
+//! one per protection, encrypted and plaintext — are populated with several
+//! files, a multi-extent file, **duplicate-content files, a reflink, and a
+//! symbolic link** so the sweep spends its time near
 //! real inode-tree, extent-tree, chunk-tree, reverse-reference, and link
 //! nodes, not just the superblock ring. Per that decode path is driven by a fuzz harness
 //! whose single invariant is:
@@ -18,7 +19,7 @@
 //!
 //! A mounted volume is then driven through the remaining decode paths the
 //! "fuzz targets" list enumerates: the **directory-block decode** path
-//! (`read_dir`/`lookup` decrypt and parse the encrypted dirent payload that
+//! (`read_dir`/`lookup` open and parse the sealed dirent payload that
 //! the mount-time free-space walk never reads), the **symbolic-link decode**
 //! path (`read_link` over an inode of on-disk kind `3`, whose target is held
 //! as node data and reached through the same integrity pipeline as file
@@ -36,9 +37,12 @@
 //! mirror path, and a dedicated **duplicated-copy sweep** corrupts *both*
 //! copies of each block pair to hammer the both-copies-bad fail-closed path.
 //!
-//! Each `exercise` mounts and fully re-checks an encrypted volume (open, a
-//! directory walk, scrub, the offline `check`, health, a reopen, and a raw
-//! `rescue` scan), so it is orders of magnitude heavier than a byte decoder.
+//! Each `exercise` mounts and fully re-checks a volume under both keyings —
+//! the encrypted base's key, and none — so every image drives each
+//! protection's decode paths and the refusals between them (open, a directory
+//! walk, scrub, the offline `check`, health, a reopen, and a raw `rescue`
+//! scan), which makes it orders of magnitude heavier than a byte decoder. The
+//! sweeps alternate between the two bases under the one budget.
 //! A plain `cargo test` — a developer machine and the per-PR `ci` gate, with no
 //! budget — therefore runs a single quick smoke pass: a small, seed-driven
 //! [`SMOKE_FLIP_SAMPLES`] sample of the single-byte sweep plus
@@ -54,7 +58,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapsh
 use tairix_abi::driver::filesystem::{DirVisit, FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
-    EntropySource, RescueSink, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
+    EntropySource, Keying, RescueSink, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
 };
 use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
@@ -92,10 +96,12 @@ impl RescueSink for NullRescueSink {
     fn emit_block(&mut self, _inode: u32, _logical_block: u64, _size: u64, _data: &[u8]) {}
 }
 
-/// Volume key the fuzz image is formatted and reopened with. `ARXFS` is
-/// encrypted-by-default (`docs/src/filesystem/arxfs-spec.md` §5); the fuzz
-/// sweep exercises the encrypted-volume open path under this fixed key.
+/// Volume key the encrypted fuzz image is formatted with.
 const FUZZ_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+
+/// The two protections, each the keying one base image is formatted with
+/// and every image is opened under.
+const KEYINGS: [Keying<'static>; 2] = [Keying::Key(&FUZZ_KEY), Keying::Plaintext];
 
 /// Deterministic stand-in for the platform RNG seam used to format the fuzz
 /// baseline image. Test scaffolding only, never a production entropy source.
@@ -120,8 +126,8 @@ const BLOCK_COUNT: u64 = 64;
 const IMAGE_LEN: usize = BLOCK_SIZE as usize * 64;
 
 /// PRNG-image count for the quick smoke pass a plain `cargo test` runs (no
-/// budget set). Small on purpose: each iteration mounts and fully re-checks an
-/// encrypted volume, so the exhaustive coverage belongs to the time-limited
+/// budget set). Small on purpose: each iteration mounts and fully re-checks a
+/// volume, so the exhaustive coverage belongs to the time-limited
 /// soak, not the per-PR run.
 const SMOKE_ITERATIONS: u64 = 512;
 
@@ -210,7 +216,7 @@ impl Block for MemBlock {
 }
 
 /// Drive the directory-block decode path on a mounted volume: walk every
-/// reachable directory (bounded), decoding each block's encrypted dirent
+/// reachable directory (bounded), decoding each block's sealed dirent
 /// payload through `read_dir` and resolving each decoded name through
 /// `lookup`. Every call must return a `Result`, never panic, for any device
 /// contents. The traversal is bounded by a hard
@@ -251,16 +257,29 @@ fn walk_directories(fs: &mut ARXFS<MemBlock>) {
 }
 
 /// The single invariant: opening an arbitrary image must return a `Result`,
-/// never panic. A successful mount must additionally survive being reopened.
+/// never panic, under either keying. A successful mount must additionally
+/// survive being reopened.
 fn exercise(image: &[u8]) {
     let mut store = image.to_vec();
     store.resize(IMAGE_LEN, 0);
-    let dev = MemBlock { store };
-    if let Ok(mut fs) = ARXFS::open(dev, &FUZZ_KEY) {
+    let _ = ARXFS::probe_protection(&mut MemBlock {
+        store: store.clone(),
+    });
+    for keying in KEYINGS {
+        exercise_under(&store, keying);
+    }
+}
+
+/// [`exercise`] under one keying.
+fn exercise_under(store: &[u8], keying: Keying<'_>) {
+    let dev = MemBlock {
+        store: store.to_vec(),
+    };
+    if let Ok(mut fs) = ARXFS::open(dev, keying) {
         // Drive the directory-block decode path ('s "directory decode"
         // target): list the root directory and resolve every decoded name.
-        // `read_dir`/`lookup` decrypt and parse the directory block's dirent
-        // payload (the encrypted directory record), which `open`'s
+        // `read_dir`/`lookup` open and parse the directory block's sealed
+        // dirent payload, which `open`'s
         // free-space walk never reads. Like `open` it must return a `Result`,
         // never panic, for any device contents.
         walk_directories(&mut fs);
@@ -280,20 +299,18 @@ fn exercise(image: &[u8]) {
         let _ = fs.health(&AllCaps, &NullSink);
         // A volume that mounts must mount again from its own bytes.
         let bytes = fs.into_block().expect("the volume closes").store;
-        let _ = ARXFS::open(MemBlock { store: bytes }, &FUZZ_KEY);
+        let _ = ARXFS::open(MemBlock { store: bytes }, keying);
     }
     // Drive the Stage-9 rescue decode path on the raw image, which does not
     // require a mountable volume: it scans every block for a self-identifying
     // transaction root (`TxnRoot::decode_any`) and runs the recovered
     // inode/extent metadata through the integrity pipeline. Like `open` it must
     // return a `Result`, never panic, for any device contents.
-    let mut rescue_store = image.to_vec();
-    rescue_store.resize(IMAGE_LEN, 0);
     let _ = ARXFS::rescue(
         MemBlock {
-            store: rescue_store,
+            store: store.to_vec(),
         },
-        &FUZZ_KEY,
+        keying,
         &AllCaps,
         &NullSink,
         &mut NullRescueSink,
@@ -305,14 +322,14 @@ fn exercise(image: &[u8]) {
 /// extent-tree node exists). Both the PRNG and the structured sweep then spend
 /// most of their time near genuinely valid tree metadata rather than pure
 /// noise. Populating stops at the first `NoSpace` on the tiny fuzz device.
-fn formatted_image() -> Vec<u8> {
+fn formatted_image(keying: Keying<'_>) -> Vec<u8> {
     publish_boot_hash_key();
     let mut fs = ARXFS::format(
         MemBlock {
             store: vec![0u8; IMAGE_LEN],
         },
         16,
-        &FUZZ_KEY,
+        keying,
         &mut FuzzEntropy { next: 1 },
     )
     .expect("format a blank fuzz device");
@@ -357,7 +374,8 @@ fn formatted_image() -> Vec<u8> {
 #[test]
 fn open_never_panics_on_arbitrary_images() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let base = formatted_image();
+    let bases = KEYINGS.map(formatted_image);
+    let image_len = bases[0].len();
 
     // Draw and log the seed up front so every sampled byte position and every
     // PRNG image below replays exactly from the logged value:
@@ -373,18 +391,22 @@ fn open_never_panics_on_arbitrary_images() {
     // deadline — the nightly budget flips every byte, a short budget probes a
     // reproducible spread on time. A plain `cargo test` (no budget) samples a
     // small, seed-driven subset so the per-PR run stays quick — each
-    // `exercise` is a full encrypted mount + re-check, far heavier than a
+    // `exercise` is a full mount + re-check, far heavier than a
     // byte decoder.
     if let Some(deadline) = deadline {
-        tairix_fuzzseed::budgeted_sweep(base.len(), rng.next_u64(), deadline, |i| {
-            let mut image = base.clone();
-            image[i] ^= 0xff;
+        tairix_fuzzseed::budgeted_sweep(image_len * bases.len(), rng.next_u64(), deadline, |i| {
+            let mut image = bases[i / image_len].clone();
+            image[i % image_len] ^= 0xff;
             exercise(&image);
         });
     } else {
-        for _ in 0..SMOKE_FLIP_SAMPLES {
+        for base in bases
+            .iter()
+            .cycle()
+            .take(usize::try_from(SMOKE_FLIP_SAMPLES).unwrap_or(0))
+        {
             let mut image = base.clone();
-            let i = rng.below(base.len());
+            let i = rng.below(image_len);
             image[i] ^= 0xff;
             exercise(&image);
         }
@@ -399,23 +421,25 @@ fn open_never_panics_on_arbitrary_images() {
     // it is cheap enough to run in either mode.
     let bs = BLOCK_SIZE as usize;
     let blocks = usize::try_from(BLOCK_COUNT).unwrap_or(0);
-    for b in 0..blocks {
-        let primary = bs * b + TAG_OFFSET;
-        let companion = bs * (b + 1) + TAG_OFFSET;
-        if companion >= base.len() {
-            break;
+    for base in &bases {
+        for b in 0..blocks {
+            let primary = bs * b + TAG_OFFSET;
+            let companion = bs * (b + 1) + TAG_OFFSET;
+            if companion >= base.len() {
+                break;
+            }
+            let mut image = base.clone();
+            image[primary] ^= 0xff;
+            image[companion] ^= 0xff;
+            exercise(&image);
         }
-        let mut image = base.clone();
-        image[primary] ^= 0xff;
-        image[companion] ^= 0xff;
-        exercise(&image);
     }
 
     // PRNG sweep: the generator mutates the valid image at random offsets. The smoke
     // pass does SMOKE_ITERATIONS images; the soak loops the continuing stream
     // until the wall-clock budget elapses.
     let mut iteration: u64 = 0;
-    loop {
+    for base in bases.iter().cycle() {
         let mut image = base.clone();
         let flips = rng.below(24);
         for _ in 0..flips {

@@ -338,8 +338,8 @@ Sparse writes must avoid unnecessary physical allocation.
 
 All of these pass, in `drivers/filesystem/arxfs/src/tests.rs` (the
 `sparse_*` set plus `all_zero_cluster_write_becomes_holes_not_a_compressed_extent`).
-Test 10 is inherent rather than separate: every ARXFS volume is encrypted, so
-every other case already runs on an encrypted volume.
+Test 10 is inherent rather than separate: the `sparse_*` set formats its
+volumes encrypted, so every other case already runs on an encrypted volume.
 
 ```text
 1. create 10 MiB zero file

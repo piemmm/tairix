@@ -909,6 +909,7 @@ Menus are pinned command plates. They are not floating ornament.
 - The menu plate uses elevated surface tokens.
 - A plate rounds itself and casts a drop shadow. Its heading band's ground is part of the plate rather than a fill over it, and a first or last row's highlight, rail and focus ring follow the plate's corners, so nothing a plate draws reaches past its own silhouette and the compositor never cuts it a second time.
 - Each menu item is a row control with label, optional icon, shortcut, and state.
+- A row is the text-plate height, so it is never shorter than the minimum target. A group break is its rule with half a control gap either side.
 - Dangerous items use a danger rim only on their item row.
 - Disabled items show the reason when focused or inspected.
 - Nested menus open from the row edge with a short anchor trace.
@@ -2462,7 +2463,17 @@ All dimensions are logical. The control code receives `Scale` and derives physic
 | Normal | Default desktop applications. |
 | Comfortable | Touch-adjacent or distance-viewed surfaces. |
 
-Density changes metrics, not state semantics.
+Density changes metrics, not state semantics. Normal is the theme's own table
+(`control_height` 24, `control_inset` 9, `control_gap` 7); compact keeps 87%
+of those three and comfortable takes 115% (`Metrics::at_density`).
+
+Contrast is laid over the same table after density (`Metrics::at_contrast`).
+Either heavier contrast draws every edge — rim, rule, rail, seam, focus
+outline — twice as heavy (`tairix_theme::edge_weight`, the one place that
+weight is decided), and a control is never shorter than a slider's knob with
+its focus ring, two rims wide, above and below it: the heavier ring is paid for
+by the row, never by shrinking the knob. The floor is in logical pixels, which
+holds at every scale because each length is scaled down to whole pixels.
 
 ### Minimum targets
 

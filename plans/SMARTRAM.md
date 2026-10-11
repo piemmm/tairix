@@ -1476,7 +1476,7 @@ ordering as every other class:
   brought-up boot disk **below** the block-sharing layer
   (`shared_block::SharedBlock`), on the device side of its sleep
   lock, so every window onto the disk — the `/System` driver-store
-  window, the encrypted-root unlock window, and the writable-root
+  window, the root-unlock window, and the writable-root
   window — reads through one coherent per-block LRU cache and every
   mutation any window issues is observed serialised. Installed by the
   shared `finish_unlock` boot tail (both the virtio-blk and EMMC2
@@ -1485,7 +1485,7 @@ ordering as every other class:
 - Classified through the SMART1 gate as `CleanFileData` (cheap to
   rebuild — one bounded device read), owned by the
   `boot_block_device` kernel subsystem, treated as user data (the
-  disk carries the encrypted user volume), source-mutation
+  disk carries the user volume), source-mutation
   invalidated, droppable; a refusal — or a device block size the
   per-block entry model cannot bound — poisons the cache from birth
   and every operation passes straight through (fail closed).

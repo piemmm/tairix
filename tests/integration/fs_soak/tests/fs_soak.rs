@@ -51,7 +51,29 @@ fn soak_arxfs_random() {
     run("arxfs-random");
 }
 
+/// The fixed-sequence soak over arxfs with no key, as a shipped root is.
+#[test]
+fn soak_arxfs_plaintext() {
+    run("arxfs-plaintext");
+}
+
+/// The randomized soak over arxfs with no key.
+#[test]
+fn soak_arxfs_plaintext_random() {
+    run("arxfs-plaintext-random");
+}
+
 #[test]
 fn registry_lists_every_soak_target() {
-    assert_eq!(TARGETS, &["arxfs", "ext4", "fat32", "arxfs-random"]);
+    assert_eq!(
+        TARGETS,
+        &[
+            "arxfs",
+            "ext4",
+            "fat32",
+            "arxfs-random",
+            "arxfs-plaintext",
+            "arxfs-plaintext-random",
+        ]
+    );
 }

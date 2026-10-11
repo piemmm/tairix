@@ -32,7 +32,6 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::discovery_ipc::{Answer, Change, Entry, Families, Query, ServiceTypeField};
-use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::Errno;
 use tairix_discovery::{DiscoveryError, Waited};
 use tairix_help::{own_short_help, HelpSource};
@@ -373,7 +372,7 @@ fn render(entry: &Entry<'_>, request: &Request, lines: &mut String) {
                 Change::Refreshed => return,
                 Change::Retired => "Rmv",
             };
-            let on = interface_name(interface);
+            let on = tairix_abi::net_ipc::if_name_str(interface);
             let _ = match (answer, request) {
                 (Answer::Instance { label }, Request::Browse(service)) => writeln!(
                     lines,
@@ -422,7 +421,7 @@ fn render(entry: &Entry<'_>, request: &Request, lines: &mut String) {
             let _ = writeln!(
                 lines,
                 "Flush  {:<16} everything learned on it is void",
-                interface_name(interface)
+                tairix_abi::net_ipc::if_name_str(interface)
             );
         }
         Entry::Lost { .. } => {
@@ -450,14 +449,6 @@ fn txt_strings(octets: &[u8]) -> impl Iterator<Item = &[u8]> {
         rest = &tail[usize::from(len)..];
         Some(string)
     })
-}
-
-fn interface_name(interface: &[u8; IF_NAME_LEN]) -> &str {
-    let len = interface
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(IF_NAME_LEN);
-    core::str::from_utf8(&interface[..len]).unwrap_or("?")
 }
 
 /// Report why the request could not go on, returning the exit status.

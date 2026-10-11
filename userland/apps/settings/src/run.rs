@@ -1552,8 +1552,10 @@ mod program {
         concluded
     }
 
-    /// Adopt the desktop the session published, if the park said it moved.
+    /// Adopt the desktop the session published, if the park said it moved,
+    /// and the output it is drawn on, which decides the resolutions offered.
     fn adopt_desktop(
+        shell: &mut Shell,
         desktop: &mut Desktop,
         themes: &mut ThemeRegistry,
         moved: &Cell<bool>,
@@ -1562,12 +1564,21 @@ mod program {
             return false;
         }
         match app::adopt_desktop(desktop, themes) {
-            Ok(changed) => changed,
+            Ok(changed) => {
+                shell.adopt_output(output_of(desktop));
+                changed
+            }
             Err(err) => {
                 app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                 false
             }
         }
+    }
+
+    /// The output `desktop` is drawn on, as its record states it.
+    fn output_of(desktop: &Desktop) -> (u32, u32) {
+        let info = desktop.info();
+        (info.output_width_px(), info.output_height_px())
     }
 
     /// Present the whole client, answering whether the session took it.
@@ -1597,7 +1608,7 @@ mod program {
         moved: &Cell<bool>,
         pictures: &mut Pictures,
     ) -> bool {
-        if !adopt_desktop(desktop, themes, moved) {
+        if !adopt_desktop(shell, desktop, themes, moved) {
             return true;
         }
         // A theme switch can move the blur the ground asks for.
@@ -2027,7 +2038,7 @@ mod program {
                 }
             };
 
-            let redraw = adopt_desktop(desktop, themes, desktop_moved);
+            let redraw = adopt_desktop(shell, desktop, themes, desktop_moved);
             if redraw {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 pictures.restart();
@@ -2100,6 +2111,8 @@ mod program {
         shell.adopt_catalog(fetch_catalog(surface.window.client()));
         // And the pointer rows their choice space, for the same reason.
         shell.adopt_cursor_sets(fetch_cursor_sets(surface.window.client()));
+        // The resolutions on offer are what the output can show.
+        shell.adopt_output(output_of(desktop));
         // The font store is read once per boot, so its families are too.
         shell.adopt_text_choices(tairix_font::families(), *themes.selected().fonts());
         // A pane the launch named, if it named one: a fresh process is

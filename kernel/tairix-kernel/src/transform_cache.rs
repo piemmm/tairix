@@ -43,7 +43,7 @@
 //! driver invalidates on every block free and purges on transaction
 //! rollback (the `tairix_drv_fs_arxfs::ClusterCache` contract), so an
 //! entry can never outlive the bytes it was derived from. The plaintext
-//! is decrypted user data from an encrypted-at-rest volume: every
+//! is user data, decrypted when the volume is encrypted: every
 //! buffer is volatilely wiped before its entry is released — on
 //! invalidation, eviction, purge, replacement, and teardown.
 

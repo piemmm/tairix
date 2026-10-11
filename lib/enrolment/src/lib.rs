@@ -260,7 +260,7 @@ impl EnrolmentOverride {
     /// The empty override layer: the image's enrolment stands unchanged.
     ///
     /// The fail-closed resolution of a **missing** document (no administrator
-    /// has changed anything, or the encrypted root is not mounted) and of a
+    /// has changed anything, or the root is not mounted) and of a
     /// **corrupt** one, which is the same answer: obey the signed image.
     #[must_use]
     pub const fn empty() -> Self {

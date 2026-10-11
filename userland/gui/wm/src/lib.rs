@@ -88,7 +88,7 @@ mod tests;
 
 pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
-pub use compositor::{Compositor, PointerTarget, Presentation};
+pub use compositor::{output_reach, Compositor, PointerTarget, Presentation};
 pub use corner::Corners;
 pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
@@ -104,7 +104,7 @@ pub use shadow::shadow_footprint;
 pub use stats::FrameStats;
 pub use surface::Surface;
 pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
-pub use window::{PointerCatch, ResizeBounds, Window, WindowId};
+pub use window::{Placement, PointerCatch, ResizeBounds, Window, WindowId};
 
 pub use tairix_controls::{
     ResizeEdge, ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState,

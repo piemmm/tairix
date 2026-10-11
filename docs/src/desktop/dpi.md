@@ -66,7 +66,8 @@ a guess, and the compositor that owns the value lives in another process an app
 cannot — and must not — reach into (`AGENTS.md` §17.3).
 
 The window channel carries it. `tairix_abi::desktop::DesktopInfo` is the seat's
-desktop as one record — the screen extent in physical pixels, the UI scale as a
+desktop as one record — the desktop's extent in physical pixels and the
+output's it is resampled onto (`plans/DISPLAY.md` D11), the UI scale as a
 percentage of the reference density, the active appearance and its theme axes,
 the double-click interval every surface pairs presses under, and the text the
 user chose — and it reaches an application two ways:

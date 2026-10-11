@@ -536,7 +536,7 @@ pub const USERS_TOOL_MANIFEST: &[CapabilityId] = &[
 /// `CAP_SERVICE_CONTROL` holder can call them. `CAP_FS_ACCESS` is held solely
 /// for the two enrolment documents: the image's record it obeys, on the
 /// read-only `/System` volume its reach there can never write, and the
-/// administrator's overrides it writes back on the encrypted root — both still
+/// administrator's overrides it writes back on the root volume — both still
 /// authorised per-inode under its own attested identity.
 /// As a system program its manifest is
 /// also its ceiling (there is no account row for the system principal),

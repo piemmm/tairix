@@ -112,8 +112,9 @@ map, forwarded as type 6.
 ### B3 — `boot/uefi-x86_64` UEFI application (`planned`)
 
 A Rust `x86_64-unknown-uefi` PE application that, using UEFI boot services
-only: opens the EFI System Partition, reads the kernel image and the
-`root.unlock` descriptor, **verifies the kernel signature** (B6 policy) and
+only: opens the EFI System Partition, reads the kernel image and, beside an
+encrypted root, the `root.unlock` descriptor, **verifies the kernel
+signature** (B6 policy) and
 measures it, obtains the memory map, computes the `LoadPlan` (B1) and the
 multiboot2 info (B2), places the segments, calls `ExitBootServices`, and
 enters the kernel's multiboot2 `_start`. Adds the `x86_64-unknown-uefi`
@@ -146,10 +147,11 @@ does.
 
 GPT-encode in `lib/partition` (parser exists, encoder is new), then the
 `--target x86_64` builder in `tools/mkimage`: a GPT disk with an ESP
-carrying the UEFI loader (`\EFI\BOOT\BOOTX64.EFI`) + kernel + `root.unlock`,
-the read-only `/System` ARXFS store, and the encrypted ARXFS root — reusing
-the shared `build_system_partition`/rootfs/appload planting code unchanged
-(§2.2), with `installer`/`debug` profiles matching the Pi builder. Host
+carrying the UEFI loader (`\EFI\BOOT\BOOTX64.EFI`) + kernel (+ `root.unlock`
+for an encrypted root), the read-only `/System` ARXFS store, and the ARXFS
+root — reusing the shared `build_system_partition`/rootfs/appload planting
+code unchanged (§2.2), with `installer`/`debug` profiles and the
+`ImageKind` root protection matching the Pi builder. Host
 tests over the layout; the whole-disk OVMF fixture boots the produced image
 end to end. This is the `plans/ARCHSUPPORT.md` A1 deliverable, now built on
 a real loader instead of the `-kernel` shortcut.

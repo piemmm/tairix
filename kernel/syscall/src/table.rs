@@ -6706,7 +6706,7 @@ mod tests {
         // `SyscallHandlerUnavailable` (id 5007) rather than the ERROR-level
         // `SyscallHandlerRejected` (id 5004). The device manager's layered
         // config read takes this answer on every boot — it tries the
-        // settings override on the not-yet-mounted encrypted root before
+        // settings override on the not-yet-mounted root before
         // falling back to the shipped default — so at ERROR it fills the
         // boot log with failures that are the design working correctly.
         let sink = RecordingSink::new();
@@ -6764,8 +6764,8 @@ mod tests {
         // below-error `SyscallHandlerWouldBlock` (id 5005) rather than the
         // ERROR-level `SyscallHandlerRejected` (id 5004) a genuine refusal
         // gets — otherwise a caller that legitimately polls while pending
-        // (e.g. `login` reading `users_db_read` while the encrypted root
-        // unlocks, or a sender hitting a full IPC mailbox) floods the boot
+        // (e.g. `login` reading `users_db_read` while the root is mounted,
+        // or a sender hitting a full IPC mailbox) floods the boot
         // log with errors.
         let sink = RecordingSink::new();
         let caps = build_caps(&[], &sink);

@@ -65,7 +65,6 @@ use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
 use tairix_collections::{RangeKey, RangeSet};
-use tairix_crypto::{AeadKey, HmacSha256Key};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
 use zeroize::Zeroize;
@@ -95,21 +94,19 @@ mod xform;
 mod tests;
 
 pub use check::{CheckReport, RescueReport, RescueSink, StructureVerdict};
-use crypto::{
-    decrypt_region, encrypt_region, CryptoHeader, VolumeKeys, CRYPTO_HEADER_LEN, CRYPTO_TRAILER,
-};
-pub use crypto::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
+use crypto::{CryptoHeader, Established, MetaSeal, Protection, CRYPTO_HEADER_LEN, CRYPTO_TRAILER};
+pub use crypto::{EntropySource, Keying, VolumeKey, VolumeProtection, VOLUME_KEY_LEN};
 pub use discard::{TrimReport, TRIM_BATCH_RANGES};
 use health::ObservedFaults;
 pub use health::{HealthReport, HealthState, HealthThresholds};
 use integrity::{
-    logical_hash, physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
+    physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
 pub use scrub::{PassVerdict, ScrubBudget, ScrubReport};
 pub use unlock::{
-    UnlockDescriptor, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DEFAULT_ITERATIONS,
-    UNLOCK_DESCRIPTOR_LEN, UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
+    UnlockDescriptor, ROOT_UNLOCK_NAME, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
+    UNLOCK_MAX_ITERATIONS, UNLOCK_MIN_ITERATIONS, UNLOCK_SALT_LEN,
 };
 pub use xform::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
 
@@ -119,7 +116,7 @@ use btree::{NodeTrail, TreeWalk};
 use dedupe::{
     chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, REVERSE_REF_CAP,
 };
-use header::{BlockHeader, BlockType, ReservedOwner, FORMAT_VERSION, HEADER_LEN, HEADER_MAGIC};
+use header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
 use wcache::{CommitScheduler, DirtySet, WritePhase, WritebackBound, WritebackReading};
@@ -636,7 +633,7 @@ struct Inode {
     /// the file maps no blocks yet.
     extent_root: u64,
     /// Physical block of this inode's extended-attribute set, `0` when it
-    /// carries no attributes. Stored as an encrypted, mirrored copy-on-write
+    /// carries no attributes. Stored as a sealed, mirrored copy-on-write
     /// metadata block ([`BlockType::Attr`]).
     attr_root: u64,
     /// The generation of this file's or link's current data
@@ -792,13 +789,11 @@ fn epoch_clock() -> Time64 {
 pub struct ARXFS<B: Block> {
     block: B,
     fs_uuid: u128,
-    mac_key: HmacSha256Key,
-    /// AEAD key encrypting directory-entry names at rest (`crypto` module).
-    filename_key: AeadKey,
-    /// AEAD key encrypting file data at rest (`crypto` module).
-    content_key: AeadKey,
-    /// Encoded plaintext crypto discovery header (the wrapped master key and
-    /// its salt) written into every superblock-ring slot at commit.
+    /// How every block is sealed and opened (`crypto` module).
+    protection: Protection,
+    /// Encoded plaintext crypto discovery header written into every
+    /// superblock-ring slot at commit: an encrypted volume's wrapped master key
+    /// and its salt, or zeroes.
     crypto_header: [u8; CRYPTO_HEADER_LEN],
     block_size: usize,
     total_blocks: u64,
@@ -836,9 +831,6 @@ pub struct ARXFS<B: Block> {
     /// finished by the next writable mount
     /// (`docs/src/filesystem/arxfs-spec.md` §4, §14).
     pending_delete_root: u64,
-    /// The volume's deduplication domain (`crypto` module). Dedupe never
-    /// crosses it.
-    dedupe_domain: u64,
     root_phys: u64,
     /// Free blocks in the committed volume, read straight from the transaction
     /// root at mount. A read-only handle holds no allocator, so this is the
@@ -1077,15 +1069,15 @@ fn extent_spec(ino: u32) -> btree::TreeSpec {
 }
 
 impl<B: Block> ARXFS<B> {
-    /// Directory slots per block. The block's tail holds the per-block crypto
-    /// trailer (nonce + tag) that encrypts the entry names at rest, so the
-    /// slots occupy `[HEADER_LEN, block_size - CRYPTO_TRAILER)`.
+    /// Directory slots per block. The block's tail holds the per-block seal
+    /// trailer of the entry names, so the slots occupy
+    /// `[HEADER_LEN, block_size - CRYPTO_TRAILER)`.
     fn dirents_per_block(&self) -> usize {
         (self.block_size - HEADER_LEN - CRYPTO_TRAILER) / DIRENT_SIZE
     }
 
-    /// First byte of the per-block crypto trailer: the offset where a data or
-    /// directory block's encrypted region ends and its nonce + tag begin.
+    /// First byte of the per-block seal trailer: where a data or directory
+    /// block's sealed region ends.
     fn crypto_trailer_offset(&self) -> usize {
         self.block_size - CRYPTO_TRAILER
     }
@@ -1245,15 +1237,6 @@ impl<B: Block> ARXFS<B> {
         self
     }
 
-    /// Install a freshly derived or unwrapped key set as the volume's working
-    /// keys (`crypto` module).
-    fn apply_keys(&mut self, keys: &VolumeKeys) {
-        self.mac_key = keys.mac_key;
-        self.filename_key = keys.filename_key;
-        self.content_key = keys.content_key;
-        self.dedupe_domain = keys.dedupe_domain;
-    }
-
     /// Read the raw block at `phys` into the first `block_size` bytes of `buf`.
     fn read_block(&mut self, phys: u64, buf: &mut [u8]) -> Result<(), DriverError> {
         self.read_block_run(phys, 1, buf)
@@ -1391,33 +1374,37 @@ impl<B: Block> ARXFS<B> {
                 expect_type,
                 self.fs_uuid,
                 phys,
-                &self.mac_key,
+                &self.protection.meta,
             ) {
-                self.decrypt_meta_payload(expect_type, buf, phys)?;
+                self.open_meta_payload(expect_type, buf, phys)?;
                 return Ok(header);
             }
         }
         // Primary failed: fall back to the companion mirror, validating it
         // against the *primary's* identity (both copies carry that address).
         self.read_block(Self::companion(phys), buf)?;
-        let header =
-            BlockHeader::decode_verify(&buf[..bs], expect_type, self.fs_uuid, phys, &self.mac_key)?;
-        // The companion is good: repair the primary from its still-encrypted
-        // bytes, then decrypt the caller's copy.
+        let header = BlockHeader::decode_verify(
+            &buf[..bs],
+            expect_type,
+            self.fs_uuid,
+            phys,
+            &self.protection.meta,
+        )?;
+        // The companion is good: repair the primary from its still-sealed
+        // bytes, then open the caller's copy.
         let repair = self.repair_meta_copy(phys, buf);
         self.observed.note_repair(repair);
         repair?;
-        self.decrypt_meta_payload(expect_type, buf, phys)?;
+        self.open_meta_payload(expect_type, buf, phys)?;
         Ok(header)
     }
 
-    /// After a metadata block authenticates, decrypt its at-rest-encrypted
-    /// payload in place for the caller. Only directory blocks carry an
-    /// encrypted payload (the entry names); every other metadata block is
-    /// authenticated-only and returned unchanged. The block authenticated
-    /// before this point, so decryption cannot yield mis-decrypted bytes
+    /// After a metadata block authenticates, open its sealed payload in place
+    /// for the caller: decrypt it, or check a plaintext volume's checksum.
+    /// Only directory and attribute blocks carry one; every other metadata
+    /// block is authenticated-only and returned unchanged
     /// (`docs/src/filesystem/arxfs-spec.md` §6 read path).
-    fn decrypt_meta_payload(
+    fn open_meta_payload(
         &self,
         block_type: BlockType,
         buf: &mut [u8],
@@ -1428,7 +1415,9 @@ impl<B: Block> ARXFS<B> {
         }
         let off = self.crypto_trailer_offset();
         let (region, trailer) = buf[HEADER_LEN..self.block_size].split_at_mut(off - HEADER_LEN);
-        decrypt_region(&self.filename_key, region, trailer, phys)
+        self.protection
+            .names
+            .open(region, trailer, phys)
             .map_err(|_| DriverError::DeviceFault)
     }
 
@@ -1568,16 +1557,17 @@ impl<B: Block> ARXFS<B> {
         let payload_len = as_u32(self.block_size - HEADER_LEN);
         let next_gen = self.generation.wrapping_add(1);
         // A directory block's entry names and an attribute block's keys and
-        // values are encrypted at rest under the metadata (filename) key
-        // before the block is authenticated, so the keyed authenticator seals
-        // the ciphertext (encrypt-then-MAC; the read path authenticates then
-        // decrypts — `docs/src/filesystem/arxfs-spec.md` §6, §7, §21). Other
-        // metadata blocks are authenticated-only.
+        // values are sealed under the names seal before the block is, so the
+        // metadata seal covers the sealed bytes (encrypt-then-MAC on an
+        // encrypted volume; the read path checks then opens —
+        // `docs/src/filesystem/arxfs-spec.md` §6, §7, §21). Other metadata
+        // blocks carry the metadata seal alone.
         if matches!(block_type, BlockType::Directory | BlockType::Attr) {
             let off = self.crypto_trailer_offset();
             let (region, trailer) = buf[HEADER_LEN..self.block_size].split_at_mut(off - HEADER_LEN);
-            encrypt_region(&self.filename_key, region, trailer, new_phys, next_gen)
-                .map_err(|_| DriverError::DeviceFault)?;
+            self.protection
+                .names
+                .seal(region, trailer, new_phys, next_gen)?;
         }
         let header = BlockHeader {
             block_type,
@@ -1589,7 +1579,7 @@ impl<B: Block> ARXFS<B> {
             payload_len,
         };
         let bs = self.block_size;
-        header.seal(&mut buf[..bs], &self.mac_key)?;
+        header.seal(&mut buf[..bs], &self.protection.meta)?;
         self.write_meta(new_phys, buf)?;
         Ok(new_phys)
     }
@@ -2326,7 +2316,12 @@ impl<B: Block> ARXFS<B> {
             free_count: self.committed_free_count(),
             next_content_gen: self.next_content_gen,
         };
-        root.seal(&mut buf[..bs], self.fs_uuid, root_phys, &self.mac_key)?;
+        root.seal(
+            &mut buf[..bs],
+            self.fs_uuid,
+            root_phys,
+            &self.protection.meta,
+        )?;
         self.write_meta(root_phys, buf)?;
         let slot = slot_block(self.ring_pos % RING_SLOTS);
         let sb = Superblock {
@@ -2336,12 +2331,13 @@ impl<B: Block> ARXFS<B> {
             generation: next_gen,
             root_phys,
             incompat: self.incompat,
+            protection: self.protection.kind(),
         };
         sb.seal(
             &mut buf[..bs],
             self.fs_uuid,
             slot,
-            &self.mac_key,
+            &self.protection.meta,
             &self.crypto_header,
         )?;
         if self.map_has_changes() {
@@ -2357,6 +2353,15 @@ impl<B: Block> ARXFS<B> {
         })
     }
 
+    /// Zero every superblock copy, so no slot of a volume formatted here before
+    /// survives to be taken for this one's: a discard need not zero, and a
+    /// plaintext copy of the old volume would still verify under its own
+    /// checksum.
+    fn erase_ring(&mut self) -> Result<(), DriverError> {
+        let erased = [0u8; MAX_BLOCK_SIZE];
+        (0..RING_BLOCKS).try_for_each(|phys| self.write_device(phys, &erased))
+    }
+
     /// Write both copies of the sealed superblock slot in `buf`, the companion
     /// first so the copy a mount prefers is the last write of the commit.
     fn publish_slot(&mut self, slot: u64, buf: &[u8]) -> Result<(), DriverError> {
@@ -2364,26 +2369,49 @@ impl<B: Block> ARXFS<B> {
         self.write_device(slot, buf)
     }
 
-    /// Validate device geometry and build a zeroed in-memory volume state.
-    fn bootstrap(block: B) -> Result<Self, DriverError> {
-        let class = block.device_class();
+    /// The device's block size and block count, refused unless a volume can
+    /// be laid on them.
+    fn checked_geometry(block: &B) -> Result<(usize, u64), DriverError> {
         let geo = block.geometry()?;
-        let block_size = geo.block_size as usize;
+        let block_size = usize::try_from(geo.block_size).map_err(|_| DriverError::Unsupported)?;
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) || !block_size.is_power_of_two()
         {
             return Err(DriverError::Unsupported);
         }
-        let total_blocks = geo.block_count;
-        if total_blocks <= RING_BLOCKS + 8 {
+        if geo.block_count <= RING_BLOCKS + 8 {
             return Err(DriverError::NoSpace);
         }
-        let fs = Self {
+        Ok((block_size, geo.block_count))
+    }
+
+    /// Every superblock copy in ring order, each slot's primary then its
+    /// companion: the block it is read from, and its slot's primary, the
+    /// address both copies are sealed for.
+    fn superblock_copies() -> impl Iterator<Item = (u64, u64)> {
+        (0..RING_SLOTS).flat_map(|slot| {
+            let primary = slot_block(slot);
+            [(primary, primary), (Self::companion(primary), primary)]
+        })
+    }
+
+    /// A zeroed in-memory volume state over `block`, of `geometry` (from
+    /// [`Self::checked_geometry`]), sealed as `established` says.
+    fn bootstrap(
+        block: B,
+        (block_size, total_blocks): (usize, u64),
+        established: Established,
+    ) -> Self {
+        let class = block.device_class();
+        let Established {
+            fs_uuid,
+            protection,
+            crypto_header,
+        } = established;
+        Self {
             block,
-            fs_uuid: 0,
-            mac_key: [0u8; tairix_crypto::HMAC_SHA256_KEY_LEN],
-            filename_key: [0u8; tairix_crypto::AEAD_KEY_LEN],
-            content_key: [0u8; tairix_crypto::AEAD_KEY_LEN],
-            crypto_header: [0u8; CRYPTO_HEADER_LEN],
+            fs_uuid,
+            protection,
+            crypto_header,
             block_size,
             total_blocks,
             inode_hint: 0,
@@ -2398,7 +2426,6 @@ impl<B: Block> ARXFS<B> {
             scrub_progress_root: 0,
             health_baseline_root: 0,
             pending_delete_root: 0,
-            dedupe_domain: 0,
             root_phys: 0,
             free_count: total_blocks,
             alloc: None,
@@ -2418,8 +2445,7 @@ impl<B: Block> ARXFS<B> {
             bound: None,
             reading: None,
             observed: ObservedFaults::default(),
-        };
-        Ok(fs)
+        }
     }
 
     /// Lay a fresh, empty arxfs volume onto `block` and return it mounted.
@@ -2428,19 +2454,20 @@ impl<B: Block> ARXFS<B> {
     /// superblock for tools, and a value below two is still rejected so at
     /// least the root directory fits.
     ///
-    /// The volume is encrypted at rest under `volume_key` (the installer's /
-    /// recovery flow's key material): `format` provisions the per-volume key
-    /// hierarchy (a wrapped master key deriving the metadata-authentication,
-    /// filename, and content keys) and stores only the wrapped master key on
-    /// disk. There is **no** plaintext layout path
-    /// (`docs/src/filesystem/arxfs-spec.md` §5, §7). A fresh volume holds no
-    /// shared chunks, so the chunk/refcount and reverse-reference trees and the
-    /// dedupe index start empty and grow on demand.
+    /// `keying` decides the volume's protection (`docs/src/filesystem/arxfs-spec.md`
+    /// §5, §7). [`Keying::Key`] encrypts it: `format` provisions the per-volume
+    /// key hierarchy — a wrapped master key deriving the
+    /// metadata-authentication, filename and content keys — and stores only
+    /// the wrapped master key. [`Keying::Plaintext`] stores no key material and
+    /// seals every block with a checksum. A fresh volume holds no shared
+    /// chunks, so the chunk/refcount and reverse-reference trees and the dedupe
+    /// index start empty and grow on demand.
     ///
-    /// The random per-volume UUID and the master key, wrapping salt, and wrap
-    /// nonce are drawn from `entropy`, the [`EntropySource`] seam onto the
-    /// platform RNG (`lib/rng`'s `CsRng`). A failed draw
-    /// fails closed: no volume is laid out with predictable key material.
+    /// The random per-volume UUID and, for an encrypted volume, the master key,
+    /// wrapping salt and wrap nonce are drawn from `entropy`, the
+    /// [`EntropySource`] seam onto the platform RNG (`lib/rng`'s `CsRng`). A
+    /// failed draw fails closed: no volume is laid out with predictable key
+    /// material or identity.
     ///
     /// # Errors
     ///
@@ -2452,30 +2479,38 @@ impl<B: Block> ARXFS<B> {
     pub fn format(
         block: B,
         inode_hint: u32,
-        volume_key: &VolumeKey,
+        keying: Keying<'_>,
         entropy: &mut dyn EntropySource,
     ) -> Result<Self, DriverError> {
-        let mut fs = Self::bootstrap(block)?;
+        let geometry = Self::checked_geometry(&block)?;
         if inode_hint < 2 {
             return Err(DriverError::NoSpace);
         }
+        let fs_uuid = random_uuid(entropy)?;
+        let established = match keying {
+            Keying::Plaintext => Established::plaintext(fs_uuid),
+            Keying::Key(volume_key) => {
+                let (header, keys) = crypto::provision(volume_key, entropy)?;
+                let mut crypto_header = [0u8; CRYPTO_HEADER_LEN];
+                header.encode(&mut crypto_header);
+                Established {
+                    fs_uuid,
+                    protection: Protection::encrypted(&keys),
+                    crypto_header,
+                }
+            }
+        };
+        let mut fs = Self::bootstrap(block, geometry, established);
         fs.inode_hint = inode_hint;
-        fs.fs_uuid = random_uuid(entropy)?;
-        // Provision the per-volume key hierarchy: a random master key wrapped
-        // under the caller's volume key, deriving the metadata-authentication,
-        // filename, and content keys. There is no plaintext path
-        // (`docs/src/filesystem/arxfs-spec.md` §5, §7).
-        let (crypto_header, keys) = crypto::provision(volume_key, entropy)?;
-        fs.apply_keys(&keys);
-        crypto_header.encode(&mut fs.crypto_header);
 
         // Tell a discard-capable device the whole volume is free before the
-        // encrypted structures are written (`docs/src/filesystem/arxfs-spec.md`
+        // volume's structures are written (`docs/src/filesystem/arxfs-spec.md`
         // §11 mkfs flow). Discard is advisory: a device without support, or a
         // discard fault, must not stop a fresh volume from being created
         // (recorded, not failed), so the outcome is intentionally not
         // propagated as a format error.
         let _ = fs.mkfs_discard();
+        fs.erase_ring()?;
         // Lay the allocation map down before anything is allocated from it.
         // The region sits immediately above the superblock ring, so a fresh
         // volume's layout is fully determined by its block size and size.
@@ -2518,23 +2553,91 @@ impl<B: Block> ARXFS<B> {
     /// chosen slot or root is then rewritten from its companion, and every bad
     /// copy met is recorded for the next [`Self::health`] pass.
     ///
-    /// The volume is encrypted: `volume_key` must be the key material the
-    /// volume was formatted with. `open` recovers the key hierarchy by
+    /// `keying` must match the volume's protection. An encrypted volume needs
+    /// the key it was formatted with: `open` recovers the key hierarchy by
     /// unwrapping the master key stored in a superblock slot's discovery
-    /// header; a wrong key never unwraps and the mount is refused with
-    /// [`DriverError::PermissionDenied`], fail-closed,
-    /// never a panic.
+    /// header, and a wrong key never unwraps. A plaintext volume needs none,
+    /// and opening it with a key is refused, so a caller expecting protection
+    /// is never handed a volume without it. [`Self::probe_protection`] says
+    /// which a volume claims to be.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Unsupported`] if the device block size is unsupported.
-    /// * [`DriverError::PermissionDenied`] if `volume_key` does not unwrap the
-    ///   volume (wrong key on an otherwise-valid arxfs volume).
+    /// * [`DriverError::Unsupported`] if the device block size is unsupported,
+    ///   the volume is plaintext but `keying` holds a key, or its protection
+    ///   word names no protection.
+    /// * [`DriverError::PermissionDenied`] if the volume is encrypted and
+    ///   `keying` holds no key or one that does not unwrap it — fail closed.
     /// * [`DriverError::BadMagic`] if no committed superblock slot validates
     ///   (e.g. the device is not a arxfs volume).
     /// * [`DriverError::DeviceFault`] on an unrecoverable block read.
-    pub fn open(block: B, volume_key: &VolumeKey) -> Result<Self, DriverError> {
-        Self::open_inner(block, volume_key, false)
+    pub fn open(block: B, keying: Keying<'_>) -> Result<Self, DriverError> {
+        Self::open_inner(block, keying, false)
+    }
+
+    /// The protection the volume on `block` declares, read from its
+    /// superblock ring without a key.
+    ///
+    /// An encrypted copy's word cannot be authenticated without the key, so
+    /// this is what the volume *claims*: it decides how to open the volume,
+    /// and the open verifies it, refusing a volume that is not what was
+    /// claimed. A plaintext claim is believed only from a copy its checksum
+    /// verifies, and a copy whose word names no protection is passed over, so
+    /// one damaged copy cannot misreport the volume while its mirror is whole.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BadMagic`] if no copy is a verifiable arxfs superblock.
+    /// * [`DriverError::Unsupported`] if the device block size is unsupported,
+    ///   or every copy that claims to be arxfs names no protection.
+    /// * [`DriverError`] from the device if no copy can be read at all.
+    pub fn probe_protection(block: &mut B) -> Result<VolumeProtection, DriverError> {
+        let (block_size, _) = Self::checked_geometry(block)?;
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let (claim, walk) = Self::walk_copies(
+            block,
+            &mut buf[..block_size],
+            |phys, claim, copy| match claim {
+                VolumeProtection::Encrypted => Some(claim),
+                VolumeProtection::Plaintext => {
+                    verified_uuid(copy, phys, &MetaSeal::Checksum).map(|_| claim)
+                }
+            },
+        );
+        claim.ok_or_else(|| walk.missed(None))
+    }
+
+    /// Walk the superblock copies in ring order, handing `settle` each one
+    /// that claims to be an arxfs superblock and names a protection, with the
+    /// address it is sealed for and its bytes, until `settle` accepts one. A
+    /// copy that cannot be read, that is no arxfs superblock, or whose word
+    /// names no protection is passed over, its mirror or another slot standing
+    /// in for it.
+    fn walk_copies<T>(
+        block: &mut B,
+        buf: &mut [u8],
+        mut settle: impl FnMut(u64, VolumeProtection, &[u8]) -> Option<T>,
+    ) -> (Option<T>, CopyWalk) {
+        let mut walk = CopyWalk::default();
+        for (at, sealed_for) in Self::superblock_copies() {
+            if let Err(err) = block.read_blocks(at, buf) {
+                walk.unread = Some(err);
+                continue;
+            }
+            walk.read = true;
+            if header::claimed_uuid(buf).is_none() {
+                continue;
+            }
+            let Some(claim) = VolumeProtection::from_word(rd_u32(buf, superblock::P_PROTECTION))
+            else {
+                walk.unrecognised = true;
+                continue;
+            };
+            if let Some(settled) = settle(sealed_for, claim, buf) {
+                return (Some(settled), walk);
+            }
+        }
+        (None, walk)
     }
 
     /// The volume's stable identity: the 16 raw bytes of the random
@@ -2549,7 +2652,7 @@ impl<B: Block> ARXFS<B> {
         self.fs_uuid.to_le_bytes()
     }
 
-    /// Open the arxfs volume on `block` **read-only**, under `volume_key`.
+    /// Open the arxfs volume on `block` **read-only**, under `keying`.
     ///
     /// Identical to [`Self::open`] in how it selects and replays the
     /// committed transaction, but the returned handle is read-only: no
@@ -2560,31 +2663,28 @@ impl<B: Block> ARXFS<B> {
     ///
     /// This is how the boot path mounts the read-only, signed-bundle
     /// `/System` volume (the design-B pre-unlock driver store,
-    /// `plans/PI.md`): the volume carries no secrets and is keyed by a
-    /// non-secret well-known key, so opening it grants read access to the
-    /// store while the kernel can never mutate it.
+    /// `plans/PI.md`): the volume carries no secrets and is plaintext, its
+    /// integrity resting on its bundles' signatures, so opening it grants read
+    /// access to the store while the kernel can never mutate it.
     ///
     /// # Errors
     ///
     /// As [`Self::open`].
-    pub fn open_read_only(block: B, volume_key: &VolumeKey) -> Result<Self, DriverError> {
-        Self::open_inner(block, volume_key, true)
+    pub fn open_read_only(block: B, keying: Keying<'_>) -> Result<Self, DriverError> {
+        Self::open_inner(block, keying, true)
     }
 
     /// Shared body of [`Self::open`] and [`Self::open_read_only`]: select
     /// and replay the highest-generation committed transaction. When
     /// `read_only` is set the handle never writes the device (one open path for both modes).
-    fn open_inner(block: B, volume_key: &VolumeKey, read_only: bool) -> Result<Self, DriverError> {
-        let mut fs = Self::bootstrap(block)?;
-        // Set before anything is read, so a read-only handle's mount repairs
-        // nothing.
+    fn open_inner(mut block: B, keying: Keying<'_>, read_only: bool) -> Result<Self, DriverError> {
+        let geometry = Self::checked_geometry(&block)?;
+        let established = Self::establish(&mut block, geometry.0, keying, Pin::Verified)?;
+        let mut fs = Self::bootstrap(block, geometry, established);
+        // Set before anything is read as metadata, so a read-only handle's
+        // mount repairs nothing.
         fs.read_only = read_only;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        // Establish the volume keys before reading any authenticated metadata:
-        // unwrap the master key from a superblock slot's plaintext discovery
-        // header under `volume_key`. This sets `fs_uuid` and the working keys,
-        // or fails closed on a wrong key.
-        fs.establish_keys(volume_key, &mut buf)?;
 
         let mut best: Option<(Superblock, u64, ServedBy)> = None;
         let uuid_pin: Option<u128> = Some(fs.fs_uuid);
@@ -2867,63 +2967,76 @@ impl<B: Block> ARXFS<B> {
         Ok(())
     }
 
-    /// Establish the working key set by unwrapping the master key with
-    /// `volume_key` from a superblock slot's plaintext crypto discovery header
-    /// (`crypto` module). Sets [`Self::fs_uuid`], the working keys, and the
-    /// encoded discovery header that every commit re-publishes.
+    /// How `keying` opens the volume on `block`, of `block_size`: from the
+    /// first superblock copy that verifies under the protection it declares —
+    /// a plaintext volume's checksums, or an encrypted volume's key hierarchy,
+    /// whose master key `keying`'s key must unwrap and whose metadata key must
+    /// then authenticate the copy. Under [`Pin::Verified`] only a verified
+    /// copy's UUID is pinned, so a damaged copy cannot misname the volume while
+    /// its mirror is whole. The ring scan then checks every slot under that
+    /// protection.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::PermissionDenied`] if a structurally-valid arxfs
-    ///   superblock is present but `volume_key` does not unwrap it (wrong key)
-    ///   — fail-closed.
-    /// * [`DriverError::BadMagic`] if no slot even looks like a arxfs
-    ///   superblock (the device is not a arxfs volume).
-    fn establish_keys(
-        &mut self,
-        volume_key: &VolumeKey,
-        buf: &mut [u8],
-    ) -> Result<(), DriverError> {
-        let mut saw_structure = false;
-        for slot in 0..RING_SLOTS {
-            let primary = slot_block(slot);
-            for phys in [primary, Self::companion(primary)] {
-                if self.read_block(phys, buf).is_err() {
-                    continue;
-                }
-                if rd_u64(buf, 0) != HEADER_MAGIC || rd_u32(buf, 12) != FORMAT_VERSION {
-                    continue;
-                }
-                saw_structure = true;
-                let Some(header) = CryptoHeader::decode(&buf[superblock::CRYPTO_OFFSET..]) else {
-                    continue;
+    /// * [`DriverError::PermissionDenied`] if the volume is encrypted and
+    ///   `keying` holds no key, or one that unwraps no copy — fail closed.
+    /// * [`DriverError::Unsupported`] if the volume is plaintext and `keying`
+    ///   holds a key, or every copy that claims to be arxfs names no
+    ///   protection.
+    /// * [`DriverError::BadMagic`] if no copy `pin` accepts is an arxfs
+    ///   superblock (the device is not an arxfs volume, or every copy is
+    ///   damaged).
+    /// * [`DriverError`] from the device if no copy can be read at all.
+    fn establish(
+        block: &mut B,
+        block_size: usize,
+        keying: Keying<'_>,
+        pin: Pin,
+    ) -> Result<Established, DriverError> {
+        let mut buf = [0u8; MAX_BLOCK_SIZE];
+        let mut refused = None;
+        let mut claimed = None;
+        let (verified, walk) =
+            Self::walk_copies(block, &mut buf[..block_size], |phys, claim, copy| {
+                let (established, seal_holds) = match (keying, claim) {
+                    (Keying::Plaintext, VolumeProtection::Plaintext) => {
+                        let fs_uuid = header::claimed_uuid(copy)?;
+                        let seal_holds =
+                            verified_uuid(copy, phys, &MetaSeal::Checksum) == Some(fs_uuid);
+                        (Established::plaintext(fs_uuid), seal_holds)
+                    }
+                    (Keying::Key(volume_key), VolumeProtection::Encrypted) => {
+                        refused = Some(DriverError::PermissionDenied);
+                        unlock_copy(volume_key, copy, phys)?
+                    }
+                    (Keying::Plaintext, VolumeProtection::Encrypted) => {
+                        refused = Some(DriverError::PermissionDenied);
+                        return None;
+                    }
+                    // A key that failed an encrypted copy is the answer
+                    // whatever a stray copy elsewhere claims.
+                    (Keying::Key(_), VolumeProtection::Plaintext) => {
+                        refused.get_or_insert(DriverError::Unsupported);
+                        return None;
+                    }
                 };
-                if let Ok(keys) = crypto::unwrap(volume_key, &header) {
-                    let mut uuid_bytes = [0u8; 16];
-                    uuid_bytes.copy_from_slice(&buf[16..32]);
-                    self.fs_uuid = u128::from_le_bytes(uuid_bytes);
-                    self.apply_keys(&keys);
-                    self.crypto_header.copy_from_slice(
-                        &buf[superblock::CRYPTO_OFFSET
-                            ..superblock::CRYPTO_OFFSET + CRYPTO_HEADER_LEN],
-                    );
-                    return Ok(());
+                if seal_holds {
+                    return Some(established);
                 }
-            }
-        }
-        Err(if saw_structure {
-            DriverError::PermissionDenied
-        } else {
-            DriverError::BadMagic
-        })
+                if pin == Pin::Claimed && claimed.is_none() {
+                    claimed = Some(established);
+                }
+                None
+            });
+        verified.or(claimed).ok_or_else(|| walk.missed(refused))
     }
 
     /// Read a superblock-ring slot at primary block `primary`, falling back to
     /// its companion mirror (`docs/src/filesystem/arxfs-spec.md` §8). Returns
     /// the decoded slot, its UUID and the copy that served it, or `Ok(None)`
     /// when neither copy is usable (the ring scan then skips the slot).
-    /// Authenticated under the volume's metadata-authentication key, recovered
-    /// in [`Self::establish_keys`].
+    /// Checked under the volume's metadata seal, established in
+    /// [`Self::establish`].
     ///
     /// A copy that cannot be **read** is as absent as one that fails to
     /// authenticate — a media error on a single sector is exactly what the
@@ -2944,7 +3057,7 @@ impl<B: Block> ARXFS<B> {
         let bs = self.block_size;
         if self.read_block(primary, buf).is_ok() {
             if let Some((sb, uuid)) =
-                Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
+                Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.protection.meta)?
             {
                 return Ok(Some((sb, uuid, ServedBy::Primary)));
             }
@@ -2953,7 +3066,7 @@ impl<B: Block> ARXFS<B> {
             return Ok(None);
         }
         Ok(
-            Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.mac_key)?
+            Superblock::try_decode(&buf[..bs], uuid_pin, primary, &self.protection.meta)?
                 .map(|(sb, uuid)| (sb, uuid, ServedBy::Companion)),
         )
     }
@@ -2980,18 +3093,19 @@ impl<B: Block> ARXFS<B> {
         buf: &mut [u8],
     ) -> Result<(TxnRoot, ServedBy), DriverError> {
         let bs = self.block_size;
-        let key = self.mac_key;
         // A copy that cannot be read is as absent as one that fails to
         // authenticate, so both fall through to the companion.
         if self.read_block(root_phys, buf).is_ok() {
+            let seal = &self.protection.meta;
             if let Ok(root) =
-                TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)
+                TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, seal)
             {
                 return Ok((root, ServedBy::Primary));
             }
         }
         self.read_block(Self::companion(root_phys), buf)?;
-        let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, &key)?;
+        let seal = &self.protection.meta;
+        let root = TxnRoot::decode_verify(&buf[..bs], uuid, root_phys, expect_generation, seal)?;
         Ok((root, ServedBy::Companion))
     }
 
@@ -3259,8 +3373,8 @@ impl<B: Block> ARXFS<B> {
             }
             return Ok(());
         }
-        let hash = logical_hash(&blk[..capu]);
-        let domain = self.dedupe_domain;
+        let hash = self.protection.content_hash.of(&blk[..capu]);
+        let domain = self.protection.dedupe_domain;
         if let Some(cand) = self.dedupe_lookup(domain, &hash, &blk[..capu])? {
             if cand.phys == old_ptr {
                 // The position already points at this exact record; the COW
@@ -3591,13 +3705,15 @@ impl<B: Block> ARXFS<B> {
         let hash_off = self.logical_hash_offset();
         {
             let (region, rest) = buf[..desc_off].split_at_mut(cap);
-            decrypt_region(&self.content_key, region, &rest[..CRYPTO_TRAILER], phys)
-                .map_err(|_| DataFault::Aead)?;
+            self.protection
+                .content
+                .open(region, &rest[..CRYPTO_TRAILER], phys)
+                .map_err(|_| DataFault::Seal)?;
         }
         let form = read_stored_form(&buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN])?;
         let mut expect = [0u8; LOGICAL_HASH_LEN];
         expect.copy_from_slice(&buf[hash_off..hash_off + LOGICAL_HASH_LEN]);
-        if logical_hash(&buf[..cap]) != expect {
+        if self.protection.content_hash.of(&buf[..cap]) != expect {
             return Err(DataFault::Logical);
         }
         Ok(form)
@@ -3641,12 +3757,12 @@ impl<B: Block> ARXFS<B> {
         }
     }
 
-    /// Encrypt the content slot in `buf[..data_capacity()]` under the content
-    /// key, seal the stored-form descriptor and the data-integrity trailer
-    /// (logical hash of the decrypted slot, then a fast physical checksum over
-    /// the at-rest bytes), and write the block to `phys`. The nonce is unique
-    /// per `(phys, generation)` so copy-on-write never reuses a `(key, nonce)`
-    /// pair (`crypto` module).
+    /// Seal the content slot in `buf[..data_capacity()]` under the content
+    /// seal, record the stored-form descriptor and the data-integrity trailer
+    /// (logical hash of the unsealed slot, then a fast physical checksum over
+    /// the at-rest bytes), and write the block to `phys`. An encrypted
+    /// volume's nonce is unique per `(phys, generation)`, so copy-on-write
+    /// never reuses a `(key, nonce)` pair (`crypto` module).
     ///
     /// # Errors
     ///
@@ -3659,31 +3775,25 @@ impl<B: Block> ARXFS<B> {
     ) -> Result<(), DriverError> {
         let cap = as_usize(self.data_capacity());
         let next_gen = self.generation.wrapping_add(1);
-        // The logical hash names the decrypted content slot, so it is taken
-        // before encryption (`docs/src/filesystem/arxfs-spec.md` §6 write
-        // path).
-        let hash = logical_hash(&buf[..cap]);
+        // The logical hash names the unsealed content slot, so it is taken
+        // before sealing (`docs/src/filesystem/arxfs-spec.md` §6 write path).
+        let hash = self.protection.content_hash.of(&buf[..cap]);
         let desc_off = self.compression_desc_offset();
         let hash_off = self.logical_hash_offset();
         {
             let (region, trailer) = buf[..desc_off].split_at_mut(cap);
-            encrypt_region(
-                &self.content_key,
-                region,
-                &mut trailer[..CRYPTO_TRAILER],
-                phys,
-                next_gen,
-            )
-            .map_err(|_| DriverError::DeviceFault)?;
+            self.protection
+                .content
+                .seal(region, &mut trailer[..CRYPTO_TRAILER], phys, next_gen)?;
         }
         write_stored_form(
             &mut buf[desc_off..desc_off + COMPRESSION_DESCRIPTOR_LEN],
             form,
         );
         buf[hash_off..hash_off + LOGICAL_HASH_LEN].copy_from_slice(&hash);
-        // The physical checksum covers the at-rest representation: ciphertext,
-        // crypto trailer, stored-form descriptor, and logical hash — everything
-        // before the checksum.
+        // The physical checksum covers the at-rest representation: the sealed
+        // region, its trailer, the stored-form descriptor, and the logical
+        // hash — everything before the checksum.
         let csum_off = self.phys_checksum_offset();
         let checksum = physical_checksum(&buf[..csum_off]);
         buf[csum_off..csum_off + PHYS_CHECKSUM_LEN].copy_from_slice(&checksum);
@@ -3694,8 +3804,8 @@ impl<B: Block> ARXFS<B> {
     /// single-block data record at `phys`.
     ///
     /// A single block is always stored raw: inside a fixed 1:1 block a
-    /// compressed frame frees nothing (its padding is encrypted, so not even
-    /// a lower layer could reclaim it), it only costs CPU on the hot data
+    /// compressed frame frees nothing (the whole block is written either
+    /// way), it only costs CPU on the hot data
     /// path. Real space savings come from the cluster path
     /// (`cluster` module), which stores a whole compressed cluster in fewer
     /// physical blocks (`docs/src/filesystem/arxfs-spec.md` §10).
@@ -4738,10 +4848,10 @@ impl<B: Block> ARXFS<B> {
         src_ptr: u64,
     ) -> Result<(), DriverError> {
         let capu = as_usize(self.data_capacity());
-        let domain = self.dedupe_domain;
+        let domain = self.protection.dedupe_domain;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         self.read_data_block(src_ptr, &mut buf)?;
-        let hash = logical_hash(&buf[..capu]);
+        let hash = self.protection.content_hash.of(&buf[..capu]);
         if usize::try_from(self.data_refcount(src_ptr)?).unwrap_or(usize::MAX) >= REVERSE_REF_CAP {
             let new_ptr = self.alloc_block(false)?;
             self.write_data_block(new_ptr, &mut buf)?;
@@ -5115,6 +5225,76 @@ fn random_uuid(entropy: &mut dyn EntropySource) -> Result<u128, DriverError> {
     entropy.fill(&mut bytes)?;
     let uuid = u128::from_le_bytes(bytes);
     Ok(if uuid == 0 { 1 } else { uuid })
+}
+
+/// What a walk of the superblock copies met besides the copy it settled on.
+#[derive(Default)]
+struct CopyWalk {
+    /// Why the last copy that could not be read could not.
+    unread: Option<DriverError>,
+    /// Whether any copy could be read.
+    read: bool,
+    /// Whether a copy claimed to be arxfs but its word named no protection.
+    unrecognised: bool,
+}
+
+impl CopyWalk {
+    /// The answer for a walk that settled on no copy: what the caller
+    /// `refused`, else a protection word naming none, else a volume with no
+    /// verifiable copy, else the device's error when no copy could be read.
+    fn missed(&self, refused: Option<DriverError>) -> DriverError {
+        refused.unwrap_or(match (self.unrecognised, self.read, self.unread) {
+            (true, ..) => DriverError::Unsupported,
+            (false, true, _) | (false, false, None) => DriverError::BadMagic,
+            (false, false, Some(err)) => err,
+        })
+    }
+}
+
+/// The UUID of the superblock `copy` at `phys` if it verifies under `seal`.
+///
+/// A copy that verifies but declares a feature this build does not implement
+/// still names the volume; the ring scan then refuses it with that reason.
+fn verified_uuid(copy: &[u8], phys: u64, seal: &MetaSeal) -> Option<u128> {
+    match Superblock::try_decode(copy, None, phys, seal) {
+        Ok(verified) => verified.map(|(_, uuid)| uuid),
+        Err(_) => header::claimed_uuid(copy),
+    }
+}
+
+/// The encrypted volume the superblock `copy` at `phys` describes, if
+/// `volume_key` unwraps its master key, and whether the metadata key derived
+/// from it then authenticates the copy, its UUID included.
+fn unlock_copy(volume_key: &VolumeKey, copy: &[u8], phys: u64) -> Option<(Established, bool)> {
+    let fs_uuid = header::claimed_uuid(copy)?;
+    let discovery =
+        copy.get(superblock::CRYPTO_OFFSET..superblock::CRYPTO_OFFSET + CRYPTO_HEADER_LEN)?;
+    let header = CryptoHeader::decode(discovery)?;
+    let keys = crypto::unwrap(volume_key, &header).ok()?;
+    let protection = Protection::encrypted(&keys);
+    let seal_holds = verified_uuid(copy, phys, &protection.meta) == Some(fs_uuid);
+    let mut crypto_header = [0u8; CRYPTO_HEADER_LEN];
+    crypto_header.copy_from_slice(discovery);
+    Some((
+        Established {
+            fs_uuid,
+            protection,
+            crypto_header,
+        },
+        seal_holds,
+    ))
+}
+
+/// Which superblock copies [`ARXFS::establish`] may pin a volume's identity
+/// from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Pin {
+    /// Only one that verifies under its seal: a mount.
+    Verified,
+    /// A verified one if any, else the first that claims the volume: a rescue,
+    /// which exists for a ring no copy of verifies, and checks every block it
+    /// then reads against the identity it pinned.
+    Claimed,
 }
 
 impl<B: Block> FilesystemRead for ARXFS<B> {

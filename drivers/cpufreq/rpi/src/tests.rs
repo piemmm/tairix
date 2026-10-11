@@ -8,13 +8,11 @@
 use core::cell::RefCell;
 
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
-use tairix_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey, HW_COMPATIBLE_MAX,
-};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
 use tairix_vcmailbox::mock::MockFirmware;
 use tairix_vcmailbox::MailboxTransport;
 
-use super::{register, RpiCpuFreq, BIND_KEYS, FIRMWARE_CLOCKS_COMPATIBLE, RATE_INTERVAL_HZ};
+use super::{register, RpiCpuFreq, BIND_KEYS, RATE_INTERVAL_HZ};
 
 /// A channel backed by the mock firmware, adapting its `&mut self` transport
 /// onto the `&self` channel the driver uses — the same `RefCell` shape the
@@ -91,9 +89,8 @@ fn register_requires_the_load_capability() {
 #[test]
 fn the_bind_table_names_the_device_tree_identity() {
     assert_eq!(BIND_KEYS.len(), 1);
-    let expected = HwMatchKey::compatible(FIRMWARE_CLOCKS_COMPATIBLE).expect("fits");
+    let expected = HwMatchKey::compatible(b"raspberrypi,firmware-clocks").expect("fits");
     assert_eq!(BIND_KEYS[0].key, expected);
-    assert!(FIRMWARE_CLOCKS_COMPATIBLE.len() <= HW_COMPATIBLE_MAX);
 }
 
 #[test]

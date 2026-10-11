@@ -29,14 +29,14 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{glyph_mask, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, RingInk, Surface};
-use tairix_theme::{Palette, TextRole, Theme};
+use tairix_theme::{edge_weight, Palette, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    ground_fill, heavy_contrast, inset, paint_bead, paint_chevron, paint_icon_slot, paint_run,
-    paint_surface_plate, plate_border, plate_corner, resolve_bead, role_font, run_width,
-    surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer,
-    PlateInterior, FULL_COLOUR,
+    ground_fill, inset, paint_bead, paint_chevron, paint_icon_slot, paint_run, paint_surface_plate,
+    plate_border, plate_corner, resolve_bead, role_font, run_width, surface_rect,
+    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, PlateInterior,
+    FULL_COLOUR,
 };
 use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
@@ -115,8 +115,8 @@ pub struct PlatePlacement {
     /// The side of the anchor the plate prefers.
     pub side: PlateSide,
     /// The clearance between the anchor's far edge and the plate. Zero is the
-    /// edge-adjacency a chain needs so travelling from a parent row into its
-    /// own child crosses no dead space.
+    /// edge-adjacency a chain needs, so travelling from a parent row into its
+    /// own child crosses only the parent's rim.
     pub gap: u32,
 }
 
@@ -502,7 +502,7 @@ impl MenuItem {
             let rail_w = scale
                 .scale_length(theme.metrics().rail_thickness)
                 .max(1)
-                .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+                .saturating_mul(edge_weight(theme.contrast()))
                 .min(w);
             plate.lay(surface, (x, y, rail_w, h), Color::from(palette.danger));
         }
@@ -670,8 +670,9 @@ struct RowBand {
 ///
 /// The menu owns highlight state and input: Up/Down move the current row
 /// (wrapping), Home/End jump to the ends, Enter/Space activate the current row
-/// (opening a submenu parent), and Escape dismisses. Pointer hover sets the
-/// current row and a primary click activates it. Every activation is a typed
+/// (opening a submenu parent), and Escape dismisses. Pointer hover highlights
+/// the row under the pointer, unless the owner holds the highlight on a row
+/// ([`hold`](Self::hold)), and a primary click activates it. Every activation is a typed
 /// [`MenuAction`] the owner dispatches; the menu enforces no authority. A
 /// non-actionable row (disabled, denied, pending, failed-closed) can be
 /// highlighted — so its Authority Mark is legible and the seat can explain it
@@ -679,9 +680,9 @@ struct RowBand {
 ///
 /// Equal menus draw the same pixels, so a host may use `==` as its repaint
 /// gate: the rows, the highlighted row, and whether that highlight came from
-/// the keyboard all compare. The pointer coordinate and the pressed-row latch
-/// do not — no render path reads either, and the *visible* consequence of a
-/// press is the highlight the same event sets.
+/// the keyboard all compare. The pointer coordinate, the pressed-row latch and
+/// the held row do not — no render path reads any of them, and the *visible*
+/// consequence of each is the highlight the same event sets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Menu {
     items: Vec<MenuItem>,
@@ -694,6 +695,10 @@ pub struct Menu {
     /// slides onto a different row does not activate it; the pressed row's
     /// *look* is `current`.
     armed: RenderInvariant<Option<usize>>,
+    /// The row the owner keeps the pointer's highlight on whatever row the
+    /// pointer is over: the row whose child is open, while the pointer
+    /// travels to that child.
+    held: RenderInvariant<Option<usize>>,
 }
 
 impl Menu {
@@ -706,6 +711,7 @@ impl Menu {
             keyboard_focus: false,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
+            held: RenderInvariant::new(None),
         }
     }
 
@@ -778,6 +784,43 @@ impl Menu {
         self.keyboard_focus = self.current.is_some();
     }
 
+    /// Keep the pointer's highlight on `row` whatever row the pointer is over,
+    /// or release it with `None`; an out-of-range row releases (fail closed).
+    /// Takes effect at the next pointer motion, or at
+    /// [`refresh_hover`](Self::refresh_hover).
+    pub fn hold(&mut self, row: Option<usize>) {
+        *self.held = self.on_menu(row);
+    }
+
+    /// Re-derive the pointer's highlight — the held row, else the row under
+    /// the last pointer position — for an owner that changed the held row
+    /// while the pointer was still, reporting the rows it moved between.
+    pub fn refresh_hover(
+        &mut self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let over = self.row_at(bounds, scale, theme, *self.pointer);
+        self.hover(over, bounds, scale, theme, damage);
+    }
+
+    /// Highlight the held row, else `over`, the row under the pointer — unless
+    /// a press is down, whose row keeps the highlight until its release.
+    fn hover(
+        &mut self,
+        over: Option<usize>,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if self.armed.is_none() {
+            self.highlight(self.held.or(over), false, bounds, scale, theme, damage);
+        }
+    }
+
     /// `index` if it names a row of this menu, else `None` — the one admission
     /// rule every highlight entry point applies.
     fn on_menu(&self, index: Option<usize>) -> Option<usize> {
@@ -812,11 +855,22 @@ impl Menu {
         scale
             .scale_length(theme.metrics().border_thickness)
             .max(1)
-            .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+            .saturating_mul(edge_weight(theme.contrast()))
     }
 
-    /// The scaled clearance between the divider rule and the rows either side.
+    /// The scaled clearance between the divider rule and the rows either side:
+    /// half a control gap, so a group break separates without costing most of
+    /// a row.
     fn divider_gap(scale: Scale, theme: &Theme) -> u32 {
+        scale
+            .scale_length(theme.metrics().control_gap.div_ceil(2))
+            .max(1)
+    }
+
+    /// How far the divider rule stops short of either rim: a whole control
+    /// gap, so it reads as a division between groups rather than as an edge
+    /// of the plate.
+    fn divider_inset(scale: Scale, theme: &Theme) -> u32 {
         scale.scale_length(theme.metrics().control_gap).max(1)
     }
 
@@ -1058,16 +1112,13 @@ impl Menu {
         let palette = theme.palette();
         let rule = Self::divider_rule(scale, theme);
         let gap = Self::divider_gap(scale, theme);
+        let inset_x = Self::divider_inset(scale, theme).min(iw / 2);
         for band in self.layout(scale, theme) {
             let row_top = iy.saturating_add(band.top);
             if row_top.saturating_add(band.height) > iy + ih {
                 break;
             }
             if band.divider > 0 {
-                // The rule sits centred in its band, inset from both plate
-                // rims so it reads as a division between groups rather than
-                // as a full-width edge of the plate itself.
-                let inset_x = gap.min(iw / 2);
                 surface.fill_rect(
                     ix.saturating_add(inset_x),
                     row_top.saturating_sub(band.divider).saturating_add(gap),
@@ -1137,8 +1188,9 @@ impl Menu {
         damage::set(&mut self.keyboard_focus, keyboard, ring, damage);
     }
 
-    /// Feed a pointer event; hover sets the current row and a completed primary
-    /// click over an actionable row activates it (opening a submenu parent).
+    /// Feed a pointer event; hover highlights the held row, else the row
+    /// under the pointer, and a completed primary click over an actionable
+    /// row activates it (opening a submenu parent).
     ///
     /// A moved highlight reports the two rows it moved between, never the whole
     /// popup, and a sample that stays on one row reports nothing.
@@ -1156,9 +1208,7 @@ impl Menu {
         let over = self.row_at(bounds, scale, theme, *self.pointer);
         match event {
             InputEvent::PointerMoved { .. } => {
-                if self.armed.is_none() {
-                    self.highlight(over, false, bounds, scale, theme, damage);
-                }
+                self.hover(over, bounds, scale, theme, damage);
                 None
             }
             InputEvent::PointerPressed {

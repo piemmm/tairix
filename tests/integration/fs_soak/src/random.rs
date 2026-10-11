@@ -613,8 +613,8 @@ fn verify_all<F: SoakFs>(fs: &mut F, model: &Model, seed: u64) -> Result<(), Str
     Ok(())
 }
 
-/// Run one randomized soak iteration on a fresh `device_bytes` volume,
-/// driven entirely by `seed`.
+/// Run one randomized soak iteration on a fresh `device_bytes` volume laid
+/// down under `format`, driven entirely by `seed`.
 ///
 /// The body formats the volume, then performs `OPS_PER_ITERATION`
 /// randomly-chosen mutations (interspersed with read-back checks and
@@ -624,9 +624,13 @@ fn verify_all<F: SoakFs>(fs: &mut F, model: &Model, seed: u64) -> Result<(), Str
 /// # Errors
 /// Returns a descriptive, seed-tagged error on any driver failure or any
 /// divergence from the oracle model.
-pub fn random_exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), String> {
+pub fn random_exercise<F: SoakFs>(
+    device_bytes: u64,
+    seed: u64,
+    format: F::Format,
+) -> Result<(), String> {
     let block = RamBlock::new(device_bytes);
-    let mut fs = ck(F::format_volume(block), "format", seed)?;
+    let mut fs = ck(F::format_volume(block, format), "format", seed)?;
     let mut model = Model::new();
     let mut rng = Prng::new(seed);
 
@@ -650,13 +654,13 @@ pub fn random_exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), St
         // Periodically flush, remount, and re-verify the whole volume.
         if step != 0 && step % REMOUNT_EVERY == 0 {
             ck(fs.flush(), "flush before remount", seed)?;
-            fs = ck(fs.remount(), "remount", seed)?;
+            fs = ck(fs.remount(format), "remount", seed)?;
             verify_all(&mut fs, &model, seed)?;
         }
     }
 
     ck(fs.flush(), "final flush", seed)?;
-    let mut fs = ck(fs.remount(), "final remount", seed)?;
+    let mut fs = ck(fs.remount(format), "final remount", seed)?;
     verify_all(&mut fs, &model, seed)?;
     Ok(())
 }

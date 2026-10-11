@@ -18,7 +18,8 @@ use tairix_usb::XHCI_COMPATIBLE;
 use tairix_vcmailbox::mock::MockFirmware;
 
 use super::{build_xhci_node, reload_firmware_and_publish};
-use crate::{FirmwareResetFailure, FirmwareResetOutcome, VL805_FIRMWARE_DEV_ADDR};
+use crate::{FirmwareResetFailure, FirmwareResetOutcome};
+use tairix_vcmailbox::VL805_FIRMWARE_DEV_ADDR;
 
 /// The CPU-physical BAR base + length and the inbound-DMA aperture top the
 /// PCIe root-complex driver published on `node A` and the kernel granted

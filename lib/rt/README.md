@@ -358,6 +358,16 @@ a wedged or absent service costs one abandoned ticket rather than a blocked
 loop. `cachereport` above and the desktop session's frame accounting both go
 out over it, so neither hand-rolls the ticket bookkeeping.
 
+## Announcing a change count (`changenotice` module)
+
+`ChangeNotice` is a counted notice topic's publishing side — `AudioDevices` for
+the audio service, `Network` for the stack. The kernel keeps a topic's value
+past its publisher and wakes nobody for a re-statement of it, so
+`ChangeNotice::resume` answers the count to go on from: one past the value on
+the board. A restarted service therefore never announces its last instance's
+count, and its first announcement always reaches the subscribers.
+`ChangeNotice::announce` publishes each count once.
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled

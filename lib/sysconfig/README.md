@@ -10,7 +10,7 @@ the canonical render.
 
 The `configure` command app (`userland/apps/configure`) writes the store
 through this engine; boot-time consumers read it through the same engine
-after the encrypted root volume is unlocked, so producer and consumer can
+after the root volume is mounted, so producer and consumer can
 never diverge — the login service for `os.loginType`, and the kernel's
 cache-admission control (`kernel/core::syscfg` → `CacheControl`) for the
 `cache.*` switches (a master `cache.all` ceiling over the per-class

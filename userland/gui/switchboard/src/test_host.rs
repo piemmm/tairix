@@ -10,8 +10,10 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
-use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, IF_NAME_LEN};
-use tairix_abi::switchboard_ipc::{MachineReport, SwitchboardRequest, TraySummary};
+use tairix_abi::net_ipc::{
+    NetIfKind, NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN,
+};
+use tairix_abi::switchboard_ipc::{MachineReport, NetworkReport, SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState,
     SysinfoQueryId, SysinfoRequestHeader, MOUNT_VOLUME_ID_LEN,
@@ -263,27 +265,54 @@ impl Transport for ProcessListTransport {
     fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
         self.requests
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let header = SysinfoRequestHeader::from_bytes(request)?;
-        if !matches!(
-            header.query,
-            SysinfoQueryId::SELF_PROCESS_LIST | SysinfoQueryId::GLOBAL_PROCESS_LIST
-        ) {
-            return Err(Errno::NotFound);
-        }
-        let payload = &request[SysinfoRequestHeader::WIRE_LEN
-            ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-        let req = PageRequest::from_bytes(payload)?;
-        let offset = req.offset as usize;
-        if offset >= self.records.len() {
-            return Ok(Vec::new());
-        }
-        let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-        let mut out = Vec::new();
-        for record in &self.records[offset..offset + take] {
-            out.extend_from_slice(&record.to_le_bytes());
-        }
-        Ok(out)
+        page_of(
+            request,
+            &[
+                SysinfoQueryId::SELF_PROCESS_LIST,
+                SysinfoQueryId::GLOBAL_PROCESS_LIST,
+            ],
+            &self.records,
+            |record, out| out.extend_from_slice(&record.to_le_bytes()),
+        )
     }
+}
+
+/// A `sysinfo` transport that serves one page of interface states and
+/// refuses every other query.
+pub(crate) struct NetStateTransport(pub(crate) Vec<NetInterfaceStateRecord>);
+
+impl Transport for NetStateTransport {
+    fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
+        page_of(
+            request,
+            &[SysinfoQueryId::NET_INTERFACE_STATE],
+            &self.0,
+            |record, out| out.extend_from_slice(&record.to_le_bytes()),
+        )
+    }
+}
+
+/// Answer a paged `request` for one of `queries` from `records`, at the
+/// offset and limit it asks for; any other query is refused.
+fn page_of<T>(
+    request: &[u8],
+    queries: &[SysinfoQueryId],
+    records: &[T],
+    encode: impl Fn(&T, &mut Vec<u8>),
+) -> Result<Vec<u8>, Errno> {
+    let header = SysinfoRequestHeader::from_bytes(request)?;
+    if !queries.contains(&header.query) {
+        return Err(Errno::NotFound);
+    }
+    let payload = &request[SysinfoRequestHeader::WIRE_LEN
+        ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
+    let req = PageRequest::from_bytes(payload)?;
+    let offset = req.offset as usize;
+    let mut out = Vec::new();
+    for record in records.iter().skip(offset).take(req.limit as usize) {
+        encode(record, &mut out);
+    }
+    Ok(out)
 }
 
 /// A [`ServiceHost`] that records everything the service asked of it and
@@ -314,6 +343,8 @@ pub(crate) struct RecordingHost {
     pub(crate) published: Vec<TraySummary>,
     /// Every machine report publish attempted, in order.
     pub(crate) reports: Vec<MachineReport>,
+    /// Every network report published, in order.
+    pub(crate) networks: Vec<NetworkReport>,
     /// Refusal to answer a machine report with.
     pub(crate) report_refusal: Option<Errno>,
     /// Every signal attempted, in order.
@@ -334,6 +365,8 @@ pub(crate) struct RecordingHost {
     pub(crate) request_refusal: Option<Errno>,
     /// Refusal to answer a publish with.
     pub(crate) publish_refusal: Option<Errno>,
+    /// Refusal to answer a network report with.
+    pub(crate) network_refusal: Option<Errno>,
     /// Refusal to answer a signal with.
     pub(crate) signal_refusal: Option<Errno>,
     /// Refusal to answer a priority lowering with.
@@ -369,6 +402,7 @@ impl RecordingHost {
             requests: Vec::new(),
             published: Vec::new(),
             reports: Vec::new(),
+            networks: Vec::new(),
             report_refusal: None,
             signals: Vec::new(),
             priorities: Vec::new(),
@@ -379,6 +413,7 @@ impl RecordingHost {
             present_refusal: None,
             request_refusal: None,
             publish_refusal: None,
+            network_refusal: None,
             signal_refusal: None,
             priority_refusal: None,
             power_refusal: None,
@@ -475,6 +510,11 @@ impl ServiceHost for RecordingHost {
     fn publish_machine(&mut self, report: &MachineReport) -> Result<(), Errno> {
         self.reports.push(report.clone());
         self.report_refusal.map_or(Ok(()), Err)
+    }
+
+    fn publish_network(&mut self, report: &NetworkReport) -> Result<(), Errno> {
+        self.networks.push(*report);
+        self.network_refusal.map_or(Ok(()), Err)
     }
 
     fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno> {

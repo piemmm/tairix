@@ -17,7 +17,7 @@ use tairix_controls::{
     Slider, SliderAction, Toggle,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -388,11 +388,6 @@ impl SoundPanel {
     }
 }
 
-/// Saturating `u32` → `i32`.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
-}
-
 #[cfg(test)]
 #[path = "sound_tests.rs"]
-mod tests;
+pub(crate) mod tests;

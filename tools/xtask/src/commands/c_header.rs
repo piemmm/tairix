@@ -157,6 +157,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("DEADLOCK", Errno::Deadlock),
     ("STALE", Errno::Stale),
     ("NO_BANDWIDTH", Errno::NoBandwidth),
+    ("DECLINED", Errno::Declined),
 ];
 
 /// The `abi-v1` driver-ABI error codes, paired with the
@@ -3153,7 +3154,9 @@ fn emit_notice_contract(out: &mut String) {
          * outside the set, or a length that is not the topic's own, is rejected with\n\
          * TAIRIX_E_OUT_OF_RANGE / TAIRIX_E_LENGTH_OUT_OF_RANGE. Publishing is\n\
          * authorised per topic: the desktop topic admits only the holder of a seat's\n\
-         * live display lease, and every kernel-owned topic admits nobody. */\n",
+         * live display lease, the audio topics only the process bound to the audio\n\
+         * service's endpoint, the network topic only the one bound to the network\n\
+         * stack's, and every kernel-owned topic admits nobody. */\n",
     );
     let _ = writeln!(
         out,
@@ -3193,6 +3196,7 @@ const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
         NoticeTopic::DisplayLease => "DISPLAY_LEASE",
         NoticeTopic::AudioCapture => "AUDIO_CAPTURE",
         NoticeTopic::AudioDevices => "AUDIO_DEVICES",
+        NoticeTopic::Network => "NETWORK",
     }
 }
 

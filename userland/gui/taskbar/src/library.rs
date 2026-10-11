@@ -51,7 +51,7 @@ use tairix_controls::{
     TreeKey, TreeRow, TreeStep,
 };
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_proglib::{Catalog, EntryId, LibraryCategory};
 use tairix_raster::Surface;
@@ -512,17 +512,11 @@ impl LibraryPopup {
         let row_height = scale.scale_length(metrics.control_height);
         let pad = scale.scale_length(metrics.control_gap);
         let corner_radius = scale.scale_length(metrics.window_corner_radius);
-        let width = scale.scale_length(POPUP_WIDTH).min(screen_width).max(1);
+        let (room_width, available) = room_beside(edge, bar.bar, (screen_width, screen_height));
+        let width = scale.scale_length(POPUP_WIDTH).min(room_width).max(1);
         let indent = scale.scale_length(ENTRY_INDENT);
 
         let chrome = probe_chrome(&chrome_panel(Point::ORIGIN), width, scale, theme);
-
-        // Space available for the panel on the popup's side of the bar.
-        let available = match edge {
-            Edge::Bottom => u32::try_from(bar.bar.top()).unwrap_or(0),
-            Edge::Top => screen_height.saturating_sub(u32::try_from(bar.bar.bottom()).unwrap_or(0)),
-            Edge::Left | Edge::Right => screen_height,
-        };
 
         let fixed = chrome
             .overhead
@@ -1259,13 +1253,25 @@ pub(crate) fn panel_origin(edge: Edge, bar: Rect, anchor: Rect, width: u32, heig
     }
 }
 
-/// Saturating `u32` → `i32`.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
+/// The `(width, height)` a popover has on its side of `bar` (pinned to
+/// `edge`): between the bar and the screen edge across from it, so a popover
+/// sized to fit never runs back over the bar.
+pub(crate) fn room_beside(
+    edge: Edge,
+    bar: Rect,
+    (screen_width, screen_height): (u32, u32),
+) -> (u32, u32) {
+    let at = |coordinate: i32| u32::try_from(coordinate).unwrap_or(0);
+    match edge {
+        Edge::Bottom => (screen_width, at(bar.top()).min(screen_height)),
+        Edge::Top => (screen_width, screen_height.saturating_sub(at(bar.bottom()))),
+        Edge::Left => (screen_width.saturating_sub(at(bar.right())), screen_height),
+        Edge::Right => (at(bar.left()).min(screen_width), screen_height),
+    }
 }
 
 /// Saturating `usize` → `u32`.
-fn to_u32(value: usize) -> u32 {
+pub(crate) fn to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 

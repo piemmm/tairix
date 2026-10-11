@@ -44,9 +44,9 @@ BAR + DMA grants to the controller driver without ever mapping them itself
 This crate has two targets:
 
 * a **`lib` target** (`src/lib.rs`, `src/wiring.rs`) holding the host-testable
-  device logic — the VL805 firmware-reload policy (`reload_firmware`,
-  `probe_firmware_revision`), the §18.3 `BIND_KEYS` match table (exact PCI
-  `1106:3483`), and the `wiring` (`build_xhci_node` publishes the controller
+  device logic — the VL805 firmware-reload policy (`reload_firmware`), the
+  §18.3 `BIND_KEYS` match table (`lib/vcmailbox::VL805_KEY`, exact PCI
+  `1106:3483`, the identity the mailbox service admits the reload for), and the `wiring` (`build_xhci_node` publishes the controller
   as an `tairix_usb::XHCI_COMPATIBLE` node forwarding the BAR + DMA grants;
   `reload_firmware_and_publish` is the reload-then-publish composition); and
 * the **`Run` binary** (`src/main.rs`), the freestanding pure-Rust program

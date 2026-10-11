@@ -125,7 +125,7 @@ fn dad_conflict_on_link_local_disables_ipv6() {
         })
     );
     assert!(iface.v6_disabled());
-    assert!(iface.ipv6_addresses().is_empty());
+    assert!(iface.ipv6_addresses().next().is_none());
     assert_eq!(
         iface.add_ipv6_static(slaac_addr(), 64, t(2)),
         Err(AddrError::V6Disabled)
@@ -154,7 +154,6 @@ fn slaac_address_forms_from_ra_prefix_and_runs_dad() {
     assert!(actions.contains(&IfaceAction::AddressPreferred { addr: slaac_addr() }));
     let info = iface
         .ipv6_addresses()
-        .into_iter()
         .find(|info| info.addr == slaac_addr())
         .expect("slaac address exists");
     assert_eq!(info.origin, AddrOrigin::Slaac);
@@ -376,7 +375,7 @@ fn ipv6_disabled_by_policy_forms_no_link_local() {
     };
     let mut iface = Iface::new(&config, temp_source(), t(0));
     assert!(iface.v6_admin_disabled());
-    assert!(iface.ipv6_addresses().is_empty());
+    assert!(iface.ipv6_addresses().next().is_none());
     // No DAD/RS activity is ever scheduled for a disabled family.
     assert!(iface.advance(t(0)).is_empty());
     assert_eq!(iface.next_deadline(), None);
@@ -413,10 +412,10 @@ fn disabling_ipv6_flushes_every_address_and_halts_solicitation() {
     iface
         .add_ipv6_static(slaac_addr(), 64, t(1))
         .expect("static add");
-    assert!(!iface.ipv6_addresses().is_empty());
+    assert!(iface.ipv6_addresses().next().is_some());
     iface.set_ipv6_enabled(false, t(2));
     assert!(iface.v6_admin_disabled());
-    assert!(iface.ipv6_addresses().is_empty());
+    assert!(iface.ipv6_addresses().next().is_none());
     assert!(iface.candidates().is_empty());
     assert_eq!(iface.next_deadline(), None);
     assert!(iface.advance(t(3)).is_empty());
@@ -430,7 +429,7 @@ fn set_ipv6_enabled_is_idempotent() {
     assert_eq!(iface.link_local(), Some(link_local_addr()));
     iface.set_ipv6_enabled(false, t(2));
     iface.set_ipv6_enabled(false, t(2));
-    assert!(iface.ipv6_addresses().is_empty());
+    assert!(iface.ipv6_addresses().next().is_none());
 }
 
 #[test]
@@ -442,7 +441,7 @@ fn re_enabling_after_dad_failure_does_not_reform_link_local() {
     // A policy toggle cannot override the RFC 4862 DAD-failure disable.
     iface.set_ipv6_enabled(false, t(1));
     iface.set_ipv6_enabled(true, t(1));
-    assert!(iface.ipv6_addresses().is_empty());
+    assert!(iface.ipv6_addresses().next().is_none());
 }
 
 // ---- RFC 8981 temporary (privacy) addresses -------------------------
@@ -469,7 +468,6 @@ fn infinite_prefix() -> PrefixInformation {
 fn temp_addrs(iface: &Iface) -> alloc::vec::Vec<Ipv6AddrInfo> {
     iface
         .ipv6_addresses()
-        .into_iter()
         .filter(|info| info.origin == AddrOrigin::Temporary)
         .collect()
 }

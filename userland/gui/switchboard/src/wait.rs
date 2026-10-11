@@ -39,6 +39,11 @@ pub enum WaitToken {
     /// opened on demand by the icon bar, and it must open in the appearance in
     /// force rather than the one the process last saw a window in.
     Desktop,
+    /// The machine's network interfaces moving.
+    ///
+    /// Permanent: what the notification area states about the network is
+    /// read on this edge, never on a timer.
+    Network,
 }
 
 impl WaitToken {
@@ -53,6 +58,7 @@ impl WaitToken {
             Self::MemoryPressure => 4,
             Self::Artwork => 5,
             Self::Desktop => 6,
+            Self::Network => 7,
         }
     }
 
@@ -71,6 +77,7 @@ impl WaitToken {
             4 => Some(Self::MemoryPressure),
             5 => Some(Self::Artwork),
             6 => Some(Self::Desktop),
+            7 => Some(Self::Network),
             _ => None,
         }
     }
@@ -78,9 +85,9 @@ impl WaitToken {
 
 /// The wait-set members the run loop must have armed for the given window
 /// state: [`WaitToken::Signal`], [`WaitToken::Command`],
-/// [`WaitToken::MemoryPressure`], [`WaitToken::Artwork`] and
-/// [`WaitToken::Desktop`] are permanent; [`WaitToken::WindowEvent`] is present
-/// only while `window_open`.
+/// [`WaitToken::MemoryPressure`], [`WaitToken::Artwork`],
+/// [`WaitToken::Desktop`] and [`WaitToken::Network`] are permanent;
+/// [`WaitToken::WindowEvent`] is present only while `window_open`.
 #[must_use]
 pub fn required_members(window_open: bool) -> Vec<WaitToken> {
     let mut members = alloc::vec![
@@ -88,7 +95,8 @@ pub fn required_members(window_open: bool) -> Vec<WaitToken> {
         WaitToken::Command,
         WaitToken::MemoryPressure,
         WaitToken::Artwork,
-        WaitToken::Desktop
+        WaitToken::Desktop,
+        WaitToken::Network
     ];
     if window_open {
         members.push(WaitToken::WindowEvent);
@@ -109,6 +117,7 @@ mod tests {
             WaitToken::MemoryPressure,
             WaitToken::Artwork,
             WaitToken::Desktop,
+            WaitToken::Network,
         ] {
             assert_eq!(WaitToken::from_u64(token.as_u64()), Some(token));
         }
@@ -117,7 +126,7 @@ mod tests {
     #[test]
     fn an_unknown_token_value_decodes_to_none() {
         assert_eq!(WaitToken::from_u64(0), None);
-        assert_eq!(WaitToken::from_u64(7), None);
+        assert_eq!(WaitToken::from_u64(8), None);
         assert_eq!(WaitToken::from_u64(u64::MAX), None);
     }
 
@@ -134,7 +143,8 @@ mod tests {
                 WaitToken::Command,
                 WaitToken::MemoryPressure,
                 WaitToken::Artwork,
-                WaitToken::Desktop
+                WaitToken::Desktop,
+                WaitToken::Network
             ]
         );
     }
@@ -149,6 +159,7 @@ mod tests {
                 WaitToken::MemoryPressure,
                 WaitToken::Artwork,
                 WaitToken::Desktop,
+                WaitToken::Network,
                 WaitToken::WindowEvent
             ]
         );

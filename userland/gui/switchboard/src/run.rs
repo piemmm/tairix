@@ -73,8 +73,9 @@ mod program {
     use tairix_abi::reply::decode_status_reply;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::switchboard_ipc::{
-        command_endpoint_for, decode_publish_reply, MachineReport, SwitchboardCommand,
-        SwitchboardRequest, TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
+        command_endpoint_for, decode_publish_reply, MachineReport, NetworkReport,
+        SwitchboardCommand, SwitchboardRequest, TraySummary, SWITCHBOARD_ENDPOINT,
+        SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{AppMenu, WindowEvent, WindowRegion, WINDOW_ENDPOINT};
     use tairix_abi::{
@@ -503,11 +504,7 @@ mod program {
         }
 
         fn request(&mut self, request: SwitchboardRequest) -> Result<(), Errno> {
-            let mut reply = [0u8; tairix_abi::reply::STATUS_REPLY_LEN];
-            match tairix_rt::ipc_call(SWITCHBOARD_ENDPOINT, &request.to_le_bytes(), &mut reply) {
-                Ok(len) => decode_status_reply(&reply[..len]),
-                Err(ret) => Err(Errno::from_syscall(ret)),
-            }
+            call_session(&request.to_le_bytes())
         }
 
         fn publish(&mut self, summary: TraySummary) -> Result<(), Errno> {
@@ -525,11 +522,11 @@ mod program {
         }
 
         fn publish_machine(&mut self, report: &MachineReport) -> Result<(), Errno> {
-            let mut reply = [0u8; tairix_abi::reply::STATUS_REPLY_LEN];
-            match tairix_rt::ipc_call(SWITCHBOARD_ENDPOINT, &report.to_le_bytes(), &mut reply) {
-                Ok(len) => decode_status_reply(&reply[..len]),
-                Err(ret) => Err(Errno::from_syscall(ret)),
-            }
+            call_session(&report.to_le_bytes())
+        }
+
+        fn publish_network(&mut self, report: &NetworkReport) -> Result<(), Errno> {
+            call_session(&report.to_le_bytes())
         }
 
         fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno> {
@@ -674,6 +671,16 @@ mod program {
     /// Feed `inputs` — a pointer or wheel event's place and what happened
     /// there — to the composition in order, returning the last action it
     /// reported.
+    /// Send `request` to the session's Switchboard endpoint and read its
+    /// status reply.
+    fn call_session(request: &[u8]) -> Result<(), Errno> {
+        let mut reply = [0u8; tairix_abi::reply::STATUS_REPLY_LEN];
+        match tairix_rt::ipc_call(SWITCHBOARD_ENDPOINT, request, &mut reply) {
+            Ok(len) => decode_status_reply(&reply[..len]),
+            Err(ret) => Err(Errno::from_syscall(ret)),
+        }
+    }
+
     fn route_inputs(
         service: &mut Service,
         host: &RtHost,
@@ -1001,6 +1008,20 @@ mod program {
                 APP_NAME,
                 EXIT_NO_WAIT_SOURCE,
                 "cannot arm the desktop-change wait-set member",
+            ));
+        }
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Network.as_u32()),
+            WaitToken::Network.as_u64(),
+        ) != 0
+        {
+            return Err(app::fail(
+                APP_NAME,
+                EXIT_NO_WAIT_SOURCE,
+                "cannot arm the network-change wait-set member",
             ));
         }
         Ok(set)
@@ -1465,6 +1486,10 @@ mod program {
                     "the wait-set failed unexpectedly",
                 );
             }
+            if WaitToken::from_u64(token) == Some(WaitToken::Network) {
+                service.network_moved(&mut host, &transport, &authority);
+                continue;
+            }
             if let Some(code) = on_wake(token, &mut service, &mut host, &reads, &authority) {
                 return code;
             }
@@ -1513,9 +1538,10 @@ mod program {
                     service.panel_mut().repaint_whole();
                 }
             }
-            // A band that did not move needs no trim, and a token the loop
-            // never arms is a spurious wake: re-sample on the next pass.
-            Some(WaitToken::MemoryPressure) | None => {}
+            // A band that did not move needs no trim, a network edge is served
+            // by the loop before it gets here, and a token the loop never arms
+            // is a spurious wake: re-sample on the next pass.
+            Some(WaitToken::MemoryPressure | WaitToken::Network) | None => {}
         }
         None
     }

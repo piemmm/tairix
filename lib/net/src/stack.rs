@@ -1508,7 +1508,6 @@ impl Stack {
     fn is_our_solicited_node(&self, dest: Ipv6Addr) -> bool {
         self.iface
             .ipv6_addresses()
-            .iter()
             .any(|info| solicited_node_multicast(&info.addr) == dest)
     }
 
@@ -2289,7 +2288,6 @@ impl Stack {
         let announce: Vec<Ipv6Addr> = self
             .iface
             .ipv6_addresses()
-            .iter()
             .filter(|info| !info.tentative)
             .map(|info| info.addr)
             .collect();
@@ -3856,7 +3854,6 @@ impl Stack {
         let v6: Vec<[u8; 16]> = self
             .iface
             .ipv6_addresses()
-            .iter()
             .map(|info| info.addr.octets())
             .collect();
         // The joined groups are the other half of the destination-acceptance

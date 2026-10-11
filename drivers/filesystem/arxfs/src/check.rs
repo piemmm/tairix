@@ -17,8 +17,8 @@
 //!   detects and reclaims **orphaned inodes**. It reports what it could not
 //!   safely fix and never panics.
 //! * **`rescue`** is the *damaged-volume extractor*. Without requiring a
-//!   mountable filesystem it recovers the volume keys from a surviving
-//!   superblock discovery header, **scans** the device for self-identifying
+//!   mountable filesystem it establishes the volume's protection from a
+//!   surviving superblock discovery header, **scans** the device for self-identifying
 //!   transaction roots, picks the highest-generation valid root, maps the
 //!   inode/extent metadata to files, and **extracts** the readable file data —
 //!   running every recovered block through the Stage 5/6 integrity pipeline so
@@ -40,8 +40,8 @@ use crate::scrub::{ScrubReport, ARXFS_RANGE_END, ARXFS_RANGE_START};
 use crate::superblock;
 use crate::transaction::TxnRoot;
 use crate::{
-    as_usize, extent_spec, inode_spec, DirScan, Extent, Inode, InodeKind, ARXFS, MAX_BLOCK_SIZE,
-    ROOT_INO,
+    as_usize, extent_spec, inode_spec, DirScan, Extent, Inode, InodeKind, Pin, ARXFS,
+    MAX_BLOCK_SIZE, ROOT_INO,
 };
 
 /// An offline `check` finished and the structure validated clean.
@@ -369,7 +369,7 @@ impl<B: Block> ARXFS<B> {
         report.unrecoverable_findings = v.metadata_unrepairable
             + v.metadata_damaged
             + v.data_physical_faults
-            + v.data_aead_faults
+            + v.data_seal_faults
             + v.data_logical_faults
             + report.dangling_entries
             + divergences.saturating_sub(v.divergences_corrected);
@@ -710,9 +710,10 @@ impl<B: Block> ARXFS<B> {
     /// Recover readable files from a volume too damaged to mount normally
     /// (`docs/src/filesystem/arxfs-spec.md` §12).
     ///
-    /// `rescue` does not require a mountable filesystem. It recovers the volume
-    /// keys from a surviving superblock discovery header (the wrapped master
-    /// key, plaintext at rest), **scans** the whole device for self-identifying
+    /// `rescue` does not require a mountable filesystem. It establishes the
+    /// volume's protection from a surviving superblock discovery region — an
+    /// encrypted volume's wrapped master key, plaintext at rest, under
+    /// `keying`'s key — **scans** the whole device for self-identifying
     /// transaction roots whose inline commit record validates, picks the
     /// highest-generation valid root, walks the inode/extent metadata it names,
     /// and **extracts** the readable file data — running every recovered block
@@ -725,10 +726,10 @@ impl<B: Block> ARXFS<B> {
     /// # Errors
     ///
     /// * [`DriverError::PermissionDenied`] if `caps` does not grant
-    ///   [`CapabilityId::FS_MOUNT`] (fail-closed), or if a
-    ///   structurally-valid superblock is present but `volume_key` does not
-    ///   unwrap it (wrong key).
-    /// * [`DriverError::Unsupported`] if the device block size is unsupported.
+    ///   [`CapabilityId::FS_MOUNT`] (fail-closed), or if the volume is
+    ///   encrypted and `keying` holds no key or one that does not unwrap it.
+    /// * [`DriverError::Unsupported`] if the device block size is unsupported,
+    ///   or the volume is plaintext and `keying` holds a key.
     /// * [`DriverError::BadMagic`] if the device is not a arxfs volume (no
     ///   superblock discovery header is present at all).
     /// * [`DriverError::DeviceFault`] on an unrecoverable low-level read while
@@ -738,8 +739,8 @@ impl<B: Block> ARXFS<B> {
     ///
     /// Requires [`CapabilityId::FS_MOUNT`].
     pub fn rescue(
-        block: B,
-        volume_key: &crate::VolumeKey,
+        mut block: B,
+        keying: crate::Keying<'_>,
         caps: &dyn CapabilityQuery,
         sink: &dyn Sink,
         out: &mut dyn RescueSink,
@@ -756,13 +757,13 @@ impl<B: Block> ARXFS<B> {
             );
             return Err(DriverError::PermissionDenied);
         }
-        let mut fs = Self::bootstrap(block)?;
+        // This checks nothing yet (the discovery region is plaintext); it
+        // fails closed on a wrong key, a volume `keying` does not fit, or a
+        // non-arxfs device.
+        let geometry = Self::checked_geometry(&block)?;
+        let established = Self::establish(&mut block, geometry.0, keying, Pin::Claimed)?;
+        let mut fs = Self::bootstrap(block, geometry, established);
         fs.read_only = true;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        // Recover the key hierarchy from a surviving superblock discovery
-        // header. This authenticates nothing yet (the discovery header is
-        // plaintext); it fails closed on a wrong key or a non-arxfs device.
-        fs.establish_keys(volume_key, &mut buf)?;
 
         let mut report = RescueReport::default();
         let Some(root) = fs.rescue_find_best_root(&mut report) else {
@@ -794,7 +795,9 @@ impl<B: Block> ARXFS<B> {
             if self.read_block(phys, &mut buf).is_err() {
                 continue;
             }
-            if let Some(root) = TxnRoot::decode_any(&buf[..bs], self.fs_uuid, phys, &self.mac_key) {
+            if let Some(root) =
+                TxnRoot::decode_any(&buf[..bs], self.fs_uuid, phys, &self.protection.meta)
+            {
                 report.roots_found += 1;
                 if best.is_none_or(|b| root.generation > b.generation) {
                     best = Some(root);

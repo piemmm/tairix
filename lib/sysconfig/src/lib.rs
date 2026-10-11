@@ -1,7 +1,7 @@
 //! The boot-time system-configuration store engine.
 //!
 //! TAIRiX keeps its administrator-settable boot-time configuration in one
-//! text document on the encrypted root volume,
+//! text document on the root volume,
 //! [`CONFIG_PATH`](`/System/Settings/Configuration/system.conf`). This crate
 //! is the **single definition** of that document: the line grammar, the
 //! closed key registry, each key's typed value set, the fail-closed parser,
@@ -10,8 +10,7 @@
 //! `os.loginType`, today) reads it through the same engine, so the two can
 //! never diverge.
 //!
-//! The store is parsed only **after** the operator's `Root filesystem
-//! passphrase:` unlocks the encrypted root — it lives inside
+//! The store is parsed only **after** the root is mounted — it lives inside
 //! `/System/Settings`, which does not exist before the mount — so a
 //! pre-unlock consumer simply runs on defaults ([`SystemConfig::default`]).
 //!

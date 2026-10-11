@@ -17,7 +17,7 @@ use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, Surface};
-use tairix_theme::{Contrast, Palette, SignalRole, SurfaceGround, TextRole, Theme};
+use tairix_theme::{edge_weight, Contrast, Palette, SignalRole, SurfaceGround, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
 
@@ -215,7 +215,16 @@ pub fn plate_border(theme: &Theme, scale: Scale) -> u32 {
     scale
         .scale_length(theme.metrics().border_thickness)
         .max(1)
-        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+        .saturating_mul(edge_weight(theme.contrast()))
+}
+
+/// How far a plate's content sits inside the plate's outer edge: its rim, then
+/// the theme's control padding. A surface sized from its content adds this on
+/// every side and lays the content at it, so the two cannot disagree.
+#[must_use]
+pub fn plate_content_inset(theme: &Theme, scale: Scale) -> u32 {
+    plate_border(theme, scale)
+        .saturating_add(scale.scale_length(theme.metrics().control_inset).max(1))
 }
 
 /// A plate's corner radius over a `w` × `h` rectangle: the theme's `corner`
@@ -560,18 +569,18 @@ pub(crate) enum TextAlign {
     Centre,
 }
 
-/// A text height remembered with the inputs it was measured for, so a layout,
-/// a paint and a hit test that each ask again wrap the words once.
+/// A text measurement remembered with the inputs it was taken for, so a
+/// layout, a paint and a hit test that each ask again measure the text once.
 ///
 /// For text its owner never changes in place: a builder that changes it
 /// forgets what was remembered. It compares equal to any other, because
 /// nothing drawn reads it.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Measured<K: Copy + Eq>(Cell<Option<(K, u32)>>);
+pub struct Measured<K: Copy + Eq>(Cell<Option<(K, u32)>>);
 
 impl<K: Copy + Eq> Measured<K> {
-    /// The height remembered for `key`, or `measure`'s answer, remembered.
-    pub(crate) fn get_or(&self, key: K, measure: impl FnOnce() -> u32) -> u32 {
+    /// The measurement remembered for `key`, or `measure`'s answer, remembered.
+    pub fn get_or(&self, key: K, measure: impl FnOnce() -> u32) -> u32 {
         if let Some((held, height)) = self.0.get() {
             if held == key {
                 return height;
@@ -1815,7 +1824,7 @@ pub(crate) fn rail_thickness(theme: &Theme, scale: Scale) -> u32 {
     scale
         .scale_length(theme.metrics().rail_thickness)
         .max(1)
-        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+        .saturating_mul(edge_weight(theme.contrast()))
 }
 
 /// The scaled thickness of a Heat Seam (an activity/progress trace on an
@@ -1847,7 +1856,7 @@ pub(crate) fn paint_edge_wake(surface: &mut Surface, bounds: Rect, scale: Scale,
         return;
     };
     let thickness = seam_thickness(theme, scale)
-        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+        .saturating_mul(edge_weight(theme.contrast()))
         .min(w);
     if thickness == 0 || h == 0 {
         return;

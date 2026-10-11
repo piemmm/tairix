@@ -299,7 +299,7 @@ pub fn build_identity_table(
 /// Build and verify the compiled-in system identity alone — the table the
 /// boot path installs before any volume is mounted, so the system and
 /// service accounts resolve (spawn-as-user, filesystem groups) from first
-/// boot on every architecture. The encrypted-root unlock later replaces it
+/// boot on every architecture. The root unlock later replaces it
 /// with the [`build_identity_table`] merge of this same half and the
 /// on-disk human records.
 ///

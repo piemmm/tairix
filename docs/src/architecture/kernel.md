@@ -715,33 +715,37 @@ fail-closed `NULL_USERS_DB` default and `users_db_read` returns
 accounts (`AGENTS.md` §5.4.5).
 
 The composition that *produces* the mounted driver `load_users_db_source`
-reads from is `tairix_kernel::root_mount::unlock_root_and_load_users`
-(`plans/PI.md` P11, Chunk A) — the one layer permitted to name both the
-`arxfs` driver and `kernel/core` (`tairix-kernel`, `Layer::Tooling`,
-`AGENTS.md` §17.4). Given the plaintext `root.unlock` key-derivation
-descriptor read off the FAT boot partition, the passphrase the operator
-typed at the console, and the encrypted root block device, it: decodes the
-descriptor fail-closed (`UnlockDescriptor::decode`, §5.4.3); derives the
-volume key from the passphrase (PBKDF2-HMAC-SHA256), holding it in a
-`Zeroizing` wrapper so it is wiped on drop (`AGENTS.md` §4 — the audited
-`zeroize` crate, no hand-rolled primitive); mounts the encrypted root
-(`ARXFS::open`), a wrong passphrase refused with `PermissionDenied` and no
-plaintext fallback (§4 / §5.4); then runs `load_users_db_source`. Every
-refusal is audited (the bin-crate ids in the shared `4_000` range; no
-passphrase, key, or volume byte is ever logged, §19.4) and yields **no**
-database, so a root that cannot be unlocked serves none (§5.4.5). A
-**structural** refusal — an unreadable/invalid descriptor, a
-missing/malformed partition table or partition, a non-arxfs volume, or a
-device fault — is the ERROR-level `4134` `ROOT_MOUNT_REJECTED`. A **wrong
-passphrase** is not a system error: it is recorded as the below-`Info`
-`4142` `ROOT_UNLOCK_KEY_REJECTED` (`Debug`), so the silent blank-passphrase
-probe of a non-blank image — which fails on *every* normal boot (§11) — and
-routine interactive retries cannot flood the boot log, while the record
-stays available for brute-force forensics when the level is lowered
-(`AGENTS.md` §2.1 / §19.4).
+reads from is `tairix_kernel::root_mount` (`plans/PI.md` P11) — the one layer
+permitted to name both the `arxfs` driver and `kernel/core` (`tairix-kernel`,
+`Layer::Tooling`, `AGENTS.md` §17.4). Over the one whole-disk device a board
+brings up, MBR or GPT, it locates the partitions by role. `read_root_lock`
+reads how the root is locked: the root volume's own protection word, checked
+against the FAT boot partition's plaintext `root.unlock` key-derivation
+descriptor. The two must agree — a descriptor beside a plaintext root, or an
+encrypted root with none, is a disk that is not what it claims and is refused
+before anything mounts. `probe_root_lock` is the same reading with no audit,
+for a caller that is only asking. `mount_root_disk_and_load_users` then mounts
+the root as that reading says: a plaintext root with no key, an encrypted one
+under the key `UnlockDescriptor::derive_volume_key` derives from the typed
+passphrase (PBKDF2-HMAC-SHA256), returned in a `Zeroizing` wrapper so it is
+wiped on drop (`AGENTS.md` §4 — the audited `zeroize` crate, no hand-rolled
+primitive). The derivation refuses an empty passphrase or one longer than
+`tairix_abi::boot::MAX_ROOT_PASSPHRASE_LEN`, and either is refused as a wrong
+passphrase. The open is held to the protection the volume declares, a wrong
+passphrase refused with `PermissionDenied` and no plaintext fallback (§4 /
+§5.4); then `load_users_db_source` runs. Every refusal is audited (the
+bin-crate ids in the shared `4_000` range; no passphrase, key, or volume byte
+is ever logged, §19.4) and yields **no** database, so a root that cannot be
+mounted serves none (§5.4.5). A **structural** refusal — an unreadable,
+invalid or contradicted descriptor, a missing/malformed partition table or
+partition, a non-arxfs volume, or a device fault — is the ERROR-level `4134`
+`ROOT_MOUNT_REJECTED`. A **wrong passphrase** is not a system error: it is
+recorded as the below-`Info` `4142` `ROOT_UNLOCK_KEY_REJECTED` (`Debug`), so
+routine interactive retries cannot flood the boot log, while the record stays
+available for brute-force forensics when the level is lowered (`AGENTS.md`
+§2.1 / §19.4).
 
-The first of those three inputs — the plaintext `root.unlock`
-key-derivation descriptor — is recovered off the FAT boot partition by
+An encrypted root's descriptor is recovered off the FAT boot partition by
 `tairix_kernel::root_mount::read_root_unlock_descriptor`, which mounts the
 partition through the **same** real FAT32 driver `tools/mkimage` authored
 it with (one on-disk definition for writer and reader, `AGENTS.md` §2.2;
@@ -751,17 +755,6 @@ bounded and fail-closed (§5.4 / §24.4): the entry's size is checked to be
 exactly `UNLOCK_DESCRIPTOR_LEN` *before* a byte is read — rejecting both a
 truncated and an over-long file — and the bytes are still re-validated by
 `UnlockDescriptor::decode` before they drive any key derivation (§5.4.3).
-
-`tairix_kernel::root_mount::mount_root_and_load_users` is the single
-boot-path entry that ties those two halves together: given the brought-up
-FAT boot-partition and encrypted-root block devices and the typed
-passphrase, it reads the descriptor (`read_root_unlock_descriptor`) and,
-on success, threads it straight into `unlock_root_and_load_users`, so the
-boot path neither re-threads the descriptor buffer nor reconciles two
-error taxonomies itself (`AGENTS.md` §2.2). A descriptor that cannot be
-read off the boot partition is audited (`4134` `ROOT_MOUNT_REJECTED`) and
-returned as `RootMountError::DescriptorRead` — the encrypted root is never
-touched and no database is served (§2.9 / §5.4.5).
 
 `ROOT_STORAGE_AUTOLOAD` (the bin-crate id `4135`, in the shared `4_000`
 range) reports the **root-storage bind gate**
@@ -827,20 +820,15 @@ console keyboard is live (`plans/PI.md` P11 Chunk B-2). It is generic over
 the `Block` disk and takes the console write/read halves as the object-safe
 `tairix_kernel_core::{ConsoleWrite, ConsoleRead}` seams, so it names no
 architecture or device type (§17.4) and is host-tested with a mock console
-over the same MBR + encrypted-`ARXFS` disk fixture `tools/mkimage` writes
-(§2.2). It tries the **blank** passphrase silently *first*, before drawing
-any prompt: the installer image is provisioned with a blank root passphrase
-(`tairix_mkimage::INSTALLER_PASSPHRASE`, §11), so a fresh install unlocks and
-boots straight into the §11 installer with no `ARXFS passphrase:`
-prompt at all. Only when the blank passphrase does not unlock the root (a debug image —
-passphrase `root` — or a production image with an operator-chosen passphrase)
-is the operator prompted interactively; a non-blank passphrase failing the
-silent attempt is no oracle (the master key simply never unwraps, exactly as
-for any wrong passphrase, §5.4). Each interactive attempt prompts
+over the same whole-disk fixtures, plaintext and encrypted, `tools/mkimage`
+writes
+(§2.2). It reads the root's lock first (`read_root_lock`): a plaintext root
+mounts at once, with no prompt and no console read, and only an encrypted one
+is prompted for. Each interactive attempt prompts
 `ARXFS passphrase:`, reads one line into a zeroized, fixed-length
-on-stack buffer (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
+on-stack buffer (`MAX_ROOT_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
 memory beyond the attempt, §4 / §19.4), and runs
-`mount_root_disk_and_load_users`. On success (silent or prompted) the loaded
+`mount_root_disk_and_load_users`. On success the loaded
 database is published into the set-once `LateUsersDb` cell through the shared
 `finish_install` helper (`4136` `ROOT_UNLOCK_INSTALLED`) so login can
 authenticate. A wrong passphrase
@@ -852,8 +840,9 @@ scripted brute-force gains no faster signal than the operator, then reported
 encrypted root holds the only copy of the user data and login is refused
 until it mounts, so there is nothing to advance to without the correct
 passphrase and no bounded "give up" that would help. Only a *structural*
-error the disk itself cannot satisfy (no table, no boot/root partition, an
-unreadable/invalid descriptor, a corrupt database) or a console read fault
+error the disk itself cannot satisfy (no table, no root partition, an
+unreadable, invalid or contradicted descriptor, a corrupt database) or a
+console read fault
 gives up; every give-up path (`4138` `ROOT_UNLOCK_GAVE_UP`, with a
 secret-free `cause`) leaves the cell empty, so every login is refused until
 the next boot (§2.9 / §5.4.5). On a *successful* unlock the prompt line is
@@ -866,8 +855,8 @@ The `&'static LateUsersDb` dispatch-hook half is wired: the boot path hands
 the syscall dispatch hook `&tairix_kernel::root_mount::LATE_USERS_DB`
 through `BootInfo::with_users_db`, so `users_db_read` reads that one
 set-once cell on every call. The cell is a **three-state** machine, because
-design B spawns `login` *before* the unlock kthread mounts the root and
-prompts for the passphrase on the **same** console: while the unlock is
+design B spawns `login` *before* the unlock kthread mounts the root, which
+for an encrypted root means prompting on the **same** console: while the unlock is
 still running the read returns `WouldBlock`, so `login` waits without
 printing `Username:` and the unlock owns the console (the two prompts never
 collide); the trusted unlock step publishes the mounted database into the

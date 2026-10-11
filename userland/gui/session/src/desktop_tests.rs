@@ -29,7 +29,7 @@ use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
     BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, LaunchDocument,
-    PinboardChange, DESKTOP_MARGIN,
+    PinboardChange, SettingsEdit, DESKTOP_MARGIN,
 };
 use crate::pinboard::{self, PinboardCommand};
 use tairix_controls::{ChainChild, ChainModel};
@@ -1997,8 +1997,8 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
         desktop
             .command(PinboardCommand::SortBy(IconSort::Size), &[])
             .action,
-        Some(DesktopAction::AdoptSettings(alloc::boxed::Box::new(
-            arranged_by(IconFlow::default(), IconSort::Size)
+        Some(DesktopAction::EditSettings(SettingsEdit::Sort(
+            IconSort::Size
         )))
     );
     assert_eq!(
@@ -2010,8 +2010,8 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
         desktop
             .command(PinboardCommand::ArrangeFrom(IconFlow::Trailing), &[])
             .action,
-        Some(DesktopAction::AdoptSettings(alloc::boxed::Box::new(
-            arranged_by(IconFlow::Trailing, IconSort::default())
+        Some(DesktopAction::EditSettings(SettingsEdit::Icons(
+            IconFlow::Trailing
         )))
     );
     assert_eq!(

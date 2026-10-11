@@ -63,6 +63,7 @@ dropped is a category the surface then has to lie about.
 | **DS25** | Trackpad — tap to click, natural scrolling and the touchpad speed (`touchpad.*`), handed to the seat's gesture recogniser; the Touchscreen pane states what it would need to set anything | DS11 | §2, §3; `plans/POINTING.md` PO6 | done |
 | **DS26** | Text — the desktop font and its size (`font.family`, `font.size`, in points) on Appearance's TEXT group, resolved by the session against the font store and carried to every application in the desktop notice; the shipped base one point smaller (16 px, 10 pt of Inter) | DS3, `plans/FONT-SERVICE.md` | DS26 | done |
 | **DS27** | Sound — one plate per sink and source (default, level, mute) and a Recording plate, acting on `audio-v1` directly under the room the session holds | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
+| **DS28** | Displays — the desktop's Resolution over the output's own modes, applied at once behind the session's Keep/Revert trial | DS3, `plans/DISPLAY.md` D11 | DS28 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -298,8 +299,10 @@ write path on landing.
 
 - **Not in this plan:** the audio, Bluetooth, print, touch, wireless, and
   sharing subsystems themselves (§3 names each one's prerequisite); the
-  compositor's window furniture; display-mode setting (there is no mode-set
-  request in `display_ipc`, §3); civil time zones (`plans/TIMEZONES.md`);
+  compositor's window furniture; the desktop resolution's scaling and its
+  Keep/Revert trial (`plans/DISPLAY.md` D11 — this plan only offers the
+  choice); setting the output's own mode (there is no mode-set request in
+  `display_ipc`, §3); civil time zones (`plans/TIMEZONES.md`);
   and the service manager (`plans/NEW-SERVICEMANAGER.md`). This plan consumes
   those surfaces where they exist and states their absence where they do not.
 
@@ -411,7 +414,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Appearance | the session's published settings document; the font store's families (`FontRequest::Families`) | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Theme | — | — (no theme model, §3) | pane states absence |
-| Displays | `SEAT_LIST`, `DesktopInfo`, `Compositor::window_scale` | session apply (scale only) | mode change: no interface (§3) |
+| Displays | `DesktopInfo`: the desktop's size and the output's, whose modes the Resolution row offers (`tairix_geometry::desktop_modes`) | session apply (`resolution`), held by the session's Keep/Revert trial until it is answered | a trial reverted or refused answers the apply so, stated on `stderr`, and the row shows what the store holds |
 | Lock Screen | the session's published settings document (`lock.after_min`) | session apply; *Lock Now* is the `LockScreen` window request | apply refused, stated; a refused lock stated on its row |
 | Screensaver | the session's published settings document (`screensaver.*`) | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
@@ -455,7 +458,7 @@ would change nothing.
 | Touchscreen | nothing to set: a touchscreen covers the one screen edge to edge, and what a touch means is the recogniser's (`plans/POINTING.md`) | a second screen, to choose which one a touchscreen covers |
 | Sharing | no SMB, VNC/RDP, or HTTP server in the tree (`userland/net/` is `netstack` alone) | a new `plans/SHARING.md` |
 | Networking → Wi-Fi | no 802.11 driver, no supplicant, no scan/associate vocabulary | a new `plans/WIRELESS.md` |
-| Displays → resolution, rotation, arrangement | `display_ipc` has `Query`/`Configure`/`Present` only: no mode *list* and no mode *set* | a mode-enumeration and mode-set request in `display_ipc`, plus driver support |
+| Displays → the output's own mode, rotation, arrangement | `display_ipc` (`Query`, `Configure`, `Present`, `QueryStats`, `SetPower`) lists no output modes and sets none, and there is one output per seat | a mode-enumeration and mode-set request in `display_ipc` with driver support, and a second output to arrange |
 | Power → sleep, battery, thermal | no power-supply, battery, or sensor interface, and no driver to serve one | `plans/DEVICES.md` sensor work + an ACPI/PSCI sleep path |
 | Keyboard → layout, modifier remap | exactly one hard-coded US ANSI table (`lib/hid::console`) | a layout registry (`lib/keymap` grows the data; the seat selects) |
 | Keyboard → shortcuts | no shortcut registry anywhere; each surface owns its own keys | a desktop-wide binding registry |
@@ -658,7 +661,9 @@ What it guarantees, which no later stage re-derives:
   reaches a pixel. **Density was doing nothing at all** before this stage:
   `Metrics::at_density` now derives the three spacing metrics that decide how
   much room a control is given, so the row is a real setting rather than a
-  control that would change nothing.
+  control that would change nothing; `Metrics::at_contrast` then keeps a
+  control tall enough for a slider's knob and its doubled focus ring under
+  either heavier contrast (`plans/GUI-CONTROLS-DESIGN.md` §14).
 - **One adopt path, bring-up included.** `PinboardChange` split into
   `BackdropWork` and `AppearanceWork`, and `adopt_appearance` is the one place
   the appearance half is put into effect — re-theme, rescale, republish. The
@@ -796,8 +801,9 @@ renderer, and Settings asks it.
 
 - **Two descriptive window-channel requests** (the render generalised by
   DS19), of the same posture as `QueryDesktop`: seat-scoped, capability-free,
-  describing the caller's own desktop and granting nothing. Both are *reads*, so §0's "three write paths
-  and no fourth" still holds — the only write is the existing session apply.
+  describing the caller's own desktop and granting nothing. Both are *reads*,
+  so §0's four write paths and no fifth still hold — the only write is the
+  existing session apply.
   - `QueryWallpapers { from }` answers a **page** of the flat catalog, with
     the catalog's total so a caller knows whether to ask again. The session
     walks the store **once, at its own bring-up** — `/System` is read-only,
@@ -1818,9 +1824,11 @@ system menu and chooses *Settings…*, then photographs the window on General,
 on Lock Screen's composed form, on Bluetooth's stated absence, and on Storage —
 reached past the strip's fold
 by the strip's own scrollbar — before paging the strip back up to Appearance,
-choosing the appearance the desktop did not boot in,
-and photographing the desktop redrawn in it. Its last gesture chooses Compact
-density on the same pane.
+choosing the appearance the desktop did not boot in, and photographing the
+desktop redrawn in it. It then shrinks the window by its corner, asks Displays
+for the largest size the output offers below its own, keeps the trial with
+`Enter`, and photographs the desktop drawn at that size. Its last gesture
+chooses Compact density on Appearance.
 
 What the vertical needed, and now guarantees:
 
@@ -1840,12 +1848,19 @@ What the vertical needed, and now guarantees:
   the only place the appearance is changed; its choice takes the one
   persist-then-adopt path, and a standing prompt follows any change of look
   through the shell's style generation.
-- **PASS is the guest's own four witnesses, in order:** an `APP_LOADED` naming
-  the settings bundle, its window's create reply, and two commits of the
-  desktop's published document — the pane's appearance choice, then its Compact
-  density, a key the first did not change so it commits whether or not
-  Settings has adopted the restyled desktop by then — attributed by the path each
-  rename replaced.
+- **A witness for each step of a resolution trial.** `TRIAL_SHOWN` follows
+  the prompt taking the keyboard, so `Enter` keeps it at once and never races
+  the user's countdown; `DESKTOP_RESIZED` follows the first frame showing the
+  desktop whole at its new size, its wallpaper fitted and settled; and
+  `TRIAL_CONCLUDED` follows the trial's call being answered, after which the
+  desktop takes settings calls again. An interactive resize announces
+  `WINDOW_SIZED` like any other new size, which gates the presses on the
+  shrunk window.
+- **PASS is the guest's own five witnesses, in order:** an `APP_LOADED` naming
+  the settings bundle, its window's create reply, and three commits of the
+  desktop's published document — the appearance choice, the kept resolution,
+  then Compact density, a key neither before it changed — attributed by the
+  path each rename replaced.
 - **Every press is aimed through the production layout.** The host resolves
   each target from the shell's own geometry (`Shell::strip_row_rect`,
   `strip_scroll_rect`, `setting_rect`, `choice_rect`, and `ScrollBar::part_rect`
@@ -1855,7 +1870,9 @@ What the vertical needed, and now guarantees:
   rim, because a plate is filled with the column's own surface; the absence by
   its words on no plate; Storage by a capacity track that is neither empty nor
   full; the restyled desktop by its bar and furniture moving towards the chosen
-  appearance over an unchanged wallpaper.
+  appearance over an unchanged wallpaper; the resized desktop by its bare
+  wallpaper being exactly that size's own wallpaper resampled onto the output,
+  read clear of the resampler's reach around everything the session draws.
 - **Every cut name carries the mark.** Each label, reading, cell, caption and
   title `lib/controls` draws, and the Settings band and statement, are elided
   through the one recipe (`elide_to_width`, then `paint_run`), which the crate
@@ -1868,6 +1885,19 @@ What the vertical needed, and now guarantees:
 Docs landed with it: the Settings page's General section, the window title,
 the vertical, and the corrected Sound statement; the session page's two
 witnesses; and the desktop's published document on the confd page.
+
+### DS28 — Displays: the desktop resolution
+
+The Displays pane composes one row, *Resolution*, over
+`tairix_geometry::desktop_modes` of the output the desktop record names:
+the output's own size first, labelled as the screen's own, then each smaller
+size of its shape. A stored size the output does not offer stays listed at the
+end, so a choice made on another monitor is shown rather than silently
+replaced. The row applies at once and posts `resolution` alone. The session
+holds that call through its Keep/Revert trial (`plans/DISPLAY.md` D11), so the
+answer is the trial's: kept and stored, or declined, which is stated and puts
+the row back to what the store holds. A new output size restates the pane. The
+UI scale stays on Appearance.
 
 ### DS14 — retire the second form idiom
 

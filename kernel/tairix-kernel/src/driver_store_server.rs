@@ -273,7 +273,7 @@ fn catalogue_reply(buf: &mut [u8], store: &DriverStore) -> Result<usize, Errno> 
 ///
 /// The device manager reads `network.conf` / `system.conf` here — over the
 /// always-mounted read-only store endpoint — because the general VFS path
-/// is not mounted until the encrypted root unlocks, yet it must configure
+/// is not mounted until the root is, yet it must configure
 /// interfaces on the same read-only volume the drivers autoload from. The
 /// read is confined strictly below the volume's settings tree to the
 /// closed [`tairix_abi::driver_store::SystemConfigFile`] set, under the same

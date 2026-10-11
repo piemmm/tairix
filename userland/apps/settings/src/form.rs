@@ -61,8 +61,8 @@ use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
     Backdrop, CatalogItem, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort,
-    IdleAfter, PointerSpeed, PointerTrail, PrimaryButton, RepeatRate, ScreensaverKind, SettingsKey,
-    TextFamily, TextSize, WallpaperFit,
+    IdleAfter, PointerSpeed, PointerTrail, PrimaryButton, RepeatRate, Resolution, ScreensaverKind,
+    SettingsKey, TextFamily, TextSize, WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
@@ -150,6 +150,9 @@ pub struct Offered<'a> {
     pub catalog: &'a [CatalogItem],
     /// The font store's families and the theme's own text, once listed.
     pub text: Option<&'a TextChoices>,
+    /// The output the desktop is drawn on, once the desktop has said: the
+    /// resolutions on offer are the ones it can show.
+    pub output: Option<(u32, u32)>,
 }
 
 /// What the Text rows offer beyond the document: the families the font store
@@ -175,6 +178,8 @@ pub enum Setting {
     Motion,
     /// The UI scale every logical length is resolved through.
     Scale,
+    /// The size the desktop is drawn at.
+    Resolution,
     /// The family interface text is drawn in.
     Font,
     /// The body size every text role derives from, in points.
@@ -238,6 +243,7 @@ impl Setting {
             Self::Density => SettingsKey::Density,
             Self::Motion => SettingsKey::Motion,
             Self::Scale => SettingsKey::Scale,
+            Self::Resolution => SettingsKey::Resolution,
             Self::Font => SettingsKey::FontFamily,
             Self::TextSize => SettingsKey::FontSize,
             Self::Fit => SettingsKey::Fit,
@@ -275,6 +281,7 @@ impl Setting {
             Self::Density => "Density",
             Self::Motion => "Motion",
             Self::Scale => "Interface scale",
+            Self::Resolution => "Resolution",
             Self::Font => "Font",
             Self::TextSize => "Text size",
             Self::Fit => "Fit",
@@ -313,13 +320,18 @@ impl Setting {
                  every state apart by shape rather than by colour."
             }
             Self::Density => {
-                "How much room a control is given. Nothing changes size, only spacing."
+                "How much room a control is given: its height, its padding and the gap to the \
+                 next. Text and corners keep their size."
             }
             Self::Motion => {
                 "Whether a state change is animated. Reduced motion still shows the change, at \
                  once rather than over time."
             }
             Self::Scale => "How large every length on the desktop is drawn.",
+            Self::Resolution => {
+                "How many pixels the desktop is drawn with. The screen keeps its own, and a \
+                 smaller desktop is enlarged to fill it."
+            }
             Self::Font => {
                 "The typeface windows, menus and the icon bar set their text in. Terminal text \
                  keeps its own."
@@ -416,6 +428,7 @@ impl Setting {
             Self::Density => list(pick(&Density::ALL, settings.density, density_label)),
             Self::Motion => list(pick(&Motion::ALL, settings.motion, motion_label)),
             Self::Scale => list(scale_choices(settings.scale)),
+            Self::Resolution => list(resolution_choices(settings.resolution, offered.output)),
             Self::Font | Self::TextSize => list(text_choices(self, settings, offered.text)),
             Self::Fit => list(pick(&WallpaperFit::ALL, settings.fit, fit_label)),
             Self::Backdrop => list(backdrop_choices(settings.backdrop)),
@@ -515,13 +528,7 @@ impl Setting {
             Self::Contrast => set(&Contrast::ALL, index, &mut settings.contrast),
             Self::Density => set(&Density::ALL, index, &mut settings.density),
             Self::Motion => set(&Motion::ALL, index, &mut settings.motion),
-            Self::Scale => match scale_ladder(settings.scale).get(index) {
-                Some(scale) => {
-                    settings.scale = *scale;
-                    true
-                }
-                None => false,
-            },
+            Self::Scale => set(&scale_ladder(settings.scale), index, &mut settings.scale),
             Self::Font => match family_ladder(settings.text_family, offered.text).get(index) {
                 Some((_, family)) => {
                     settings.text_family = *family;
@@ -536,6 +543,11 @@ impl Setting {
                 }
                 None => false,
             },
+            Self::Resolution => set(
+                &resolution_ladder(settings.resolution, offered.output),
+                index,
+                &mut settings.resolution,
+            ),
             Self::Fit => set(&WallpaperFit::ALL, index, &mut settings.fit),
             Self::Backdrop => match backdrop_ladder(settings.backdrop).get(index) {
                 Some((_, backdrop)) => {
@@ -850,6 +862,55 @@ const fn primary_button_label(button: PrimaryButton) -> &'static str {
         PrimaryButton::Left => "Left",
         PrimaryButton::Right => "Right",
     }
+}
+
+/// The resolutions an output of `output` pixels offers, its own first, with
+/// `current` held at the end when the output does not offer it, so the row
+/// states what the store says rather than a size it never chose.
+fn resolution_ladder(current: Resolution, output: Option<(u32, u32)>) -> Vec<Resolution> {
+    let current = as_offered(current, output);
+    let mut ladder: Vec<Resolution> = match output {
+        Some(output) => tairix_geometry::desktop_modes(output)
+            .map(|size| Resolution::of(size, output))
+            .collect(),
+        None => alloc::vec![Resolution::Native],
+    };
+    if !ladder.contains(&current) {
+        ladder.push(current);
+    }
+    ladder
+}
+
+/// `current` as `output`'s choices spell it: a stored size that is the
+/// output's own is its native entry, not a second one.
+fn as_offered(current: Resolution, output: Option<(u32, u32)>) -> Resolution {
+    match (current, output) {
+        (Resolution::Size { width, height }, Some(output)) => {
+            Resolution::of((width, height), output)
+        }
+        _ => current,
+    }
+}
+
+/// The resolution choices and which one is in effect.
+fn resolution_choices(current: Resolution, output: Option<(u32, u32)>) -> (Vec<String>, usize) {
+    let ladder = resolution_ladder(current, output);
+    let current = as_offered(current, output);
+    let at = ladder
+        .iter()
+        .position(|choice| *choice == current)
+        .unwrap_or(0);
+    let labels = ladder
+        .iter()
+        .map(|choice| match (choice, output) {
+            (Resolution::Native, Some((width, height))) => {
+                alloc::format!("{width} \u{d7} {height} (the screen's own)")
+            }
+            (Resolution::Native, None) => String::from("The screen's own"),
+            (Resolution::Size { width, height }, _) => alloc::format!("{width} \u{d7} {height}"),
+        })
+        .collect();
+    (labels, at)
 }
 
 /// The scale choices and which one is in effect.
@@ -1215,6 +1276,7 @@ impl Declared {
                     cursor_sets: documents.cursor_sets,
                     catalog: documents.catalog,
                     text: documents.text,
+                    output: documents.output,
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
@@ -1326,6 +1388,17 @@ const APPEARANCE_GROUPS: [GroupSpec; 3] = [
         footnote: None,
     },
 ];
+
+/// The Displays pane's one group.
+const DISPLAY_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "RESOLUTION",
+    settings: &[Declared::Desktop(Setting::Resolution)],
+    pictures: None,
+    footnote: Some(
+        "A new resolution is shown at once and asks whether to keep it; it goes back on its own \
+         unless you do.",
+    ),
+}];
 
 /// The Accessibility pane's groups: the same settings, grouped the way a
 /// reader looking for them would.
@@ -1501,6 +1574,8 @@ const DNS_KEYS: [IfaceKey; 1] = [IfaceKey::DnsServers];
 pub enum Composition {
     /// The Appearance pane.
     Appearance,
+    /// The Displays pane.
+    Displays,
     /// The Accessibility pane.
     Accessibility,
     /// The Wallpaper pane's settings rows, beneath its picture gallery.
@@ -1545,6 +1620,7 @@ impl Composition {
     const fn groups(self) -> &'static [GroupSpec] {
         match self {
             Self::Appearance => &APPEARANCE_GROUPS,
+            Self::Displays => &DISPLAY_GROUPS,
             Self::Accessibility => &ACCESSIBILITY_GROUPS,
             Self::Wallpaper => &WALLPAPER_GROUPS,
             Self::LoginStartup => &LOGIN_GROUPS,
@@ -1565,6 +1641,7 @@ impl Composition {
     pub const fn posture(self) -> Posture {
         match self {
             Self::Appearance
+            | Self::Displays
             | Self::Accessibility
             | Self::Wallpaper
             | Self::Notifications
@@ -1599,6 +1676,7 @@ impl Composition {
         matches!(
             self,
             Self::Appearance
+                | Self::Displays
                 | Self::Accessibility
                 | Self::Wallpaper
                 | Self::Notifications
@@ -1662,6 +1740,7 @@ impl Composition {
     const fn keys(self) -> &'static [SettingsKey] {
         match self {
             Self::Appearance | Self::Accessibility => &SettingsKey::APPEARANCE,
+            Self::Displays => &SettingsKey::DISPLAY,
             Self::Wallpaper => &SettingsKey::PINBOARD,
             Self::Notifications => &SettingsKey::NOTIFICATIONS,
             Self::Mouse => &SettingsKey::POINTER,
@@ -1908,6 +1987,8 @@ pub(crate) struct Documents<'a> {
     pub(crate) catalog: &'a [CatalogItem],
     /// The font store's families and the theme's own text, once listed.
     pub(crate) text: Option<&'a TextChoices>,
+    /// The output the desktop is drawn on, once the desktop has said.
+    pub(crate) output: Option<(u32, u32)>,
     /// The machine's boot-time configuration, or `None` while it has not
     /// been read.
     pub(crate) config: Option<&'a SystemConfig>,
@@ -2078,6 +2159,8 @@ pub struct Form {
     /// The font store's families and the theme's own text, kept for the same
     /// reason.
     text: Option<TextChoices>,
+    /// The output the desktop is drawn on, kept for the same reason.
+    output: Option<(u32, u32)>,
     /// What renders each picture the choosers show, and which the desktop
     /// would not.
     pictures: Pictures,
@@ -2123,6 +2206,7 @@ impl Form {
             cursor_sets: documents.cursor_sets.to_vec(),
             catalog: documents.catalog.to_vec(),
             text: documents.text.cloned(),
+            output: documents.output,
             pictures: Pictures::default(),
             notify_sources: documents.notify_sources.map(<[_]>::to_vec),
             sources_full: documents.sources_full,
@@ -2578,6 +2662,7 @@ impl Form {
             cursor_sets: &self.cursor_sets,
             catalog: &self.catalog,
             text: self.text.as_ref(),
+            output: self.output,
             config: self.config.as_ref(),
             addressing: &self.addressing,
             staged: &self.staged,
@@ -3072,6 +3157,7 @@ impl Form {
                     cursor_sets: &self.cursor_sets,
                     catalog: &self.catalog,
                     text: self.text.as_ref(),
+                    output: self.output,
                 };
                 let offered_before = setting.offer(&self.settings, offered).len();
                 if !setting.adopt(index, &mut self.settings, offered) {
@@ -3084,6 +3170,7 @@ impl Form {
                     cursor_sets: &self.cursor_sets,
                     catalog: &self.catalog,
                     text: self.text.as_ref(),
+                    output: self.output,
                 };
                 if setting.offer(&self.settings, offered).len() != offered_before {
                     self.rebuild();

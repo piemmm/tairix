@@ -31,6 +31,7 @@ use crate::apps::AppIdentity;
 use crate::clock_menu::{self, ClockPermits};
 use crate::edge::Edge;
 use crate::input::TaskbarResponse;
+use crate::network_menu;
 use crate::system::{self, SystemPermits};
 
 /// One row a bar menu's own table produced: its position in that table, what
@@ -64,6 +65,8 @@ pub enum MenuSubject {
     System,
     /// The bar's clock.
     Clock,
+    /// The network signal.
+    Network,
 }
 
 impl MenuSubject {
@@ -87,6 +90,7 @@ impl MenuSubject {
             },
             Self::System => system::response_at(item.index()),
             Self::Clock => clock_menu::response_at(item.index()),
+            Self::Network => network_menu::response_at(item.index()),
         }
     }
 
@@ -200,6 +204,15 @@ const CLOCK_TITLE: &str = "Clock";
 #[must_use]
 pub(crate) fn clock_menu(permits: &ClockPermits) -> ChainModel {
     rows_from(CLOCK_TITLE, clock_menu::rows(permits))
+}
+
+/// The title the network menu's plate carries.
+const NETWORK_TITLE: &str = "Network";
+
+/// The model the network signal's menu opens with.
+#[must_use]
+pub(crate) fn network_menu(settings_installed: bool) -> ChainModel {
+    rows_from(NETWORK_TITLE, network_menu::rows(settings_installed))
 }
 
 /// A flat model titled `title` from rows a subject's own table produced, each

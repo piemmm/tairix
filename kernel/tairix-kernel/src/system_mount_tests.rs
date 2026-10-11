@@ -13,7 +13,7 @@ use super::system_vfs;
 
 #[test]
 fn system_vfs_mounts_the_writable_volume_as_root() {
-    // The corrected layering: the encrypted, writable root volume *is* `/`,
+    // The corrected layering: the writable root volume *is* `/`,
     // so `/` itself and the persistent top-level trees (`/Users`, `/Apps`,
     // `/Storage`) resolve to a writable, driver-backed mount — not the
     // volatile in-RAM tree, and not the read-only `/System` volume. This is

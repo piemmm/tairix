@@ -3553,7 +3553,7 @@ mod tests {
     // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
     use tairix_abi::SYSCALLS;
-    use tairix_abi_trap::seam;
+    use tairix_abi_trap::seam::capture;
 
     /// The complete set of stubs this crate implements, paired with the
     /// `abi-v1` number and argument count each one marshals. The drift tests
@@ -3723,14 +3723,6 @@ mod tests {
                 spec.name
             );
         }
-    }
-
-    /// Run `call` with the seam armed to return `ret`, returning the recorded
-    /// `(number, args)`.
-    fn capture(ret: u64, call: impl FnOnce()) -> (u64, [u64; SYSCALL_MAX_ARGS]) {
-        seam::arm(ret);
-        call();
-        seam::last_call().expect("the stub must issue exactly one trap")
     }
 
     #[test]

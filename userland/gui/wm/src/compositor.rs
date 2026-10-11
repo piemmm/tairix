@@ -34,7 +34,7 @@ use tairix_icon::IconKind;
 use tairix_inline::ArrayVec;
 use tairix_input::{InputEvent, Key};
 use tairix_parallel::JobRunner;
-use tairix_raster::{BlurScratch, Frosting};
+use tairix_raster::{resample_reach, BlurScratch, Frosting, ResampleScratch};
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
 use tairix_util::fallible;
@@ -50,7 +50,7 @@ use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{
-    PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow, WindowShape,
+    Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow, WindowShape,
 };
 
 /// The furniture a composite pass built for itself because the cache would
@@ -174,6 +174,13 @@ impl Presentation {
 /// scale of the output it is on ([`window_scale`](Self::window_scale)).
 pub struct Compositor {
     mode: DisplayMode,
+    /// The size the desktop is laid out and composed at: the output's own, or
+    /// a smaller desktop resolution resampled onto it
+    /// ([`set_desktop_size`](Self::set_desktop_size)).
+    screen: (u32, u32),
+    /// What drawing a desktop smaller than its output onto the output needs,
+    /// while it is.
+    scaled: Option<Scaled>,
     scale: Scale,
     theme: Theme,
     /// Bumped every time [`set_theme`](Compositor::set_theme) really
@@ -361,12 +368,67 @@ const FROST_BANDS: usize = 8;
 /// Reserved with the back buffer rather than grown on demand, because a frost
 /// grown on demand is one a machine short of memory refuses, and a refused
 /// frost is a window drawn without its glass.
-fn frost_reserve(mode: &DisplayMode, runner: &dyn JobRunner) -> Option<(Surface, BlurScratch)> {
-    let plane = Surface::new(mode.width_px, mode.height_px)?;
+fn frost_reserve(
+    (width, height): (u32, u32),
+    runner: &dyn JobRunner,
+) -> Option<(Surface, BlurScratch)> {
+    let plane = Surface::new(width, height)?;
     let mut scratch = BlurScratch::new();
     scratch
-        .reserve(mode.width_px, mode.height_px, FROST_BANDS, runner)
+        .reserve(width, height, FROST_BANDS, runner)
         .then_some((plane, scratch))
+}
+
+/// A desktop composed smaller than its output, and what resampling it onto
+/// the output a damaged rectangle at a time needs.
+struct Scaled {
+    /// The composed desktop resampled to the output's size, which the scan-out
+    /// frame is encoded from, so a fade re-encodes it rather than resampling.
+    output: Surface,
+    /// The filter's working memory, a slot per band the runner spreads a
+    /// resample over.
+    scratch: Vec<ResampleScratch>,
+    /// The output pixels a frame resamples and those it encodes, held so a
+    /// frame reuses their storage.
+    resample: Region,
+    encode: Region,
+    /// Output pixels a resample could not grow its scratch for, stale until a
+    /// later frame resamples them: the desktop behind them is already right.
+    owed: Region,
+}
+
+impl Scaled {
+    /// What an output of `width`×`height` needs under `runner`, or `None` when
+    /// the allocator refuses it.
+    fn reserve(width: u32, height: u32, runner: &dyn JobRunner) -> Option<Self> {
+        let mut scaled = Self {
+            output: Surface::new(width, height)?,
+            scratch: Vec::new(),
+            resample: Region::new(),
+            encode: Region::new(),
+            owed: Region::new(),
+        };
+        scaled.spread_over(runner).then_some(scaled)
+    }
+
+    /// Hold a filter slot for every band `runner` may split a resample into.
+    /// A refusal keeps the slots held before, which costs parallelism and
+    /// never the resample.
+    fn spread_over(&mut self, runner: &dyn JobRunner) -> bool {
+        let slots = tairix_parallel::bands(runner, usize::MAX, 1).max(1);
+        if self.scratch.len() >= slots {
+            return true;
+        }
+        if self
+            .scratch
+            .try_reserve(slots - self.scratch.len())
+            .is_err()
+        {
+            return !self.scratch.is_empty();
+        }
+        self.scratch.resize_with(slots, ResampleScratch::new);
+        true
+    }
 }
 
 impl Compositor {
@@ -416,12 +478,15 @@ impl Compositor {
             a: 255,
             ..Color::from(theme.palette().desktop)
         };
-        let back = Surface::filled(mode.width_px, mode.height_px, background.premultiply())?;
+        let screen = (mode.width_px, mode.height_px);
+        let back = Surface::filled(screen.0, screen.1, background.premultiply())?;
         let frame = scanout_frame(&mode)?;
-        let (frost_plane, blur_scratch) = frost_reserve(&mode, &tairix_parallel::SERIAL)?;
+        let (frost_plane, blur_scratch) = frost_reserve(screen, &tairix_parallel::SERIAL)?;
         let shadow = ShadowKit::new(Scale::ONE, &theme);
         let mut compositor = Self {
             mode,
+            screen,
+            scaled: None,
             scale: Scale::ONE,
             theme,
             theme_generation: 0,
@@ -476,7 +541,9 @@ impl Compositor {
     }
 
     /// Adopt a new display mode, rebuilding the back buffer and scan-out
-    /// frame for it and marking the whole screen for redraw.
+    /// frame for it and marking the whole screen for redraw. The desktop is
+    /// composed at the new mode's own size until
+    /// [`set_desktop_size`](Self::set_desktop_size) says otherwise.
     ///
     /// Served windows survive: they keep their positions and are clipped to
     /// whatever screen the new mode describes, so a session resumed onto a
@@ -500,18 +567,19 @@ impl Compositor {
         let Some(order) = ChannelOrder::for_format(mode.format) else {
             return false;
         };
-        let Some(back) =
-            Surface::filled(mode.width_px, mode.height_px, self.background.premultiply())
-        else {
+        let screen = (mode.width_px, mode.height_px);
+        let Some(back) = Surface::filled(screen.0, screen.1, self.background.premultiply()) else {
             return false;
         };
         let Some(frame) = scanout_frame(&mode) else {
             return false;
         };
-        let Some((frost_plane, blur_scratch)) = frost_reserve(&mode, self.runner) else {
+        let Some((frost_plane, blur_scratch)) = frost_reserve(screen, self.runner) else {
             return false;
         };
         self.mode = mode;
+        self.screen = screen;
+        self.scaled = None;
         self.order = order;
         self.back = back;
         self.frame = frame;
@@ -528,9 +596,62 @@ impl Compositor {
         true
     }
 
-    /// The whole-screen rectangle.
+    /// Compose the desktop at `width`×`height` and resample it onto the
+    /// output, or compose it at the output's own size when that is what is
+    /// asked for.
+    ///
+    /// A side of zero or one larger than the output's is refused, as is a
+    /// size whose buffers cannot be allocated, and a refusal leaves the
+    /// compositor exactly as it was. Windows keep their positions and are
+    /// clipped to the new screen, as across a mode change: refitting what
+    /// must fit is the embedder's.
+    pub fn set_desktop_size(&mut self, width: u32, height: u32) -> bool {
+        if (width, height) == self.screen {
+            return true;
+        }
+        let (output_width, output_height) = (self.mode.width_px, self.mode.height_px);
+        if width == 0 || height == 0 || width > output_width || height > output_height {
+            return false;
+        }
+        let Some(back) = Surface::filled(width, height, self.background.premultiply()) else {
+            return false;
+        };
+        let Some((frost_plane, blur_scratch)) = frost_reserve((width, height), self.runner) else {
+            return false;
+        };
+        let scaled = if (width, height) == (output_width, output_height) {
+            None
+        } else if self.scaled.is_some() {
+            self.scaled.take()
+        } else {
+            let Some(scaled) = Scaled::reserve(output_width, output_height, self.runner) else {
+                return false;
+            };
+            Some(scaled)
+        };
+        self.screen = (width, height);
+        self.scaled = scaled;
+        self.back = back;
+        self.frost_plane = frost_plane;
+        self.blur_scratch = blur_scratch;
+        self.damage.clear();
+        self.scanout.clear();
+        self.undelivered.clear();
+        let screen = self.screen_rect();
+        self.mark(screen);
+        true
+    }
+
+    /// The whole-screen rectangle: the desktop as windows, the pointer and
+    /// applications see it.
     #[must_use]
     pub fn screen_rect(&self) -> Rect {
+        Rect::new(0, 0, self.screen.0, self.screen.1)
+    }
+
+    /// The output's own rectangle, which the scan-out frame and everything
+    /// presented to the display are measured in.
+    fn output_rect(&self) -> Rect {
         Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
     }
 
@@ -812,11 +933,7 @@ impl Compositor {
     /// The generation every retained [`FrostedBackdrop`] is valid for: this
     /// output's scale and the screen extent frosts were clipped to.
     fn frost_epoch(&self) -> FrostEpoch {
-        (
-            self.scale.percent(),
-            self.mode.width_px,
-            self.mode.height_px,
-        )
+        (self.scale.percent(), self.screen.0, self.screen.1)
     }
 
     /// The physical radius `window`'s backdrop is blurred by: its logical
@@ -2379,6 +2496,97 @@ impl Compositor {
         Some(applied)
     }
 
+    /// Fit every top-level window to the screen as it now is
+    /// ([`set_desktop_size`](Self::set_desktop_size), a mode change): a
+    /// fullscreen window covers it, a maximized one fills `work_area`, and a
+    /// restored one is brought inside `work_area` so none is left out of
+    /// reach. Answers each window whose client size changed, with its size
+    /// state and new client rectangle, for the embedder to tell its
+    /// application. A transient is placed by its application and keeps its
+    /// size; it is only moved back within reach.
+    pub fn refit_windows(
+        &mut self,
+        work_area: Rect,
+    ) -> Vec<(WindowId, tairix_controls::WindowSizeState, Rect)> {
+        let screen = self.screen_rect();
+        let reach = self.shadow.reach();
+        let ids: Vec<WindowId> = self.windows.iter().map(Window::id).collect();
+        let mut resized = Vec::new();
+        for id in ids {
+            let refit = self
+                .mutate_frame(id, |window, scale, theme, damage| {
+                    let before = window.footprint(reach);
+                    let refit = window.refit(screen, work_area, scale, theme);
+                    let after = window.footprint(reach);
+                    if after != before {
+                        damage.add(before);
+                        damage.add(after);
+                    }
+                    refit
+                })
+                .flatten();
+            if let Some((state, client)) = refit {
+                resized.push((id, state, client));
+            }
+        }
+        resized
+    }
+
+    /// Where every window sits now, for
+    /// [`restore_placements`](Self::restore_placements) to put back.
+    #[must_use]
+    pub fn placements(&self) -> Vec<Placement> {
+        self.windows.iter().map(Window::placement).collect()
+    }
+
+    /// Put back where `before` says each window a change of desktop size
+    /// moved and nothing has moved since — each still where `after` says the
+    /// change left it — and fit it to `work_area`. A window the user moved or
+    /// resized meanwhile, or one opened since, stays where it is. Answers
+    /// each window whose client size changed, as
+    /// [`refit_windows`](Self::refit_windows) does.
+    pub fn restore_placements(
+        &mut self,
+        before: &[Placement],
+        after: &[Placement],
+        work_area: Rect,
+    ) -> Vec<(WindowId, tairix_controls::WindowSizeState, Rect)> {
+        let screen = self.screen_rect();
+        let reach = self.shadow.reach();
+        let mut resized = Vec::new();
+        for was in before {
+            let Some(left) = after.iter().find(|placed| placed.id() == was.id()) else {
+                continue;
+            };
+            if left == was {
+                continue;
+            }
+            let restored = self
+                .mutate_frame(was.id(), |window, scale, theme, damage| {
+                    if !window.placement().rests_as(left) {
+                        return None;
+                    }
+                    let before = window.footprint(reach);
+                    let client = window.client_rect();
+                    let _ = window.restore_placement(was, scale, theme);
+                    let _ = window.refit(screen, work_area, scale, theme);
+                    let after = window.footprint(reach);
+                    if after != before {
+                        damage.add(before);
+                        damage.add(after);
+                    }
+                    let now = window.client_rect();
+                    ((now.width, now.height) != (client.width, client.height))
+                        .then_some((window.size_state(), now))
+                })
+                .flatten();
+            if let Some((state, client)) = restored {
+                resized.push((was.id(), state, client));
+            }
+        }
+        resized
+    }
+
     /// Bring the window named by `id` inside the size range its application
     /// last declared ([`set_window_client_size_range`](Self::set_window_client_size_range)),
     /// maximizing against `work_area` where it is maximized.
@@ -3064,8 +3272,12 @@ impl Compositor {
         let screen = self.screen_rect();
         self.damage.intersects(screen)
             || self.scanout.intersects(screen)
-            || self.undelivered.intersects(screen)
+            || self.undelivered.intersects(self.output_rect())
             || self.pointer.has_damage(screen)
+            || self
+                .scaled
+                .as_ref()
+                .is_some_and(|scaled| !scaled.owed.is_empty())
     }
 
     /// Whether `point` lies within a currently-dirty rectangle. Test-only: it
@@ -3088,7 +3300,11 @@ impl Compositor {
     /// (via [`Display::present_rects`]) moves bytes proportional to what
     /// changed rather than their bounding box, which can span far more of
     /// the screen than the union of the pixels that actually moved (a
-    /// dirty taskbar strip plus a cursor near the opposite edge, say).
+    /// dirty taskbar strip plus a cursor near the opposite edge, say). While
+    /// the desktop is drawn smaller than its output
+    /// ([`set_desktop_size`](Self::set_desktop_size)) the rectangles are the
+    /// output pixels the present moves: each composed rectangle's
+    /// [`output_reach`].
     ///
     /// The pointer overlay is not damaged as it moves; instead this method
     /// diffs each of its parts' current footprint (and artwork identity)
@@ -3177,7 +3393,11 @@ impl Compositor {
         for window in &mut self.windows {
             window.set_backdrop_changed(false);
         }
-        self.rescan_scanout(composited, screen);
+        if self.scaled.is_some() {
+            self.scale_out(composited, screen);
+        } else {
+            self.rescan_scanout(composited, screen);
+        }
     }
 
     /// Re-encode the scan-out bytes of everything
@@ -3200,6 +3420,83 @@ impl Compositor {
             changed.add(area);
         }
         // Handed back emptied so the next frame reuses the buffer it grew.
+        scanout.clear();
+        self.scanout = scanout;
+    }
+
+    /// Bring a desktop composed smaller than its output to the output: the
+    /// composed rectangles of `changed` are resampled onto the output's
+    /// picture of it, those and whatever only the reveal moved are encoded
+    /// from that picture, and `changed` is left naming the output pixels
+    /// encoded.
+    ///
+    /// The frame's counts stay in desktop pixels, as an unscaled frame's are:
+    /// a reveal-only rectangle is damage the frame redrew, and every damaged
+    /// desktop pixel is one the frame brought to the scan-out. A resample the
+    /// scratch cannot grow for leaves just its output pixels owed to the next
+    /// frame, never the desktop recomposed.
+    fn scale_out(&mut self, changed: &mut Region, screen: Rect) {
+        let mut scanout = core::mem::take(&mut self.scanout);
+        scanout.clip(screen);
+        for &done in changed.rects() {
+            scanout.subtract(done);
+        }
+        let Self {
+            mode,
+            screen: desktop,
+            scaled,
+            back,
+            frame,
+            order,
+            reveal,
+            runner,
+            stats,
+            ..
+        } = self;
+        let Some(scaled) = scaled.as_mut() else {
+            return;
+        };
+        let output = (mode.width_px, mode.height_px);
+        scaled.resample.clear();
+        scaled.encode.clear();
+        for &area in changed.rects() {
+            stats.add_encoded(area_px(area.width, area.height));
+            scaled.resample.add(output_reach(area, *desktop, output));
+        }
+        for &area in scanout.rects() {
+            stats.add_damaged(area_px(area.width, area.height));
+            stats.add_encoded(area_px(area.width, area.height));
+            scaled.encode.add(output_reach(area, *desktop, output));
+        }
+        for &rect in scaled.owed.rects() {
+            scaled.resample.add(rect);
+        }
+        scaled.owed.clear();
+        for &rect in scaled.resample.rects() {
+            let Some(window) = image_region(rect) else {
+                continue;
+            };
+            if back
+                .resample_window_into(&mut scaled.output, window, &mut scaled.scratch, *runner)
+                .is_err()
+            {
+                scaled.owed.add(rect);
+            }
+            scaled.encode.add(rect);
+        }
+        let stride = mode.stride_bytes as usize;
+        changed.clear();
+        for &rect in scaled.encode.rects() {
+            encode_output(
+                frame,
+                &scaled.output,
+                rect,
+                stride,
+                (*order, *reveal),
+                *runner,
+            );
+            changed.add(rect);
+        }
         scanout.clear();
         self.scanout = scanout;
     }
@@ -3500,7 +3797,7 @@ impl Compositor {
 
     /// The current screen's pixel count.
     fn screen_px(&self) -> u64 {
-        area_px(self.mode.width_px, self.mode.height_px)
+        area_px(self.screen.0, self.screen.1)
     }
 
     /// Allow or forbid the opaque-run copy path, so a test can compose one
@@ -3572,7 +3869,7 @@ impl Compositor {
         let mut region = core::mem::take(&mut self.composed);
         self.recompose_damage(&mut region);
         let mut owed = core::mem::take(&mut self.undelivered);
-        owed.clip(self.screen_rect());
+        owed.clip(self.output_rect());
         for &rect in owed.rects() {
             region.add(rect);
         }
@@ -3655,16 +3952,19 @@ impl Compositor {
         // A hardware layer is composed from its own pixels alone and cannot
         // sample what is already behind it, so a backdrop blur has no layer
         // encoding at all and the whole frame goes through software.
-        let layers = if self.has_backdrop_blur() || self.has_translucent_window() {
-            None
-        } else {
-            // Every visible window becomes its own layer here, so every one
-            // of them needs its furniture and its shadow's corners available
-            // before the immutable encode.
-            let fallback = self.ensure_chrome(|_| true);
-            self.ensure_shadow_tiles();
-            self.encode_layers(&caps, &fallback)
-        };
+        // An engine layer is placed in output pixels at its own size, so a
+        // desktop drawn smaller than its output is resampled in software.
+        let layers =
+            if self.scaled.is_some() || self.has_backdrop_blur() || self.has_translucent_window() {
+                None
+            } else {
+                // Every visible window becomes its own layer here, so every one
+                // of them needs its furniture and its shadow's corners available
+                // before the immutable encode.
+                let fallback = self.ensure_chrome(|_| true);
+                self.ensure_shadow_tiles();
+                self.encode_layers(&caps, &fallback)
+            };
         let presentation = if let Some((buffers, presentation)) = layers {
             let layers: Vec<AccelLayer<'_>> = buffers.iter().map(LayerBuf::as_layer).collect();
             self.stats.bump_present();
@@ -3676,7 +3976,7 @@ impl Compositor {
             self.composed = composed;
             self.stats.bump_present();
             if let Err(err) = display.present(&self.frame) {
-                self.undelivered.add(self.screen_rect());
+                self.undelivered.add(self.output_rect());
                 return Err(err);
             }
             Presentation::Composited
@@ -3737,7 +4037,7 @@ impl Compositor {
                 .map(|layers| (layers, Presentation::Promoted(cover.id())));
         }
         layers.push(
-            self.encode_layer(self.mode.width_px, self.mode.height_px, 0, 0, |_, _| {
+            self.encode_layer(self.screen.0, self.screen.1, 0, 0, |_, _| {
                 Some(self.background.premultiply())
             })?,
         );
@@ -4351,6 +4651,9 @@ impl Compositor {
         #[cfg(not(test))]
         let opaque_runs = true;
         let runner = self.runner;
+        // A desktop drawn smaller than its output has no frame row to pair
+        // with: the scale stage encodes the frame from the resampled picture.
+        let encodes_frame = self.scaled.is_none();
         let Self {
             mode,
             order,
@@ -4427,7 +4730,12 @@ impl Compositor {
         // reach its scan-out bytes composes nothing, so the back buffer can
         // never drift from the frame. The frost plane has no frame to drift
         // from.
-        let Some(frames) = frame_chunks(frame, target, top..bottom, per_band, stride) else {
+        let frames = if encodes_frame {
+            frame_chunks(frame, target, top..bottom, per_band, stride)
+        } else {
+            Some(FrameChunks::Absent)
+        };
+        let Some(frames) = frames else {
             return;
         };
         // Both splits step the same number of rows over the same row span, so
@@ -4472,9 +4780,12 @@ impl Compositor {
         // A frost runs within whatever the scratch holds, spreading less widely
         // where it holds less, so a refusal here costs parallelism and never a
         // frost.
-        let _ =
-            self.blur_scratch
-                .reserve(self.mode.width_px, self.mode.height_px, FROST_BANDS, runner);
+        let _ = self
+            .blur_scratch
+            .reserve(self.screen.0, self.screen.1, FROST_BANDS, runner);
+        if let Some(scaled) = self.scaled.as_mut() {
+            let _ = scaled.spread_over(runner);
+        }
     }
 
     /// The runner installed by [`set_job_runner`](Self::set_job_runner).
@@ -4669,6 +4980,96 @@ impl BandWork {
     }
 }
 
+/// The output pixels a change to `area` of a `desktop`-sized screen reaches
+/// once resampled onto an `output`-sized one: every pixel whose filter reads
+/// the part of it on the desktop.
+#[must_use]
+pub fn output_reach(area: Rect, desktop: (u32, u32), output: (u32, u32)) -> Rect {
+    let span = |start: i32, end: i32, extent: u32| {
+        let on_desktop = |at: i32| u32::try_from(at).unwrap_or(0).min(extent);
+        on_desktop(start)..on_desktop(end)
+    };
+    let columns = resample_reach(
+        desktop.0,
+        output.0,
+        span(area.left(), area.right(), desktop.0),
+    );
+    let rows = resample_reach(
+        desktop.1,
+        output.1,
+        span(area.top(), area.bottom(), desktop.1),
+    );
+    Rect::new(
+        tairix_geometry::to_i32(columns.start),
+        tairix_geometry::to_i32(rows.start),
+        columns.end.saturating_sub(columns.start),
+        rows.end.saturating_sub(rows.start),
+    )
+}
+
+/// `rect` as the image rectangle the resampler takes, or `None` for an empty
+/// one or one that begins off the image.
+fn image_region(rect: Rect) -> Option<tairix_raster::Region> {
+    (!rect.is_empty()).then_some(tairix_raster::Region {
+        x: u32::try_from(rect.left()).ok()?,
+        y: u32::try_from(rect.top()).ok()?,
+        width: rect.width,
+        height: rect.height,
+    })
+}
+
+/// Encode `rect` of the resampled desktop `output` into `frame`, `stride`
+/// bytes a row, through `encoding`'s channel order at its reveal, in bands
+/// spread across `runner`.
+fn encode_output(
+    frame: &mut [u8],
+    output: &Surface,
+    rect: Rect,
+    stride: usize,
+    encoding: (ChannelOrder, u8),
+    runner: &dyn JobRunner,
+) {
+    let (order, reveal) = encoding;
+    let (Ok(left), Ok(top), Ok(bottom)) = (
+        u32::try_from(rect.left()),
+        u32::try_from(rect.top()),
+        u32::try_from(rect.bottom()),
+    ) else {
+        return;
+    };
+    let Some(region) = frame_region(frame, top, bottom, stride) else {
+        return;
+    };
+    let rows = usize::try_from(rect.height).unwrap_or(0);
+    let cols = usize::try_from(rect.width).unwrap_or(0);
+    let count = tairix_parallel::bands(runner, rows, MIN_PARALLEL_BAND_PX.div_ceil(cols.max(1)));
+    let per_band = tairix_raster::band_rows(rows, count).max(1);
+    let (Some(first_byte), Some(row_bytes), Some(band_bytes)) = (
+        usize::try_from(left)
+            .ok()
+            .and_then(|left| left.checked_mul(4)),
+        cols.checked_mul(4),
+        (per_band as usize).checked_mul(stride),
+    ) else {
+        return;
+    };
+    let pieces = region.chunks_mut(band_bytes.max(1)).enumerate();
+    tairix_parallel::for_each_drawn(runner, pieces, &|(index, chunk): (usize, &mut [u8])| {
+        let band_top =
+            top.saturating_add(per_band.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX)));
+        for (local, row) in chunk.chunks_mut(stride.max(1)).enumerate() {
+            let y = band_top.saturating_add(u32::try_from(local).unwrap_or(u32::MAX));
+            let (Some((_, pixels)), Some(bytes)) = (
+                output.row_span(y, left, rect.width),
+                row.get_mut(first_byte..first_byte.saturating_add(row_bytes)),
+            ) else {
+                continue;
+            };
+            encode_segment(bytes, pixels, order, reveal);
+        }
+    });
+}
+
 /// The scan-out bytes the bands of `target`'s rows `rows` pair with, a band of
 /// `per_band` rows at a time, or `None` when the frame does not hold them.
 fn frame_chunks(
@@ -4797,7 +5198,10 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         // alone, laid over each run it copies. The screen reveal is applied as
         // a pixel is encoded, so a fade in flight has no run a plain copy could
         // serve; the pointer overlay is resolved per row, so only the few rows
-        // it draws on lose the fast path.
+        // it draws on lose the fast path. A desktop drawn smaller than its
+        // output has no frame row here: its scale stage encodes the frame.
+        let frame = frame_row.filter(|_| encode);
+        let encodes = frame.is_some();
         let front = window_rows
             .iter()
             .rposition(|layer| matches!(layer, RowLayer::Body(_)));
@@ -4812,7 +5216,7 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
                     _ => None,
                 })
                 .filter(|_| {
-                    opaque_runs && pointer_runs.is_empty() && (!encode || reveal == u8::MAX)
+                    opaque_runs && pointer_runs.is_empty() && (!encodes || reveal == u8::MAX)
                 }),
             overlays: front
                 .and_then(|at| window_rows.get(at.saturating_add(1)..))
@@ -4820,7 +5224,7 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         };
         let targets = RowTargets {
             back: back_row,
-            frame: frame_row.filter(|_| encode),
+            frame,
         };
         let work = compose_row(
             &layers,
@@ -4829,7 +5233,7 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
             order,
             RowRound { reveal, dither },
         );
-        if encode {
+        if encodes {
             band.work.encoded = band.work.encoded.saturating_add(u64::from(area.width));
         }
         band.work.blended = band.work.blended.saturating_add(work.blended);

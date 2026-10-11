@@ -88,7 +88,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{DriverError, DriverHandle, Errno};
-use tairix_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
+use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::callreg::EndpointVanishObserver;
@@ -618,16 +618,14 @@ fn open_filesystem(
 ) -> Result<OpenedVolume, Errno> {
     match fstype {
         VolumeFsType::ARXFS => {
-            // A removable ARXFS volume is keyed like any ARXFS volume.
-            // The well-known key covers non-secret volumes (the same key
-            // the read-only system volume uses); a volume under a private
-            // key refuses the open with a typed error, and key-provisioned
-            // attach arrives with the volume manager's key policy — the
-            // kernel never guesses a secret.
+            // A removable volume is attached plaintext: an encrypted one
+            // refuses the open with a typed error, and key-provisioned attach
+            // arrives with the volume manager's key policy — the kernel never
+            // guesses a secret.
             let fs = if read_only {
-                ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
+                ARXFS::open_read_only(window, Keying::Plaintext)
             } else {
-                ARXFS::open(window, &SYSTEM_VOLUME_KEY)
+                ARXFS::open(window, Keying::Plaintext)
             }
             .map_err(DriverError::as_errno)?;
             let identity = fs.volume_uuid();

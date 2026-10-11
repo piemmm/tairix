@@ -4043,9 +4043,9 @@ fn choose_bar_menu_row(
     let geom = chain_geometry_over(comp, &theme);
     let subject = request.subject.clone();
     let (mut chain, at) = open_bar_chain(shell, comp, request, label, &geom);
-    chain.handle(&moved(at.x, at.y), at, &geom);
-    chain.handle(&PRIMARY_PRESS, at, &geom);
-    let acted = chain.handle(&PRIMARY_RELEASE, at, &geom);
+    chain.handle(&moved(at.x, at.y), at, &geom, 0);
+    chain.handle(&PRIMARY_PRESS, at, &geom, 0);
+    let acted = chain.handle(&PRIMARY_RELEASE, at, &geom, 0);
     assert_eq!(acted, ChainAction::Closed, "the chosen row ends the chain");
     let answers = chain.take_answers();
     assert_eq!(answers.len(), 1, "exactly one answer per chain");
@@ -4072,7 +4072,7 @@ impl DirectorySource for RefusingSource {
 
 /// A headless desktop for the session's own trusted windows: a shell over a
 /// bottom taskbar and a compositor at a small fixed mode.
-fn headless_desktop() -> (DesktopShell, Compositor) {
+pub(crate) fn headless_desktop() -> (DesktopShell, Compositor) {
     let shell = shell_for(TaskbarConfig::bottom_bar(640, 480));
     let mode = DisplayMode {
         width_px: 640,
@@ -9060,6 +9060,150 @@ fn a_malformed_machine_report_is_refused() {
     assert!(matches!(refusal, Err(SwitchboardRefusal::Malformed(_))));
 }
 
+/// One Ethernet interface with a preferred IPv4 address, as the monitor
+/// reports it.
+fn connected_network() -> tairix_abi::switchboard_ipc::NetworkReport {
+    use tairix_abi::net_ipc::{
+        NetAddrFamily, NetAddrState, NetIfAddr, NetInterfaceStateRecord, IF_NAME_LEN,
+        NET_IF_MAX_ADDRS,
+    };
+    use tairix_abi::switchboard_ipc::NetworkReport;
+    let mut name = [0u8; IF_NAME_LEN];
+    name[..4].copy_from_slice(b"eth0");
+    let mut addrs = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+    let mut addr = [0u8; 16];
+    addr[..4].copy_from_slice(&[10, 0, 2, 15]);
+    addrs[0] = NetIfAddr {
+        family: NetAddrFamily::V4,
+        prefix: 24,
+        state: NetAddrState::Preferred,
+        addr,
+    };
+    NetworkReport::measured(&[NetInterfaceStateRecord {
+        name,
+        link_up: true,
+        addr_count: 1,
+        addrs,
+    }])
+}
+
+fn network_signal(shell: &DesktopShell) -> Option<tairix_taskbar::StatusKind> {
+    shell
+        .session()
+        .taskbar()
+        .notifications()
+        .signals()
+        .iter()
+        .find(|signal| signal.id == tairix_taskbar::network::NETWORK_SIGNAL)
+        .map(|signal| signal.kind)
+}
+
+#[test]
+fn a_network_report_from_the_launched_monitor_reaches_the_bar() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let mut launched = monitor_launched();
+
+    let outcome = serve_frame_as_monitor(
+        (&mut shell, &mut comp),
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut Relaunches::default(),
+        &mut Screensaver::new(),
+        &connected_network().to_le_bytes(),
+    );
+
+    assert_eq!(outcome, Ok(SwitchboardOutcome::Plain));
+    assert_eq!(
+        network_signal(&shell),
+        Some(tairix_taskbar::StatusKind::Network)
+    );
+    shell.set_network_report(&mut comp, None);
+    assert_eq!(
+        network_signal(&shell),
+        None,
+        "a gone monitor states nothing"
+    );
+}
+
+#[test]
+fn a_network_report_from_anyone_but_the_launched_monitor_is_refused_unread() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut saver = Screensaver::new();
+
+    let refusal = serve_switchboard_request(
+        SwitchboardServe {
+            shell: &mut shell,
+            compositor: &mut comp,
+            launched: &mut launched,
+            owner_windows: &FakeOwnerWindows::none(),
+            relaunch: &mut |_: &mut LaunchTable, _: &str, _: &str| {},
+            self_proc_id: session_proc_id(),
+            saver: &mut saver,
+            now_ns: 0,
+        },
+        MONITOR_PID + 1,
+        &connected_network().to_le_bytes(),
+    );
+
+    assert_eq!(refusal, Err(SwitchboardRefusal::Unattested));
+    assert_eq!(network_signal(&shell), None);
+}
+
+#[test]
+fn a_malformed_network_report_is_refused_and_states_nothing() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut bytes = connected_network().to_le_bytes();
+    bytes[6] = 0xff;
+
+    let refusal = serve_frame_as_monitor(
+        (&mut shell, &mut comp),
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut Relaunches::default(),
+        &mut Screensaver::new(),
+        &bytes,
+    );
+
+    assert!(matches!(refusal, Err(SwitchboardRefusal::Malformed(_))));
+    assert_eq!(network_signal(&shell), None);
+}
+
+/// The readout is a window of the bar's own, so the pointer travelling onto
+/// it is still on the bar's surfaces and keeps it open.
+#[test]
+fn the_network_readout_is_a_bar_window_that_follows_the_pointer() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    shell.set_network_report(&mut comp, Some(connected_network()));
+    let slot = shell.session().taskbar().layout(Scale::ONE).notifications[0];
+    let _ = shell.handle(moved(slot.center().x, slot.center().y), &mut comp, 0);
+    let readout = shell
+        .presenter()
+        .network_window()
+        .expect("hovering the signal presents its readout");
+    assert!(shell.presenter().owns_window(readout));
+
+    let panel = shell
+        .session()
+        .taskbar()
+        .network_readout_layout(Scale::ONE)
+        .expect("open")
+        .panel;
+    assert_eq!(comp.window_at(panel.center()), Some(readout));
+    let _ = shell.handle(moved(panel.center().x, panel.center().y), &mut comp, 0);
+    assert_eq!(shell.presenter().network_window(), Some(readout));
+
+    let _ = shell.handle(moved(5, 5), &mut comp, 0);
+    assert!(shell.presenter().network_window().is_none());
+}
+
 #[test]
 fn each_outcome_is_answered_with_its_own_frame() {
     use tairix_abi::reply::decode_status_reply;
@@ -9204,6 +9348,26 @@ fn the_frame_report_is_sent_only_on_change_and_only_to_a_live_instance() {
         u64::from(mode.width_px) * u64::from(mode.height_px)
     );
     assert_eq!(report.damaged_px, comp.frame_stats().damaged_px);
+
+    // A desktop drawn smaller than its output is reported on its own pixels,
+    // the ones its damage is counted in.
+    let mut scaled = compositor();
+    assert!(scaled.set_desktop_size(mode.width_px / 2, mode.height_px / 2));
+    scaled.composite();
+    let mut scaled_box = RecordingMailbox::default();
+    FrameReportGate::new().maybe_send(
+        &scaled,
+        Some(MONITOR_PID),
+        FrameContent::Foreign,
+        0,
+        &mut scaled_box,
+    );
+    let (_, command) = scaled_box.sent.first().copied().expect("one report");
+    let screen = scaled.screen_rect();
+    assert_eq!(
+        frame_of(command).expect("a frame report").screen_px,
+        u64::from(screen.width) * u64::from(screen.height)
+    );
     assert!(report.damaged_px > 0, "the composed frame changed pixels");
 
     // Offered far enough past the first that the rate limit cannot be what
@@ -9743,7 +9907,7 @@ fn a_pending_open_refused_by_a_full_mailbox_survives_to_the_next_publish() {
 
 // --- The system quick-actions menu's session half (T13) -----------------
 
-use crate::confirm::{build_dialog, Answer, ConfirmPrompt, CONFIRM_ORIGIN, WIN_HEIGHT, WIN_WIDTH};
+use crate::confirm::{build_dialog, Answer, ConfirmPrompt, WIN_HEIGHT, WIN_WIDTH};
 use crate::relay_power;
 use tairix_abi::PowerAction;
 
@@ -9765,7 +9929,34 @@ fn prompt_action_centre(action: PowerAction, index: usize, shell: &DesktopShell)
     )
 }
 
-/// `ask` opens exactly one prompt, at its deterministic origin; a second
+/// A prompt cannot be moved, so wherever the screen is smaller or denser than
+/// the prompt was drawn for, it is moved wholly onto it rather than opened
+/// with its buttons out of reach.
+#[test]
+fn a_session_prompt_opens_wholly_on_any_screen_it_fits() {
+    for (screen, size) in [
+        (Rect::new(0, 0, 640, 360), (460, 170)),
+        (Rect::new(0, 0, 1024, 768), (920, 340)),
+        (Rect::new(0, 0, 400, 300), (460, 170)),
+    ] {
+        let at = crate::shell::prompt_origin(screen, size);
+        let placed = Rect::new(at.x, at.y, size.0, size.1);
+        assert!(
+            placed.left() >= 0 && placed.top() >= 0,
+            "{placed:?} on {screen:?}"
+        );
+        if size.0 <= screen.width && size.1 <= screen.height {
+            assert!(placed.right() <= screen.right() && placed.bottom() <= screen.bottom());
+            assert_eq!(
+                placed.left() - screen.left(),
+                screen.right() - placed.right(),
+                "centred across {screen:?}"
+            );
+        }
+    }
+}
+
+/// `ask` opens exactly one prompt, where every session prompt opens; a second
 /// request while one is showing is refused rather than stacking a prompt
 /// over the question already asked.
 #[test]
@@ -9775,7 +9966,10 @@ fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
 
     assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("a prompt window is showing");
-    assert_eq!(comp.window(wm).expect("live").origin(), CONFIRM_ORIGIN);
+    assert_eq!(
+        comp.window(wm).expect("live").origin(),
+        crate::shell::prompt_origin(comp.screen_rect(), (WIN_WIDTH, WIN_HEIGHT))
+    );
     assert_eq!(confirm.pending(), Some(PowerAction::PowerOff));
 
     assert!(
@@ -12554,7 +12748,7 @@ fn moving_a_menu_highlight_recomposites_two_rows_and_not_the_plate() {
     let first = chain.row_rect(0, 0, &geom).expect("the first row");
     let at = centre(first);
     assert_eq!(
-        chain.handle(&moved(at.x, at.y), at, &geom),
+        chain.handle(&moved(at.x, at.y), at, &geom, 0),
         ChainAction::Redraw
     );
     assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
@@ -12563,7 +12757,7 @@ fn moving_a_menu_highlight_recomposites_two_rows_and_not_the_plate() {
     let third = chain.row_rect(0, 2, &geom).expect("the third row");
     let at = centre(third);
     assert_eq!(
-        chain.handle(&moved(at.x, at.y), at, &geom),
+        chain.handle(&moved(at.x, at.y), at, &geom, 0),
         ChainAction::Redraw
     );
     assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
@@ -12671,7 +12865,7 @@ fn the_seats_floating_chrome_is_painted_casts_and_keeps_to_its_corners() {
         epoch: comp.chrome_epoch(),
     };
     shell.apply(moved(at.x, at.y), &mut comp, 0);
-    chain.handle(&moved(at.x, at.y), at, &geom);
+    chain.handle(&moved(at.x, at.y), at, &geom, 0);
     assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     shell.settle(&mut comp);
     assert!(shell.tooltip_tick(crate::tip::TOOLTIP_DWELL_NS));
@@ -12747,7 +12941,7 @@ fn a_refused_chain_row_is_explained_by_a_tip_only_after_the_dwell() {
         epoch: comp.chrome_epoch(),
     };
     shell.apply(moved(at.x, at.y), &mut comp, 0);
-    chain.handle(&moved(at.x, at.y), at, &geom);
+    chain.handle(&moved(at.x, at.y), at, &geom, 0);
     assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     shell.settle(&mut comp);
     assert_eq!(
@@ -12815,7 +13009,7 @@ fn a_tip_is_withdrawn_when_the_pointer_leaves_the_row_it_explains() {
 
     let refused = chain_row_centre(&shell, &comp, &chain, 1);
     shell.apply(moved(refused.x, refused.y), &mut comp, 0);
-    chain.handle(&moved(refused.x, refused.y), refused, &geom);
+    chain.handle(&moved(refused.x, refused.y), refused, &geom, 0);
     assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     assert!(shell.tooltip_tick(crate::tip::TOOLTIP_DWELL_NS));
     assert!(shell.present_tooltip(&mut comp));
@@ -12829,7 +13023,7 @@ fn a_tip_is_withdrawn_when_the_pointer_leaves_the_row_it_explains() {
         &mut comp,
         crate::tip::TOOLTIP_DWELL_NS,
     );
-    chain.handle(&moved(offered.x, offered.y), offered, &geom);
+    chain.handle(&moved(offered.x, offered.y), offered, &geom, 0);
     assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
     shell.settle(&mut comp);
     assert_eq!(
@@ -12963,7 +13157,7 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
         info.left() + i32::try_from(info.width / 2).expect("small"),
         info.top() + i32::try_from(info.height / 2).expect("small"),
     );
-    chain.handle(&moved(at.x, at.y), at, &geom);
+    chain.handle(&moved(at.x, at.y), at, &geom, 0);
     assert!(
         chain
             .surfaces()
@@ -13037,7 +13231,7 @@ fn chain_with_entry_open(geom: &ChainGeometry<'_>) -> MenuChain {
     let row = chain.row_rect(0, 0, geom).expect("the rename row");
     let at = centre(row);
     assert_eq!(
-        chain.handle(&moved(at.x, at.y), at, geom),
+        chain.handle(&moved(at.x, at.y), at, geom, 0),
         ChainAction::Redraw,
         "arriving on the row opens its field"
     );
@@ -13071,7 +13265,7 @@ fn a_quick_entry_field_opens_on_arrival_owns_the_keyboard_and_answers_its_text()
 
     // Keys reach the field: a letter is text, not a traversal.
     assert_eq!(
-        chain.handle(&key_press(Key::Char('2')), Point::ORIGIN, &geom),
+        chain.handle(&key_press(Key::Char('2')), Point::ORIGIN, &geom, 0),
         ChainAction::Redraw
     );
     // Committing answers the field's own id and the whole text.
@@ -13079,7 +13273,8 @@ fn a_quick_entry_field_opens_on_arrival_owns_the_keyboard_and_answers_its_text()
         chain.handle(
             &key_press(Key::Named(NamedKey::Enter)),
             Point::ORIGIN,
-            &geom
+            &geom,
+            0
         ),
         ChainAction::Closed
     );
@@ -13113,7 +13308,8 @@ fn escape_closes_a_quick_entry_field_before_the_chain_and_discards_its_text() {
         chain.handle(
             &key_press(Key::Named(NamedKey::Escape)),
             Point::ORIGIN,
-            &geom
+            &geom,
+            0
         ),
         ChainAction::Redraw
     );
@@ -13133,7 +13329,8 @@ fn escape_closes_a_quick_entry_field_before_the_chain_and_discards_its_text() {
         chain.handle(
             &key_press(Key::Named(NamedKey::Escape)),
             Point::ORIGIN,
-            &geom
+            &geom,
+            0
         ),
         ChainAction::Closed,
         "and the next Escape gets the user out"
@@ -13159,9 +13356,9 @@ fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
     let mut chain = chain_with_entry_open(&geom);
     let row = chain.row_rect(0, 0, &geom).expect("the rename row");
     let at = centre(row);
-    chain.handle(&PRIMARY_PRESS, at, &geom);
+    chain.handle(&PRIMARY_PRESS, at, &geom, 0);
     assert_eq!(
-        chain.handle(&PRIMARY_RELEASE, at, &geom),
+        chain.handle(&PRIMARY_RELEASE, at, &geom, 0),
         ChainAction::Closed
     );
     assert_eq!(
@@ -13199,7 +13396,7 @@ fn clicking_a_field_bearing_row_answers_the_rows_own_id() {
         comp.screen_rect().bottom() - 1,
     );
     assert_eq!(
-        chain.handle(&PRIMARY_PRESS, outside, &geom),
+        chain.handle(&PRIMARY_PRESS, outside, &geom, 0),
         ChainAction::Closed
     );
     assert_eq!(
@@ -13363,12 +13560,12 @@ fn session_surfaces_adapt_to_display_scale() {
     let size_200 = window_rect(&comp, confirm_id);
     assert_eq!(
         size_200.width,
-        scale_200.scale_length(crate::confirm::WIN_WIDTH)
+        scale_200
+            .scale_length(crate::confirm::WIN_WIDTH)
+            .min(comp.screen_rect().width),
+        "it grows with the density, up to the screen"
     );
-    assert_eq!(
-        size_200.height,
-        scale_200.scale_length(crate::confirm::WIN_HEIGHT)
-    );
+    assert!(size_200.height >= scale_200.scale_length(crate::confirm::WIN_HEIGHT));
     assert!(size_200.width > size_100.width);
 
     // 2. The picker's window grows the same way, at the browser-view
@@ -15518,9 +15715,7 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
 // --- The credential prompt for a command the session may not perform ----
 
 use crate::config::DATETIME_RUN_PATH;
-use crate::elevate::{
-    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, NOT_STARTED_REASON, REFUSED_REASON,
-};
+use crate::elevate::{ElevatePrompt, Elevator, PromptOutcome, NOT_STARTED_REASON, REFUSED_REASON};
 use alloc::string::ToString;
 
 /// One sentence explaining the command, as the session words it.
@@ -15597,35 +15792,85 @@ fn fill_credentials(
 }
 
 /// The seat is held while any one of the lock, the trusted picker, the
-/// elevation prompt or a confirmation is up, and only then.
+/// elevation prompt, a confirmation or a resolution trial is up, and only then.
 #[test]
-fn the_seat_is_held_by_the_lock_the_picker_and_either_prompt() {
+fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
     let (mut shell, mut comp) = headless_desktop();
     let mut lock = ScreenLock::new();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     let mut confirm = ConfirmPrompt::new();
     let mut elevate = ElevatePrompt::new();
-    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+    let mut resolution = crate::ResolutionPrompt::new();
+    assert!(!crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
+
+    let trial = crate::Trial {
+        request: String::from("resolution = native\n"),
+        ticket: 1,
+    };
+    assert!(resolution.ask(trial, 0, &mut shell, &mut comp).is_ok());
+    assert!(crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
+    assert!(resolution.abandon(&mut shell, &mut comp));
+    assert!(!crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
 
     assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
-    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
     confirm.abandon(&mut shell, &mut comp);
-    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(!crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
 
     assert!(elevate.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
     elevate.abandon(&mut shell, &mut comp);
-    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(!crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
 
     picker
         .begin(7, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
-    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
     picker.abort_for(7, &mut shell, &mut comp);
-    assert!(!crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(!crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
 
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
-    assert!(crate::seat_held(&lock, &picker, &confirm, &elevate));
+    assert!(crate::seat_held(
+        &lock,
+        &picker,
+        (&confirm, &elevate, &resolution)
+    ));
 }
 
 #[test]
@@ -15635,7 +15880,11 @@ fn the_credential_prompt_opens_once_and_refuses_a_second() {
 
     assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
     let wm = prompt.wm_id().expect("a prompt window is showing");
-    assert_eq!(comp.window(wm).expect("live").origin(), ELEVATE_ORIGIN);
+    let placed = comp.window(wm).expect("live").bounds();
+    assert_eq!(
+        placed.origin,
+        crate::shell::prompt_origin(comp.screen_rect(), (placed.width, placed.height))
+    );
     assert_eq!(prompt.pending(), Some(DATETIME_RUN_PATH));
 
     assert!(

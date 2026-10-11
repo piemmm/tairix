@@ -75,7 +75,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_abi::net_ipc::{NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings};
+use tairix_abi::net_ipc::{if_name_str, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings};
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_netconfig::{IfaceKey, InterfaceConfigPlan, NetworkConfig};
@@ -644,21 +644,12 @@ fn apply_interfaces(
     notice
 }
 
-/// One interface alias as text, for a diagnostic.
-fn alias_text(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> &str {
-    let len = alias
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(alias.len());
-    core::str::from_utf8(&alias[..len]).unwrap_or("?")
-}
-
 /// The notice a saved-but-not-applied interface change reports.
 fn interface_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN], err: Errno) -> String {
     format!(
         "{}: saved; the running network stack did not accept it ({err}); it applies at next \
          boot\n",
-        alias_text(alias)
+        if_name_str(alias)
     )
 }
 
@@ -668,7 +659,7 @@ fn removed_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
     format!(
         "{}: removed from the configuration; the running network stack keeps it until next \
          boot\n",
-        alias_text(alias)
+        if_name_str(alias)
     )
 }
 
@@ -677,7 +668,7 @@ fn removed_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
 fn rejected_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
     format!(
         "{}: saved; it has neither match.mac nor match.node, so no device can be bound to it\n",
-        alias_text(alias)
+        if_name_str(alias)
     )
 }
 
@@ -790,7 +781,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
-    use tairix_abi::net_ipc::{NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings};
+    use tairix_abi::net_ipc::{
+        if_name_str, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings,
+    };
     use tairix_abi::Errno;
     use tairix_help::HelpSource;
     use tairix_netconfig::IfaceKey;
@@ -944,7 +937,7 @@ mod tests {
             self.interfaces
                 .borrow()
                 .iter()
-                .map(|msg| String::from(super::alias_text(&msg.alias)))
+                .map(|msg| String::from(if_name_str(&msg.alias)))
                 .collect()
         }
     }

@@ -66,7 +66,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         name: "arxfs",
         test_fn: "soak_arxfs",
-        description: "native arxfs: format + integrity + extremes",
+        description: "encrypted arxfs: format + integrity + extremes",
     },
     Target {
         name: "ext4",
@@ -81,7 +81,17 @@ pub const TARGETS: &[Target] = &[
     Target {
         name: "arxfs-random",
         test_fn: "soak_arxfs_random",
-        description: "arxfs: randomized, model-checked op mix (new path each run)",
+        description: "encrypted arxfs: randomized, model-checked op mix (new path each run)",
+    },
+    Target {
+        name: "arxfs-plaintext",
+        test_fn: "soak_arxfs_plaintext",
+        description: "plaintext arxfs: format + integrity + extremes",
+    },
+    Target {
+        name: "arxfs-plaintext-random",
+        test_fn: "soak_arxfs_plaintext_random",
+        description: "plaintext arxfs: randomized, model-checked op mix",
     },
 ];
 
@@ -354,7 +364,14 @@ mod tests {
 
     #[test]
     fn registry_covers_every_soak_target() {
-        for required in ["arxfs", "ext4", "fat32", "arxfs-random"] {
+        for required in [
+            "arxfs",
+            "ext4",
+            "fat32",
+            "arxfs-random",
+            "arxfs-plaintext",
+            "arxfs-plaintext-random",
+        ] {
             assert!(
                 TARGETS.iter().any(|t| t.name == required),
                 "missing required soak target {required}"

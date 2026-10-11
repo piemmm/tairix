@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_reclaim::{FreeMemorySource, PressureBand};
 
 /// The test gauge's backing size (1 GiB), so the band watermarks land
@@ -492,7 +492,7 @@ fn cached_volume() -> (
     let fs = ARXFS::format(
         VecBlock::new(512, 256),
         32,
-        &TEST_KEY,
+        Keying::Key(&TEST_KEY),
         &mut TestEntropy { next: 1 },
     )
     .expect("format")

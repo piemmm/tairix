@@ -79,8 +79,8 @@ pub use paint::{
 };
 pub use reorient::Reorient;
 pub use resample::{
-    resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image, RowOrder,
-    RowReducer,
+    resample, resample_reach, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image,
+    RowOrder, RowReducer,
 };
 pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};

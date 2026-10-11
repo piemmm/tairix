@@ -41,6 +41,32 @@ and a blend rather than a coordinate conversion, a layer decision, and a
 footprint — their bounds and any shadow they cast (see [Drop
 shadows](#drop-shadows)) — overlaps the dirty rectangle are considered at all.
 
+## A desktop smaller than its output
+
+`Compositor::set_desktop_size` draws the desktop at a size at or below the
+output's own, which is how a user's desktop resolution is put on screen
+(`plans/DISPLAY.md` D11). The back buffer and the frost plane take the
+desktop's size; the scan-out frame keeps the output's mode, so the display
+service and its driver never learn of it. A zero size, one larger than the
+output, or one whose buffers cannot be allocated is refused, and a refusal
+changes nothing.
+
+`screen_rect` is the desktop's rectangle: every layout, hit test, refit and
+pointer position is in desktop pixels. While the two sizes differ, compose
+writes the back buffer only. Each composed rectangle is then widened to its
+`output_reach` — every output pixel whose filter reads it — resampled onto an
+output-sized picture by `lib/raster`'s one resampler, banded across the job
+runner, and encoded from that picture. The picture is kept between frames, so
+a reveal step re-encodes it without resampling. `composite` answers the output
+pixels it moved. The layer engine is not used while scaled: its layers are
+placed in output pixels the desktop does not draw in.
+
+`refit_windows(work_area)` fits every top-level window to the desktop after a
+size change: a fullscreen window covers it, a maximised one fills the work
+area, and a restored one is brought inside the work area, shrunk only on an
+axis where it does not fit, its held restore geometry with it. It answers each
+window whose client size changed, for the session to tell its application.
+
 ## Spread across the machine's cores
 
 A composited row writes one row of the back buffer and the scan-out bytes of that

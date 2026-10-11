@@ -45,8 +45,9 @@ use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
 
 use tairix_abi::net_ipc::{
-    NetBondMemberRecord, NetIfKind, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, IF_NAME_LEN,
+    if_name_bytes, if_name_str, NetBondMemberRecord, NetInterfaceCountersRecord,
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr,
+    IF_NAME_LEN,
 };
 use tairix_abi::sysinfo::{
     reclaim_class_from_name, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, IrqRecord,
@@ -258,7 +259,7 @@ fn resolve_state(
         ["net", bond, "active-member"] => {
             let members = net_bond_members_for(transport, bond)?;
             let rendered = match members.iter().find(|m| m.active) {
-                Some(member) => if_name_string(&member.member),
+                Some(member) => String::from(if_name_str(&member.member)),
                 None => String::from("none"),
             };
             (
@@ -276,7 +277,7 @@ fn resolve_state(
                 if !rendered.is_empty() {
                     rendered.push_str(", ");
                 }
-                rendered.push_str(&if_name_string(&member.member));
+                rendered.push_str(&String::from(if_name_str(&member.member)));
                 rendered.push('=');
                 rendered.push_str(if member.link_up { "up" } else { "down" });
                 if member.eligible {
@@ -456,7 +457,7 @@ fn resolve_info_value(
             let value = match *leaf {
                 "mac" => InfoValue::new_str(Sensitivity::Sensitive, &mac_string(record.mac)),
                 "mtu" => InfoValue::new_str(Sensitivity::Public, &record.mtu.to_string()),
-                _ => InfoValue::new_str(Sensitivity::Public, net_kind_name(record.kind)),
+                _ => InfoValue::new_str(Sensitivity::Public, record.kind.name()),
             };
             (value, Authorization::Capability(CapabilityId::SYSINFO_HW))
         }
@@ -1223,8 +1224,7 @@ const NET_PAGE_LIMIT: u16 = kstats::NET_INTERFACE_PAGE;
 
 /// Whether a NUL-padded interface-name field spells `iface`.
 fn if_name_matches(name: &[u8; IF_NAME_LEN], iface: &str) -> bool {
-    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
-    &name[..len] == iface.as_bytes()
+    if_name_bytes(name) == iface.as_bytes()
 }
 
 /// The record for the interface whose alias is `iface`, found by walking the
@@ -1336,12 +1336,6 @@ fn render_server_addrs(servers: &[NetServerAddr]) -> String {
     rendered
 }
 
-/// The NUL-padded interface-alias field as an owned display string.
-fn if_name_string(name: &[u8; IF_NAME_LEN]) -> String {
-    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
-    field_lossy(&name[..len])
-}
-
 /// Resolve `info:net/<bond>/members`: the bond's member aliases in
 /// configured order, GLOBAL-gated; a non-bond alias fails closed inside
 /// [`net_bond_members_for`].
@@ -1356,7 +1350,7 @@ fn bond_members_info(
         if !rendered.is_empty() {
             rendered.push_str(", ");
         }
-        rendered.push_str(&if_name_string(&member.member));
+        rendered.push_str(&String::from(if_name_str(&member.member)));
     }
     Ok((
         InfoValue::new_str(Sensitivity::Public, &rendered),
@@ -1728,15 +1722,6 @@ fn walk_resolved<R, const N: usize>(
     })
 }
 
-/// The display name of an interface's link kind.
-fn net_kind_name(kind: NetIfKind) -> &'static str {
-    match kind {
-        NetIfKind::Ethernet => "ethernet",
-        NetIfKind::Loopback => "loopback",
-        NetIfKind::Bond => "bond",
-    }
-}
-
 /// Render a MAC address as colon-separated lowercase hex octets.
 fn mac_string(mac: [u8; 6]) -> String {
     let mut out = String::new();
@@ -1921,7 +1906,7 @@ mod tests {
     use tairix_resref::parse;
 
     use super::{for_each_net_bond_member, for_each_net_interface};
-    use crate::list::{field_lossy, WalkStep};
+    use crate::list::WalkStep;
 
     /// An in-memory `sysinfod` stand-in that answers the singleton queries
     /// this resolver uses, decoding the request exactly as the real service
@@ -3459,8 +3444,7 @@ mod tests {
 
     /// A NUL-padded interface-name field as text.
     fn alias_text(name: &[u8; IF_NAME_LEN]) -> String {
-        let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
-        field_lossy(&name[..len])
+        String::from(tairix_abi::net_ipc::if_name_str(name))
     }
 
     /// The extracted walks page: a table one record longer than a page is

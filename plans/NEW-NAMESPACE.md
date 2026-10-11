@@ -44,7 +44,7 @@ GPT type byte.
   `fstype`, catalog name. Already expressive enough to describe a boot volume.
 - `tairix_abi::driver_store::SystemConfigFile` — a **closed whitelist** of
   files the `/System` store service reads on a bootstrap client's behalf
-  *before the encrypted root is unlocked*. Already the sanctioned pre-unlock
+  *before the root is mounted*. Already the sanctioned pre-unlock
   read path (`system.conf`, `network.conf`).
 - `kernel/core::fs::volumes::VolumeForest` — publishes each attached volume's
   stable identity so `id::<uuid>/path` resolves.
@@ -112,8 +112,8 @@ structural: nothing can hand `/Storage` an exec bit.
 
 ## 4. Where the policy lives, and why it is not in the encrypted volume
 
-Putting the table in the encrypted root is circular: reading it requires
-unlocking the volume that holds it, so a second, smaller hardcoded table would
+Putting the table in the root volume is circular: reading it requires
+mounting — for an encrypted root, unlocking — the volume that holds it, so a second, smaller hardcoded table would
 be needed to describe how to reach the first.
 
 The circularity dissolves because **the namespace topology is not secret; it
@@ -173,7 +173,7 @@ new format (§2.2). Two record kinds:
 # An attachment: a volume this machine expects, named by durable identity.
 attach.system.id       = b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001
 attach.system.fstype   = arxfs
-attach.system.key      = well-known
+attach.system.key      = none
 attach.system.flags    = ro
 
 attach.root.id         = 4c1d9a02-77b3-4a19-9f0e-2ab6d5c31e77
@@ -195,8 +195,10 @@ Binding rules, all fail-closed:
 
 - An attachment is named **only** by `id::<uuid>`. A policy naming a partition
   index or a GPT type is refused.
-- `key` selects the key provenance (`well-known`, `passphrase`, and — with
-  `plans/TPM.md` — `sealed`). It never carries key material.
+- `key` selects the key provenance (`none` for a plaintext volume,
+  `passphrase`, and — with `plans/TPM.md` — `sealed`). It never carries key
+  material, and an attachment whose provenance disagrees with the protection
+  its volume declares is refused.
 - A projection's flags must be a **subset-or-equal** narrowing of its
   attachment's flags. An absent flag list means *preserve* (which is why
   `project./System` needs none — its attachment is already `ro`). A widening
@@ -337,7 +339,7 @@ normal path never derives a key in ring 0.
    loads input and display drivers. (Unchanged: the store is served
    independently of the passphrase, so this happens before any prompt.)
 5. PID 1 starts `nsmgr`; it reads and verifies the namespace policy.
-6. `nsmgr` attaches every `key = well-known` volume and applies its
+6. `nsmgr` attaches every `key = none` volume and applies its
    projections.
 7. For a `key = passphrase` volume, `nsmgr` starts the unlock agent, which
    prompts on the seat. On success the root ARXFS driver attaches the volume.

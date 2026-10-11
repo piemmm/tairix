@@ -22,7 +22,7 @@
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{edge_weight, Theme};
 
 use crate::damage;
 use crate::paint::{
@@ -673,7 +673,7 @@ impl ScrollBar {
 
         // Focus ring around the whole bar, distinct from a hover brighten.
         if self.state.focus.focused {
-            let thickness = if heavy_contrast(theme) { 2 } else { 1 };
+            let thickness = edge_weight(theme.contrast());
             draw_outline(
                 surface,
                 bx,

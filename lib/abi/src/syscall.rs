@@ -702,7 +702,7 @@ impl SyscallNumber {
     ///
     /// Argument: `timeout_ns: u64` (`u64::MAX` for an effectively unbounded
     /// wait). Under design B `login` is spawned **before** the in-kernel
-    /// unlock kthread mounts the encrypted root, so an early
+    /// unlock kthread mounts the root, so an early
     /// [`SyscallNumber::USERS_DB_READ`] reports [`crate::Errno::WouldBlock`]
     /// — the live-but-not-ready signal. Rather than re-reading in a yield
     /// loop (a busy spin), `login` calls this once: the

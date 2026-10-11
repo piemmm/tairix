@@ -372,6 +372,11 @@ This crate owns:
   compositor asks per window row — reads the clamp rather than restating it.
 - `RowReducer` — the reducing arm of that resampler fed a source a row at a
   time, so a decoder reduces a picture it never holds (see "The resampler").
+- `Surface::resample_window_into` / `resample_reach` — one window of a
+  surface's whole resample written into a destination the caller holds, in
+  bands across a job runner, and the destination samples a change to some
+  source samples reaches: the pair a compositor drawing a desktop smaller than
+  its output resamples each frame's damage through.
 - `resample` / `resample_window` / `Surface::resampled` — the single image
   resampler the whole desktop scales through: the icon pipeline fitting a
   bundle's artwork into a slot, the wallpaper pipeline placing a photograph
@@ -510,6 +515,16 @@ axis plans, the filtered-row cache and the accumulator row — and hands it to
 grew; every call replaces all of it before reading any, so nothing one
 resample filtered reaches another. The one-shot entry points hold a scratch
 for the call alone.
+
+A caller that resamples only what changed — the compositor scaling a desktop
+drawn smaller than its output, one damaged rectangle at a time — asks
+`resample_reach` which destination samples a change to some source samples
+reaches. It is answered from the footprints the filter itself reads, so the
+window it names is every sample the whole resample would have changed, and
+`Surface::resample_window_into` writes that window into the destination the
+caller keeps, in bands across a `tairix_parallel::JobRunner` (one
+`ResampleScratch` per band) once the window is large enough to pay for the
+hand-off.
 
 Both axes are windowed, which is what makes a zoom affordable: one
 screen-sized rectangle of a picture scaled a hundredfold costs that

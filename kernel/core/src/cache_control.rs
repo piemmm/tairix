@@ -7,12 +7,12 @@
 //! `cache.transform` / `cache.semantic` switches). This module is the kernel
 //! side of those switches: a process-global [`CacheControl`] holding one
 //! admission flag per live cache class, applied once from the parsed
-//! [`SystemConfig`] as the encrypted root is unlocked (`crate::syscfg`).
+//! [`SystemConfig`] as the root is mounted (`crate::syscfg`).
 //!
 //! # Why a live control, not a construction-time flag
 //!
-//! The store lives on the encrypted root, so it is only readable *after* the
-//! unlock — by which point some caches (the whole-disk block cache) are
+//! The store lives on the root volume, so it is only readable *after* the
+//! mount — by which point some caches (the whole-disk block cache) are
 //! already constructed. Each cache therefore consults the live control at
 //! **admission** and at its per-operation enforcement, exactly as it already
 //! samples the memory-pressure gauge, rather than freezing a mode at

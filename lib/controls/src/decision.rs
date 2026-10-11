@@ -295,6 +295,12 @@ impl Dialog {
         self.message.as_deref()
     }
 
+    /// Replace the message body, keeping the actions and where the pointer
+    /// and the focus are: a message that counts down is one dialog throughout.
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = Some(message.into());
+    }
+
     /// The dialog's inline reason, if any.
     #[must_use]
     pub fn reason(&self) -> Option<&str> {

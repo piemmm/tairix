@@ -21,6 +21,8 @@
 //! | `MemoryPressure` | the published band's depth | rendered from the gauge |
 //! | `DisplayLease` | the boot seat's lease word | the word and its holder's login session, read from the registry |
 //! | `AudioCapture` | a counter bumped when the published count differs | retained here |
+//! | `AudioDevices` | a counter bumped when the published change count differs | retained here |
+//! | `Network` | a counter bumped when the published change count differs | retained here |
 //!
 //! The display lease's word only grows across transitions, so it is its own
 //! generation, and both are read from the seat registry the caller runs
@@ -117,7 +119,8 @@ pub fn may_observe(topic: NoticeTopic, observer: u64) -> bool {
         | NoticeTopic::Mounts
         | NoticeTopic::MemoryPressure
         | NoticeTopic::AudioCapture
-        | NoticeTopic::AudioDevices => true,
+        | NoticeTopic::AudioDevices
+        | NoticeTopic::Network => true,
         NoticeTopic::DisplayLease => {
             binds(DISPLAY_ENDPOINT, observer) || binds(AUDIO_ENDPOINT, observer)
         }
@@ -137,9 +140,10 @@ pub fn binds(endpoint: u64, process: u64) -> bool {
 #[must_use]
 pub fn generation(topic: NoticeTopic, seats: &SeatRegistry) -> u64 {
     match topic {
-        NoticeTopic::Desktop | NoticeTopic::AudioCapture | NoticeTopic::AudioDevices => {
-            SLOTS.lock()[topic.as_u32() as usize].generation
-        }
+        NoticeTopic::Desktop
+        | NoticeTopic::AudioCapture
+        | NoticeTopic::AudioDevices
+        | NoticeTopic::Network => SLOTS.lock()[topic.as_u32() as usize].generation,
         NoticeTopic::Mounts => MOUNT_GENERATION.load(Ordering::Acquire),
         // The band depth *is* the generation, so a move and a move back
         // leave a waiter's view already correct.
@@ -167,7 +171,10 @@ pub fn payload(
     out: &mut [u8],
 ) -> Result<Option<usize>, Errno> {
     match topic {
-        NoticeTopic::Desktop | NoticeTopic::AudioCapture | NoticeTopic::AudioDevices => {
+        NoticeTopic::Desktop
+        | NoticeTopic::AudioCapture
+        | NoticeTopic::AudioDevices
+        | NoticeTopic::Network => {
             let slot = SLOTS.lock()[topic.as_u32() as usize];
             if slot.len == 0 {
                 return Ok(None);
@@ -217,7 +224,10 @@ pub fn publish(notice: &Notice) -> Result<bool, Errno> {
     let topic = notice.topic();
     if !matches!(
         topic,
-        NoticeTopic::Desktop | NoticeTopic::AudioCapture | NoticeTopic::AudioDevices
+        NoticeTopic::Desktop
+            | NoticeTopic::AudioCapture
+            | NoticeTopic::AudioDevices
+            | NoticeTopic::Network
     ) {
         return Err(Errno::PermissionDenied);
     }
@@ -383,6 +393,33 @@ mod tests {
         assert_eq!(
             Notice::decode(NoticeTopic::AudioCapture, &out[..len]),
             Ok(Notice::AudioCapture { live: 1 })
+        );
+    }
+
+    /// Each interface change the network stack counts wakes a subscriber, and
+    /// anyone may read that one happened.
+    #[test]
+    fn each_counted_interface_change_moves_the_generation() {
+        let _registry = registry_guard();
+        let before = generation(NoticeTopic::Network, &NULL_SEAT_REGISTRY);
+        assert_eq!(publish(&Notice::Network { changes: 1 }), Ok(true));
+        let first = generation(NoticeTopic::Network, &NULL_SEAT_REGISTRY);
+        assert_ne!(first, before);
+        assert_eq!(publish(&Notice::Network { changes: 1 }), Ok(false));
+        assert_eq!(generation(NoticeTopic::Network, &NULL_SEAT_REGISTRY), first);
+        assert!(super::may_observe(NoticeTopic::Network, 77));
+        let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+        let len = payload(
+            NoticeTopic::Network,
+            &NULL_SEAT_REGISTRY,
+            &no_processes(),
+            &mut out,
+        )
+        .expect("fits")
+        .expect("published");
+        assert_eq!(
+            Notice::decode(NoticeTopic::Network, &out[..len]),
+            Ok(Notice::Network { changes: 1 })
         );
     }
 

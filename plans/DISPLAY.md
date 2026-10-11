@@ -29,7 +29,8 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 | **D7** | The display-client present path: kernel surfaces, the display service, the desktop session binary, end to end (D7a–D7d) | done |
 | **D8** | The surface handover: who paints the seat's pixels | done |
 | **D9** | The display's power follows its configuration: `SetPower`, the kernel's display-lease notice, one service loop for every display driver, and the Pi's firmware power switch | done |
-| **Open** | A user-settable UI scale | planned |
+| **D10** | A user-settable UI scale | done |
+| **D11** | A user-settable desktop resolution, resampled onto the unchanged output | done |
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -225,22 +226,84 @@ this plan (overwrite each time), recording what landed
 and the exact next work, in the style of the other plans' continuation
 prompts. Plan files state current state, not history (`AGENTS.md` §13).
 
-### Open — a user-settable UI scale
+### Stage D10 — a user-settable UI scale
 
-The density is now honest end to end: the compositor owns the output's
-`Scale`, the session reports it in the desktop record, and every application
-and every session-drawn surface resolves its lengths through the reported
-value rather than a hard-coded 100%. What is still missing is any way for a
-user to *choose* it — nothing in the tree calls `Compositor::set_scale` or
-`DesktopShell::set_scale` outside tests, so the desktop always runs at the
-reference density.
+**Done.** The compositor owns the output's `Scale`, the session reports it in
+the desktop record, and every application and session-drawn surface resolves
+its lengths through the reported value. The user chooses it: it is the `scale`
+key of the user's desktop settings (`lib/wallpaper`), set from Settings'
+Appearance pane, and the session applies a change through
+`DesktopShell::set_scale` and the existing `publish_desktop`.
 
-What remains: a persisted per-seat scale in the desktop's own settings, a
-control that changes it (the Switchboard capsule's quick actions are the
-natural home, beside the light/dark pair), and the runtime application —
-`DesktopShell::set_scale` followed by the existing `publish_desktop`, which
-already relays a change to every subscriber. No ABI change is needed: the
-wire already carries the percentage and every consumer already reads it.
+### Stage D11 — a user-settable desktop resolution
+
+The graphical desktop draws at a resolution the user chooses at or below the
+output's own, and the compositor resamples it onto the output's unchanged
+mode. The display service, every display driver, the scan-out frame, the text
+console, the panic path and memtest never see it. A fixed-pixel panel scales
+any mode but its native one anyway; doing it in the compositor's own frame
+conversion makes it work on every output the desktop drives — the Raspberry
+Pi's firmware framebuffer and HVS included — with no driver change.
+
+- **Modes.** `tairix_geometry::desktop_modes(output)` offers the native size,
+  then each standard VESA/CEA size smaller on both axes, at least 640×360,
+  whose aspect is within 1% of the output's, so the picture fills the output
+  undistorted and nothing is letterboxed. `DesktopInfo` carries the output's
+  size beside the desktop's, so an application derives the same list from the
+  record it already follows.
+- **The setting** is `resolution` in the user's desktop settings
+  (`lib/wallpaper`): `native`, or a `WxH` from the standard set.
+  `Resolution::on(output)` falls back to native on an output that does not
+  offer the stored size, so a stored size never strands a session on another
+  monitor.
+- **The compositor.** `Compositor::set_desktop_size` sizes the back buffer and
+  the frost plane to the desktop and keeps the scan-out at the output; it
+  refuses a zero size, one larger than the output, or an allocation that
+  fails, and changes nothing when it refuses. While the two differ, compose
+  writes the back buffer only, and each composed rectangle, widened by
+  `resample_reach` so every output pixel whose filter reads it is recomputed,
+  is resampled onto an output-sized picture by `lib/raster`'s one resampler,
+  banded across the job runner. The picture is kept between frames, so a fade
+  re-encodes it without resampling. The accelerated layer path is not used
+  while scaled. `screen_rect` is the desktop's rectangle: every layout, hit
+  test and pointer reads desktop pixels.
+- **Convergence.** Outside a trial the drawn size converges on
+  `settings.resolution.on(output)` — at bring-up, on every adopted settings
+  change, and on resume, which re-publishes the desktop record. It waits while
+  a settings publish is outstanding, and while the screen is locked or a
+  screensaver is up, whose surfaces cover the size they were drawn at. A
+  resize re-lays the bar, backdrop and icons; refits every window (fullscreen
+  covers the desktop, maximised fills the work area, restored is held inside
+  the work area and shrunk only where it does not fit, a transient is moved
+  back within reach at its own size); takes down any menu chain or tooltip;
+  holds the pointer on the desktop; publishes the desktop record; and
+  announces `DESKTOP_RESIZED` once a frame shows the desktop whole at its new
+  size, its wallpaper fitted and settled. A frame drawn smaller than its
+  output is counted in desktop pixels, so its totals obey the same rules as
+  an unscaled frame's.
+- **The trial.** A pinboard apply whose resolution resolves to a size other
+  than the one the setting in force draws is held — behind a lock or a
+  screensaver it is answered `Busy` — and the size is drawn at once under a
+  session-owned prompt, *Keep this resolution?*, counting 15 s down on a park
+  deadline with *Keep Changes* focused. Keep merges the held request over the
+  settings then in force and persists it under the held call, and the size
+  stays drawn until the store answers that call. Revert, `Escape`, the
+  countdown, and a trial the session abandons (switching user, logging out,
+  locking) answer the call `Errno::Declined`, and convergence draws the
+  settings' size again and puts back every window the trial's refit moved
+  that nothing has moved since (`Compositor::restore_placements`). While a
+  trial or its kept write is open, every other pinboard apply is answered
+  `Busy`. A key held when the keyboard moves to the prompt does not repeat
+  into it. `TRIAL_SHOWN` and `TRIAL_CONCLUDED` (`kept`, `refused`,
+  `reverted`) witness it.
+- **Session prompts** open at `prompt_origin`: centred, a third of the way
+  down, and wholly on any screen they fit. The two-button prompts (this one
+  and the confirmation) are one `ChoicePrompt`, drawn no wider than the screen
+  with the message wrapped, so neither button is stranded; the credential
+  prompt keeps its fixed layout.
+
+Settings composes the choice on its Displays pane
+(`plans/NEW-DESKTOP-SETTINGS.md`).
 
 ### Stage D1 — `lib/seat`: the arch-neutral seat model
 

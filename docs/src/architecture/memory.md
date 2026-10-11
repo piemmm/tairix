@@ -1449,8 +1449,8 @@ properties:
 - **Bounded and zeroing.** Payload copies are fallibly allocated
   (`try_reserve`); oversized names are refused; and every cached buffer
   (file bytes, names) is zeroed on invalidation, eviction, purge, and
-  teardown — the volumes are encrypted at rest, so cached bytes are
-  decrypted user data that must not linger in reusable heap memory.
+  teardown — cached bytes are user data, decrypted when the volume is
+  encrypted, that must not linger in reusable heap memory.
 - **Read size is a cost, never an admission rule.** Every read is
   cached whatever its length: a read's size decides how its miss is
   *fetched*, never whether the bytes are retained. A miss issues **one**
@@ -1608,8 +1608,8 @@ with it, once per *cluster*.
   (`DeviceFault`) instead. Reflink-shared clusters are only invalidated
   when their stored run is actually freed — a surviving referrer keeps
   the (still identical) plaintext.
-- **Secret hygiene.** The plaintext is decrypted user data from an
-  encrypted-at-rest volume: every buffer is volatilely wiped
+- **Secret hygiene.** The plaintext is user data, decrypted when the
+  volume is encrypted: every buffer is volatilely wiped
   (`zeroize`) when its entry is invalidated, evicted, replaced, purged,
   or torn down, and the driver wipes its own transient frame and
   plaintext scratch on every path of the cluster read, clone, and
@@ -1847,7 +1847,7 @@ calling task across a completion interrupt.
 - **Classification and budget.** Classified through the §7g gate as
   `CleanFileData` (clean, rebuildable, one bounded device read),
   owned by the `boot_block_device` kernel subsystem, treated as user
-  data (the disk carries the encrypted user volume), droppable, and
+  data (the disk carries the user volume), droppable, and
   precisely invalidated by the device's single serialised writer. A
   refusal — or a block size the per-block entry model cannot bound —
   poisons the cache from birth: every operation passes straight

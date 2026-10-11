@@ -19,8 +19,8 @@
 //! within its write cache (`docs/src/filesystem/arxfs-spec.md` §22).
 
 use tairix_abi::DriverError;
-use tairix_crypto::HmacSha256Key;
 
+use crate::crypto::MetaSeal;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 
 /// Commit-record magic stored in the root payload trailer: `"RFSCMMIT"`.
@@ -121,7 +121,7 @@ impl TxnRoot {
         block: &mut [u8],
         fs_uuid: u128,
         phys: u64,
-        key: &HmacSha256Key,
+        seal: &MetaSeal,
     ) -> Result<(), DriverError> {
         if block.len() < P_COMMIT_GENERATION + 8 {
             return Err(DriverError::DeviceFault);
@@ -152,7 +152,7 @@ impl TxnRoot {
             physical_addr: phys,
             payload_len: PAYLOAD_LEN,
         };
-        header.seal(block, key)
+        header.seal(block, seal)
     }
 
     /// Decode and validate the transaction root at physical address `phys`,
@@ -168,9 +168,9 @@ impl TxnRoot {
         fs_uuid: u128,
         phys: u64,
         expect_generation: u64,
-        key: &HmacSha256Key,
+        seal: &MetaSeal,
     ) -> Result<Self, DriverError> {
-        let header = BlockHeader::decode_verify(block, BlockType::TxnRoot, fs_uuid, phys, key)?;
+        let header = BlockHeader::decode_verify(block, BlockType::TxnRoot, fs_uuid, phys, seal)?;
         let generation = rd_u64(block, P_GENERATION);
         if generation != header.generation || generation != expect_generation {
             return Err(DriverError::DeviceFault);
@@ -207,8 +207,8 @@ impl TxnRoot {
     /// Returns `None` for any block that is not a valid committed root at
     /// `phys` (corruption is surfaced as a skip, never panicked).
     #[must_use]
-    pub fn decode_any(block: &[u8], fs_uuid: u128, phys: u64, key: &HmacSha256Key) -> Option<Self> {
-        let header = BlockHeader::try_decode(block, BlockType::TxnRoot, fs_uuid, phys, key)?;
+    pub fn decode_any(block: &[u8], fs_uuid: u128, phys: u64, seal: &MetaSeal) -> Option<Self> {
+        let header = BlockHeader::try_decode(block, BlockType::TxnRoot, fs_uuid, phys, seal)?;
         let generation = rd_u64(block, P_GENERATION);
         if generation != header.generation {
             return None;

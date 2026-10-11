@@ -15,6 +15,11 @@ publish.workspace = true
 # mailbox failures across the driver ABI.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
+[dev-dependencies]
+# The admission harness draws its inputs through the shared seed/budget seam
+# (`tairix_fuzzseed`). Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+
 [features]
 # Expose the protocol-faithful mock firmware (`mock` module) to consumers'
 # host tests. Dev-dependency use only; never enabled by a production build.

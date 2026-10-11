@@ -8,12 +8,12 @@
 //! * **Metadata** — every live metadata block (the committed superblock slot,
 //!   the transaction root, the inode and per-file extent B-trees, and the
 //!   chunk and reverse-reference trees) is authenticated in **both** physical
-//!   copies. A copy that fails the keyed authenticator is **repaired from its
+//!   copies. A copy that fails its authenticator is **repaired from its
 //!   good companion** (the Stage 3 redundancy seam); a both-copies-bad block
 //!   is recorded as an unrepairable finding, fail-closed and never a panic.
 //! * **Data** — every live file-data block is run through the Stage 5/6 read
 //!   pipeline and any failure is classified by its
-//!   [`crate::integrity::DataFault`] (`Physical` / `Aead` / `Logical`) and
+//!   [`crate::integrity::DataFault`] (`Physical` / `Seal` / `Logical`) and
 //!   **recorded**. Deep repair / reconstruction of data is a later stage;
 //!   scrub records honestly rather than pretending to fix what it cannot.
 //! * **Refcounts + reverse references** — the chunk refcounts and reverse-ref
@@ -127,8 +127,9 @@ pub struct ScrubReport {
     pub data_blocks_checked: u64,
     /// Data blocks that failed the fast physical checksum.
     pub data_physical_faults: u64,
-    /// Data blocks whose AEAD tag failed (ciphertext / crypto-trailer tamper).
-    pub data_aead_faults: u64,
+    /// Data blocks whose region seal failed: an encrypted block's AEAD tag, or
+    /// a plaintext block's checksum or address.
+    pub data_seal_faults: u64,
     /// Data blocks whose decrypted plaintext did not match its logical hash.
     pub data_logical_faults: u64,
     /// Chunk records whose refcount diverged from the recomputed truth.
@@ -156,7 +157,7 @@ impl ScrubReport {
             || self.metadata_damaged != 0
             || self.metadata_unrepairable != 0
             || self.data_physical_faults != 0
-            || self.data_aead_faults != 0
+            || self.data_seal_faults != 0
             || self.data_logical_faults != 0
             || self.refcount_divergences != 0
             || self.reverse_ref_divergences != 0
@@ -603,7 +604,7 @@ impl<B: Block> ARXFS<B> {
                 expect_type,
                 self.fs_uuid,
                 phys,
-                &self.mac_key,
+                &self.protection.meta,
             )
             .is_ok();
         let companion_ok = self.read_block(comp, &mut companion).is_ok()
@@ -612,7 +613,7 @@ impl<B: Block> ARXFS<B> {
                 expect_type,
                 self.fs_uuid,
                 phys,
-                &self.mac_key,
+                &self.protection.meta,
             )
             .is_ok();
         match (primary_ok, companion_ok) {
@@ -651,7 +652,7 @@ impl ScrubReport {
     pub(crate) fn note_data_fault(&mut self, fault: DataFault) {
         match fault {
             DataFault::Physical => self.data_physical_faults += 1,
-            DataFault::Aead => self.data_aead_faults += 1,
+            DataFault::Seal => self.data_seal_faults += 1,
             DataFault::Logical => self.data_logical_faults += 1,
         }
     }
@@ -689,7 +690,7 @@ impl<B: Block> ARXFS<B> {
             metadata_unrepairable: counts[2],
             data_blocks_checked: counts[3],
             data_physical_faults: counts[4],
-            data_aead_faults: counts[5],
+            data_seal_faults: counts[5],
             data_logical_faults: counts[6],
             refcount_divergences: counts[7],
             reverse_ref_divergences: counts[8],
@@ -719,7 +720,7 @@ impl<B: Block> ARXFS<B> {
             report.metadata_unrepairable,
             report.data_blocks_checked,
             report.data_physical_faults,
-            report.data_aead_faults,
+            report.data_seal_faults,
             report.data_logical_faults,
             report.refcount_divergences,
             report.reverse_ref_divergences,

@@ -4,11 +4,10 @@
 //! (`tairix-drv-fs-fat32`) — the same code that mounts it on the running
 //! system — so the author and the consumer share one on-disk definition. It carries exactly what the Pi GPU bootloader
 //! reads: the verified firmware blobs, the generated `config.txt`, and the
-//! flat `kernel8.img`. It also carries the volume's plaintext
-//! [`UnlockDescriptor`](tairix_drv_fs_arxfs::UnlockDescriptor) — the
-//! salt + iteration count the bootstrap reads *before* anything is
-//! decrypted, to turn the operator passphrase into the encrypted root's
-//! volume key.
+//! flat `kernel8.img`. Beside an encrypted root it also carries the volume's
+//! plaintext [`UnlockDescriptor`](tairix_drv_fs_arxfs::UnlockDescriptor) — the
+//! salt + iteration count the bootstrap reads *before* anything is decrypted,
+//! to turn the operator passphrase into the root's volume key.
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_drv_fs_fat32::Fat32;
@@ -24,8 +23,9 @@ pub const KERNEL_IMG_NAME: &str = "kernel8.img";
 /// Name of the generated firmware configuration file.
 pub const CONFIG_TXT_NAME: &str = "config.txt";
 
-/// Name of the root volume's plaintext key-derivation descriptor. The bootstrap reads it off this partition *before*
-/// mounting the encrypted root, derives the volume key from the operator
+/// Name of an encrypted root volume's plaintext key-derivation descriptor.
+/// The bootstrap reads it off this partition *before* mounting the root,
+/// derives the volume key from the operator
 /// passphrase under the descriptor's salt + iteration count, and only
 /// then opens the root. It carries no secret — only the public KDF
 /// parameters (see
@@ -90,8 +90,7 @@ const BOOT_FAT_SERIAL: u32 = 0x5253_4F53; // "RSOS"
 
 /// Author the FAT32 boot partition: format `sectors` sectors and plant the
 /// firmware blobs, the first-party overlays, `config.txt`, `kernel8.img`,
-/// and the root volume's
-/// `unlock_descriptor` (the encoded
+/// and — for an encrypted root — its `unlock_descriptor` (the encoded
 /// [`UnlockDescriptor`](tairix_drv_fs_arxfs::UnlockDescriptor) bytes, at
 /// [`ROOT_UNLOCK_NAME`]).
 ///
@@ -103,7 +102,7 @@ pub fn build_boot_partition(
     sectors: u64,
     firmware: &[FirmwareFile],
     kernel8: &[u8],
-    unlock_descriptor: &[u8],
+    unlock_descriptor: Option<&[u8]>,
     console_baud: u32,
 ) -> Result<Vec<u8>, MkimageError> {
     let dev = MemBlock::new(sectors).map_err(MkimageError::BootPartition)?;
@@ -118,7 +117,9 @@ pub fn build_boot_partition(
     plant(&mut fs, PWM_AUDIO_OVERLAY_PATH, &pwm_audio_overlay()?)?;
     plant(&mut fs, CONFIG_TXT_NAME, config.as_bytes())?;
     plant(&mut fs, KERNEL_IMG_NAME, kernel8)?;
-    plant(&mut fs, ROOT_UNLOCK_NAME, unlock_descriptor)?;
+    if let Some(descriptor) = unlock_descriptor {
+        plant(&mut fs, ROOT_UNLOCK_NAME, descriptor)?;
+    }
 
     fs.flush().map_err(MkimageError::BootPartition)?;
     Ok(fs.into_block().into_bytes())
@@ -200,8 +201,14 @@ mod tests {
     fn plants_firmware_config_and_kernel() {
         let kernel8 = vec![0x44u8; 8192];
         let unlock = [0x66u8; 28];
-        let bytes = build_boot_partition(TEST_SECTORS, &test_firmware(), &kernel8, &unlock, 57_600)
-            .expect("boot partition builds");
+        let bytes = build_boot_partition(
+            TEST_SECTORS,
+            &test_firmware(),
+            &kernel8,
+            Some(&unlock),
+            57_600,
+        )
+        .expect("boot partition builds");
         assert_eq!(
             bytes.len(),
             usize::try_from(TEST_SECTORS).expect("fits") * SECTOR_BYTES
@@ -257,7 +264,7 @@ mod tests {
             TEST_SECTORS,
             &firmware,
             &[0x44u8; 16],
-            &[0x66u8; 28],
+            Some(&[0x66u8; 28]),
             crate::CONSOLE_BAUD,
         )
         .expect("boot partition builds");
@@ -277,9 +284,30 @@ mod tests {
             8,
             &test_firmware(),
             &[0x44u8; 16],
-            &[0x66u8; 28],
+            Some(&[0x66u8; 28]),
             crate::CONSOLE_BAUD,
         )
         .is_err());
+    }
+
+    /// A plaintext root's boot partition carries no unlock descriptor.
+    #[test]
+    fn a_plaintext_roots_boot_partition_plants_no_descriptor() {
+        let bytes = build_boot_partition(
+            TEST_SECTORS,
+            &test_firmware(),
+            &[0x44u8; 16],
+            None,
+            crate::CONSOLE_BAUD,
+        )
+        .expect("boot partition builds");
+        let mut fs =
+            Fat32::open(MemBlock::from_bytes(bytes).expect("whole sectors")).expect("mounts");
+        let root = fs.root();
+        assert_eq!(
+            fs.lookup(root, ROOT_UNLOCK_NAME.as_bytes()).err(),
+            Some(tairix_abi::DriverError::NotFound)
+        );
+        assert_eq!(read_back(&mut fs, KERNEL_IMG_NAME), vec![0x44u8; 16]);
     }
 }

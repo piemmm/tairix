@@ -7,16 +7,15 @@
 use alloc::string::String;
 
 use tairix_geometry::Scale;
-use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
 use tairix_controls::damage;
 
 use super::pane::{self, ItemBody};
-use super::{BlockBody, DeviceId, PaneBlock};
-use crate::view::reading::ReadingFact;
+use super::{BlockBody, DeviceId};
 use crate::view::test_support::{
     bounds, model, not_slid_up, pointer, refresh, report, shot, turn, unreported_change,
+    wheel_pixels, with_taller_pane,
 };
 use crate::view::{ListInfo, Sweep, Switchboard, SwitchboardModel};
 
@@ -36,45 +35,13 @@ fn flow(sb: &Switchboard) -> ListInfo {
 }
 
 /// A wheel turned `pixels` pixels' worth at the unit scale.
-fn wheel_pixels(pixels: u32) -> InputEvent {
-    InputEvent::PointerScrolled {
-        dx: 0,
-        dy: i32::try_from(pixels).unwrap_or(0) * 5 / 2,
-    }
-}
-
-/// The fixture model with the memory pane made taller than its flow's
-/// viewport by `blocks` more blocks of facts.
-fn tall_memory(blocks: usize) -> SwitchboardModel {
-    let mut m = model();
-    let memory = m
-        .resources
-        .devices
-        .iter_mut()
-        .find(|device| device.id == DeviceId::Memory)
-        .expect("the fixture carries a memory device");
-    for block in 0..blocks {
-        memory.blocks.push(PaneBlock::full(
-            "KERNEL",
-            BlockBody::Facts(
-                (0..4)
-                    .map(|fact| {
-                        ReadingFact::text(alloc::format!("fact {block}.{fact}"), "measured")
-                    })
-                    .collect(),
-            ),
-        ));
-    }
-    m
-}
-
 #[test]
 fn the_cpu_graph_keeps_its_full_height_when_scrolled_part_way() {
     // Two rows down, the hero's plot is half above the viewport. It keeps the
     // height its band gives it and slides; the viewport's edge cuts it, and
     // the item the bottom edge cuts is drawn at its own size too.
     let theme = Theme::dark();
-    let mut sb = on_device(&model(), DeviceId::Cpu);
+    let mut sb = on_device(&with_taller_pane(model(), DeviceId::Cpu, 2), DeviceId::Cpu);
     let before = shot(&mut sb);
     let list = flow(&sb);
     let by = 2 * list.pitch;
@@ -152,7 +119,10 @@ fn a_banner_stands_above_the_flow_rather_than_being_counted_into_it() {
 #[test]
 fn a_bannered_pane_scrolls_all_the_way_to_its_last_row() {
     let theme = Theme::dark();
-    let mut sb = on_device(&tall_memory(3), DeviceId::Memory);
+    let mut sb = on_device(
+        &with_taller_pane(model(), DeviceId::Memory, 3),
+        DeviceId::Memory,
+    );
     let _ = pointer(&mut sb, bounds(), Scale::ONE, &theme, &turn(40));
     let rows = flow(&sb);
     let pad = tairix_controls::block::content_inset(Scale::ONE, &theme);
@@ -233,7 +203,10 @@ fn a_banner_that_comes_or_goes_repaints_the_pane_it_moved() {
 
 #[test]
 fn the_banner_stands_while_the_flow_scrolls() {
-    let mut sb = on_device(&tall_memory(3), DeviceId::Memory);
+    let mut sb = on_device(
+        &with_taller_pane(model(), DeviceId::Memory, 3),
+        DeviceId::Memory,
+    );
     let before = shot(&mut sb);
     let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &Theme::dark());
     let frame = sb.section_frame(&layout, Scale::ONE, &Theme::dark());

@@ -48,6 +48,7 @@ mod program {
     use tairix_audiod::{exit, AudioChannelTransport, AudioService, RegionHost, RegionId};
     use tairix_caps::CapabilitySet;
     use tairix_log::{log, Event, Level};
+    use tairix_rt::changenotice::ChangeNotice;
     use tairix_rt::{ClockDelay, LogSink};
 
     /// Outstanding-call capacity of the `audio-v1` rendezvous. Every client
@@ -313,15 +314,16 @@ mod program {
     /// the seat's lease for the life of the service.
     fn serve(set: u64, pid: u64) -> i32 {
         let mut service = AudioService::new(RtRegions::new(), RtNotifier, ClockDelay::new());
+        let (mut devices_notice, from) = ChangeNotice::resume(NoticeTopic::AudioDevices);
+        service.resume_changes(from);
         let mut request = [0u8; AUDIO_MAX_REQUEST];
         let mut reply = [0u8; AUDIO_MAX_REPLY];
         let mut notify = [0u8; NOTIFY_BUF];
         let mut published = None;
-        let mut announced = None;
         follow_seat(&mut service);
         loop {
             publish_captures(&service, &mut published);
-            publish_devices(&service, &mut announced);
+            publish_devices(&service, &mut devices_notice);
             let mut token = 0u64;
             let woke = tairix_rt::waitset_wait(set, u64::MAX, &mut token);
             if woke < 0 {
@@ -404,13 +406,8 @@ mod program {
 
     /// Publish the device-change count when it moved, so every surface that
     /// shows a device or its controls reads them again.
-    fn publish_devices(service: &Service, announced: &mut Option<u64>) {
-        let changes = service.changes();
-        if *announced == Some(changes) {
-            return;
-        }
-        *announced = Some(changes);
-        if tairix_rt::notice_publish(&Notice::AudioDevices { changes }) == 0 {
+    fn publish_devices(service: &Service, notice: &mut ChangeNotice) {
+        if notice.announce(service.changes()).is_ok() {
             return;
         }
         log(

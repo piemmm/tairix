@@ -133,6 +133,12 @@ fn detent_px() -> u64 {
     u64::from(SCALE.scale_length(WHEEL_STEP))
 }
 
+/// The fewest wheel units whose share of a detent scrolls `pixels`.
+fn units_for(pixels: u64) -> u64 {
+    let per_detent = u64::try_from(SCROLL_UNITS_PER_DETENT).expect("a positive detent");
+    (pixels * per_detent).div_ceil(detent_px())
+}
+
 /// Scroll the body to `to` pixels with the wheel, turned over the bar so no
 /// row is left hovered.
 fn wheel_to(sheet: &mut Settings, viewport: Rect, to: u64) {
@@ -143,9 +149,8 @@ fn wheel_to(sheet: &mut Settings, viewport: Rect, to: u64) {
     );
     let from = offset(sheet, viewport);
     let pixels = i64::try_from(to).expect("a sane offset") - i64::try_from(from).expect("sane");
-    let per_detent = i64::from(SCROLL_UNITS_PER_DETENT);
-    let units = i32::try_from(pixels * per_detent / i64::try_from(detent_px()).expect("sane"))
-        .expect("a sane turn");
+    let units = i32::try_from(units_for(pixels.unsigned_abs())).expect("a sane turn")
+        * i32::try_from(pixels.signum()).expect("a sign");
     wheel_at(sheet, viewport, bar, units, &mut damage::sink());
     assert_eq!(
         offset(sheet, viewport),
@@ -1169,10 +1174,11 @@ fn a_keyed_scheme_choice_reports_the_editor_caption() {
     let body = body(&sheet, CLIENT);
     let editor = laid_out(&sheet, CLIENT, Focus::Swatches);
     let above = laid_out(&sheet, CLIENT, radio).top() - body.top();
+    let end = resolved(&sheet, CLIENT).1.range().max_offset();
     wheel_to(
         &mut sheet,
         CLIENT,
-        u64::try_from(above).expect("below the top"),
+        u64::try_from(above).expect("below the top").min(end),
     );
     let caption = row_rect(&sheet, CLIENT, Focus::Swatches).expect("the editor row shows");
     assert!(caption.height > editor.height / 4, "enough of it to matter");
@@ -1517,7 +1523,7 @@ fn the_hover_follows_the_rows_the_wheel_moves() {
     let dressing = theme();
     let metrics = dressing.metrics();
     let pitch = SCALE.scale_length(metrics.control_height + metrics.control_gap);
-    let units = to_i32(pitch) * SCROLL_UNITS_PER_DETENT / to_i32(SCALE.scale_length(WHEEL_STEP));
+    let units = i32::try_from(units_for(u64::from(pitch))).expect("a sane turn");
     sheet.on_pointer(
         &InputEvent::PointerScrolled { dx: 0, dy: units },
         CLIENT,

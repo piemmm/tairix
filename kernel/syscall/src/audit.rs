@@ -55,8 +55,8 @@ pub enum AuditEvent {
     /// This is **not** a rejection — the dispatcher's capability and
     /// argument checks all passed and no security decision was taken; the
     /// call simply made no progress (the `abi-v1` `EAGAIN`/`EWOULDBLOCK`
-    /// retry signal, e.g. `users_db_read` while the encrypted root is still
-    /// being unlocked, or a non-blocking `ipc_recv` on an empty mailbox).
+    /// retry signal, e.g. `users_db_read` while the root is still being
+    /// mounted, or a non-blocking `ipc_recv` on an empty mailbox).
     /// It is recorded at [`Level::Debug`] so a caller that legitimately
     /// polls-while-pending cannot flood the log with errors, while the
     /// record remains available for flood/DoS forensics when the level is
@@ -86,8 +86,8 @@ pub enum AuditEvent {
     /// Every dispatcher check passed and no security decision was taken:
     /// the handler simply has nothing behind it to answer with. A layered
     /// lookup that tries an optional source before falling back — the
-    /// device manager reading a settings override from the encrypted root
-    /// before it is mounted, then taking the shipped default — takes this
+    /// device manager reading a settings override from the root before it
+    /// is mounted, then taking the shipped default — takes this
     /// answer on every boot, and on every system where nobody overrode
     /// anything, so it is recorded at [`Level::Debug`] rather than
     /// flooding the boot log with errors. A genuine authorisation refusal
@@ -258,7 +258,7 @@ mod tests {
         // The benign "nothing yet, retry" outcome must never surface at the
         // error level a genuine rejection does — otherwise a caller that
         // legitimately polls while pending (e.g. `login` reading
-        // `users_db_read` while the encrypted root unlocks) floods the boot
+        // `users_db_read` while the root is mounted) floods the boot
         // log with errors. It is `Debug`, below
         // the default `Info` filter, so it is dropped unless the level is
         // lowered for forensics.

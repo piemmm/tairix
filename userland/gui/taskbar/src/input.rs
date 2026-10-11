@@ -210,6 +210,10 @@ pub enum TaskbarResponse {
     /// console's broker and starts the Date & Time application as that
     /// account; the bar holds no such authority and sets no clock itself.
     SetDateTime,
+    /// The network menu's *Network Settings…* row was chosen. The embedder
+    /// opens Settings at the pane that configures the interfaces; the bar
+    /// changes nothing itself.
+    OpenNetworkSettings,
 
     /// A gesture on the Switchboard capsule (or the readout's "Open
     /// Switchboard" safe action) asked to open the Switchboard window at a
@@ -743,8 +747,8 @@ impl TaskbarInput {
     /// the popup closed: a press on a running application's slot asks for the
     /// menu that application declared (and for nothing at all when it declared
     /// none), a press on the Switchboard capsule asks for the desktop's system
-    /// quick actions, a press on the clock asks for its menu; anywhere else on
-    /// the bar is claimed and does nothing.
+    /// quick actions, a press on the clock or the network signal asks for its
+    /// menu; anywhere else on the bar is claimed and does nothing.
     ///
     /// The bar draws no menu: it hands the embedder a model and an anchor, and
     /// the desktop's one chain places, draws, grabs and answers it.
@@ -757,6 +761,14 @@ impl TaskbarInput {
             }
             Some(Hit::Switchboard) => Some(taskbar.system_menu(layout.switchboard, scale)),
             Some(Hit::Clock) => Some(taskbar.clock_menu(layout.clock, scale)),
+            Some(Hit::Notification(index)) if taskbar.is_network_slot(index) => {
+                let anchor = layout
+                    .notifications
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Rect::EMPTY);
+                Some(taskbar.network_menu(anchor, scale))
+            }
             _ => None,
         };
         match asked {

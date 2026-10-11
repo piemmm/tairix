@@ -13,10 +13,10 @@ use tairix_colour::Rgba;
 use crate::motion::{ease_out, smoothstep, MotionInteraction};
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
-    lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind, CursorSet,
-    CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Metrics, Motion,
-    MotionTheme, Palette, SignalRole, SurfaceGround, SyntaxPalette, SyntaxRole, TextRole, Theme,
-    ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
+    edge_weight, lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind,
+    CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Metrics,
+    Motion, MotionTheme, Palette, SignalRole, SurfaceGround, SyntaxPalette, SyntaxRole, TextRole,
+    Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
 };
 
 #[test]
@@ -970,13 +970,15 @@ fn a_floating_surface_casts_a_translucent_shadow_darker_than_the_desktop() {
 #[test]
 fn an_icon_casts_a_shadow_inside_its_tiles_inset() {
     for theme in [Theme::dark(), Theme::light()] {
-        let metrics = theme.metrics();
-        assert!(metrics.icon_shadow_reach > 0, "{}", theme.name());
-        assert!(
-            metrics.icon_shadow_reach < metrics.control_inset / 2,
-            "{}: the shadow reaches past the gap below a tile's picture",
-            theme.name()
-        );
+        for density in Density::ALL {
+            let metrics = theme.metrics().at_density(density);
+            assert!(metrics.icon_shadow_reach > 0, "{}", theme.name());
+            assert!(
+                metrics.icon_shadow_reach < metrics.control_inset / 2,
+                "{} at {density:?}: the shadow reaches past the gap below a tile's picture",
+                theme.name()
+            );
+        }
     }
 }
 
@@ -991,30 +993,34 @@ fn builtins_share_metrics_fonts_and_cursors() {
 
 #[test]
 fn instrument_lines_stay_thinner_than_the_row_that_carries_them() {
-    let dark = Theme::dark();
-    let m = dark.metrics();
+    for density in Density::ALL {
+        let m = Theme::dark().metrics().at_density(density);
 
-    // A slider's groove is the thinnest track: the thumb marks the value, so
-    // the line only has to be visible.
-    assert!(m.measured_thickness < m.progress_thickness);
-    // A chart is a box, not an instrument line: it must have room a track does
-    // not, or a trend cannot rise far enough to be read.
-    assert!(m.progress_thickness < m.chart_height);
-    // A progress bar has no thumb, so it reads a little broader — but it stays
-    // an instrument line, nowhere near a plate.
-    assert!(m.progress_thickness < m.selector_extent);
-    assert!(m.selector_extent < m.control_height);
-    // A composition band is broader still: each of its runs has to be
-    // identifiable against the key under it, which a progress line's breadth
-    // cannot carry. It stays below a plate.
-    assert!(m.progress_thickness < m.composition_thickness);
-    assert!(m.composition_thickness < m.control_height);
-    // Every track survives the thinnest sensible rounding.
-    assert!(m.measured_thickness >= 1);
-    // A slider's knob stands well clear of its groove and well inside its
-    // row, with room above and below it for the ring that marks focus.
-    assert!(m.slider_knob >= m.measured_thickness * 3);
-    assert!(m.slider_knob + 4 * m.border_thickness < m.control_height);
+        // A slider's groove is the thinnest track: the thumb marks the value,
+        // so the line only has to be visible.
+        assert!(m.measured_thickness < m.progress_thickness);
+        // A chart is a box, not an instrument line: it must have room a track
+        // does not, or a trend cannot rise far enough to be read.
+        assert!(m.progress_thickness < m.chart_height);
+        // A progress bar has no thumb, so it reads a little broader — but it
+        // stays an instrument line, nowhere near a plate.
+        assert!(m.progress_thickness < m.selector_extent);
+        assert!(m.selector_extent < m.control_height, "{density:?}");
+        // A composition band is broader still: each of its runs has to be
+        // identifiable against the key under it, which a progress line's
+        // breadth cannot carry. It stays below a plate.
+        assert!(m.progress_thickness < m.composition_thickness);
+        assert!(m.composition_thickness < m.control_height, "{density:?}");
+        // Every track survives the thinnest sensible rounding.
+        assert!(m.measured_thickness >= 1);
+        // A slider's knob stands well clear of its groove and well inside its
+        // row, with room above and below it for the ring that marks focus.
+        assert!(m.slider_knob >= m.measured_thickness * 3);
+        assert!(
+            m.slider_knob + 4 * m.border_thickness < m.control_height,
+            "{density:?}"
+        );
+    }
 }
 
 /// The key a test names a family by.
@@ -1661,6 +1667,47 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
     assert_eq!(normal.at_density(Density::Normal), normal);
 }
 
+/// Each density's control height, inset and gap.
+#[test]
+fn the_density_ladder_steps_from_compact_to_comfortable() {
+    let normal = *Theme::dark().metrics();
+    let step = |m: Metrics| (m.control_height, m.control_inset, m.control_gap);
+    assert_eq!(step(normal.at_density(Density::Compact)), (21, 8, 6));
+    assert_eq!(step(normal), (24, 9, 7));
+    assert_eq!(step(normal.at_density(Density::Comfortable)), (28, 10, 8));
+}
+
+/// Under either heavier contrast every rim is twice as heavy, and a row still
+/// holds a slider's knob with its focus ring, two rims wide, above and below
+/// it, at every density; normal contrast leaves the ladder as it is.
+#[test]
+fn every_row_holds_a_ringed_knob_at_every_density_and_contrast() {
+    for density in Density::ALL {
+        for contrast in [Contrast::Normal, Contrast::High, Contrast::Monochrome] {
+            let theme = Theme::dark().with_axes(Accessibility {
+                contrast,
+                density,
+                ..Accessibility::default()
+            });
+            let m = theme.metrics();
+            let rim = m.border_thickness * edge_weight(contrast);
+            assert!(
+                m.slider_knob + 4 * rim <= m.control_height,
+                "{density:?} at {contrast:?}"
+            );
+        }
+        let plain = Theme::dark().with_axes(Accessibility {
+            density,
+            ..Accessibility::default()
+        });
+        assert_eq!(
+            *plain.metrics(),
+            Theme::dark().metrics().at_density(density),
+            "{density:?}"
+        );
+    }
+}
+
 #[test]
 fn a_spacing_metric_never_rounds_away_to_nothing() {
     let mut metrics = *Theme::dark().metrics();
@@ -1691,7 +1738,10 @@ fn the_axes_reach_the_theme_a_surface_actually_draws_with() {
     assert!(drawn.motion().reduced_motion());
     assert_eq!(
         *drawn.metrics(),
-        plain.metrics().at_density(Density::Comfortable)
+        plain
+            .metrics()
+            .at_density(Density::Comfortable)
+            .at_contrast(Contrast::High)
     );
     // The selection itself is untouched: the axes are the desktop's, not
     // the theme's, so a surface editing them still reads what the theme

@@ -153,7 +153,7 @@ mod program {
     /// registration store, so no enrolment record could govern them. The
     /// enrolled tier is registered only where the effective enrolment enables
     /// it; at boot that is the image's layer alone, because the
-    /// administrator's overrides live on the encrypted root, so the manager
+    /// administrator's overrides live on the root volume, so the manager
     /// boots on the image's decision and narrows to the administrator's as soon
     /// as that document appears.
     fn register_startup_services(engine: &mut Init<'_>, config: &StartupConfig<'_>) -> bool {
@@ -309,8 +309,9 @@ mod program {
     /// How long PID 1 waits before its first attempt to read the
     /// administrator's enrolment overrides, and the base its retry doubles.
     ///
-    /// The document lives on the encrypted root, which is unlocked a few
-    /// seconds after PID 1 starts, and no userland event says when — so the
+    /// The document lives on the root volume, which is mounted shortly after
+    /// PID 1 starts — later still while an encrypted root waits for its
+    /// passphrase — and no userland event says when, so the
     /// wait is a bounded doubling one-shot ladder, never a poll.
     const OVERRIDE_RETRY_BASE: Duration64 = Duration64::from_secs(1);
 
@@ -324,7 +325,7 @@ mod program {
     /// identical from here.
     const OVERRIDE_RETRY_ATTEMPTS: u32 = 6;
 
-    /// Read the administrator's override layer off the encrypted root, or
+    /// Read the administrator's override layer off the root volume, or
     /// `None` while the document is unreachable.
     ///
     /// A document that is present but malformed resolves to the empty layer —
@@ -402,7 +403,7 @@ mod program {
         engine: &'a mut Init<'cfg>,
         reaper: &'a LoopReaper,
         /// The bounded one-shot schedule for reading the administrator's
-        /// enrolment overrides off the encrypted root, or `None` once they
+        /// enrolment overrides off the root volume, or `None` once they
         /// have been adopted or the ladder is spent.
         override_retry: Option<RetryLadder>,
         /// Call tickets of clients the engine parked, awaiting their

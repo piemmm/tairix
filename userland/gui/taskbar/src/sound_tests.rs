@@ -10,7 +10,7 @@ use tairix_theme::Theme;
 
 use super::{OutputState, SoundAction, SoundState, RECORDING_SIGNAL, VOLUME_SIGNAL};
 use crate::input::{TaskbarInput, TaskbarResponse};
-use crate::notifications::{IconId, StatusKind, StatusSignal};
+use crate::notifications::StatusKind;
 use crate::repaint::TaskbarRepaint;
 use crate::taskbar::{Taskbar, TaskbarConfig};
 
@@ -25,7 +25,7 @@ fn bar() -> Taskbar {
     bar
 }
 
-fn speakers(level: i32, muted: bool, may_change: bool) -> SoundState {
+pub(crate) fn speakers(level: i32, muted: bool, may_change: bool) -> SoundState {
     SoundState {
         output: Some(OutputState {
             device_id: 3,
@@ -81,10 +81,7 @@ fn open(input: &mut TaskbarInput, bar: &mut Taskbar) {
 #[test]
 fn the_signals_follow_the_output_and_the_recording() {
     let mut bar = bar();
-    bar.set_status_signals(alloc::vec![StatusSignal::new(
-        IconId(9),
-        StatusKind::Network
-    )]);
+    assert!(bar.set_network(Some(crate::network::tests::connected())));
     let _ = bar.take_repaint();
     let _ = bar.set_sound(speakers(-600, false, true));
     let kinds = |bar: &Taskbar| -> alloc::vec::Vec<StatusKind> {

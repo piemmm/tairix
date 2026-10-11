@@ -204,6 +204,28 @@ struct EntrySurface {
     repaint: Repaint,
 }
 
+/// How long the pointer may rest on a sibling row it crossed on its way to an
+/// open child before the crossing counts as choosing that row.
+pub const SUBMENU_SETTLE_NS: u64 = 300 * tairix_abi::time::NANOS_PER_MILLI;
+
+/// How far, in logical pixels, a path may wander from where it left the open
+/// row before it has a heading: a move that small is the hand settling, not a
+/// direction.
+const AIM_SLACK: u32 = 4;
+
+/// A crossing of a sibling row, deferred because the pointer was heading into
+/// the open child: it settles onto `row` at `due_ns` unless the pointer reaches
+/// the child or turns away first.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Settle {
+    /// The plate whose row was crossed.
+    depth: usize,
+    /// The row under the pointer.
+    row: usize,
+    /// When the crossing becomes a choice.
+    due_ns: u64,
+}
+
 /// A drag in flight: which plate the band press landed on, and where the
 /// pointer was when the plate last moved.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -272,6 +294,21 @@ struct OpenChain {
     /// Where the root plate opens, in screen pixels.
     placement: PlatePlacement,
     drag: Option<Drag>,
+    /// The pointer's previous position: a sample that has not moved decides
+    /// nothing.
+    last_pointer: Option<Point>,
+    /// Where the pointer last stood on the row whose child is open, or where
+    /// it was when that child opened: the apex a path aimed at the child is
+    /// measured from. It stays put while the path crosses the rows beside the
+    /// open one, so a slow or stepped path is judged by where it is heading
+    /// rather than by its last step.
+    aim_apex: Option<Point>,
+    /// A sibling crossing waiting to become a choice.
+    settle: Option<Settle>,
+    /// The plate whose open row has lent its highlight to the row the pointer
+    /// rests on, one that can open nothing, so its Authority Mark can be
+    /// read. The open row takes it back once the pointer is anywhere else.
+    lent: Option<usize>,
     /// The answer this chain has settled on, once something has ended it.
     outcome: Option<ChainOutcome>,
     /// The screen and output mode the chain was placed against.
@@ -383,6 +420,10 @@ impl MenuChain {
             entry: None,
             placement,
             drag: None,
+            last_pointer: None,
+            aim_apex: None,
+            settle: None,
+            lent: None,
             outcome: None,
             mode: geom.mode(),
             shown: false,
@@ -716,6 +757,25 @@ impl MenuChain {
         moved && self.close_open()
     }
 
+    /// The park this seat needs, shortened to the moment a deferred crossing
+    /// becomes a choice. No deferral, no deadline: a quiet chain wakes nothing.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        match self.open.as_ref().and_then(|chain| chain.settle) {
+            Some(settle) => park_ns.min(settle.due_ns.saturating_sub(now_ns)),
+            None => park_ns,
+        }
+    }
+
+    /// Settle a deferred crossing that has come due at `now_ns`, answering
+    /// whether the chain changed. A pointer at rest sends nothing, so this is
+    /// what makes a rest on a crossed row choose it.
+    pub fn tick(&mut self, now_ns: u64, geom: &ChainGeometry<'_>) -> bool {
+        self.open
+            .as_mut()
+            .is_some_and(|chain| chain.settle_due(now_ns, geom))
+    }
+
     /// Close the chain if `window_id` owns it — the window closed, or the
     /// application behind it died. Returns whether it did.
     pub fn dismiss_owner(&mut self, window_id: u64) -> bool {
@@ -733,16 +793,21 @@ impl MenuChain {
         event: &InputEvent,
         pointer: Point,
         geom: &ChainGeometry<'_>,
+        now_ns: u64,
     ) -> ChainAction {
         let Some(chain) = self.open.as_mut() else {
             return ChainAction::Consumed;
         };
         let acted = match event {
-            InputEvent::KeyPressed { key, .. } => chain.on_key(*key, geom),
+            InputEvent::KeyPressed { key, .. } => {
+                chain.settle = None;
+                chain.last_pointer = Some(pointer);
+                chain.on_key(*key, geom)
+            }
             InputEvent::KeyReleased { .. } | InputEvent::ModifiersChanged { .. } => {
                 ChainAction::Consumed
             }
-            _ => chain.on_pointer(event, pointer, geom),
+            _ => chain.on_pointer(event, pointer, geom, now_ns),
         };
         if matches!(acted, ChainAction::Closed) {
             let outcome = chain_outcome(self.open.as_mut());
@@ -889,8 +954,8 @@ impl OpenChain {
 
     /// The region a child of the plate at `depth` is placed against: that
     /// plate's own horizontal span, at the height of the row whose child it
-    /// is. Edge-adjacency to the plate is what leaves the pointer no dead gap
-    /// to cross on its way in.
+    /// is. Edge-adjacency leaves only the plate's rim between a row and its
+    /// child, and a point on no row closes nothing.
     fn child_anchor(&self, depth: usize, geom: &ChainGeometry<'_>) -> Rect {
         let Some(plate) = self.plates.get(depth) else {
             return Rect::EMPTY;
@@ -956,12 +1021,27 @@ impl OpenChain {
         event: &InputEvent,
         pointer: Point,
         geom: &ChainGeometry<'_>,
+        now_ns: u64,
     ) -> ChainAction {
+        let moved = matches!(event, InputEvent::PointerMoved { .. });
+        let from = if moved {
+            self.last_pointer.replace(pointer)
+        } else {
+            None
+        };
         if let Some(action) = self.drag_pointer(event, pointer, geom) {
             return action;
         }
         let hit = self.surface_at(pointer);
-        match (event, hit) {
+        // A deferral lives only while the pointer moves over the plate it
+        // deferred on: a press, a scroll, or reaching the child ends it.
+        if !moved
+            || !matches!(hit, Some(Hit::Plate(depth)) if self.settle.is_some_and(|s| s.depth == depth))
+        {
+            self.settle = None;
+        }
+        let reclaimed = self.reclaim_highlight(hit, geom);
+        let acted = match (event, hit) {
             // A press with nothing of the chain under it ends the chain, and
             // the press goes no further: a dismissal is not also a click on
             // what the menu was covering.
@@ -971,17 +1051,58 @@ impl OpenChain {
             (_, Some(Hit::Info) | None) => ChainAction::Consumed,
             // The field is a control, so a press in it positions its caret.
             (_, Some(Hit::Entry)) => self.entry_pointer(event, geom),
-            (_, Some(Hit::Plate(depth))) => self.plate_pointer(depth, event, pointer, geom),
+            (_, Some(Hit::Plate(depth))) => {
+                self.plate_pointer(depth, event, (from, pointer), geom, now_ns)
+            }
+        };
+        if reclaimed && acted == ChainAction::Consumed {
+            ChainAction::Redraw
+        } else {
+            acted
         }
     }
 
-    /// Route a pointer event that landed on the plate at `depth`.
+    /// Give the open row back the highlight it lent, unless `keep` is the
+    /// plate that borrowed it. Answers whether that moved the highlight.
+    fn reclaim_highlight(&mut self, keep: Option<Hit>, geom: &ChainGeometry<'_>) -> bool {
+        let Some(depth) = self.lent else {
+            return false;
+        };
+        if keep == Some(Hit::Plate(depth)) {
+            return false;
+        }
+        self.lent = None;
+        let Some(plate) = self.plates.get_mut(depth) else {
+            return false;
+        };
+        plate.menu.hold(plate.open_row);
+        let rows = rows_rect(plate, geom);
+        let mut damage = damage::sink();
+        plate
+            .menu
+            .refresh_hover(rows, geom.scale, geom.theme, &mut damage);
+        self.mark_plate(depth, &damage);
+        !damage.is_empty()
+    }
+
+    /// Whether row `index` of the plate at `depth` can open or do anything.
+    fn actionable(&self, depth: usize, index: usize) -> bool {
+        self.plates
+            .get(depth)
+            .and_then(|plate| plate.rows.get(index))
+            .and_then(|&row| self.model.rows().get(row))
+            .is_some_and(|entry| entry.drawn().state().is_actionable())
+    }
+
+    /// Route a pointer event that landed on the plate at `depth`, at `pointer`
+    /// from the previous sample.
     fn plate_pointer(
         &mut self,
         depth: usize,
         event: &InputEvent,
-        pointer: Point,
+        (from, pointer): (Option<Point>, Point),
         geom: &ChainGeometry<'_>,
+        now_ns: u64,
     ) -> ChainAction {
         let Some(plate) = self.plates.get_mut(depth) else {
             return ChainAction::Consumed;
@@ -994,45 +1115,149 @@ impl OpenChain {
         );
         let mut damage = damage::sink();
         if band.contains(pointer) {
+            // The band is no row, so a crossing waiting there has not been
+            // rested on, and no row the pointer left keeps a lent highlight.
+            self.settle = None;
+            let reclaimed = self.reclaim_highlight(None, geom);
+            let Some(plate) = self.plates.get_mut(depth) else {
+                return ChainAction::Consumed;
+            };
             let acted = plate
                 .band
                 .on_pointer(event, band, geom.scale, geom.theme, &mut damage);
             self.mark_plate(depth, &damage);
-            return self.band_event(depth, acted, pointer, geom);
+            let answered = self.band_event(depth, acted, pointer, geom);
+            return if reclaimed && answered == ChainAction::Consumed {
+                ChainAction::Redraw
+            } else {
+                answered
+            };
         }
         let rows = rows_rect(plate, geom);
+        if matches!(event, InputEvent::PointerMoved { .. }) {
+            let over = plate.menu.row_at(rows, geom.scale, geom.theme, pointer);
+            let steered = self.steer(depth, over, (from, pointer), now_ns, geom);
+            let open = self.plates.get(depth).and_then(|plate| plate.open_row);
+            // The row whose child is open keeps the highlight however the
+            // pointer reaches the child, except to a row that can open
+            // nothing, which borrows it while the pointer rests there.
+            let lend = open.is_some()
+                && self.settle.is_none()
+                && over.is_some_and(|row| Some(row) != open && !self.actionable(depth, row));
+            self.lent = lend.then_some(depth);
+            let Some(plate) = self.plates.get_mut(depth) else {
+                return steered;
+            };
+            // Whether the highlight moved is the row control's answer, so
+            // travel within one row costs no repaint.
+            plate.menu.hold(if lend { None } else { plate.open_row });
+            let _ = plate
+                .menu
+                .on_pointer(event, rows, geom.scale, geom.theme, &mut damage);
+            self.mark_plate(depth, &damage);
+            return if steered == ChainAction::Consumed && !damage.is_empty() {
+                ChainAction::Redraw
+            } else {
+                steered
+            };
+        }
         let acted = plate
             .menu
             .on_pointer(event, rows, geom.scale, geom.theme, &mut damage);
-        let over = plate.menu.row_at(rows, geom.scale, geom.theme, pointer);
         self.mark_plate(depth, &damage);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(depth, index, geom),
             // A click on a row that opens a child keeps its child open
             // rather than acting: the child is what the row is for.
-            Some(MenuAction::OpenSubmenu { index }) => self.arrive(depth, Some(index), geom),
+            Some(MenuAction::OpenSubmenu { index }) => self.arrive(depth, index, geom),
             Some(MenuAction::Dismissed) => self.closing(ChainOutcome::Dismissed),
-            None => {
-                // Arrival, with no click and no timer: a child opens when the
-                // pointer reaches its row and closes when the pointer settles
-                // on a *different* row of the same plate — never merely
-                // because it left the row's rectangle, which is what
-                // travelling into the child does.
-                //
-                // Whether the *highlight* moved is the row control's answer,
-                // reported as damage, so a pointer travelling within one row
-                // costs no repaint.
-                let acted = if matches!(event, InputEvent::PointerMoved { .. }) {
-                    self.arrive(depth, over, geom)
-                } else {
-                    ChainAction::Consumed
-                };
-                if acted == ChainAction::Consumed && !damage.is_empty() {
-                    return ChainAction::Redraw;
-                }
-                acted
-            }
+            None if damage.is_empty() => ChainAction::Consumed,
+            None => ChainAction::Redraw,
         }
+    }
+
+    /// Decide what a pointer step onto `over` of the plate at `depth` means.
+    ///
+    /// A point on no row changes nothing: the rim and a group break lie
+    /// between rows, never on a different one. A step onto a sibling of the row
+    /// whose child is open waits while it heads into that child, so a diagonal
+    /// path to the child may cross the row beneath; any other step chooses the
+    /// row at once. A step that goes nowhere decides nothing.
+    fn steer(
+        &mut self,
+        depth: usize,
+        over: Option<usize>,
+        (from, to): (Option<Point>, Point),
+        now_ns: u64,
+        geom: &ChainGeometry<'_>,
+    ) -> ChainAction {
+        if from == Some(to) {
+            return ChainAction::Consumed;
+        }
+        let Some(row) = over else {
+            self.settle = None;
+            return ChainAction::Consumed;
+        };
+        let open = self.plates.get(depth).and_then(|plate| plate.open_row);
+        if open == Some(row) {
+            self.settle = None;
+            self.aim_apex = Some(to);
+            return ChainAction::Consumed;
+        }
+        let slack = geom.scale.scale_length(AIM_SLACK).max(1);
+        let aiming = open.is_some()
+            && self.aim_apex.is_some_and(|apex| {
+                let parent = self.plates.get(depth).map(|plate| plate.rect);
+                parent
+                    .zip(self.child_rect(depth))
+                    .is_some_and(|(parent, child)| heads_into(apex, to, child, parent, slack))
+            });
+        if aiming {
+            self.settle = Some(Settle {
+                depth,
+                row,
+                due_ns: now_ns.saturating_add(SUBMENU_SETTLE_NS),
+            });
+            return ChainAction::Consumed;
+        }
+        self.settle = None;
+        self.arrive(depth, row, geom)
+    }
+
+    /// The surface hanging off the plate at `depth`: the next plate down, or the
+    /// panel or field on the deepest.
+    fn child_rect(&self, depth: usize) -> Option<Rect> {
+        if let Some(plate) = self.plates.get(depth + 1) {
+            return Some(plate.rect);
+        }
+        if depth + 1 != self.plates.len() {
+            return None;
+        }
+        self.info
+            .as_ref()
+            .map(|info| info.rect)
+            .or_else(|| self.entry.as_ref().map(|entry| entry.rect))
+    }
+
+    /// Make a deferred crossing that has come due the choice it was waiting to
+    /// be: the pointer rested on the crossed row.
+    fn settle_due(&mut self, now_ns: u64, geom: &ChainGeometry<'_>) -> bool {
+        let Some(settle) = self.settle.filter(|settle| now_ns >= settle.due_ns) else {
+            return false;
+        };
+        self.settle = None;
+        let changed = self.arrive(settle.depth, settle.row, geom) != ChainAction::Consumed;
+        let Some(plate) = self.plates.get_mut(settle.depth) else {
+            return changed;
+        };
+        plate.menu.hold(plate.open_row);
+        let rows = rows_rect(plate, geom);
+        let mut damage = damage::sink();
+        plate
+            .menu
+            .refresh_hover(rows, geom.scale, geom.theme, &mut damage);
+        self.mark_plate(settle.depth, &damage);
+        changed || !damage.is_empty()
     }
 
     /// Fold a control's reported damage — screen rectangles, because that is
@@ -1162,29 +1387,15 @@ impl OpenChain {
         ChainAction::Redraw
     }
 
-    /// The pointer settled on `row` of the plate at `depth`.
-    fn arrive(
-        &mut self,
-        depth: usize,
-        row: Option<usize>,
-        geom: &ChainGeometry<'_>,
-    ) -> ChainAction {
+    /// The pointer settled on row `index` of the plate at `depth`: it opens
+    /// that row's child, closing whatever the plate had open.
+    fn arrive(&mut self, depth: usize, index: usize, geom: &ChainGeometry<'_>) -> ChainAction {
         let Some(plate) = self.plates.get(depth) else {
             return ChainAction::Consumed;
         };
-        if plate.open_row == row {
+        if plate.open_row == Some(index) {
             return ChainAction::Consumed;
         }
-        // A row with no child still closes the child the plate had: the
-        // pointer settling elsewhere on this plate is exactly the rule that
-        // closes an open child.
-        let Some(index) = row else {
-            if plate.open_row.is_none() {
-                return ChainAction::Consumed;
-            }
-            self.truncate_to(depth);
-            return ChainAction::Redraw;
-        };
         let Some(&model_row) = plate.rows.get(index) else {
             return ChainAction::Consumed;
         };
@@ -1205,11 +1416,12 @@ impl OpenChain {
             matches!(child, ChainChild::Entry(..)).then(|| entry.drawn().label().to_string());
         // Whether anything was actually taken down, which is what tells a
         // no-child arrival from one that closed a plate.
-        let closed = self.plates.len() > depth + 1 || self.info.is_some();
+        let closed = self.plates.len() > depth + 1 || self.info.is_some() || self.entry.is_some();
         self.truncate_to(depth);
         if let Some(plate) = self.plates.get_mut(depth) {
             plate.open_row = Some(index);
         }
+        self.aim_apex = self.last_pointer;
         match child {
             // A row with no child opened nothing, so whether anything has to
             // be redrawn is the highlight's question, not this one's.
@@ -1346,7 +1558,7 @@ impl OpenChain {
             // A submenu and the information row name no id, so there is
             // nothing for choosing one to answer: activating one opens or
             // keeps the child it is for.
-            None => self.arrive(depth, Some(index), geom),
+            None => self.arrive(depth, index, geom),
         }
     }
 
@@ -1395,7 +1607,7 @@ impl OpenChain {
         self.mark_plate(deepest, &damage);
         match acted {
             Some(MenuAction::Activated { index }) => self.choose(deepest, index, geom),
-            Some(MenuAction::OpenSubmenu { index }) => self.arrive(deepest, Some(index), geom),
+            Some(MenuAction::OpenSubmenu { index }) => self.arrive(deepest, index, geom),
             Some(MenuAction::Dismissed) => self.closing(ChainOutcome::Dismissed),
             None => {
                 if damage.is_empty() {
@@ -1600,6 +1812,42 @@ fn plate_extent(plate: &Plate, geom: &ChainGeometry<'_>) -> (u32, u32) {
         .saturating_add(plate.menu.preferred_height(geom.scale, geom.theme))
         .max(1);
     (width, height)
+}
+
+/// Whether a path from `apex` that has reached `to` heads into `child`, which
+/// hangs beside `parent`: `to` is still within `slack` of the apex, where a
+/// path has no heading yet, or lies in the triangle from the apex to the
+/// child's near edge, the band a pointer aimed anywhere at the child moves
+/// through.
+fn heads_into(apex: Point, to: Point, child: Rect, parent: Rect, slack: u32) -> bool {
+    if to.x.abs_diff(apex.x) <= slack && to.y.abs_diff(apex.y) <= slack {
+        return true;
+    }
+    let doubled_centre = |rect: Rect| i64::from(rect.left()) * 2 + i64::from(rect.width);
+    let near = if doubled_centre(child) >= doubled_centre(parent) {
+        child.left()
+    } else {
+        child.right()
+    };
+    in_triangle(
+        to,
+        [
+            apex,
+            Point::new(near, child.top()),
+            Point::new(near, child.bottom()),
+        ],
+    )
+}
+
+/// Whether `p` lies inside or on the triangle `corners`: on no side of any
+/// edge opposite to the others.
+fn in_triangle(p: Point, [a, b, c]: [Point; 3]) -> bool {
+    let side = |u: Point, v: Point| {
+        (i64::from(v.x) - i64::from(u.x)) * (i64::from(p.y) - i64::from(u.y))
+            - (i64::from(v.y) - i64::from(u.y)) * (i64::from(p.x) - i64::from(u.x))
+    };
+    let turns = [side(a, b), side(b, c), side(c, a)];
+    !(turns.iter().any(|&t| t < 0) && turns.iter().any(|&t| t > 0))
 }
 
 /// The screen rectangle a plate's rows occupy, below its band.

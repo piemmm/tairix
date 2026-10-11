@@ -143,13 +143,19 @@ fn statement_of(pane: Pane) -> (&'static str, &'static str) {
     (missing, needs)
 }
 
-/// Displays names where the interface scale is set, which is true only while
-/// that pane offers the row.
+/// Displays sets the resolution the desktop is drawn at, and the interface
+/// scale stays where every other length the desktop draws is set.
 #[test]
-fn the_displays_pane_points_to_where_the_interface_scale_is_set() {
-    let (missing, _) = statement_of(Pane::Displays);
+fn the_displays_pane_sets_the_resolution_and_appearance_keeps_the_scale() {
+    let Some((_, row)) = Pane::Displays.locate() else {
+        panic!("Displays is not listed");
+    };
+    assert_eq!(
+        row.backing,
+        PaneBacking::Composed(PaneContent::Form(Composition::Displays))
+    );
+    assert_eq!(row.settings, [Setting::Resolution.label()]);
     let appearance = Category::Appearance.row().expect("appearance is listed");
-    assert!(missing.contains(appearance.label), "{missing}");
     assert!(appearance
         .panes
         .iter()

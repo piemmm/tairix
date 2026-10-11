@@ -33,7 +33,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{edge_weight, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
@@ -283,7 +283,7 @@ impl Breadcrumb {
     /// as `plate_border`/`rail_thickness` already do for their own edges.
     fn chevron_width(theme: &Theme, font: BitmapFont) -> u32 {
         font.glyph_height()
-            .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+            .saturating_mul(edge_weight(theme.contrast()))
     }
 
     /// The width one chevron occupies together with the gap either side.

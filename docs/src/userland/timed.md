@@ -101,7 +101,7 @@ Two keys in `/System/Settings/Configuration/system.conf`:
 * `time.refresh` — `6h`, `12h`, `1d` (the default), `2d`, or `7d`: how much
   *uptime* passes between steady-state re-queries.
 
-The store lives on the encrypted root and this service starts before that root
+The store lives on the root volume and this service starts before that root
 is mounted, so its first read normally finds nothing. There is no userland
 event for "the root is mounted", so the tiers are re-selected on a bounded,
 doubling schedule folded into the reactor's own deadline — about seventeen

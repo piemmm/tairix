@@ -1870,25 +1870,20 @@ user mode (operator metal acceptance).
   written. `armstub8.bin` is optional and unpinned — no official binary
   exists and the boot stub parks secondaries itself; it joins the
   manifest when SMP-on-metal needs it.
-- Root partition: an encrypted ARXFS volume (no plaintext mode) carrying
-  the §16 skeleton (`/System` + its twelve subdirectories incl.
-  `Security/{Keys,Policy}`, `/Users`, `/Apps`, `/Storage`); the §11
-  databases/users are the installer's first-boot job. The volume key is
-  **passphrase-derived** (§11): the build provisions a per-volume arxfs
-  `UnlockDescriptor` (random salt + PBKDF2 cost), derives the key from the
-  profile's `passphrase_for` (`INSTALLER_PASSPHRASE` — **blank** — for the
-  installer; `DEBUG_PASSPHRASE` — `root` — for the never-shipped debug
-  image), provisions the root under it, and plants the plaintext descriptor
-  on the FAT boot partition as `root.unlock` (the LUKS-header analogue the
-  bootstrap reads before mounting). The bootstrap tries the **blank**
-  passphrase silently first, so the installer image unlocks with **no
-  prompt** and boots straight into the §11 installer; only a non-blank
-  passphrase (debug `root`, or a production operator-chosen one) draws the
-  `Root passphrase:` prompt. The derived key is written to the sibling
-  `…-rpi.rootkey` file (0600) for host mounting — never inside the image,
-  and re-derivable from `root.unlock` + the profile passphrase. A shippable
-  user root is unlocked by an operator-chosen passphrase the installer sets,
-  never a blank default.
+- Root partition: an ARXFS volume carrying the §16 skeleton (`/System` +
+  its twelve subdirectories incl. `Security/{Keys,Policy}`, `/Users`,
+  `/Apps`, `/Storage`); the §11 databases/users are the installer's
+  first-boot job. It is **plaintext** in both profiles, so the image boots
+  with no passphrase. `--encrypt-root`, a debug image's only
+  (`ImageKind::new`), instead formats it under a key derived from
+  `DEBUG_PASSPHRASE` (`root`) through a per-volume arxfs `UnlockDescriptor`
+  (random salt + PBKDF2 cost) and plants the plaintext descriptor on the FAT
+  boot partition as `root.unlock` (the LUKS-header analogue the bootstrap
+  reads before mounting); the boot then draws the `ARXFS passphrase:`
+  prompt. The derived key is written to the sibling `…-rpi.rootkey` file
+  (0600, `write_root_key`) for host mounting — never inside the image, and
+  re-derivable from `root.unlock` + the passphrase. Whether to encrypt a real
+  installation is the installer's question to its user (§11).
 - Entry points: `cargo xtask image --target aarch64-rpi` and the
   delegating `cargo xtask build --target aarch64-rpi` (`--headless`
   accepted; the image content is identical until installable GUI userland
@@ -1956,14 +1951,21 @@ sequences; the `B` items are design B, the pre-unlock store (below).
 
 **Input — done.** USB input comes up entirely in user space, as a chain of
 signed driver bundles in the read-only `/System` volume's `/System/Drivers/`
-store, autoloaded before the encrypted root is unlocked (design B, below).
+store, autoloaded before the root is mounted (design B, below).
 Each is its own crate with its device logic co-located as a `lib` target
 (§2.22):
 
 1. `drivers/bus/pcie_brcm` binds the discovered `brcm,bcm2711-pcie` node,
    trains the link and publishes the VL805's PCI function;
 2. `drivers/bus/mailbox/vcmailbox` serves the VideoCore mailbox, its
-   property layout shared through `lib/vcmailbox`;
+   property layout shared through `lib/vcmailbox`. `CAP_MAILBOX` lets a
+   driver ask; `lib/vcmailbox::admit_request` decides what reaches the
+   firmware: one tag of a driver's working set, word for word in its shape,
+   from the driver the kernel attests is loaded for that tag's device
+   (`call_peer_node`), and nothing else. The device keys live in
+   `lib/vcmailbox` and each driver's bind table is built from its key. The
+   firmware runs code on the GPU and the GPU masters the bus, so an
+   unfiltered mailbox would hand one compromised client the machine;
 3. `drivers/bus/usb/vl805` reloads the VL805 firmware and only then
    publishes the `usb,xhci` node, so firmware-before-bring-up holds by
    construction;
@@ -2055,8 +2057,9 @@ Each fact below was established on metal and is pinned by a
   mailbox driver waits up to `REPLY_WINDOW_NS` (4 s). The reload is
   best-effort: the controller's own capability block at `Xhci::open` is the
   readiness gate, never the vendor version register at configuration
-  `0x50`. A `GET_FIRMWARE_REVISION` probe (`vl805::probe_firmware_revision`)
-  tells a dead mailbox path from VideoCore dropping only the xHCI tag. The
+  `0x50`. The mailbox service's own bring-up revision probe tells a dead
+  mailbox path from VideoCore dropping only the xHCI tag: a service that is
+  serving has had its probe answered. The
   property buffer sizes each tag's value buffer to the larger of request and
   response, and `find_tag` fails an oversized reply closed.
 - **Controller start (`lib/usb`).** Only stale write-1-to-clear status is
@@ -2121,17 +2124,16 @@ expert mode may not collapse it.
    its signed store against the discovered tree (`devmgr` match → signed
    gate → user-space spawn); the bus drivers publish what they enumerate,
    and each published node autoloads in turn, bringing the keyboard up;
-3. it unlocks the data root and installs the users database. The blank
-   passphrase is tried silently first, so the installer image unlocks with
-   no prompt (§11); only a non-blank passphrase draws the keyboard-served
-   `Root passphrase:` prompt.
+3. it mounts the data root and installs the users database: a plaintext
+   root with no prompt, an encrypted one under the passphrase typed at the
+   keyboard-served `ARXFS passphrase:` prompt.
 
 What the finished parts guarantee:
 
 - **B1 — the split.** `lib/partition` carries the `ARXFSSystem` role (MBR type
   `0x7e`, GPT `TYPE_GUID_ARXFS_SYSTEM`). `ARXFS::open_read_only` fails every
-  mutator closed. The `/System` volume is keyed by the non-secret
-  `SYSTEM_VOLUME_KEY`, its integrity resting on the per-bundle signatures.
+  mutator closed. The `/System` volume is plaintext, its integrity resting
+  on the per-bundle signatures.
   `root_mount::with_system_volume` mounts it read-only only once its
   `Drivers` store is found (`SYSTEM_VOLUME_MOUNTED` 4140, each decline
   `SYSTEM_VOLUME_UNAVAILABLE` 4141) and never aborts the boot.
@@ -2154,9 +2156,9 @@ What the finished parts guarantee:
 - **The hand-off to login.** Login waits on the unlock rather than racing
   its prompt (P11). `unlock_root_disk_interactively`'s `on_resolved`
   releases console 0 on every outcome and wakes any type-ahead
-  (`the_console_is_released_on_every_unlock_outcome`). Neither the silent
-  blank-passphrase probe nor login's pending `users_db_read` poll logs as an
-  error: a wrong passphrase is `ROOT_UNLOCK_KEY_REJECTED` (4142, Debug)
+  (`the_console_is_released_on_every_unlock_outcome`). Neither a wrong
+  passphrase nor login's pending `users_db_read` poll logs as an error: a
+  wrong passphrase is `ROOT_UNLOCK_KEY_REJECTED` (4142, Debug)
   while a structural refusal stays `ROOT_MOUNT_REJECTED` (4134, Error), and
   an audited handler's `WouldBlock` and `NotFound` are
   `SYSCALL_HANDLER_WOULD_BLOCK` and `SYSCALL_HANDLER_NOT_FOUND` (5005 and
@@ -2231,8 +2233,8 @@ two users — or the same user twice — can be logged in concurrently.
   parser. With no database (installer image, no root volume) login wires
   a deny-all authenticator — the prompt stays up and every attempt is
   refused (§5.4.5). Design B spawns `login` **before** the in-kernel unlock
-  kthread mounts the encrypted root, and the kthread prompts for the
-  passphrase on the **same** console, so the `users_db_read` seam is a
+  kthread mounts the root, and for an encrypted root the kthread prompts for
+  the passphrase on the **same** console, so the `users_db_read` seam is a
   **three-state** machine (`LateUsersDb`) and `tairix_login::supervise`
   acts on it **before every round**: while the unlock is still running the
   read returns `WouldBlock` and `login` *waits without prompting* (yielding
@@ -2491,7 +2493,7 @@ two users — or the same user twice — can be logged in concurrently.
    per-volume random salt + bounded iteration count, fail-closed
    encode/decode, `derive_volume_key`) turns an operator passphrase into
    the volume's `VolumeKey` (`AGENTS.md` §11). It is the LUKS-style
-   indirection above the always-encrypted volume; the plaintext
+   indirection above an encrypted volume; the plaintext
    descriptor rides beside the volume (the FAT boot partition on a Pi
    image). A wrong passphrase derives the wrong key and `ARXFS::open`
    refuses it (`PermissionDenied`) — no separate oracle. Host-proven:
@@ -2502,35 +2504,32 @@ two users — or the same user twice — can be logged in concurrently.
    to a measured boot and falls back to the passphrase).
 
    **Image authoring is landed** (`tools/mkimage`): `build_rpi_image`
-   provisions a per-volume `UnlockDescriptor` (random salt +
-   `UNLOCK_DEFAULT_ITERATIONS`) and derives the volume key from the
-   profile's `passphrase_for` — `INSTALLER_PASSPHRASE` (**blank**, the
-   installer image re-provisioned at install time) or `DEBUG_PASSPHRASE`
-   (`root`, the never-shipped debug image). The passphrase is not a
-   `build_rpi_image` argument: deriving it from the profile makes it
-   impossible to provision an image under a passphrase that disagrees with
-   the prompt (§2.2). It provisions the encrypted root under the derived
-   key and plants the plaintext descriptor on the FAT boot partition as
-   `root.unlock` (`fatboot::ROOT_UNLOCK_NAME`). The boot path tries the
-   blank passphrase silently, so the installer unlocks with no prompt; the
-   derived key is also emitted to `.rootkey` for host mounting and is
-   re-derivable from `root.unlock` + the profile passphrase. Host-proven by
-   the mkimage tests (the on-FAT descriptor re-derives the exact key per
-   profile; a wrong passphrase is refused with no separate oracle, §5.4).
+   takes an `ImageKind`, which cannot express an encrypted installer image.
+   A plaintext root carries no descriptor. An encrypted debug root
+   (`--encrypt-root`) is provisioned under a per-volume `UnlockDescriptor`
+   (random salt + `UNLOCK_DEFAULT_ITERATIONS`) and the key derived from
+   `DEBUG_PASSPHRASE` (`root`, the never-shipped debug image). The
+   passphrase is not a `build_rpi_image` argument, so no image can be
+   provisioned under a passphrase that disagrees with the documented one
+   (§2.2). The plaintext descriptor goes on the FAT boot partition as
+   `root.unlock` (`fatboot::ROOT_UNLOCK_NAME`) and the derived key to
+   `.rootkey` for host mounting. Host-proven by the mkimage tests (a
+   plaintext root mounts with no key; the on-FAT descriptor re-derives the
+   exact key; a wrong passphrase is refused with no separate oracle, §5.4).
    Docs: `docs/src/install/raspberry_pi.md`.
 
    **Still staged** (each its own increment; the chain end to end is
    gated on these):
    - **Installer-authored production root.** The §11 installer first-boot
-     flow provisions the *user's* encrypted root under their **chosen**
-     passphrase and writes its descriptor — a real, operator-set
-     passphrase, never the blank `mkimage` default. (The blank-passphrase
-     `mkimage` images above are the development/first-boot artefacts only.)
-   - **Boot mount.** The production boot reads the descriptor from the
-     boot partition, prompts for the passphrase on the console, derives
-     the key, mounts the discovered root volume (EMMC2 on metal /
-     virtio-blk on `virt`), runs the kernel-side read, and installs the
-     held text into the production dispatch hook.
+     flow asks whether to encrypt the system disk; an encrypted root is
+     provisioned under the user's **chosen** passphrase and its descriptor
+     written. (The `mkimage` images above are development and first-boot
+     artefacts only.)
+   - **Boot mount.** The production boot reads how the root is locked,
+     mounts a plaintext root with no prompt or prompts for an encrypted
+     root's passphrase and derives its key, mounts the discovered root
+     volume (EMMC2 on metal / virtio-blk on `virt`), runs the kernel-side
+     read, and installs the held text into the production dispatch hook.
      - **Kernel-neutral install seam — LANDED.** The architecture-neutral
        half of this — the §17.4 boundary between the install *policy* and
        the board storage bring-up that *produces* the mounted driver — is
@@ -2548,31 +2547,21 @@ two users — or the same user twice — can be logged in concurrently.
        `load_users_db_source` cases + the `BootInfo::with_users_db`
        builder). No `lib/abi`/C-header change (`BootInfo` is a kernel/core
        handover type, not FFI).
-     - **Chunk A — the arch-neutral unlock + mount + load composition —
-       LANDED (host-proven).** `tairix_kernel::root_mount::unlock_root_and_load_users`
-       (`kernel/tairix-kernel/src/root_mount.rs`) is the one composition —
-       in the `Layer::Tooling` bin crate, the only layer permitted to name
-       both the `arxfs` driver and `kernel/core` (§17.4) — that turns the
-       three artefacts a boot path recovers off storage into the served
-       `users-v1` database: the plaintext `root.unlock` descriptor, the
-       typed passphrase, and the encrypted root `Block` device. It decodes
-       the descriptor fail-closed (`UnlockDescriptor::decode`, §5.4.3),
-       derives the volume key from the passphrase (PBKDF2-HMAC-SHA256) in a
-       `Zeroizing` wrapper (§4 — wiped on drop, the audited `zeroize` crate,
-       no hand-rolled primitive), mounts the encrypted root (`ARXFS::open`
-       — a wrong passphrase refused with `PermissionDenied`, no plaintext
-       fallback, no separate oracle, §4 / §5.4), then runs
-       `load_users_db_source`. Every refusal is audited (`4133`
-       `ROOT_MOUNT_UNLOCKED` / `4134` `ROOT_MOUNT_REJECTED`; no secret ever
-       logged, §19.4) and yields no database (§5.4.5). Host-proven by 4
-       tests (the correct passphrase unlocks the volume and the served text
-       parses + authenticates the planted `root`/`root`; a wrong passphrase,
-       a tampered descriptor, and a non-arxfs volume each refused
-       fail-closed). The shared `tairix_test_arxfs_image` fixture gained
-       `build_users_root_image_with_key` + `VecBlock::from_bytes` so the
-       test authors a real volume under a passphrase-derived key through the
-       one on-disk-layout source of truth (§2.2). No `lib/abi`/C-header
-       change.
+     - **The root mount — done.** `tairix_kernel::root_mount`, in the
+       `Layer::Tooling` bin crate (the only layer permitted to name both the
+       `arxfs` driver and `kernel/core`, §17.4), turns one whole-disk `Block`
+       device into the served `users-v1` database. `read_root_lock` reads the
+       root's protection word and checks it against the FAT boot partition's
+       `root.unlock` descriptor — a descriptor beside a plaintext root, or an
+       encrypted root with none, is refused — and `probe_root_lock` is the
+       same reading unaudited. `mount_root_disk_and_load_users` then mounts
+       the root as that says: with no key, or under the key
+       `UnlockDescriptor::derive_volume_key` derives from the typed
+       passphrase in a `Zeroizing` wrapper, refusing an empty or over-long
+       one. A wrong passphrase is refused with `PermissionDenied` — no
+       plaintext fallback, no separate oracle. Every refusal is audited
+       (`4133` / `4134` / `4142`; no secret ever logged, §19.4) and yields no
+       database (§5.4.5).
      - **Chunk B-1 — the FAT `root.unlock` reader — LANDED (host-proven).**
        `tairix_kernel::root_mount::read_root_unlock_descriptor` reads the
        plaintext `root.unlock` key-derivation descriptor off the FAT boot
@@ -2585,27 +2574,11 @@ two users — or the same user twice — can be logged in concurrently.
        and fail-closed (§5.4 / §24.4): the entry's size is checked to be
        **exactly** `UNLOCK_DESCRIPTOR_LEN` *before* a byte is read (both a
        truncated and an over-long file refused), and the bytes are still
-       re-validated by `UnlockDescriptor::decode` inside
-       `unlock_root_and_load_users` (§5.4.3). Host-proven by 6 reader tests
-       (read-back + decode, end-to-end feed into `unlock_root_and_load_users`,
+       re-validated by `UnlockDescriptor::decode` inside `read_root_lock`
+       (§5.4.3). Host-proven by the reader tests (read-back + decode,
        missing → `NotFound`, truncated/over-long → `OutOfRange`, unformatted
        partition refused) over a FAT volume authored through the real FAT32
        driver. No `lib/abi`/C-header change.
-     - **Chunk B-2 boot-path entry composition — LANDED (host-proven).**
-       `tairix_kernel::root_mount::mount_root_and_load_users` is the single
-       boot-path entry that threads Chunk B-1 into Chunk A: given the two
-       brought-up `Block` devices (FAT boot partition + encrypted root) and
-       the typed passphrase it reads the `root.unlock` descriptor
-       (`read_root_unlock_descriptor`) and, on success, calls
-       `unlock_root_and_load_users` — so the boot path neither re-threads the
-       descriptor buffer nor reconciles two error taxonomies itself (§2.2). A
-       descriptor that cannot be read off the boot partition is audited
-       (`4134`) and returned as the new `RootMountError::DescriptorRead`
-       (cause `descriptor_unreadable`); the encrypted root is never touched
-       and no database is served (§2.9 / §5.4.5). Host-proven by 3 tests
-       (end-to-end success authenticating the planted `root`/`root`; a
-       missing descriptor refused with no unlock; a wrong passphrase refused
-       fail-closed). No `lib/abi`/C-header change.
      - **Chunk B-2 single-disk partition split — LANDED (host-proven).**
        `tairix_kernel::root_mount::mount_root_disk_and_load_users` is the
        entry for the common case: **one** whole-disk `Block` device. It
@@ -2617,14 +2590,17 @@ two users — or the same user twice — can be logged in concurrently.
        boot and `ARXFS` root partitions **by role** (not by index), opens a
        bounds-checked `PartitionBlock` window onto each **in sequence** (one
        device, two windows, via the new `impl Block for &mut B` forwarding in
-       `lib/abi`), reads the descriptor off the boot window, then mounts the
-       root window. A malformed/forged table, a missing FAT boot or `ARXFS`
-       root partition, or an out-of-range extent is audited (`4134`) and
+       `lib/abi`), reads the root's protection and an encrypted root's
+       descriptor, then mounts the root window. A malformed/forged table, a
+       missing `ARXFS` root partition (or an encrypted root's missing FAT boot
+       partition), or an out-of-range extent is audited (`4134`) and
        returned (`RootMountError::PartitionTable`/`NoBootPartition`/
        `NoRootPartition`/`PartitionWindow`); no database is served (§2.9 /
-       §5.4). Host-proven by 3 tests (whole-disk MBR split → unlock → load
-       authenticating the planted account; no-table and no-root-partition
-       refusals) plus the `lib/partition` MBR/GPT parse + fuzz suite. No
+       §5.4). Host-proven by the `root_mount` whole-disk tests (both
+       protections mounting and authenticating the planted account; the
+       no-table, no-root-partition, contradicted-descriptor and
+       other-protection refusals) plus the `lib/partition` MBR/GPT parse +
+       fuzz suite. No
        `lib/abi` ABI change (the `&mut B` `Block` impl is a forwarding impl,
        not a new method — no C-header regen).
      - **Chunk B-2 root-storage bind gate — LANDED (host-proven).**
@@ -2653,8 +2629,8 @@ two users — or the same user twice — can be logged in concurrently.
      - **Chunk B-2 late-bound users-db cell — LANDED (host-proven).**
        `tairix_kernel_core::LateUsersDb` (`kernel/core/src/users.rs`) is the
        set-once `UsersDbSource` the post-boot unlock step publishes the
-       mounted database into. The encrypted root is unlocked only **after**
-       the console keyboard is live (the operator types the passphrase, §11),
+       mounted database into. The root is mounted only **after** the console
+       keyboard is live (an encrypted root's passphrase is typed there, §11),
        which is past where `BootInfo::with_users_db` is consumed — so the
        dispatch hook holds a `&'static LateUsersDb` from boot and reads
        `text()` on every `users_db_read`, and the unlock step installs the
@@ -2676,10 +2652,11 @@ two users — or the same user twice — can be logged in concurrently.
        device and the console keyboard is live. Generic over the `Block`
        disk and taking the console halves as the object-safe
        `tairix_kernel_core::{ConsoleWrite, ConsoleRead}` seams, it names no
-       arch or device type (§17.4). Each attempt prompts
-       `ARXFS passphrase:`, reads one line into a zeroized,
+       arch or device type (§17.4). A plaintext root mounts with no prompt;
+       for an encrypted one each attempt prompts `ARXFS passphrase:`, reads
+       one line into a zeroized,
        fixed-length on-stack buffer
-       (`MAX_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
+       (`MAX_ROOT_PASSPHRASE_LEN`; the secret never reaches the heap, a log, or
        memory beyond the attempt, §4 / §19.4; Backspace edits, an over-long
        line is a refused attempt not a truncated secret, §5.4.3), and runs
        `mount_root_disk_and_load_users`. Success publishes the loaded
@@ -2697,7 +2674,8 @@ two users — or the same user twice — can be logged in concurrently.
        structural failure or a console read fault gives up (`4138`), leaving
        the cell empty so every login is refused until reboot (§2.9 / §5.4.5).
        Host-proven by `root_mount` tests over a mock console + the same
-       MBR + encrypted-`ARXFS` disk fixture `tools/mkimage` writes (§2.2). No
+       whole-disk fixtures, plaintext and encrypted, `tools/mkimage` writes
+       (§2.2). No
        `lib/abi`/C-header change.
      - **Chunk B-2 `&'static LateUsersDb` dispatch-hook wiring — LANDED
        (whole gate green).** The shared set-once cell

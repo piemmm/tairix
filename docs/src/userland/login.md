@@ -430,10 +430,10 @@ program PID 1 `init`'s `session` directive launches and supervises
   with the fail-closed `tairix-users` parser. `tairix_login::supervise`
   classifies each read into one of three states and acts on it **before
   every round** (never a once-read cache):
-  - **Pending** (`Errno::WouldBlock`) — the encrypted root is still being
-    unlocked. Under design B (`plans/PI.md` P11) `init` spawns `login`
-    *before* the in-kernel root-unlock kthread mounts the root, and that
-    kthread prompts for its passphrase on the **same** console. So while
+  - **Pending** (`Errno::WouldBlock`) — the root is still being mounted.
+    Under design B (`plans/PI.md` P11) `init` spawns `login` *before* the
+    in-kernel root-unlock kthread mounts the root, and for an encrypted root
+    that kthread prompts for its passphrase on the **same** console. So while
     the read is pending `login` **parks** in the bounded `users_db_wait`
     syscall and does
     **not** print `Username:` — the unlock owns the console until it

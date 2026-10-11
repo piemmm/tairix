@@ -27,9 +27,10 @@ use crate::damage;
 use crate::paint::{
     authority_rgba, foreground, heavy_contrast, inset, key_activation, paint_bead,
     paint_count_badge, paint_icon_slot, paint_plate, paint_run, paint_surface_plate,
-    paint_text_line, plate_border, plate_corner, pointer_activation, rail_thickness, resolve_bead,
-    resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
-    text_plate_height, to_i32, withheld, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
+    paint_text_line, plate_border, plate_content_inset, plate_corner, pointer_activation,
+    rail_thickness, resolve_bead, resolve_frame, resolve_rail, role_font, seam_thickness,
+    seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChromeLayer,
+    PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -947,6 +948,38 @@ struct TrayCapsule {
     badge: Option<TrayBadge>,
 }
 
+/// The pointer state a control that opens a hover readout takes with the
+/// pointer at `at`: hovered over the control itself, or, while the readout is
+/// `open`, over the readout or the band between the two, so the pointer can
+/// travel from the one onto the other; otherwise nothing.
+#[must_use]
+pub fn readout_hover(at: Point, control: Rect, readout: Rect, open: bool) -> PointerState {
+    let held = open && (readout.contains(at) || corridor(control, readout).contains(at));
+    if control.contains(at) || held {
+        PointerState::Hover
+    } else {
+        PointerState::None
+    }
+}
+
+/// The ground between `a` and `b` where they face each other across a gap,
+/// over the span they share. A control's rim lies here, and closing a readout
+/// on the rim is closing it on the way to it.
+fn corridor(a: Rect, b: Rect) -> Rect {
+    if a.is_empty() || b.is_empty() {
+        return Rect::EMPTY;
+    }
+    let (left, right) = (a.left().max(b.left()), a.right().min(b.right()));
+    let (top, bottom) = (a.top().max(b.top()), a.bottom().min(b.bottom()));
+    if left < right && bottom <= top {
+        Rect::new(left, bottom, right.abs_diff(left), top.abs_diff(bottom))
+    } else if top < bottom && right <= left {
+        Rect::new(right, top, left.abs_diff(right), bottom.abs_diff(top))
+    } else {
+        Rect::EMPTY
+    }
+}
+
 impl TraySignal {
     /// A calm tray signal with the given glyph and state-name label.
     #[must_use]
@@ -1312,12 +1345,21 @@ impl TraySignal {
             _ => scale.scale_length(theme.metrics().control_height).max(1),
         });
         let value_h = self.value.as_ref().map_or(0, |_| line);
-        let w = text_w.max(action_w).saturating_add(pad.saturating_mul(2));
+        let edges = plate_content_inset(theme, scale).saturating_mul(2);
+        let w = text_w.max(action_w).saturating_add(edges);
         let h = line
             .saturating_add(value_h)
             .saturating_add(action_h)
-            .saturating_add(pad.saturating_mul(2));
+            .saturating_add(edges);
         (w.max(1), h.max(1))
+    }
+
+    /// Where the readout's lines and action sit within `bounds`: inside the
+    /// plate's rim and padding, as [`readout_size`](Self::readout_size)
+    /// reserved.
+    fn readout_content(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32, u32)> {
+        let (x, y, w, h) = surface_rect(bounds)?;
+        inset(x, y, w, h, plate_content_inset(theme, scale))
     }
 
     /// The readout's primary-action button rectangle within `bounds`, shared by
@@ -1325,10 +1367,8 @@ impl TraySignal {
     /// never disagree.
     fn action_rect(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
         self.action.as_ref()?;
-        let (x, y, w, h) = surface_rect(bounds)?;
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let bh = text_plate_height(theme, scale, TextRole::Body);
-        let (ix, iy, iw, ih) = inset(x, y, w, h, pad)?;
+        let (ix, iy, iw, ih) = Self::readout_content(bounds, scale, theme)?;
         if ih <= bh {
             return None;
         }
@@ -1354,15 +1394,14 @@ impl TraySignal {
         let border = plate_border(theme, scale);
         let radius = plate_corner(w, h, theme.metrics().popup_corner_radius, scale);
         let plate = (palette.surface_raised, ChromeLayer::Ground);
-        let Some((ix, iy, iw, _)) =
-            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
-        else {
+        if paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate).is_none() {
+            return;
+        }
+        let Some((ix, iy, text_w, _)) = Self::readout_content(bounds, scale, theme) else {
             return;
         };
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let text_x = to_i32(ix + pad);
-        let mut text_y = to_i32(iy + pad);
-        let text_w = iw.saturating_sub(pad.saturating_mul(2));
+        let text_x = to_i32(ix);
+        let mut text_y = to_i32(iy);
         if text_w > 0 {
             paint_run(
                 surface,
@@ -1410,13 +1449,12 @@ impl TraySignal {
             *self.pointer = *to;
         }
         let expanded_before = self.is_expanded();
-        let over_capsule = capsule_bounds.contains(*self.pointer);
-        let over_readout = expanded_before && readout_bounds.contains(*self.pointer);
-        let hover = if over_capsule || over_readout {
-            PointerState::Hover
-        } else {
-            PointerState::None
-        };
+        let hover = readout_hover(
+            *self.pointer,
+            capsule_bounds,
+            readout_bounds,
+            expanded_before,
+        );
         damage::set(
             &mut self.capsule.state.pointer,
             hover,

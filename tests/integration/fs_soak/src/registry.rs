@@ -4,17 +4,18 @@ use std::time::{Duration, Instant};
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite};
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_fuzzseed::FSSOAK_SEED_ENV;
 
 use crate::{exercise, random_exercise, RamBlock};
 
-/// Volume key the soak formats and remounts arxfs with. `ARXFS` is
-/// encrypted-by-default (`docs/src/filesystem/arxfs-spec.md` §5), so the
-/// soak exercises the encrypted-volume path under this fixed key.
+/// Volume key the encrypted arxfs targets format and remount with.
 const ARXFS_SOAK_KEY: VolumeKey = [0xa5; VOLUME_KEY_LEN];
+
+/// How the encrypted arxfs targets open their volumes.
+const ARXFS_SOAK_KEYING: Keying<'static> = Keying::Key(&ARXFS_SOAK_KEY);
 
 /// Volume identity the soak stamps onto its ext4 volumes: deterministic
 /// (the soak is reproducible), non-nil (the formatter refuses the reserved
@@ -42,31 +43,46 @@ impl EntropySource for SoakEntropy {
 /// `cargo xtask fssoak --list` and the `soak.sh` fan-out, so neither
 /// hard-codes the list.
 ///
-/// `arxfs`/`ext4`/`fat32` run the fixed-sequence [`exercise()`];
-/// `arxfs-random` runs the randomized, model-checked [`random_exercise`]
-/// over arxfs, taking a different path on every launch. Both draw a fresh
-/// start seed each launch and log it, so every run differs
-/// and any failure replays from the logged seed.
-pub const TARGETS: &[&str] = &["arxfs", "ext4", "fat32", "arxfs-random"];
+/// `arxfs`/`ext4`/`fat32`/`arxfs-plaintext` run the fixed-sequence
+/// [`exercise()`]; `arxfs-random`/`arxfs-plaintext-random` run the randomized,
+/// model-checked [`random_exercise`] over arxfs, taking a different path on
+/// every launch. The `-plaintext` targets format arxfs with no key, as a
+/// shipped root is, and the other two encrypt it. Every target draws a fresh
+/// start seed each launch and logs it, so every run differs and any failure
+/// replays from the logged seed.
+pub const TARGETS: &[&str] = &[
+    "arxfs",
+    "ext4",
+    "fat32",
+    "arxfs-random",
+    "arxfs-plaintext",
+    "arxfs-plaintext-random",
+];
 
 /// A filesystem the soak can format on a [`RamBlock`] and remount,
 /// reached only through the frozen [`FilesystemRead`]/[`FilesystemWrite`]
 /// ABI thereafter. Implemented for the three first-party drivers; the
 /// exerciser is written once against this trait.
 pub trait SoakFs: FilesystemRead + FilesystemWrite + Sized {
-    /// Lay a fresh, empty volume onto `block` and return it mounted.
+    /// What a volume is formatted under and must be remounted with: arxfs's
+    /// protection, and nothing for a filesystem with no such choice.
+    type Format: Copy;
+
+    /// Lay a fresh, empty volume onto `block` under `format` and return it
+    /// mounted.
     ///
     /// # Errors
     /// Propagates the driver's formatter error (e.g. a device too small
     /// for the filesystem).
-    fn format_volume(block: RamBlock) -> Result<Self, DriverError>;
+    fn format_volume(block: RamBlock, format: Self::Format) -> Result<Self, DriverError>;
 
-    /// Unmount and remount the same backing device, so the soak can
-    /// re-verify that committed state survives a fresh `open()`.
+    /// Unmount and remount the same backing device under the `format` it was
+    /// laid down with, so the soak can re-verify that committed state survives
+    /// a fresh `open()`.
     ///
     /// # Errors
     /// Propagates the driver's `open` error.
-    fn remount(self) -> Result<Self, DriverError>;
+    fn remount(self, format: Self::Format) -> Result<Self, DriverError>;
 }
 
 /// Minimum-total inode budget for an `inode`-based filesystem on a
@@ -78,36 +94,42 @@ fn inode_budget(bytes: u64) -> u32 {
 }
 
 impl SoakFs for ARXFS<RamBlock> {
-    fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
+    type Format = Keying<'static>;
+
+    fn format_volume(block: RamBlock, keying: Keying<'static>) -> Result<Self, DriverError> {
         let inodes = inode_budget(block.len_bytes());
-        ARXFS::format(block, inodes, &ARXFS_SOAK_KEY, &mut SoakEntropy { next: 1 })
+        ARXFS::format(block, inodes, keying, &mut SoakEntropy { next: 1 })
     }
 
-    fn remount(self) -> Result<Self, DriverError> {
-        ARXFS::open(self.into_block()?, &ARXFS_SOAK_KEY)
+    fn remount(self, keying: Keying<'static>) -> Result<Self, DriverError> {
+        ARXFS::open(self.into_block()?, keying)
     }
 }
 
 impl SoakFs for Ext4<RamBlock> {
-    fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
+    type Format = ();
+
+    fn format_volume(block: RamBlock, (): ()) -> Result<Self, DriverError> {
         let inodes = inode_budget(block.len_bytes());
         Ext4::format(block, inodes, SOAK_EXT4_UUID)
     }
 
-    fn remount(self) -> Result<Self, DriverError> {
+    fn remount(self, (): ()) -> Result<Self, DriverError> {
         Ext4::open(self.into_block())
     }
 }
 
 impl SoakFs for Fat32<RamBlock> {
-    fn format_volume(block: RamBlock) -> Result<Self, DriverError> {
+    type Format = ();
+
+    fn format_volume(block: RamBlock, (): ()) -> Result<Self, DriverError> {
         // FAT has no inode table; its directory entries live in the data
         // region, so the formatter takes no inode budget. The serial is a
         // fixed test value: soak volumes never meet the volume forest.
         Fat32::format(block, 0x50A5_FA32)
     }
 
-    fn remount(self) -> Result<Self, DriverError> {
+    fn remount(self, (): ()) -> Result<Self, DriverError> {
         Fat32::open(self.into_block())
     }
 }
@@ -120,21 +142,27 @@ impl SoakFs for Fat32<RamBlock> {
 /// Returns a descriptive error (including the failing seed) when the
 /// filesystem is unknown or the exerciser finds an inconsistency.
 pub fn run_target(name: &str, device_bytes: u64, deadline: Option<Instant>) -> Result<(), String> {
-    match name {
-        "arxfs" => soak(name, device_bytes, deadline, exercise::<ARXFS<RamBlock>>),
-        "ext4" => soak(name, device_bytes, deadline, exercise::<Ext4<RamBlock>>),
-        "fat32" => soak(name, device_bytes, deadline, exercise::<Fat32<RamBlock>>),
-        "arxfs-random" => soak(
-            name,
-            device_bytes,
-            deadline,
-            random_exercise::<ARXFS<RamBlock>>,
-        ),
-        other => Err(format!(
-            "fssoak: unknown filesystem `{other}`; known: {}",
-            TARGETS.join(", ")
-        )),
-    }
+    let pass: fn(u64, u64) -> Result<(), String> = match name {
+        "arxfs" => |bytes, seed| exercise::<ARXFS<RamBlock>>(bytes, seed, ARXFS_SOAK_KEYING),
+        "ext4" => |bytes, seed| exercise::<Ext4<RamBlock>>(bytes, seed, ()),
+        "fat32" => |bytes, seed| exercise::<Fat32<RamBlock>>(bytes, seed, ()),
+        "arxfs-random" => {
+            |bytes, seed| random_exercise::<ARXFS<RamBlock>>(bytes, seed, ARXFS_SOAK_KEYING)
+        }
+        "arxfs-plaintext" => {
+            |bytes, seed| exercise::<ARXFS<RamBlock>>(bytes, seed, Keying::Plaintext)
+        }
+        "arxfs-plaintext-random" => {
+            |bytes, seed| random_exercise::<ARXFS<RamBlock>>(bytes, seed, Keying::Plaintext)
+        }
+        other => {
+            return Err(format!(
+                "fssoak: unknown filesystem `{other}`; known: {}",
+                TARGETS.join(", ")
+            ))
+        }
+    };
+    soak(name, device_bytes, deadline, pass)
 }
 
 /// Drive one `pass` — a whole [`exercise()`] or [`random_exercise`] round over

@@ -863,3 +863,165 @@ fn a_reduction_refuses_geometry_it_cannot_reduce() {
     );
     assert_eq!(reducer.finish().map(|pixels| pixels.len()), Ok(4));
 }
+
+// ---- windows written in place, and the reach of a change ---------------
+
+/// A surface whose every pixel is the marker a test looks for untouched.
+fn marked(width: u32, height: u32) -> Surface {
+    Surface::filled(
+        width,
+        height,
+        crate::Pixel {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255,
+        },
+    )
+    .expect("fits")
+}
+
+/// Whether `window` holds the point.
+fn inside(window: Region, x: u32, y: u32) -> bool {
+    x >= window.x && x < window.x + window.width && y >= window.y && y < window.y + window.height
+}
+
+#[test]
+fn a_window_written_in_place_is_that_rectangle_of_the_whole_resample() {
+    let src = surface(64, 48, &gradient(64, 48));
+    let whole_dest = src.resampled(whole(64, 48), 512, 384).expect("resamples");
+    let reversed = tairix_parallel::Reversed::new(4);
+    let threaded = tairix_parallel::Threaded::new(3);
+    let runners: [&dyn tairix_parallel::JobRunner; 3] =
+        [&tairix_parallel::SERIAL, &reversed, &threaded];
+    let windows = [
+        whole(512, 384),
+        Region {
+            x: 37,
+            y: 101,
+            width: 300,
+            height: 190,
+        },
+        Region {
+            x: 511,
+            y: 383,
+            width: 1,
+            height: 1,
+        },
+    ];
+    for runner in runners {
+        for window in windows {
+            let mut dest = marked(512, 384);
+            let mut scratch: Vec<ResampleScratch> =
+                (0..8).map(|_| ResampleScratch::new()).collect();
+            src.resample_window_into(&mut dest, window, &mut scratch, runner)
+                .expect("resamples");
+            for y in 0..384 {
+                for x in 0..512 {
+                    let want = if inside(window, x, y) {
+                        whole_dest.get(x, y)
+                    } else {
+                        Some(crate::Pixel {
+                            r: 1,
+                            g: 2,
+                            b: 3,
+                            a: 255,
+                        })
+                    };
+                    assert_eq!(dest.get(x, y), want, "{window:?} at ({x}, {y})");
+                }
+            }
+        }
+    }
+    assert!(
+        reversed.widest() > 1,
+        "the whole window was split into bands"
+    );
+}
+
+#[test]
+fn a_window_in_place_refuses_what_it_cannot_write_and_writes_nothing() {
+    let src = surface(8, 6, &gradient(8, 6));
+    let mut dest = marked(16, 12);
+    let untouched = dest.clone();
+    let mut scratch = [ResampleScratch::new()];
+    let past = Region {
+        x: 10,
+        y: 0,
+        width: 7,
+        height: 2,
+    };
+    assert_eq!(
+        src.resample_window_into(&mut dest, past, &mut scratch, &tairix_parallel::SERIAL),
+        Err(ResampleError::WindowOutOfBounds)
+    );
+    assert_eq!(
+        src.resample_window_into(&mut dest, whole(16, 12), &mut [], &tairix_parallel::SERIAL),
+        Err(ResampleError::OutOfMemory)
+    );
+    assert_eq!(dest.pixels(), untouched.pixels());
+}
+
+#[test]
+fn the_reach_of_a_change_holds_every_destination_pixel_it_moves() {
+    for ((sw, sh), (dw, dh)) in [
+        ((16, 12), (40, 30)),
+        ((40, 30), (16, 12)),
+        ((16, 12), (16, 12)),
+        ((9, 7), (32, 32)),
+    ] {
+        let before = surface(sw, sh, &gradient(sw, sh));
+        let before_dest = before.resampled(whole(sw, sh), dw, dh).expect("resamples");
+        for (x0, y0, x1, y1) in [
+            (0, 0, 1, 1),
+            (3, 2, 5, 4),
+            (sw - 1, sh - 1, sw, sh),
+            (0, 0, sw, sh),
+        ] {
+            let mut changed = before.clone();
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    changed.set(
+                        x,
+                        y,
+                        crate::Pixel {
+                            r: 250,
+                            g: 0,
+                            b: 250,
+                            a: 255,
+                        },
+                    );
+                }
+            }
+            let after_dest = changed.resampled(whole(sw, sh), dw, dh).expect("resamples");
+            let columns = super::resample_reach(sw, dw, x0..x1);
+            let rows = super::resample_reach(sh, dh, y0..y1);
+            for y in 0..dh {
+                for x in 0..dw {
+                    if before_dest.get(x, y) != after_dest.get(x, y) {
+                        assert!(
+                            columns.contains(&x) && rows.contains(&y),
+                            "{sw}x{sh} -> {dw}x{dh}: a change to {x0}..{x1} x {y0}..{y1} moved \
+                             ({x}, {y}) outside {columns:?} x {rows:?}"
+                        );
+                    }
+                }
+            }
+            assert!(columns.end <= dw && rows.end <= dh);
+        }
+    }
+}
+
+#[test]
+fn the_reach_of_one_sample_is_its_filter_width_and_nothing_is_reached_by_nothing() {
+    // Enlarging 2.5 times, a cubic reads four samples: one source sample is
+    // read by the destination samples within two of its own position.
+    let reach = super::resample_reach(16, 40, 8..9);
+    assert!(reach.len() <= 10 && reach.contains(&21), "{reach:?}");
+    // A cubic's four taps run from the sample before its centre to two after
+    // it, so at 1:1 the samples six to nine read sample eight.
+    assert_eq!(super::resample_reach(16, 16, 8..9), 6..10);
+    assert!(super::resample_reach(16, 40, 4..4).is_empty());
+    assert!(super::resample_reach(0, 40, 0..1).is_empty());
+    assert!(super::resample_reach(16, 0, 0..1).is_empty());
+}

@@ -11,7 +11,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::damage::sink;
 use crate::paint::{measured_thickness, progress_thickness};
@@ -442,6 +442,44 @@ fn the_knob_its_dot_and_the_groove_share_one_centre_at_every_scale() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Under heavier contrast a compact row seats the knob a normal one does, at
+/// every offered scale: the heavier focus ring is paid for by the row, never
+/// by shrinking the knob it rings.
+#[test]
+fn a_compact_row_keeps_the_whole_knob_under_heavier_contrast() {
+    use tairix_theme::{Accessibility, Contrast, Density};
+    let at = |density, contrast| {
+        Theme::dark().with_axes(Accessibility {
+            contrast,
+            density,
+            ..Accessibility::default()
+        })
+    };
+    for contrast in [Contrast::High, Contrast::Monochrome] {
+        let (compact, normal) = (
+            at(Density::Compact, contrast),
+            at(Density::Normal, contrast),
+        );
+        for percent in [100, 125, 150, 175, 200, 250, 300] {
+            let scale = Scale::from_percent(percent).expect("a supported scale");
+            let width = W * percent / 100;
+            let knob = |theme: &Theme| {
+                let height = crate::paint::text_plate_height(theme, scale, TextRole::Body);
+                let mut surface = Surface::new(width, height).expect("surface");
+                Slider::new(500).render(&mut surface, Rect::new(0, 0, width, height), scale, theme);
+                let (_, top, _, bottom) = extent_of(
+                    &surface,
+                    (0, 0, width - 1, height - 1),
+                    premul(theme.palette().surface_raised),
+                )
+                .expect("the knob is drawn");
+                bottom - top
+            };
+            assert_eq!(knob(&compact), knob(&normal), "{contrast:?} at {percent}%");
         }
     }
 }

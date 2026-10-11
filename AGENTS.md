@@ -1278,7 +1278,11 @@ an update to this section.
   1. Prompt for system name (hostname).
   2. Prompt for the first user (username, password, full name, primary group).
   3. Offer the secure default layout defined in §16:
-     - Encrypted root (LUKS-equivalent using `lib/crypto`).
+     - Ask whether to encrypt the system disk, with unencrypted
+       preselected. An encrypted root (LUKS-equivalent using `lib/crypto`)
+       asks for its passphrase at every boot; an unencrypted one mounts
+       with none. The upgrader keeps the protection an installation was
+       made with.
      - Encrypted swap (§4). Swap is keyed by an ephemeral per-boot
        random key that is never written to disk, so the default needs
        no passphrase and leaves nothing recoverable at rest. The

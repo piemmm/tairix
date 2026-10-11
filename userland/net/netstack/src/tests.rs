@@ -17,8 +17,8 @@ use tairix_abi::net::{
     SocketRequest, SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers, NetIfKind,
-    NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers,
+    NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetServerAddr,
     NetSockProto, NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
     MAX_CONNECTION_BUFFER_BYTES, MIN_CONNECTION_BUFFER_BYTES, NETSTACK_LIST_LIMIT_MAX,
@@ -360,6 +360,112 @@ impl Net for LinkNet {
             ..ServiceReport::default()
         })
     }
+}
+
+/// The network notice's count moves once for each change to what an
+/// interface reports, and never for a pass that changed nothing.
+#[test]
+fn the_interface_state_publication_counts_each_change_once() {
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
+    stack
+        .add_interface(
+            name("eth0"),
+            NetIfKind::Ethernet,
+            facts(MAC_A),
+            IID_A,
+            7,
+            0,
+            t(0),
+        )
+        .expect("add interface");
+    assert!(stack.publish_state(), "a new interface is news");
+    assert_eq!(stack.state_changes(), 1);
+    assert!(!stack.publish_state(), "nothing moved");
+
+    stack
+        .addr_add(name("eth0"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
+        .expect("addr add");
+    assert!(stack.publish_state(), "an address arrived");
+    assert_eq!(stack.state_changes(), 2);
+    assert!(!stack.publish_state());
+
+    let mut region = rings_region();
+    let mut fs = local_service_link(LinkNet::new(), &mut region);
+    fs.net_mut().set_link(LinkState::Down);
+    let outcome = stack
+        .service_interface(name("eth0"), &mut fs, t(2), ServiceHint::default())
+        .expect("pump");
+    assert_eq!(outcome.link_change, Some(LinkState::Down));
+    let _ = stack.on_member_link_change(name("eth0"), LinkState::Down, t(2));
+    assert!(stack.publish_state(), "the link went down");
+    assert_eq!(stack.state_changes(), 3);
+    assert!(!stack.state_records(0, 1)[0].link_up);
+}
+
+/// A stack resumed past an earlier instance's count goes on from it, so its
+/// first announcement is never the count that instance left.
+#[test]
+fn a_resumed_count_goes_on_from_where_it_was_resumed() {
+    let mut stack = managed_stack();
+    stack.resume_state_changes(42);
+    assert_eq!(stack.state_changes(), 42);
+    assert!(stack.publish_state(), "the interface is news");
+    assert_eq!(stack.state_changes(), 43);
+}
+
+/// An address finishing duplicate detection is news: its state moves from
+/// tentative to preferred, and the count with it.
+#[test]
+fn an_address_passing_duplicate_detection_moves_the_count() {
+    let mut stack = managed_stack();
+    let mut region = rings_region();
+    let mut fs = local_service(PeerNet::new(t(0)), &mut region);
+    let ours = link_local(IID_A).octets();
+    let state_of = |stack: &Netstack| {
+        let record = stack.state_records(0, 1)[0];
+        record.addrs[..usize::from(record.addr_count)]
+            .iter()
+            .find(|addr| addr.addr == ours)
+            .map(|addr| addr.state)
+    };
+    assert!(stack.publish_state());
+    assert_eq!(state_of(&stack), Some(NetAddrState::Tentative));
+    let before = stack.state_changes();
+
+    for step in 0..2 {
+        fs.net_mut().now = t(step);
+        let _ = stack
+            .service_interface(name("wan"), &mut fs, t(step), ServiceHint::default())
+            .expect("pump");
+    }
+    assert_eq!(state_of(&stack), Some(NetAddrState::Preferred));
+    assert!(stack.publish_state(), "the address became usable");
+    assert_eq!(stack.state_changes(), before + 1);
+}
+
+/// An interface taking a new alias is a different entry to every reader.
+#[test]
+fn an_interface_renamed_moves_the_count() {
+    let mut stack = managed_stack();
+    assert!(stack.publish_state());
+    let before = stack.state_changes();
+    let msg = NetInterfaceConfigMsg {
+        alias: name("uplink"),
+        match_mac: Some(MAC_A_OCTETS),
+        match_node: None,
+        ipv4: NetIpv4Config::Disabled,
+        ipv6: NetIpv6Config::Slaac,
+        mtu: 0,
+        dns: NetDnsServers::EMPTY,
+    };
+    stack.apply_interface_config(&msg, t(1)).expect("applied");
+    assert!(stack.publish_state(), "the entry was renamed");
+    assert_eq!(stack.state_changes(), before + 1);
+    assert_eq!(stack.state_records(0, 1)[0].name, name("uplink"));
 }
 
 /// A plain interface's live link change (a device config-change the driver
@@ -3913,13 +4019,14 @@ fn disabling_a_family_refuses_a_socket_open_for_it() {
 fn applying_settings_reconfigures_an_existing_interface() {
     let mut stack = managed_stack();
     // The interface came up with its IPv6 link-local (still tentative).
-    assert!(!stack
+    assert!(stack
         .interface(name("wan"))
         .expect("iface")
         .stack()
         .iface()
         .ipv6_addresses()
-        .is_empty());
+        .next()
+        .is_some());
     // Disabling IPv6 flushes it from the already-managed interface.
     stack.apply_settings(
         NetworkSettings {
@@ -3939,16 +4046,18 @@ fn applying_settings_reconfigures_an_existing_interface() {
         .stack()
         .iface()
         .ipv6_addresses()
-        .is_empty());
+        .next()
+        .is_none());
     // Re-enabling brings the link-local back.
     stack.apply_settings(NetworkSettings::default(), t(3));
-    assert!(!stack
+    assert!(stack
         .interface(name("wan"))
         .expect("iface")
         .stack()
         .iface()
         .ipv6_addresses()
-        .is_empty());
+        .next()
+        .is_some());
 }
 
 /// The device MAC of `managed_stack`'s single `wan` interface, as the wire
@@ -4195,7 +4304,6 @@ fn interface_config_assigns_a_static_ipv6_address() {
         .stack()
         .iface()
         .ipv6_addresses()
-        .iter()
         .any(|info| info.addr == addr && info.prefix_len == 64);
     assert!(has_addr, "the static IPv6 address is assigned");
 }
@@ -4278,7 +4386,7 @@ fn interface_config_disables_both_families() {
         .expect("disable");
     let iface = stack.interface(name("wan")).expect("iface");
     assert_eq!(iface.stack().iface().ipv4(), None);
-    assert!(iface.stack().iface().ipv6_addresses().is_empty());
+    assert!(iface.stack().iface().ipv6_addresses().next().is_none());
 }
 
 #[test]
@@ -4383,7 +4491,6 @@ fn interface_config_is_idempotent() {
         .stack()
         .iface()
         .ipv6_addresses()
-        .iter()
         .filter(|info| info.addr == addr)
         .count();
     assert_eq!(count, 1, "the static address is present exactly once");

@@ -41,6 +41,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) catalog: &'a [CatalogItem],
     /// The font store's families and the theme's own text, once listed.
     pub(crate) text: Option<&'a TextChoices>,
+    /// The output the desktop is drawn on, once the desktop has said.
+    pub(crate) output: Option<(u32, u32)>,
     /// The mounted volumes the mount-table walk answered with.
     pub(crate) volumes: &'a [VolumeReading],
     /// The machine's boot-time configuration, or `None` while the read has
@@ -78,6 +80,7 @@ impl<'a> Answered<'a> {
             cursor_sets: self.cursor_sets,
             catalog: self.catalog,
             text: self.text,
+            output: self.output,
             config: self.config,
             addressing: &self.network.addressing,
             staged: self.staged,

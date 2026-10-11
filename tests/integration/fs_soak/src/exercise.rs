@@ -130,14 +130,14 @@ fn verify_file<F: SoakFs>(
 }
 
 /// Run one deterministic soak iteration over a fresh `device_bytes`
-/// volume.
+/// volume laid down under `format`.
 ///
 /// # Errors
 /// Returns a descriptive, seed-tagged error on any driver failure or
 /// integrity mismatch.
-pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), String> {
+pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64, format: F::Format) -> Result<(), String> {
     let block = RamBlock::new(device_bytes);
-    let mut fs = ck(F::format_volume(block), "format", seed)?;
+    let mut fs = ck(F::format_volume(block, format), "format", seed)?;
     let root = fs.root();
 
     // --- Integrity round-trip across a nested directory. ---
@@ -199,7 +199,7 @@ pub fn exercise<F: SoakFs>(device_bytes: u64, seed: u64) -> Result<(), String> {
     )?;
 
     // --- Remount and re-verify the survivors. ---
-    let mut fs = ck(fs.remount(), "remount", seed)?;
+    let mut fs = ck(fs.remount(format), "remount", seed)?;
     let root = fs.root();
     let sub = ck(fs.lookup(root, b"sub"), "lookup sub after remount", seed)?;
     verify_file(&mut fs, root, b"alpha", 0, 2048, seed)?;

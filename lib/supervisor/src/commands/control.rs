@@ -1,22 +1,18 @@
 //! Control commands: the ones that change boot state.
 //!
 //! Each audits its intent through [`crate::SupervisorHost::audit`] before
-//! acting and fails closed. `mount` performs the *real* passphrase unlock —
-//! there is no command that bypasses the passphrase or reveals key material.
+//! acting and fails closed. `mount` performs the *real* root mount, asking
+//! for the passphrase an encrypted root needs — there is no command that
+//! bypasses the passphrase or reveals key material.
 
+use tairix_abi::boot::MAX_ROOT_PASSPHRASE_LEN;
 use tairix_abi::BootSession;
+use tairix_util::secret::Wiped;
 
 use crate::commands::arg_str;
 use crate::dispatch::{Flow, Session};
 use crate::repl::{read_line, LineOutcome};
-use crate::{MountOutcome, SupervisorEvent, SupervisorExit};
-
-/// The longest passphrase the Supervisor `mount` prompt accepts, in bytes.
-///
-/// The same generous fixed operator-input bound the normal unlock prompt
-/// uses; the read buffer is a fixed on-stack array of this size that is
-/// zeroed the instant the attempt resolves, so the secret never lingers.
-const MOUNT_PASSPHRASE_MAX: usize = 256;
+use crate::{MountOutcome, RootLock, SupervisorEvent, SupervisorExit};
 
 /// The one-line spelling of `continue` shown when an operand is refused.
 const CONTINUE_USAGE: &str = "usage: continue [text|gui]";
@@ -70,34 +66,20 @@ fn parse_session(word: &[u8]) -> Option<BootSession> {
     }
 }
 
-/// `mount` — prompt for the ARXFS passphrase and perform the real root
-/// unlock now. On success the boot continues without a second prompt.
+/// `mount` — perform the real root mount now, prompting for the ARXFS
+/// passphrase only when the root is encrypted. On success the boot continues
+/// without a second prompt.
 pub fn cmd_mount(_args: &[&[u8]], session: &mut Session<'_>) -> Flow {
     session.host.audit(SupervisorEvent::MountAttempt);
-    session.out.write_str("ARXFS passphrase: ");
-
-    // A fixed, on-stack buffer wiped the instant the attempt resolves: the
-    // typed secret never reaches a heap and never lingers. The read is
-    // un-echoed so the passphrase does not render.
-    let mut passphrase = [0u8; MOUNT_PASSPHRASE_MAX];
-    let read = read_line(session.input, &mut passphrase, false, session.out);
-    session.out.newline();
-    let outcome = match read {
-        LineOutcome::Line(len) => session.host.mount(&passphrase[..len], session.out),
-        LineOutcome::TooLong => {
-            passphrase.fill(0);
-            session.out.line("Passphrase too long; not attempted.");
+    let outcome = if session.host.root_lock() == Some(RootLock::Passphrase) {
+        let Some(outcome) = mount_with_passphrase(session) else {
             session.host.audit(SupervisorEvent::MountFailed);
             return Flow::Stay;
-        }
-        LineOutcome::Eof => {
-            passphrase.fill(0);
-            session.out.line("No passphrase entered; mount cancelled.");
-            session.host.audit(SupervisorEvent::MountFailed);
-            return Flow::Stay;
-        }
+        };
+        outcome
+    } else {
+        session.host.mount(None, session.out)
     };
-    passphrase.fill(0);
 
     match outcome {
         MountOutcome::Mounted => {
@@ -116,6 +98,27 @@ pub fn cmd_mount(_args: &[&[u8]], session: &mut Session<'_>) -> Flow {
                 .line("Mount failed (the root volume could not be read).");
             session.host.audit(SupervisorEvent::MountFailed);
             Flow::Stay
+        }
+    }
+}
+
+/// Ask for the ARXFS passphrase and mount the encrypted root under it, or
+/// answer `None` — having said why — when no passphrase was read.
+fn mount_with_passphrase(session: &mut Session<'_>) -> Option<MountOutcome> {
+    session.out.write_str("ARXFS passphrase: ");
+    // Un-echoed, on the stack, and wiped on every return path.
+    let mut passphrase = Wiped::<MAX_ROOT_PASSPHRASE_LEN>::new();
+    let read = read_line(session.input, &mut passphrase[..], false, session.out);
+    session.out.newline();
+    match read {
+        LineOutcome::Line(len) => Some(session.host.mount(Some(&passphrase[..len]), session.out)),
+        LineOutcome::TooLong => {
+            session.out.line("Passphrase too long; not attempted.");
+            None
+        }
+        LineOutcome::Eof => {
+            session.out.line("No passphrase entered; mount cancelled.");
+            None
         }
     }
 }
@@ -287,5 +290,37 @@ mod tests {
         s.set_mount_result(MountOutcome::Failed);
         dispatch(b"mount", &mut s.session());
         assert!(!s.output_contains("topsecret"));
+    }
+
+    #[test]
+    fn a_plaintext_root_mounts_with_no_prompt_and_no_passphrase() {
+        let mut s = MockSession::new(b"");
+        s.set_root_lock(Some(crate::RootLock::Plaintext));
+        s.set_mount_result(MountOutcome::Mounted);
+        let flow = dispatch(b"mount", &mut s.session());
+        assert_eq!(flow, Flow::Exit(SupervisorExit::Mounted));
+        assert!(!s.output_contains("passphrase"));
+        assert_eq!(s.mounted_with_passphrase(), Some(false));
+        assert!(s.audited(SupervisorEvent::MountOk));
+    }
+
+    #[test]
+    fn an_encrypted_root_is_mounted_with_the_typed_passphrase() {
+        let mut s = MockSession::new(b"opensesame\n");
+        s.set_mount_result(MountOutcome::Mounted);
+        dispatch(b"mount", &mut s.session());
+        assert!(s.output_contains("ARXFS passphrase: "));
+        assert_eq!(s.mounted_with_passphrase(), Some(true));
+    }
+
+    #[test]
+    fn a_disk_that_cannot_say_how_its_root_is_locked_asks_the_host_without_a_prompt() {
+        let mut s = MockSession::new(b"");
+        s.set_root_lock(None);
+        let flow = dispatch(b"mount", &mut s.session());
+        assert_eq!(flow, Flow::Stay);
+        assert!(!s.output_contains("passphrase"));
+        assert_eq!(s.mounted_with_passphrase(), Some(false));
+        assert!(s.output_contains("Mount failed"));
     }
 }

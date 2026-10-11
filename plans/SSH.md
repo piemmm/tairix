@@ -340,7 +340,7 @@ untrusted input in the §19.5 sense, exactly as it is not for `login`.
 `SystemConfigFile` (`lib/abi/src/driver_store.rs`) — the closed set that stops a
 writer and a reader naming different files — gains an `Ssh` variant so
 `configure` and `sshd` share one definition of the path. It has no pre-unlock
-reader: `sshd` starts after the encrypted root is unlocked.
+reader: `sshd` starts after the root is mounted.
 
 **Configuration grammar mirrors `lib/netconfig` exactly**, in a dedicated
 `lib/sshconfig`: `<scope>.<key> value` lines over `lib/util::conf`'s shared
@@ -913,7 +913,7 @@ Each is stated and absent, never stubbed.
   sockets. The agent's endpoint-id channel (S9) covers the one case that
   mattered.
 - **Pre-authentication `zlib` compression** — §5, S10.
-- **Remote unlock of the encrypted root** (`dropbear`-in-initramfs). The
+- **Remote unlock of an encrypted root** (`dropbear`-in-initramfs). The
   network stack, the users database, and `/System/Settings` are all behind the
   root unlock, so `sshd` cannot run before it. Reaching that would mean a second,
   far more exposed pre-unlock service; it is not smuggled in here.

@@ -1479,6 +1479,53 @@ impl Window {
         Some((target, self.client_rect()))
     }
 
+    /// Fit this window to a screen that changed size: a fullscreen window
+    /// covers `screen`, a maximized one fills `work_area`, and a restored one
+    /// is brought inside `work_area`, shrunk only where it no longer fits. A
+    /// geometry held to restore to is brought inside too, so restoring later
+    /// cannot strand the window. Answers the size state and new client
+    /// rectangle where the client's size changed.
+    pub(crate) fn refit(
+        &mut self,
+        screen: Rect,
+        work_area: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(WindowSizeState, Rect)> {
+        if self.parent().is_some() {
+            // A transient is placed by its application and keeps its size;
+            // it is only brought back within reach.
+            let _ = self.set_origin(self.bounds().clamped_onto(work_area).origin);
+            return None;
+        }
+        if let Some(held) = self.restore_outer {
+            self.restore_outer = Some(fit_inside(held, work_area));
+        }
+        let outer = self.bounds();
+        let target = match self.size_state {
+            WindowSizeState::Fullscreen => screen,
+            WindowSizeState::Maximized => self.in_range(work_area, scale, theme),
+            WindowSizeState::Restored if self.declared_resizable() == Some(true) => self
+                .in_range(fit_inside(outer, work_area), scale, theme)
+                .clamped_onto(work_area),
+            WindowSizeState::Restored => outer.clamped_onto(work_area),
+        };
+        if target == outer {
+            return None;
+        }
+        if (target.width, target.height) == (outer.width, outer.height) {
+            let _ = self.set_origin(target.origin);
+            return None;
+        }
+        let client = self.client_rect();
+        if !self.resize_to_outer(target, scale, theme) {
+            return None;
+        }
+        let refit = self.client_rect();
+        ((refit.width, refit.height) != (client.width, client.height))
+            .then_some((self.size_state, refit))
+    }
+
     /// Bring this resizable window inside the size range its application
     /// last declared, reporting the new client rectangle when it had to
     /// change size.
@@ -1728,6 +1775,83 @@ impl Window {
             None => Rect::EMPTY,
         }
     }
+}
+
+impl Window {
+    /// Where this window sits, as [`Placement`].
+    pub(crate) fn placement(&self) -> Placement {
+        Placement {
+            id: self.id(),
+            state: self.size_state,
+            outer: self.bounds(),
+            restore: self.restore_outer,
+        }
+    }
+
+    /// Put this window back where `placement` says, in the same size state:
+    /// a restored or transient window at its rectangle, a maximized or
+    /// fullscreen one holding its rectangle to restore to. Answers whether
+    /// its outer rectangle changed.
+    pub(crate) fn restore_placement(
+        &mut self,
+        placement: &Placement,
+        scale: Scale,
+        theme: &Theme,
+    ) -> bool {
+        self.restore_outer = placement.restore;
+        if self.size_state != WindowSizeState::Restored {
+            return false;
+        }
+        let outer = self.bounds();
+        if placement.outer == outer {
+            return false;
+        }
+        if (placement.outer.width, placement.outer.height) == (outer.width, outer.height) {
+            return self.set_origin(placement.outer.origin);
+        }
+        self.resize_to_outer(placement.outer, scale, theme)
+    }
+}
+
+/// Where a window sat, for
+/// [`Compositor::restore_placements`](crate::Compositor::restore_placements)
+/// to put back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Placement {
+    id: WindowId,
+    state: WindowSizeState,
+    outer: Rect,
+    restore: Option<Rect>,
+}
+
+impl Placement {
+    /// The window this is the placement of.
+    #[must_use]
+    pub const fn id(&self) -> WindowId {
+        self.id
+    }
+
+    /// Whether a window placed as `self` still rests as `since` left it: in
+    /// the same state and holding the same rectangle to restore to, and a
+    /// restored one at the same rectangle — a maximized or fullscreen one's
+    /// own rectangle follows the screen.
+    pub(crate) fn rests_as(&self, since: &Self) -> bool {
+        self.id == since.id
+            && self.state == since.state
+            && self.restore == since.restore
+            && (self.state != WindowSizeState::Restored || self.outer == since.outer)
+    }
+}
+
+/// `rect` no larger than `area` on either axis, moved inside it.
+fn fit_inside(rect: Rect, area: Rect) -> Rect {
+    Rect::new(
+        rect.left(),
+        rect.top(),
+        rect.width.min(area.width),
+        rect.height.min(area.height),
+    )
+    .clamped_onto(area)
 }
 
 /// The activation a frame currently in `current` takes when the window

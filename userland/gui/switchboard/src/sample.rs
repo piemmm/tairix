@@ -52,6 +52,7 @@ use tairix_abi::net_ipc::{
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
     NetInterfaceStateRecord, NetServerAddr, NetSockState, NetStackDefenceCounters,
 };
+use tairix_abi::switchboard_ipc::NetworkReport;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, KernelMemoryStats,
     LoadAverage, MemoryPressureBand, MemoryTotal, MountRecord, NetInterfaceRatesRequest,
@@ -561,10 +562,10 @@ pub struct Sample {
     /// pane's utilisation is a delta over its own interval.
     pub gpu_stats: Option<Vec<DisplayStats>>,
     /// The network interface inventory — the interfaces that exist and
-    /// their fixed properties ([`Cadence::Static`], hardware scope).
+    /// their fixed properties ([`Cadence::OnNotice`], hardware scope).
     pub net_facts: Option<Vec<NetInterfaceFactsRecord>>,
-    /// Live per-interface link and address state
-    /// ([`Cadence::EverySample`], global scope).
+    /// Live per-interface link and address state ([`Cadence::OnNotice`],
+    /// global scope).
     pub net_state: Option<Vec<NetInterfaceStateRecord>>,
     /// Per-interface throughput averaged over the sample period
     /// ([`Cadence::EverySample`], global scope). Each record states the
@@ -840,6 +841,11 @@ pub struct Sampler {
     identity: Option<SystemIdentity>,
     memory_total: Option<MemoryTotal>,
     net_facts: Option<Vec<NetInterfaceFactsRecord>>,
+    net_state: Option<Vec<NetInterfaceStateRecord>>,
+    /// Whether either interface reading was taken since the last
+    /// [`Self::take_network_read`], so a report is rebuilt only from new
+    /// readings.
+    network_read: bool,
     kernel_memory: Option<KernelMemoryStats>,
     mounts: Option<Vec<MountRecord>>,
     volume_health: Option<Vec<VolumeIoHealthRecord>>,
@@ -874,6 +880,8 @@ impl Sampler {
             identity: None,
             memory_total: None,
             net_facts: None,
+            net_state: None,
+            network_read: false,
             kernel_memory: None,
             mounts: None,
             volume_health: None,
@@ -916,7 +924,7 @@ impl Sampler {
         let cpu_info = self.read_cpu_info(transport, &mut degradations);
         let cpu_load = self.read_cpu_load(transport, &mut degradations);
         let pressure_band = self.read_pressure_band(transport, &mut degradations);
-        let net_state = self.read_net_state(transport, &mut degradations);
+        self.refresh_network(transport, &mut degradations);
         let net_rates = self.read_net_rates(transport, &mut degradations);
         let net_counters = self.read_net_counters(transport, &mut degradations);
         let sockets = self.read_sockets(transport, &mut degradations);
@@ -949,7 +957,7 @@ impl Sampler {
             volume_io_queue: self.volume_io_queue.clone(),
             gpu_stats: self.gpu_stats.clone(),
             net_facts: self.net_facts.clone(),
-            net_state,
+            net_state: self.net_state.clone(),
             net_rates,
             seats: self.seats.clone(),
             resource_limits: self.resource_limits.clone(),
@@ -1175,9 +1183,10 @@ impl Sampler {
     /// permits it at all, and its cadence tier says a fresh read would
     /// tell the surface something it does not already hold.
     ///
-    /// `cached` is whether a value for it is already held (it decides only a
-    /// [`Cadence::Static`] reading, which is retried until it succeeds and
-    /// then never again).
+    /// `cached` is whether a value for it is already held. It decides only a
+    /// [`Cadence::Static`] or [`Cadence::OnNotice`] reading, each retried
+    /// until it succeeds and then held until the machine restarts or a
+    /// notice drops it.
     fn due(&self, field: DegradedField, cached: bool) -> bool {
         self.scopes.permits(field) && cadence_of(field).due(self.sample_index, cached)
     }
@@ -1508,29 +1517,6 @@ impl Sampler {
         )
     }
 
-    /// Live per-interface link and address state.
-    fn read_net_state(
-        &mut self,
-        transport: &dyn Transport,
-        degradations: &mut Vec<DegradedField>,
-    ) -> Option<Vec<NetInterfaceStateRecord>> {
-        if !self.due(DegradedField::NetInterfaceState, false) {
-            return None;
-        }
-        self.read_paged(
-            transport,
-            PagedRead {
-                query: SysinfoQueryId::NET_INTERFACE_STATE,
-                field: DegradedField::NetInterfaceState,
-                record_len: NetInterfaceStateRecord::WIRE_LEN,
-                cap: NET_INTERFACE_CAP,
-            },
-            degradations,
-            PageRequest::to_le_bytes,
-            NetInterfaceStateRecord::from_bytes,
-        )
-    }
-
     /// Per-interface throughput, averaged over the nominal sample period.
     ///
     /// The requested window is the sample period rather than the measured
@@ -1578,9 +1564,8 @@ impl Sampler {
         self.refresh_inventory(transport, degradations);
     }
 
-    /// Refresh the readings that cannot change while the machine is up — the
-    /// installation's identity, its RAM total, and the network hardware it
-    /// presents.
+    /// Refresh the readings that cannot change while the machine is up: the
+    /// installation's identity and its RAM total.
     ///
     /// Each is read once and kept, and re-read only while it is still
     /// missing, so a reading that was refused or unavailable at start-up is
@@ -1613,8 +1598,19 @@ impl Sampler {
                 self.memory_total = Some(total);
             }
         }
+    }
+
+    /// Read the network interfaces and their link and addresses, where
+    /// nothing is held for them: at start, and after
+    /// [`Self::network_moved`] dropped what was.
+    pub fn refresh_network(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) {
         if self.due(DegradedField::NetInterfaceFacts, self.net_facts.is_some()) {
-            if let Some(records) = self.read_paged(
+            self.network_read = true;
+            self.net_facts = self.read_paged(
                 transport,
                 PagedRead {
                     query: SysinfoQueryId::NET_INTERFACE_FACTS,
@@ -1625,10 +1621,54 @@ impl Sampler {
                 degradations,
                 PageRequest::to_le_bytes,
                 NetInterfaceFactsRecord::from_bytes,
-            ) {
-                self.net_facts = Some(records);
-            }
+            );
         }
+        if self.due(DegradedField::NetInterfaceState, self.net_state.is_some()) {
+            self.network_read = true;
+            self.net_state = self.read_paged(
+                transport,
+                PagedRead {
+                    query: SysinfoQueryId::NET_INTERFACE_STATE,
+                    field: DegradedField::NetInterfaceState,
+                    record_len: NetInterfaceStateRecord::WIRE_LEN,
+                    cap: NET_INTERFACE_CAP,
+                },
+                degradations,
+                PageRequest::to_le_bytes,
+                NetInterfaceStateRecord::from_bytes,
+            );
+        }
+    }
+
+    /// The interfaces' fixed properties as last read.
+    #[must_use]
+    pub fn net_facts(&self) -> Option<&[NetInterfaceFactsRecord]> {
+        self.net_facts.as_deref()
+    }
+
+    /// The interfaces' link and addresses as last read.
+    #[must_use]
+    pub fn net_state(&self) -> Option<&[NetInterfaceStateRecord]> {
+        self.net_state.as_deref()
+    }
+
+    /// Drop the held interfaces, because the network notice announced that
+    /// they moved: the next [`Self::refresh_network`] reads them again.
+    pub fn network_moved(&mut self) {
+        self.net_facts = None;
+        self.net_state = None;
+    }
+
+    /// Whether an interface reading was taken since this was last asked.
+    pub fn take_network_read(&mut self) -> bool {
+        core::mem::take(&mut self.network_read)
+    }
+
+    /// The interfaces as last read, for the network report, or unmeasured
+    /// where the state reading is missing.
+    #[must_use]
+    pub fn network_report(&self) -> NetworkReport {
+        crate::network::report(self.net_state())
     }
 
     /// Refresh the slow-moving inventory: what is mounted and how healthy it
@@ -1928,7 +1968,6 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::CpuInfo
         | DegradedField::CpuLoad
         | DegradedField::MemoryPressureBand
-        | DegradedField::NetInterfaceState
         | DegradedField::NetInterfaceRates
         | DegradedField::NetInterfaceCounters
         | DegradedField::NetSockets
@@ -1951,9 +1990,8 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::NetResolverServers
         | DegradedField::NetTimeServers
         | DegradedField::HardwareTree => Cadence::Inventory,
-        DegradedField::Identity | DegradedField::MemoryTotal | DegradedField::NetInterfaceFacts => {
-            Cadence::Static
-        }
+        DegradedField::Identity | DegradedField::MemoryTotal => Cadence::Static,
+        DegradedField::NetInterfaceFacts | DegradedField::NetInterfaceState => Cadence::OnNotice,
     }
 }
 

@@ -78,7 +78,7 @@ reinvents (§2.2):
 - **Pre-unlock `/System/Settings` reads** — `SystemFileService::read_system_config`
   + the closed `SystemConfigFile` ABI enum already read a *whitelisted* set
   of `/System/Settings/**` files off the always-mounted read-only `/System`
-  before the encrypted root is unlocked. The service **registration store**
+  before the root is mounted. The service **registration store**
   (below) is read through this same confined, fail-closed path.
 
 TAIRiX has not shipped, so `abi-v1` is **not** frozen: the new `lib/abi`
@@ -466,7 +466,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   image's layer, compiled into PID 1's startup configuration because nothing
   under `/System` is reliably readable when the manager decides. The
   administrator's `EnrolmentOverride` is `/System/Settings/Services/overrides`
-  on the encrypted root (a user's own under `Settings/Services/`) and holds
+  on the root volume (a user's own under `Settings/Services/`) and holds
   only what differs from the image, so an update's new defaults reach
   everything the administrator never touched. `effective` is the one fold of
   the two, and `overrides_for` the one derivation back.
@@ -949,7 +949,7 @@ it does not.
     `project./System/Settings = root:/System/Settings`, so the pre-unlock
     volume can never be the mutable store and the mutable path can never be
     read pre-unlock. The **administrator** layer is
-    `/System/Settings/Services/overrides` on the encrypted root, holding only
+    `/System/Settings/Services/overrides` on the root volume, holding only
     `<name> enabled|disabled` for what was changed, so a system update's new
     default takes effect at once for everything unspoken. The **vendor** layer
     is the `enrolled` directives of PID 1's startup configuration, *not* a

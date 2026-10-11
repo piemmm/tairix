@@ -55,7 +55,6 @@
 //! ([`DesktopAction`]) and the embedder — which holds the spawn and
 //! filesystem capabilities — carries it out.
 
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -127,6 +126,36 @@ pub struct LaunchDocument {
     pub edits: bool,
 }
 
+/// A settings change the desktop's backdrop menu asks for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SettingsEdit {
+    /// Order the icons this way.
+    Sort(IconSort),
+    /// Flow the icons from this corner.
+    Icons(IconFlow),
+}
+
+impl SettingsEdit {
+    /// `settings` with this edit made.
+    #[must_use]
+    pub fn applied_to(self, mut settings: DesktopSettings) -> DesktopSettings {
+        match self {
+            Self::Sort(sort) => settings.sort = sort,
+            Self::Icons(icons) => settings.icons = icons,
+        }
+        settings
+    }
+
+    /// Whether `settings` already say what this edit would.
+    #[must_use]
+    pub fn is_in(self, settings: &DesktopSettings) -> bool {
+        match self {
+            Self::Sort(sort) => settings.sort == sort,
+            Self::Icons(icons) => settings.icons == icons,
+        }
+    }
+}
+
 /// What one desktop gesture asks the session to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DesktopAction {
@@ -155,14 +184,17 @@ pub enum DesktopAction {
         /// The path the link stores, exactly as it was given.
         target: String,
     },
-    /// Adopt these settings: persist them to the user's own store and hand
-    /// them back through [`Desktop::apply_settings`], which reports the work
-    /// the edit actually implies.
+    /// Make this edit: the embedder makes it over the newest settings it has
+    /// asked to publish, persists them to the user's own store and hands them
+    /// back through [`Desktop::apply_settings`], which reports the work the
+    /// edit actually implies.
     ///
-    /// The model names the new settings; it does not apply them itself, so
-    /// there is exactly one place settings are adopted and the persisted
-    /// document and the live desktop can never drift apart.
-    AdoptSettings(Box<DesktopSettings>),
+    /// The model names the change, not a document: one built over the
+    /// settings it last adopted would undo a change still on its way to the
+    /// store. Nor does it apply the change itself, so there is exactly one
+    /// place settings are adopted and the persisted document and the live
+    /// desktop can never drift apart.
+    EditSettings(SettingsEdit),
     /// Open the settings surface where the desktop picture is chosen,
     /// which is an installed application the embedder resolves and launches
     /// (the model knows no bundle paths).
@@ -1060,14 +1092,8 @@ impl<S: DirectorySource> Desktop<S> {
             PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
                 path: self.path_of(&NewEntry::Folder.suggest_name(&self.entries)),
             }),
-            PinboardCommand::SortBy(sort) => self.adopt(DesktopSettings {
-                sort,
-                ..self.settings.clone()
-            }),
-            PinboardCommand::ArrangeFrom(icons) => self.adopt(DesktopSettings {
-                icons,
-                ..self.settings.clone()
-            }),
+            PinboardCommand::SortBy(sort) => self.edit(SettingsEdit::Sort(sort)),
+            PinboardCommand::ArrangeFrom(icons) => self.edit(SettingsEdit::Icons(icons)),
             PinboardCommand::Refresh => DesktopOutcome {
                 relisted: self.relist(),
                 action: None,
@@ -1083,13 +1109,13 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// Name the settings edit `next` for the embedder to adopt, or change
-    /// nothing when it asks for the settings already in force.
-    fn adopt(&self, next: DesktopSettings) -> DesktopOutcome {
-        if next == self.settings {
+    /// Name `edit` for the embedder to make, or change nothing when the
+    /// settings in force already say it.
+    fn edit(&self, edit: SettingsEdit) -> DesktopOutcome {
+        if edit.is_in(&self.settings) {
             return DesktopOutcome::ignored();
         }
-        DesktopOutcome::acting(DesktopAction::AdoptSettings(Box::new(next)))
+        DesktopOutcome::acting(DesktopAction::EditSettings(edit))
     }
 
     /// A key while the desktop holds the keyboard: the arrows move the

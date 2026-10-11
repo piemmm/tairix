@@ -1175,7 +1175,7 @@ pub fn hw_tree_wake() {
 }
 
 /// The wait-queue holding `users_db_wait` callers (`plans/PI.md` P11). A
-/// `login` spawned before the encrypted root is unlocked parks here off the
+/// `login` spawned before the root is mounted parks here off the
 /// run queue (**no** busy yield) instead of re-reading
 /// `users_db_read` in a yield loop, which flooded the audit log with one
 /// ERROR per poll. It is woken by [`users_db_wake`] the instant the unlock

@@ -25,6 +25,13 @@ pressures with a pressured-resource count, and a validated top-task name.
 Every field is a real measurement or an honest absence — a failed or
 refused query degrades exactly the field it backs, never fabricates one.
 
+The interfaces are not on that cycle. Their facts and state are read once at
+start and again on each `Network` system notice the network stack publishes
+when an interface's presence, link, addresses or address states change
+(`docs/src/abi/notice.md`), so the two audited queries cost what the network
+actually does rather than one call every two seconds. A reading that went
+unanswered is retried at each cycle until it is answered.
+
 ## Channel
 
 Summaries travel over the seat-scoped `SWITCHBOARD_ENDPOINT`
@@ -73,6 +80,17 @@ The session answers a report it has no board for with `BrokenPipe`, which
 stops the reports, so a lost stop heals on the next publish. A watch the
 service refused is offered again with that instance's next summary. Reports
 are published only on a sample's own cycle, so watching adds no wake-up.
+
+The **network report** (`NetworkReport`, magic `SWN1`) feeds the bar's
+network signal. It names at most eight of the interfaces the stack hosts,
+each as its interface-state record — link and addresses — and counts the rest
+as omitted; an instance whose authority does not reach the state query sends
+it unmeasured, and the bar then shows no network signal rather than an offline
+one. It is published whenever it differs from the last one the session
+accepted: after each `Network` notice, and on a sample's cycle while the
+session has not taken an earlier one, whether back-pressure held it back or
+the session refused it. A refusal is stated once until a report is taken. The session accepts it only from the instance it launched and
+clears it when that instance is reaped.
 
 ## The live overview window
 
@@ -772,7 +790,7 @@ leaves them denied: fail closed, never optimistic.
 
 The loop is tickless and event-driven: **one** `waitset_wait` per iteration
 covers the termination signal, the command mailbox, the machine's
-memory-pressure band, and — only while a
+memory-pressure band, the `Network` notice, and — only while a
 window is open — that window's event mailbox, with a timeout equal to the
 time until the next real sample is due. Sampling is strict: a cycle
 triggered by an input or command wake before the deadline is a no-op that

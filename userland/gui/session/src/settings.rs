@@ -38,7 +38,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::pinboard_ipc::PinboardRequest;
+use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_appconf::Registry;
@@ -243,13 +243,81 @@ pub fn serve_pinboard_apply(
     caller_uid: u32,
     in_effect: &DesktopSettings,
     request: &[u8],
-) -> Result<DesktopSettings, PinboardApplyRefusal> {
+) -> Result<PinboardApplied, PinboardApplyRefusal> {
     if caller_uid != session_uid {
         return Err(PinboardApplyRefusal::Unattested);
     }
     let request = PinboardRequest::from_bytes(request).map_err(PinboardApplyRefusal::Malformed)?;
     let PinboardRequest::Apply { document } = request;
-    merge_applied(in_effect, document.as_str()).map_err(PinboardApplyRefusal::Undecodable)
+    let settings =
+        merge_applied(in_effect, document.as_str()).map_err(PinboardApplyRefusal::Undecodable)?;
+    Ok(PinboardApplied { settings, document })
+}
+
+/// What an attested apply asked for: the settings it makes over the ones in
+/// effect, and the document that made them, for a request held until the
+/// user answers to be merged again over whatever is in effect by then.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinboardApplied {
+    /// The settings in effect with the document's keys merged over them.
+    pub settings: DesktopSettings,
+    /// The document the call carried.
+    pub document: PinboardDocument,
+}
+
+/// The newest settings the session has asked to publish, until that ask
+/// lands: what its own next change is made over, so one change never undoes
+/// another still on its way to the store.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AskedSettings {
+    numbered: u64,
+    newest: Option<(u64, DesktopSettings)>,
+}
+
+impl AskedSettings {
+    /// Nothing asked.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            numbered: 0,
+            newest: None,
+        }
+    }
+
+    /// Note that `settings` have been asked to be published, answering the
+    /// ask's number for [`landed`](Self::landed).
+    pub fn ask(&mut self, settings: &DesktopSettings) -> u64 {
+        self.numbered = self.numbered.wrapping_add(1);
+        self.newest = Some((self.numbered, settings.clone()));
+        self.numbered
+    }
+
+    /// Note that ask `number` has landed, adopted or refused. Only the newest
+    /// ask landing leaves nothing outstanding.
+    pub fn landed(&mut self, number: u64) {
+        if self
+            .newest
+            .as_ref()
+            .is_some_and(|(newest, _)| *newest == number)
+        {
+            self.newest = None;
+        }
+    }
+
+    /// The settings a change is made over: the newest asked for, or `adopted`
+    /// once every ask has landed.
+    #[must_use]
+    pub fn base(&self, adopted: &DesktopSettings) -> DesktopSettings {
+        self.newest
+            .as_ref()
+            .map_or_else(|| adopted.clone(), |(_, settings)| settings.clone())
+    }
+
+    /// Whether an ask has yet to land.
+    #[must_use]
+    pub const fn outstanding(&self) -> bool {
+        self.newest.is_some()
+    }
 }
 
 /// One ready-to-print warning line for settings the desktop could not fully
@@ -271,7 +339,39 @@ mod tests {
         WallpaperFit,
     };
 
-    use super::{load_pinboard, publish_pinboard, serve_pinboard_apply, PinboardApplyRefusal};
+    use super::{
+        load_pinboard, publish_pinboard, serve_pinboard_apply, AskedSettings, PinboardApplyRefusal,
+    };
+
+    /// A change made while an earlier one is still being written is made over
+    /// that one, not over the settings last adopted, which would undo it.
+    #[test]
+    fn a_change_is_made_over_the_newest_ask_until_it_lands() {
+        let adopted = DesktopSettings::default();
+        let mut asked = AskedSettings::new();
+        assert_eq!(asked.base(&adopted), adopted);
+        assert!(!asked.outstanding());
+
+        let sorted = DesktopSettings {
+            sort: IconSort::Size,
+            ..adopted.clone()
+        };
+        let first = asked.ask(&sorted);
+        assert_eq!(asked.base(&adopted), sorted, "the sort is still on its way");
+        let flowed = DesktopSettings {
+            icons: IconFlow::Trailing,
+            ..asked.base(&adopted)
+        };
+        let second = asked.ask(&flowed);
+        assert_eq!(flowed.sort, IconSort::Size, "made over the sort in flight");
+
+        asked.landed(first);
+        assert!(asked.outstanding(), "an older ask landing settles nothing");
+        assert_eq!(asked.base(&adopted), flowed);
+        asked.landed(second);
+        assert!(!asked.outstanding());
+        assert_eq!(asked.base(&adopted), adopted, "back to what was adopted");
+    }
 
     /// The uid the session under test runs as.
     const SESSION_UID: u32 = 1000;
@@ -416,7 +516,8 @@ mod tests {
                 SESSION_UID,
                 &DesktopSettings::default(),
                 &frame
-            ),
+            )
+            .map(|applied| applied.settings),
             Ok(edited())
         );
     }
@@ -536,7 +637,8 @@ mod tests {
         .to_vec();
 
         let merged = serve_pinboard_apply(SESSION_UID, SESSION_UID, &in_effect, &frame)
-            .expect("the backdrop keys are valid");
+            .expect("the backdrop keys are valid")
+            .settings;
         assert_eq!(merged.sort, IconSort::Size);
         assert_eq!(merged.appearance, in_effect.appearance);
         assert_eq!(merged.density, in_effect.density);

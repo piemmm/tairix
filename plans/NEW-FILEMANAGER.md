@@ -1742,7 +1742,7 @@ the click-through that keys on them is written.
   `system_mount::register_writable_state`. The shared users-root fixture
   already carries `/Users/root/`, owned by the logged-in account
   (`tairix_users::FIRST_USER_UID`/`FIRST_USER_GID`, mode `0700`;
-  `tairix_test_arxfs_image::build_users_root_image_with_key`), and the
+  `tairix_test_arxfs_image::build_users_root_image_keyed`), and the
   desktop session (and the files bundle it spawns) run as that account.
   So the manager can create/rename/delete under `/Users/root` with the
   authority it already holds. Adding a fourth writable partition would

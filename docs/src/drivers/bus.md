@@ -771,18 +771,11 @@ VL805/BCM2711 — but it reaches the firmware mailbox **only** through the
 board-neutral `tairix_abi::driver::mailbox::MailboxChannel` seam, never a
 doorbell address or a `kernel/*` dependency (`AGENTS.md` §17.4). Its
 public surface is the §8 `register` entry, the §18.3 `BIND_KEYS` bind
-table (exact PCI `1106:3483`, ranked above the generic class-wildcard
-xHCI driver), two firmware-policy functions composed over a
-`MailboxChannel` —
-
-- `probe_firmware_revision` — a benign firmware-revision liveness read
-  that separates a broken mailbox path from `VideoCore` dropping the
-  reset tag (`AGENTS.md` §15.7), and
-- `reload_firmware` — the `NOTIFY_XHCI_RESET` reload, fail-closed: an
-  unverified firmware ack is treated as a failure, never a success
-  (`AGENTS.md` §5.4) —
-
-and the `wiring` composition the bin runs: `build_xhci_node` publishes
+table (`lib/vcmailbox::VL805_KEY`, exact PCI `1106:3483`, ranked above
+the generic class-wildcard xHCI driver), `reload_firmware` — the
+`NOTIFY_XHCI_RESET` reload composed over a `MailboxChannel`, fail-closed:
+an unverified firmware ack is treated as a failure, never a success
+(`AGENTS.md` §5.4) — and the `wiring` composition the bin runs: `build_xhci_node` publishes
 the controller as `node B`, an `usb,xhci` hardware-tree node (the shared
 `tairix_usb::XHCI_COMPATIBLE` identity) **forwarding** the register BAR +
 DMA grants the bin received on the VL805 PCI node (`node A`), and
@@ -794,9 +787,10 @@ it forwards the BAR/DMA grants without ever mapping them (`AGENTS.md` §4
 binds node B (its `BIND_KEYS`) to bring the controller up.
 
 The property-message *layout* lives once in `lib/vcmailbox`
-(`encode_xhci_reset` / `decode_xhci_reset_response` and the
-firmware-revision pair); the VL805 driver only sequences the policy, never
-re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
+(`encode_xhci_reset` / `decode_xhci_reset_response`), and so do the
+VL805's identity and the one address the reload may name, which the
+mailbox service admits the request against; the VL805 driver only
+sequences the policy, never re-deriving the layout (`AGENTS.md` §2.2). The mailbox *mechanism* (the
 discovered doorbell window, the DMA-aliased property buffer, the cache
 coherency) lives behind the `MailboxChannel`: the user-space bin reaches
 the autoloaded `drivers/bus/mailbox/vcmailbox` service over the kernel

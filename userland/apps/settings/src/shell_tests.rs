@@ -2138,6 +2138,96 @@ fn an_answered_cursor_set_joins_the_pointer_set_row() {
     );
 }
 
+/// The Resolution row's choices on `shell`'s Displays pane.
+fn resolution_choices(shell: &Shell) -> Vec<String> {
+    let form = shell.form_for_test().expect("a form");
+    let row = form
+        .groups()
+        .iter()
+        .flat_map(tairix_controls::FieldGroup::rows)
+        .find(|row| row.label() == Setting::Resolution.label())
+        .expect("the resolution row");
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("the resolution row draws a choice list");
+    };
+    combo.choices().to_vec()
+}
+
+fn displays() -> Shell {
+    shell_at(Location {
+        category: Category::Displays,
+        pane: Pane::Displays,
+    })
+}
+
+#[test]
+fn the_displays_pane_offers_what_the_output_can_show_its_own_first() {
+    let mut shell = displays();
+    assert_eq!(
+        resolution_choices(&shell),
+        ["The screen's own"],
+        "nothing but the screen's own before the desktop says what it is"
+    );
+    shell.adopt_output((1024, 768));
+    assert_eq!(
+        resolution_choices(&shell),
+        [
+            "1024 \u{d7} 768 (the screen's own)",
+            "800 \u{d7} 600",
+            "640 \u{d7} 480"
+        ]
+    );
+}
+
+#[test]
+fn choosing_a_resolution_posts_it_alone() {
+    let mut shell = displays();
+    shell.adopt_output((1024, 768));
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 0, 1) else {
+        panic!("choosing a resolution posts a document");
+    };
+    assert_eq!(document.trim(), "resolution = 800x600");
+}
+
+#[test]
+fn a_stored_size_that_is_the_output_s_own_is_its_native_entry_listed_once() {
+    let mut shell = displays();
+    shell.adopt_settings(DesktopSettings {
+        resolution: tairix_wallpaper::Resolution::Size {
+            width: 1024,
+            height: 768,
+        },
+        ..DesktopSettings::default()
+    });
+    shell.adopt_output((1024, 768));
+    assert_eq!(
+        resolution_choices(&shell),
+        [
+            "1024 \u{d7} 768 (the screen's own)",
+            "800 \u{d7} 600",
+            "640 \u{d7} 480"
+        ]
+    );
+}
+
+#[test]
+fn a_stored_resolution_this_output_cannot_show_is_stated_not_replaced() {
+    let mut shell = displays();
+    shell.adopt_settings(DesktopSettings {
+        resolution: tairix_wallpaper::Resolution::Size {
+            width: 1280,
+            height: 720,
+        },
+        ..DesktopSettings::default()
+    });
+    shell.adopt_output((1024, 768));
+    assert_eq!(
+        resolution_choices(&shell).last().map(String::as_str),
+        Some("1280 \u{d7} 720")
+    );
+}
+
 /// The store's families and the shipped families' line boxes, as `fontd`
 /// lists them.
 fn font_store() -> Vec<tairix_abi::font_ipc::FamilyEntry> {
@@ -2297,6 +2387,7 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
     // is not there is a search that lands nowhere.
     for (pane, composition) in [
         (Pane::Appearance, Composition::Appearance),
+        (Pane::Displays, Composition::Displays),
         (Pane::Accessibility, Composition::Accessibility),
         // A composition whose plates are discovered from a document only
         // an authenticated run answers contributes the subject a reader

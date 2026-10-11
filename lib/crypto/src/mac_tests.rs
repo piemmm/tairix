@@ -244,3 +244,17 @@ fn the_instantiations_do_not_share_a_core() {
         hmac_sha256(&mid, MESSAGE)[..20]
     );
 }
+
+/// Every hash state wipes itself on drop, and so does an HMAC's keyed
+/// midstate, which lives in the two hash cores it holds. The upstream
+/// `zeroize` features are what make them do so; this stops compiling if one
+/// is dropped.
+#[test]
+fn hash_and_mac_states_wipe_themselves_on_drop() {
+    fn wipes<T: sha2::digest::zeroize::ZeroizeOnDrop>() {}
+    wipes::<sha2::Sha256>();
+    wipes::<sha2::Sha512>();
+    wipes::<sha1::Sha1>();
+    wipes::<sha2::block_api::Sha256VarCore>();
+    wipes::<sha2::block_api::Sha512VarCore>();
+}

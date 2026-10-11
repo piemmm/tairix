@@ -485,7 +485,7 @@ pub trait Block {
 /// `tairix_partition::PartitionBlock` window) over a *borrowed* device,
 /// use it, drop it, then reuse the underlying device — without giving up
 /// ownership. The boot path relies on it to open the FAT boot partition
-/// and the encrypted root partition of one disk in sequence (one disk,
+/// and the root partition of one disk in sequence (one disk,
 /// two windows, no second device handle).
 impl<B: Block + ?Sized> Block for &mut B {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

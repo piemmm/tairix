@@ -12,12 +12,13 @@
 //! `tairix_abi::mailbox_ipc::MAILBOX_ENDPOINT` call endpoint.
 //!
 //! The hardware mechanism (doorbell registers, DMA buffer, bus-address
-//! translation, cache coherency) lives entirely behind the transport; the
-//! service keeps no protocol logic of its own — it decodes each request,
-//! runs the exchange, and frames the reply through
-//! `tairix_abi::mailbox_ipc::serve_request`. A caller's
-//! authority is enforced kernel-side by the endpoint's `CAP_MAILBOX` send gate: the service serves whoever the kernel admitted
-//! and validates nothing about the caller itself.
+//! translation, cache coherency) lives entirely behind the transport. The
+//! endpoint's `CAP_MAILBOX` send gate decides who may ask; what reaches the
+//! firmware is `lib/vcmailbox::admit_request`'s answer, taken against the
+//! hardware-tree node the kernel attests the caller is the driver of, because
+//! the property interface reaches the whole `VideoCore` and the GPU masters
+//! the bus. A refused request is answered in-band and logged with its caller,
+//! its tag and the answer.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland
 //! runtime `tairix-rt` (`_start`, the stack canary, the panic handler,
@@ -69,13 +70,21 @@ mod program {
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::mailbox_ipc::{self, MAILBOX_ENDPOINT};
     use tairix_abi::time::MonotonicClock;
-    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
+    use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, MmioMapper};
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_log::{Event, EventId, Field, FieldValue, Level};
+    use tairix_rt::LogSink;
     use tairix_vcmailbox::{
-        decode_firmware_revision_response, encode_firmware_revision_query, DmaMailbox,
-        InboxInterrupt, MailboxError, MailboxTransport, PROPERTY_LEN_BYTES,
+        admit_request, decode_firmware_revision_response, encode_firmware_revision_query,
+        DmaMailbox, InboxInterrupt, MailboxError, MailboxTransport, PROPERTY_LEN_BYTES,
+        SERVICE_CAPS,
     };
+
+    /// A firmware request was refused: a frame that does not decode, a tag
+    /// outside every driver's working set or in another shape, or one from a
+    /// caller that is not the driver of the device it concerns.
+    const REQUEST_REFUSED: EventId = EventId(24_500);
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -117,16 +126,14 @@ mod program {
     /// capacity suffices; it is a queue bound, not a hardware capacity.
     const ENDPOINT_CAPACITY: usize = 4;
 
-    /// The capability set the host re-checks before issuing a `mmio_map` /
-    /// `dma_alloc` / `irq_bind` trap, plus the bind privilege the service
-    /// needs to create a restricted-sender endpoint. The kernel re-checks
-    /// every trap regardless.
+    /// The capability set the host re-checks before issuing a trap: the set
+    /// the service's bundle requests. The kernel re-checks every trap
+    /// regardless.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::MEM_DMA);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
+        for &cap in SERVICE_CAPS {
+            caps.insert(cap);
+        }
         caps
     }
 
@@ -242,7 +249,8 @@ mod program {
     }
 
     /// The serve loop: block in `call_recv` (a real park between requests),
-    /// transform the request through the mailbox transport, and answer with
+    /// judge each request against the device its caller is the driver of,
+    /// transform it through the mailbox transport, and answer with
     /// `call_reply`.
     ///
     /// A `call_recv` error is terminal — the endpoint is sized so an
@@ -257,15 +265,72 @@ mod program {
         let mut reply = [0u8; mailbox_ipc::REPLY_LEN];
         loop {
             let mut ticket = 0u64;
-            match tairix_rt::call_recv(MAILBOX_ENDPOINT, &mut request, &mut ticket) {
-                Ok(n) => {
-                    let len =
-                        mailbox_ipc::serve_request(channel, &request[..n], &mut reply).unwrap_or(0);
-                    let _ = tairix_rt::call_reply(MAILBOX_ENDPOINT, ticket, &reply[..len]);
+            let Ok(n) = tairix_rt::call_recv(MAILBOX_ENDPOINT, &mut request, &mut ticket) else {
+                return EXIT_SERVE_FAILED;
+            };
+            let mut named = None;
+            let admit = |message: &[u32; MAILBOX_PROPERTY_WORDS]| {
+                admit_request(message, attested_node(ticket).as_ref()).map_err(|refusal| {
+                    named = refusal.tag;
+                    refusal.errno
+                })
+            };
+            let len = match mailbox_ipc::serve_request(channel, &request[..n], &mut reply, admit) {
+                Ok(served) => {
+                    if let Some(errno) = served.refused {
+                        log_refusal(ticket, named, errno);
+                    }
+                    served.reply_len
                 }
-                Err(_) => return EXIT_SERVE_FAILED,
-            }
+                Err(_) => 0,
+            };
+            let _ = tairix_rt::call_reply(MAILBOX_ENDPOINT, ticket, &reply[..len]);
         }
+    }
+
+    /// The hardware-tree node the kernel attests the caller of `ticket` is the
+    /// driver of, or [`None`] when it is no driver loaded for a node.
+    fn attested_node(ticket: u64) -> Option<HwNode> {
+        let mut bytes = [0u8; HwNode::WIRE_LEN];
+        let len = tairix_rt::call_peer_node(MAILBOX_ENDPOINT, ticket, &mut bytes).ok()?;
+        if len != bytes.len() {
+            return None;
+        }
+        HwNode::from_bytes(&bytes).ok()
+    }
+
+    /// Record that the caller of `ticket`, still in service, was refused with
+    /// `errno` over the tag it `named`.
+    fn log_refusal(ticket: u64, named: Option<u32>, errno: Errno) {
+        let pid = tairix_rt::peer_origin(MAILBOX_ENDPOINT, ticket)
+            .map_or(FieldValue::Null, |origin| {
+                FieldValue::UnsignedInt(origin.pid())
+            });
+        let tag = named.map_or(FieldValue::Null, |tag| {
+            FieldValue::UnsignedInt(u64::from(tag))
+        });
+        tairix_log::log(
+            &LogSink,
+            &Event {
+                level: Level::Warn,
+                id: REQUEST_REFUSED,
+                message: "vcmailbox: firmware request refused",
+                fields: &[
+                    Field {
+                        key: "pid",
+                        value: pid,
+                    },
+                    Field {
+                        key: "tag",
+                        value: tag,
+                    },
+                    Field {
+                        key: "errno",
+                        value: FieldValue::SignedInt(i64::from(errno.as_i32())),
+                    },
+                ],
+            },
+        );
     }
 
     tairix_rt::entry!(main);

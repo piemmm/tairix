@@ -188,7 +188,7 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
                 // have no driver, so emitting one record per unbound node at
                 // `Info` floods the slow diagnostic UART and starves boot (a
                 // progress-spam / defect — it once delayed the Pi's
-                // `Root passphrase:` prompt by tens of seconds). It is `Debug`
+                // `ARXFS passphrase:` prompt by tens of seconds). It is `Debug`
                 // instead, so the default `Info` filter drops it in O(1)
                 // before any `log_emit` syscall. A *binding* (`NODE_BOUND`), a
                 // packaging tie, or a load refusal stays visible — those are

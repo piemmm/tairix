@@ -24,8 +24,8 @@ use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::{has_pixel, high_contrast, premul};
 
 const W: u32 = 160;
-const CH: u32 = 28;
-const GAP: u32 = 8;
+const CH: u32 = 24;
+const GAP: u32 = 7;
 const ITEM_SLOT: u32 = CH + GAP;
 
 /// A `u32` coordinate as an `i32` (test coordinates always fit).

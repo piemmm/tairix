@@ -36,7 +36,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::home::HOME_USER_FILES_DIR;
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Salt, Uid, UserRecord, UsersDb,
 };
@@ -57,11 +57,12 @@ pub const TOTAL_SECTORS: u64 = 2048;
 /// and written files need.
 const INODE_COUNT: u32 = 64;
 
-/// Volume key the fixture is formatted and mounted with. `ARXFS` is
-/// encrypted-by-default with no plaintext layout
-/// (`docs/src/filesystem/arxfs-spec.md` §5), so the host builder and the
-/// guest tail mount the planted volume under this single shared key.
+/// Volume key the encrypted fixtures are formatted and mounted with: one
+/// shared key for the host builder and the guest tail.
 pub const FIXTURE_VOLUME_KEY: VolumeKey = [0x5a; VOLUME_KEY_LEN];
+
+/// How the encrypted fixtures are formatted and mounted.
+pub const FIXTURE_KEYING: Keying<'static> = Keying::Key(&FIXTURE_VOLUME_KEY);
 
 /// Deterministic stand-in for the platform RNG seam used to provision the
 /// fixture volume. A fixed sequence keeps the built image **reproducible**; it is fixture scaffolding, never a production source.
@@ -223,7 +224,7 @@ impl VecBlock {
     }
 
     /// Wrap an already-laid-out image (e.g. the bytes returned by
-    /// [`build_users_root_image_with_key`]) as a mountable device, so a
+    /// [`build_users_root_image_keyed`]) as a mountable device, so a
     /// consumer can re-open it through the real `ARXFS::open` without
     /// re-deriving the on-disk layout (one block-device
     /// double, shared by the fixture and its consumers).
@@ -293,7 +294,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
     let mut fs = ARXFS::format(
         dev,
         INODE_COUNT,
-        &FIXTURE_VOLUME_KEY,
+        FIXTURE_KEYING,
         &mut FixtureEntropy { next: 1 },
     )?;
     let root = fs.root();
@@ -321,7 +322,7 @@ pub fn build_image() -> Result<Vec<u8>, DriverError> {
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked).
 pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
-    build_users_root_image_with_key(&FIXTURE_VOLUME_KEY, &[])
+    build_users_root_image_keyed(FIXTURE_KEYING, &[])
 }
 
 /// Create PID 1's enrolment-override directory under `settings`, owned by the
@@ -379,13 +380,13 @@ fn plant_home_file(
     Ok(())
 }
 
-/// Build the users-root volume under an arbitrary `volume_key` — the same
-/// layout as [`build_users_root_image`] but keyed by the caller's key, so
-/// a consumer can exercise the production passphrase-derived-key mount
-/// path (`plans/PI.md` P11 root-mount; `kernel/tairix-kernel::root_mount`)
-/// against a real on-disk volume. [`build_users_root_image`] delegates
-/// here with [`FIXTURE_VOLUME_KEY`] (one authoring
-/// path).
+/// Build the users-root volume under `keying` — the same layout as
+/// [`build_users_root_image`] but protected as the caller asks, so a consumer
+/// can exercise the production root mount (`plans/PI.md` P11;
+/// `kernel/tairix-kernel::root_mount`) on a passphrase-derived key or on a
+/// plaintext root, against a real on-disk volume.
+/// [`build_users_root_image`] delegates here with [`FIXTURE_KEYING`] (one
+/// authoring path).
 ///
 /// `root_files` are extra documents planted on this volume, each
 /// `(path_components, bytes)` relative to the volume root with every
@@ -401,19 +402,14 @@ fn plant_home_file(
 /// database that violates the `users-v1` bounds surfaces as
 /// [`DriverError::Unsupported`] (a programming error in this fixture,
 /// surfaced rather than panicked).
-pub fn build_users_root_image_with_key(
-    volume_key: &VolumeKey,
+pub fn build_users_root_image_keyed(
+    keying: Keying<'_>,
     root_files: &[(&[&[u8]], &[u8])],
 ) -> Result<Vec<u8>, DriverError> {
     let text = users_db_text().map_err(|_| DriverError::Unsupported)?;
     let groups_text = groups_db_text().map_err(|_| DriverError::Unsupported)?;
     let dev = VecBlock::new(TOTAL_SECTORS);
-    let mut fs = ARXFS::format(
-        dev,
-        INODE_COUNT,
-        volume_key,
-        &mut FixtureEntropy { next: 1 },
-    )?;
+    let mut fs = ARXFS::format(dev, INODE_COUNT, keying, &mut FixtureEntropy { next: 1 })?;
     let root = fs.root();
     for name in ["System", "Users", "Apps", "Storage"] {
         let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
@@ -509,7 +505,7 @@ mod tests {
     fn mount() -> ARXFS<VecBlock> {
         let bytes = build_image().expect("the fixture builds a valid arxfs volume");
         let dev = VecBlock { store: bytes };
-        ARXFS::open(dev, &FIXTURE_VOLUME_KEY).expect("the built image is a valid arxfs volume")
+        ARXFS::open(dev, FIXTURE_KEYING).expect("the built image is a valid arxfs volume")
     }
 
     #[test]
@@ -567,8 +563,7 @@ mod tests {
 
         let bytes = build_users_root_image().expect("users-root image builds");
         let dev = VecBlock { store: bytes };
-        let mut fs =
-            ARXFS::open(dev, &FIXTURE_VOLUME_KEY).expect("users-root image is a valid volume");
+        let mut fs = ARXFS::open(dev, FIXTURE_KEYING).expect("users-root image is a valid volume");
 
         let sink = DiscardSink;
         let db = tairix_kernel_core::load_users_db(&mut fs, &sink)
@@ -647,7 +642,7 @@ mod tests {
 
         let dev = VecBlock::new(TOTAL_SECTORS);
         let mut entropy = FixtureEntropy { next: 1 };
-        let mut fs = ARXFS::format(dev, INODE_COUNT, &FIXTURE_VOLUME_KEY, &mut entropy)
+        let mut fs = ARXFS::format(dev, INODE_COUNT, FIXTURE_KEYING, &mut entropy)
             .expect("a fresh volume formats");
         let root = fs.root();
         plant_nested_file(&mut fs, root, path, bundle).expect("the bundle plants");

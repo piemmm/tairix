@@ -288,6 +288,11 @@ pub const TARGETS: &[Target] = &[
         description: "ramzip compressed-entry restore (tampered/truncated sealed entries)",
     },
     Target {
+        package: "tairix-vcmailbox",
+        test: "fuzz_admit",
+        description: "VideoCore mailbox admission (a caller-chosen property buffer)",
+    },
+    Target {
         package: "tairix-drv-fs-arxfs",
         test: "fuzz_mount",
         description:

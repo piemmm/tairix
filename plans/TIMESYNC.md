@@ -447,7 +447,7 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   `AppInfo.toml`, and the boot-floor registration in PID 1's startup config
   and the x86_64/riscv64 embedded spawn floor.
 - **Config availability is a boot-order fact, not a bug.** The store lives on
-  the encrypted root and this is a boot-floor service, so the first read
+  the root volume and this is a boot-floor service, so the first read
   normally precedes the mount. With no userland "root mounted" event, the
   reactor re-selects on a bounded doubling one-shot ladder (8 attempts, ~17
   minutes, parking between them). TS-7 made that ladder also the mechanism
@@ -475,7 +475,7 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   `Configured` tier (originally: on any read that finds no server).
   An earlier attempt to disarm it when the store's path had no VFS backing —
   meaning to spare a volume-less guest a pointless timer — stranded the
-  service on every ordinary boot instead: an unmounted encrypted root is
+  service on every ordinary boot instead: an unmounted root is
   indistinguishable from an absent one at `open`, so `timed` gave up three
   seconds before the unlock and never set the clock. The ladder's own finite
   length is what bounds the volume-less case; the classification is not worth
@@ -810,7 +810,7 @@ becoming "any number is fine".
 
 **The enrolment record is two layers, and that shape is forced by
 `plans/NEW-NAMESPACE.md` §5.** PID 1 must know what is enrolled *before* the
-encrypted root is unlocked — the RTC verticals boot with no unlock at all, and
+root is mounted — the RTC verticals boot with no unlock at all, and
 a machine's clock service must reach its chip without one — yet an
 administrator must be able to change enrolment at runtime. The target
 namespace policy pins `attach.system.flags = ro` and
@@ -823,7 +823,7 @@ copied, never merged into a third place:
 | Layer | Where | Written by |
 |---|---|---|
 | Vendor | the `enrolled` directives of PID 1's startup configuration | the build |
-| Administrator | `/System/Settings/Services/overrides` on the encrypted root | PID 1, on a control request |
+| Administrator | `/System/Settings/Services/overrides` on the root volume | PID 1, on a control request |
 
 - **The vendor layer is not on disk, and a QEMU run is what settled that.** An
   earlier shape put it at `/System/Services/enabled` on the read-only volume.

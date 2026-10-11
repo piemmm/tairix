@@ -33,7 +33,7 @@ use crate::netbind::NetstackBind;
 /// system-configuration store.
 ///
 /// The production implementation reads `system.conf` — the administrator's
-/// document when the encrypted root is mounted, the shipped default beneath
+/// document when the root is mounted, the shipped default beneath
 /// it otherwise — and maps it through the one shared
 /// [`SystemConfig::network_settings`](tairix_sysconfig::SystemConfig::network_settings);
 /// it is a seam so the delivery policy is host-testable against a scripted
@@ -55,7 +55,7 @@ pub trait NetworkConfigSource {
 /// Not a "delivered once" flag: the shipped default on the read-only
 /// `/System` volume is only the *lower* layer of the store, and the
 /// authoritative document on the writable root becomes readable when the
-/// encrypted root is mounted. So the policy is re-read on each generation
+/// root is mounted. So the policy is re-read on each generation
 /// bump and re-delivered whenever it differs from what the stack was last
 /// given, which is what makes an administrator's edit take effect on the
 /// next boot rather than being silently ignored.
@@ -229,7 +229,7 @@ impl NetIfConfigState {
 ///
 /// The plan is re-read through `source` at every reaction, exactly as the
 /// stack-wide policy is: the document on the writable root only becomes
-/// readable at the encrypted-root unlock, and an administrator may edit it
+/// readable at the root mount, and an administrator may edit it
 /// at any time afterwards, so a plan read once and cached would leave the
 /// running stack on whichever configuration happened to be visible first.
 /// Until the store is readable this is a no-op that retries on the next
@@ -386,8 +386,7 @@ fn audit_iface(
     message: &'static str,
     iface: &[u8; IF_NAME_LEN],
 ) {
-    let len = iface.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
-    let name = core::str::from_utf8(&iface[..len]).unwrap_or("?");
+    let name = tairix_abi::net_ipc::if_name_str(iface);
     log_event(
         sink,
         &Event {
@@ -581,7 +580,7 @@ mod tests {
     fn a_changed_policy_is_re_delivered() {
         // The shipped default on the read-only volume is only the lower
         // layer: the administrator's document becomes readable when the
-        // encrypted root is mounted, so a policy that changes between reads
+        // root is mounted, so a policy that changes between reads
         // must reach the stack rather than being ignored as "already
         // delivered".
         let shipped = settings(true, true, false, false, false, false);

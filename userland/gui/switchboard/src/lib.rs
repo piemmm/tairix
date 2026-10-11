@@ -99,6 +99,7 @@ pub mod derive;
 pub mod format;
 pub mod machine;
 pub mod model;
+pub mod network;
 pub mod panel;
 pub mod publish;
 pub mod resource_report;

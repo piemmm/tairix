@@ -538,9 +538,9 @@ volume-policy service.
   posture (stores refused — silently-lossy records are forbidden). The
   ext4 **formatter wrote a nil `s_uuid`** — a real defect the new tests
   exposed; `Ext4::format` now takes the caller-minted UUID and refuses
-  nil. (2) A ARXFS attach uses the well-known key (non-secret volumes,
-  as the System volume): a privately-keyed volume refuses with a typed
-  error, and key-provisioned attach arrives with volmgr's key policy —
+  nil. (2) An ARXFS attach opens the volume plaintext, as the System
+  volume is: an encrypted volume refuses with a typed error, and
+  key-provisioned attach arrives with volmgr's key policy —
   the kernel never guesses a secret. (3) The mount template is the
   restrictive system-owned default until D3c's storage-group identity
   map lands; listing `/Storage` (the catalog *view*) is D3c's synthetic

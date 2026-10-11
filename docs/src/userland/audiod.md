@@ -150,7 +150,9 @@ delivered by the device manager from `system.conf`.
 A lost device is never a default and is never listed, and is reaped once no
 stream rides it; its slot is the next bind's. Each change to a device or its
 controls moves a count the `AudioDevices` notice publishes, which the desktop
-session follows to remember its user's choices.
+session follows to remember its user's choices. The count resumes one past the
+value already on the board (`tairix_rt::changenotice`), so a restarted service's
+first announcement always reaches its subscribers.
 
 ## Authority
 

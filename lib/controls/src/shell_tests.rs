@@ -16,7 +16,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
@@ -1025,6 +1025,26 @@ fn tray_signal_readout_renders_name_value_and_action() {
     assert!(has_pixel(&s, premul(theme.palette().surface_raised)));
 }
 
+/// The readout's plate wears a rim, doubled under heavy contrast, inside which
+/// its lines keep the control padding: a size that reserves the padding alone
+/// squeezes the label it states by the rim.
+#[test]
+fn a_tray_readout_asks_for_its_rim_around_what_it_states() {
+    for theme in [Theme::dark(), high_contrast()] {
+        let label = "Battery charging";
+        let sig = TraySignal::new(IconKind::Battery, label);
+        let font = crate::paint::role_font(&theme, Scale::ONE, TextRole::Body);
+        let edges =
+            2 * (crate::paint::plate_border(&theme, Scale::ONE) + theme.metrics().control_inset);
+        assert_eq!(
+            sig.readout_size(Scale::ONE, &theme),
+            (font.text_width(label) + edges, font.line_height() + edges),
+            "{}",
+            theme.name()
+        );
+    }
+}
+
 /// The capsule's readout is one of the desktop's floating surfaces, and the
 /// trap is the same one the menu's test names: its rim is drawn across the
 /// whole plate first, so a ground merely *composited* over it comes back
@@ -1229,4 +1249,93 @@ fn a_text_too_long_for_its_plate_is_elided_with_the_mark() {
         marks_elision(|text| readout(TraySignal::new(IconKind::Battery, "").with_value(text))),
         "a readout's value"
     );
+}
+
+/// The pointer may travel from a control onto its open readout without the
+/// readout closing under it; a closed readout's area is not the control's.
+#[test]
+fn a_readout_holds_the_hover_only_while_it_is_open() {
+    use crate::shell::readout_hover;
+    use crate::state::PointerState;
+    let control = tairix_geometry::Rect::new(0, 100, 20, 20);
+    let readout = tairix_geometry::Rect::new(0, 40, 80, 60);
+    let at = tairix_geometry::Point::new;
+    assert_eq!(
+        readout_hover(at(5, 105), control, readout, false),
+        PointerState::Hover
+    );
+    assert_eq!(
+        readout_hover(at(40, 60), control, readout, true),
+        PointerState::Hover
+    );
+    assert_eq!(
+        readout_hover(at(40, 60), control, readout, false),
+        PointerState::None
+    );
+    assert_eq!(
+        readout_hover(at(200, 200), control, readout, true),
+        PointerState::None
+    );
+}
+
+/// A readout opened a rim's width away from its control stays open across
+/// the rim, wherever it opens, and only over the span the two share.
+#[test]
+fn an_open_readout_holds_across_the_gap_to_its_control_and_no_wider() {
+    use crate::shell::readout_hover;
+    use crate::state::PointerState;
+    use tairix_geometry::{Point, Rect};
+    let control = Rect::new(100, 100, 20, 20);
+    // Above, below, left and right of the control, two pixels clear of it.
+    let cases = [
+        (
+            Rect::new(90, 40, 80, 58),
+            Point::new(110, 98),
+            Point::new(95, 99),
+        ),
+        (
+            Rect::new(90, 122, 80, 58),
+            Point::new(119, 121),
+            Point::new(121, 120),
+        ),
+        (
+            Rect::new(40, 90, 58, 80),
+            Point::new(98, 100),
+            Point::new(99, 95),
+        ),
+        (
+            Rect::new(122, 90, 58, 80),
+            Point::new(121, 119),
+            Point::new(120, 121),
+        ),
+    ];
+    for (readout, across, beside) in cases {
+        assert_eq!(
+            readout_hover(across, control, readout, true),
+            PointerState::Hover,
+            "{readout:?}: across the gap at {across:?}"
+        );
+        assert_eq!(
+            readout_hover(across, control, readout, false),
+            PointerState::None,
+            "{readout:?}: a closed readout has no gap to hold"
+        );
+        assert_eq!(
+            readout_hover(beside, control, readout, true),
+            PointerState::None,
+            "{readout:?}: {beside:?} is beside the shared span"
+        );
+    }
+    let touching = Rect::new(100, 60, 20, 40);
+    let overlapping = Rect::new(90, 90, 40, 40);
+    let outside_both = [(135, 135), (85, 85), (135, 85), (85, 135)];
+    for readout in [touching, overlapping, Rect::EMPTY] {
+        for (x, y) in outside_both {
+            assert_eq!(
+                readout_hover(Point::new(x, y), control, readout, true),
+                PointerState::None,
+                "{readout:?}: no gap, nothing between"
+            );
+        }
+    }
 }

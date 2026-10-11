@@ -65,7 +65,7 @@ pub const READ_CONFIG_REQUEST_LEN: usize = 1 + 1;
 /// read-only `/System` store service will read on a bootstrap client's
 /// behalf.
 ///
-/// A bootstrap client needs these *before the encrypted root is unlocked*
+/// A bootstrap client needs these *before the root is mounted*
 /// (the device manager needs the network configuration), so it cannot reach
 /// them through the general VFS (which is not mounted until unlock); the
 /// store service already owns
@@ -120,7 +120,7 @@ impl SystemConfigFile {
     /// This is the one location the pre-unlock store endpoint reads and the
     /// one an image builder plants, so the writer and the reader cannot
     /// drift onto different volumes: at runtime `/System/Settings` is the
-    /// *writable* sub-mount backed by the encrypted root, which no
+    /// *writable* sub-mount backed by the root volume, which no
     /// bootstrap client can reach, so a document planted at [`Self::path`]
     /// through the VFS is invisible to every reader of this set.
     #[must_use]
@@ -200,7 +200,7 @@ pub enum StoreRequest {
     /// read-only `/System` volume the store service owns.
     ///
     /// The device manager needs the network configuration before the
-    /// encrypted root is unlocked (so it can bring interfaces up on the
+    /// root is mounted (so it can bring interfaces up on the
     /// same read-only volume the drivers autoload from), but the general
     /// VFS path is not mounted until unlock. The store service already
     /// holds the `/System` volume, so it reads the file and returns its

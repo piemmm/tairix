@@ -120,8 +120,9 @@ release re-signed with a fresh build key still opens the vault it wrote, while a
 developer squatting the identifier derives a different key.
 
 The master secret is stored as drawn, in the gated root: this service owns it,
-mode `0700`, gated on the capability, on a volume ARXFS has no plaintext mode
-for. It is deliberately not wrapped under a second key, because at this stage
+mode `0700`, gated on the capability, and at rest it is as safe as the root
+volume — encrypted only when the installation chose an encrypted root. It is
+deliberately not wrapped under a second key, because at this stage
 there is no second secret to wrap it with and a publicly derivable wrapping key
 would be theatre. The record is versioned, so a login-passphrase or TPM
 protector reshapes it in place. A record that attests nothing is refused and

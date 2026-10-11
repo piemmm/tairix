@@ -2,7 +2,7 @@
 
 This is the staged plan for bringing the `x86_64-tairix-none` port to the
 same **product** state the aarch64 port reached through `plans/PI.md`: a
-bootable image, the encrypted-root unlock → `/System` mount → on-disk app
+bootable image, the root unlock → `/System` mount → on-disk app
 store → users DB → login/session pipeline, `devmgr` autoload in the
 production boot, display/seat/console wiring, and the QEMU vertical parity
 sweep — ending with the deletion of the embedded spawn registry (`PLAN.md`,

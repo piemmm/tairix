@@ -14,7 +14,7 @@ record.
   compiled in, because nothing under `/System` is reliably readable at the
   instant the manager decides, so it is never parsed from a document.
 - `EnrolmentOverride` — the administrator's document at
-  `/System/Settings/Services/overrides` on the encrypted root (and a user's
+  `/System/Settings/Services/overrides` on the root volume (and a user's
   own under `Settings/Services/`), holding only the services whose enrolment
   was *changed* from the image's default, so an update shipping a new
   default applies at once to everything the administrator never touched.

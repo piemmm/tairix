@@ -71,7 +71,7 @@ pub enum TextRole {
     ItemLabel,
     /// A numeric readout beside a meter — a percentage, a byte count, a rate.
     Metric,
-    /// The secondary line under an item title, a clock, or any de-emphasised
+    /// The secondary line under an item title, or any de-emphasised
     /// annotation.
     Caption,
     /// A column or group header over a list, set in bold.

@@ -182,7 +182,7 @@ fn overlaid_availability(
 ///
 /// One VFS owns the whole mount table; **several** backing volumes can be
 /// registered (e.g. the read-only `/System` volume and the writable
-/// `/System/Logs` subtree of the encrypted root volume). Each `fs_*`
+/// `/System/Logs` subtree of the root volume). Each `fs_*`
 /// operation resolves its path's covering mount, reads that mount's
 /// [`DriverHandle`], and runs against the matching driver — so operations on
 /// *different* volumes proceed in parallel (each behind its own
@@ -702,7 +702,7 @@ impl<F: FilesystemWrite + Send + 'static> WritebackHost for LateFilesystem<F> {
 /// path resolves caller groups against (mirrors
 /// [`crate::users::LateUsersDb`]).
 ///
-/// The on-disk accounts are read only after the encrypted root is unlocked,
+/// The on-disk accounts are read only after the root is mounted,
 /// past the point where the handler set is built, so the service holds a
 /// `&'static LateIdentity` from boot and the trusted unlock step installs the
 /// verified [`IdentityTable`] once it exists. The table is **credential-free**
@@ -795,7 +795,7 @@ impl LateIdentity {
     /// The **system principal** (`uid 0`) is kernel-defined, not
     /// database-defined: it exists before any account table can be read
     /// (PID 1 and the boot services must load their store bundles off the
-    /// read-only `/System` volume before the encrypted root is unlocked)
+    /// read-only `/System` volume before the root is mounted)
     /// and on an installer image no table ever defines it. It therefore
     /// resolves to the same capability-less bootstrap identity the boot
     /// readers use (`gid 0`, no supplementary groups) whenever the table is

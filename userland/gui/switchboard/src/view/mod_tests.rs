@@ -1422,7 +1422,7 @@ fn a_row_scrolled_part_way_past_is_cut_not_squeezed() {
     feed(
         &mut sb,
         &theme,
-        &wheel_units(i32::try_from(by).unwrap_or(0) * 5 / 2),
+        &crate::view::test_support::wheel_pixels(by),
     );
     assert_eq!(sb.scroll_offset(), u64::from(by));
     let after = shot(&mut sb);
@@ -1477,7 +1477,7 @@ fn the_keyboard_reveals_a_row_the_list_had_scrolled_part_way_past() {
     feed(
         &mut sb,
         &theme,
-        &wheel_units(i32::try_from(offset).unwrap_or(0) * 5 / 2),
+        &crate::view::test_support::wheel_pixels(offset),
     );
     assert_eq!(sb.scroll_offset(), u64::from(offset));
 

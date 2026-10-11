@@ -37,8 +37,8 @@ use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
 use tairix_wm::{Compositor, Corners, Point, Rect, Scale, Surface, WindowId};
 
 /// Presents a taskbar, its program-library popup, its hover window picker,
-/// the notification popover, and the Switchboard capsule's instrument readout
-/// as window-manager windows.
+/// the notification popover, the Switchboard capsule's instrument readout,
+/// the volume panel and the network readout as window-manager windows.
 ///
 /// Build one with [`TaskbarPresenter::new`], then call
 /// [`present`](Self::present) whenever the taskbar's model or the active theme
@@ -53,6 +53,7 @@ pub struct TaskbarPresenter {
     notifications: Option<WindowId>,
     readout: Option<WindowId>,
     sound: Option<WindowId>,
+    network: Option<WindowId>,
     /// The density the surfaces on screen were laid out at, so a runtime
     /// DPI change is caught even though it never touches the taskbar
     /// model that drives the repaint latch.
@@ -74,6 +75,7 @@ impl TaskbarPresenter {
             notifications: None,
             readout: None,
             sound: None,
+            network: None,
             presented_scale: None,
             owed: TaskbarRepaint::NONE,
         }
@@ -117,6 +119,13 @@ impl TaskbarPresenter {
         self.readout
     }
 
+    /// The compositor window currently showing the network readout, or
+    /// `None` while the pointer is not holding it open.
+    #[must_use]
+    pub const fn network_window(&self) -> Option<WindowId> {
+        self.network
+    }
+
     /// Whether `window` is one of the surfaces this presenter placed: the bar
     /// itself, or any of the popups and popovers it opens.
     ///
@@ -137,6 +146,7 @@ impl TaskbarPresenter {
             self.notifications,
             self.readout,
             self.sound,
+            self.network,
         ]
         .into_iter()
         .flatten()
@@ -243,6 +253,11 @@ impl TaskbarPresenter {
         {
             self.owed.sound.merge(owed.sound);
         }
+        if due(&owed.network, self.network)
+            && !self.present_network(compositor, renderer, taskbar, scale, &owed.network)
+        {
+            self.owed.network.merge(owed.network);
+        }
     }
 
     /// Remove the bar, popup, picker, and popover windows from `compositor`
@@ -251,6 +266,9 @@ impl TaskbarPresenter {
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presented_scale = None;
         self.owed = TaskbarRepaint::NONE;
+        if let Some(id) = self.network.take() {
+            compositor.remove(id);
+        }
         if let Some(id) = self.sound.take() {
             compositor.remove(id);
         }
@@ -420,13 +438,13 @@ impl TaskbarPresenter {
     /// expanded (hovered or keyboard-focused), or remove it once collapsed.
     ///
     /// The readout opens outward from the capsule's slot at
-    /// [`TrayReadoutLayout::panel`]'s origin, rounded with
-    /// [`TrayReadoutLayout::corner_radius`]. Fails closed like the others: a
+    /// [`ReadoutLayout::panel`]'s origin, rounded with
+    /// [`ReadoutLayout::corner_radius`]. Fails closed like the others: a
     /// render whose surface cannot be allocated leaves the existing window
     /// untouched.
     ///
-    /// [`TrayReadoutLayout::panel`]: tairix_taskbar::TrayReadoutLayout::panel
-    /// [`TrayReadoutLayout::corner_radius`]: tairix_taskbar::TrayReadoutLayout::corner_radius
+    /// [`ReadoutLayout::panel`]: tairix_taskbar::ReadoutLayout::panel
+    /// [`ReadoutLayout::corner_radius`]: tairix_taskbar::ReadoutLayout::corner_radius
     fn present_readout(
         &mut self,
         compositor: &mut Compositor,
@@ -487,6 +505,39 @@ impl TaskbarPresenter {
         );
         if let Some(id) = placed {
             self.sound = Some(id);
+        }
+        placed.is_some()
+    }
+
+    /// Present the network readout while the pointer holds it open, or remove
+    /// it once it closes. Fails closed like the others.
+    fn present_network(
+        &mut self,
+        compositor: &mut Compositor,
+        renderer: &mut TaskbarRenderer,
+        taskbar: &Taskbar,
+        scale: Scale,
+        owed: &Repaint,
+    ) -> bool {
+        let Some(layout) = taskbar.network_readout_layout(scale) else {
+            if let Some(id) = self.network.take() {
+                compositor.remove(id);
+            }
+            return true;
+        };
+        let placed = place(
+            compositor,
+            self.network,
+            (
+                layout.panel.origin,
+                (layout.panel.width, layout.panel.height),
+            ),
+            owed,
+            Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
+            |surface, rects| renderer.paint_network_readout(taskbar, scale, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.network = Some(id);
         }
         placed.is_some()
     }

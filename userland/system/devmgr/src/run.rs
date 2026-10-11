@@ -361,7 +361,7 @@ mod program {
     ///
     /// The device manager configures interfaces on the same read-only
     /// `/System` volume the drivers autoload from, and must do so *before*
-    /// the encrypted root is unlocked — while the general VFS path
+    /// the root is mounted — while the general VFS path
     /// (`fs_open`) is not yet mounted. The store service already owns that
     /// volume, so the config is read through it (`StoreRequest::ReadConfig`)
     /// rather than the VFS, over the same `CAP_DRV_LOAD`-gated endpoint the
@@ -394,7 +394,7 @@ mod program {
     ///
     /// This is the writable *override* layer above the shipped default the
     /// store endpoint serves ([`read_store_config`]): the path resolves to
-    /// the writable sub-mount backed by the encrypted root, so it fails
+    /// the writable sub-mount backed by the root volume, so it fails
     /// closed until that root is mounted and succeeds afterwards. Without it
     /// an administrator's edit would be written to a file no reader ever
     /// opened.

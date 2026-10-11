@@ -152,18 +152,29 @@ pub fn decode_reply(reply: &[u8], out: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Re
     }
 }
 
-/// Serve one request frame: decode it, run the property exchange over
-/// `channel`, and encode the framed reply into `reply`, returning the number
-/// of reply bytes written.
+/// What serving one request frame came to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Served {
+    /// The bytes of the reply buffer the answer occupies.
+    pub reply_len: usize,
+    /// Why the request never reached the firmware: a frame that does not
+    /// decode, or the admission policy's refusal. `None` once the exchange was
+    /// attempted.
+    pub refused: Option<Errno>,
+}
+
+/// Serve one request frame: decode it, let `admit` judge it, run the property
+/// exchange over `channel`, and encode the framed reply into `reply`.
 ///
 /// This is the wire-level server transformation the user-space `vcmailbox`
 /// service runs between [`call_recv`](crate::SyscallNumber::CALL_RECV) and
 /// [`call_reply`](crate::SyscallNumber::CALL_REPLY): the hardware mechanism
-/// (the doorbell window + DMA property buffer) lives behind `channel`, so the
-/// service keeps no protocol logic of its own. Every
-/// failure — a malformed request or a [`DriverError`](crate::DriverError)
-/// from the exchange — is turned into an in-band status-framed error reply,
-/// so the blocked caller is always answered and fails closed.
+/// (the doorbell window + DMA property buffer) lives behind `channel`, and
+/// the policy over what reaches the firmware is `admit`'s, which sees the
+/// decoded buffer before the firmware does. Every failure — a malformed
+/// request, a refusal, or a [`DriverError`](crate::DriverError) from the
+/// exchange — is turned into an in-band status-framed error reply, so the
+/// blocked caller is always answered and fails closed.
 ///
 /// # Errors
 ///
@@ -174,14 +185,29 @@ pub fn serve_request<C: MailboxChannel + ?Sized>(
     channel: &C,
     request: &[u8],
     reply: &mut [u8],
-) -> Result<usize, Errno> {
-    match decode_request(request) {
-        Ok(mut message) => match channel.exchange(&mut message) {
-            Ok(()) => encode_reply(reply, &message),
-            Err(err) => encode_error_reply(reply, err.as_errno()),
-        },
-        Err(err) => encode_error_reply(reply, err),
+    admit: impl FnOnce(&[u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), Errno>,
+) -> Result<Served, Errno> {
+    let refuse = |reply: &mut [u8], err| {
+        encode_error_reply(reply, err).map(|reply_len| Served {
+            reply_len,
+            refused: Some(err),
+        })
+    };
+    let mut message = match decode_request(request) {
+        Ok(message) => message,
+        Err(err) => return refuse(reply, err),
+    };
+    if let Err(err) = admit(&message) {
+        return refuse(reply, err);
     }
+    let reply_len = match channel.exchange(&mut message) {
+        Ok(()) => encode_reply(reply, &message)?,
+        Err(err) => encode_error_reply(reply, err.as_errno())?,
+    };
+    Ok(Served {
+        reply_len,
+        refused: None,
+    })
 }
 
 #[cfg(test)]
@@ -294,10 +320,11 @@ mod tests {
         let mut req_bytes = [0u8; REQUEST_LEN];
         encode_request(&mut req_bytes, &request).expect("encodes");
         let mut reply = [0u8; REPLY_LEN];
-        let n = serve_request(&channel, &req_bytes, &mut reply).expect("serves");
+        let served = serve_request(&channel, &req_bytes, &mut reply, |_| Ok(())).expect("serves");
+        assert_eq!(served.refused, None);
 
         let mut out = [0u32; MAILBOX_PROPERTY_WORDS];
-        assert_eq!(decode_reply(&reply[..n], &mut out), Ok(()));
+        assert_eq!(decode_reply(&reply[..served.reply_len], &mut out), Ok(()));
         assert_eq!(out, response);
     }
 
@@ -312,12 +339,16 @@ mod tests {
         let mut req_bytes = [0u8; REQUEST_LEN];
         encode_request(&mut req_bytes, &sample()).expect("encodes");
         let mut reply = [0u8; REPLY_LEN];
-        let n = serve_request(&channel, &req_bytes, &mut reply).expect("serves");
+        let served = serve_request(&channel, &req_bytes, &mut reply, |_| Ok(())).expect("serves");
+        assert_eq!(served.refused, None, "the firmware was asked");
 
         let mut out = [0u32; MAILBOX_PROPERTY_WORDS];
         // `DeviceFault` maps to its distinct `Errno::DeviceFault` via
         // `as_errno`.
-        assert_eq!(decode_reply(&reply[..n], &mut out), Err(Errno::DeviceFault));
+        assert_eq!(
+            decode_reply(&reply[..served.reply_len], &mut out),
+            Err(Errno::DeviceFault)
+        );
     }
 
     #[test]
@@ -330,13 +361,41 @@ mod tests {
         };
         let short = [0u8; REQUEST_LEN - 1];
         let mut reply = [0u8; REPLY_LEN];
-        let n = serve_request(&channel, &short, &mut reply).expect("serves");
+        let served = serve_request(&channel, &short, &mut reply, |_| Ok(())).expect("serves");
+        assert_eq!(served.refused, Some(Errno::LengthOutOfRange));
         let mut out = [0u32; MAILBOX_PROPERTY_WORDS];
         assert_eq!(
-            decode_reply(&reply[..n], &mut out),
+            decode_reply(&reply[..served.reply_len], &mut out),
             Err(Errno::LengthOutOfRange)
         );
     }
+
+    #[test]
+    fn a_refused_request_is_answered_without_reaching_the_firmware() {
+        struct Untouched(core::cell::Cell<bool>);
+        impl MailboxChannel for Untouched {
+            fn exchange(&self, _: &mut [u32; MAILBOX_PROPERTY_WORDS]) -> Result<(), DriverError> {
+                self.0.set(true);
+                Ok(())
+            }
+        }
+        let channel = Untouched(core::cell::Cell::new(false));
+        let mut req_bytes = [0u8; REQUEST_LEN];
+        encode_request(&mut req_bytes, &sample()).expect("encodes");
+        let mut reply = [0u8; REPLY_LEN];
+        let served = serve_request(&channel, &req_bytes, &mut reply, |_| {
+            Err(Errno::PermissionDenied)
+        })
+        .expect("serves");
+        assert_eq!(served.refused, Some(Errno::PermissionDenied));
+        let mut out = [0u32; MAILBOX_PROPERTY_WORDS];
+        assert_eq!(
+            decode_reply(&reply[..served.reply_len], &mut out),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(!channel.0.get(), "the firmware never saw it");
+    }
+
     #[test]
     fn the_most_negative_status_word_fails_closed_instead_of_aborting() {
         let mut reply = [0u8; REPLY_LEN];

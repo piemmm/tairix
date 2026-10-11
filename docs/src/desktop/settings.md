@@ -46,11 +46,12 @@ starting a second view of one machine's configuration, each able to overwrite
 the other's applies. The desktop's one launch funnel resolves that, so every
 route in — the system menu, the Program Library, a shell — behaves the same.
 
-**Three write paths, and no fourth.** Every settable reaches one of exactly
-three owners: the desktop session, for the user's own desktop; the tool that
-already writes a machine-wide store, run as a re-authenticated account; or the
-syscall's own tool, likewise. A pane whose write path is refused states the
-refusal and changes nothing — it never reports a success it did not get.
+**Four write paths, and no fifth.** Every settable reaches one of exactly
+four owners: the desktop session, for the user's own desktop; the tool that
+already writes a machine-wide store, run as a re-authenticated account; the
+syscall's own tool, likewise; or the audio service, for a sound device's own
+controls. A pane whose write path is refused states the refusal and changes
+nothing — it never reports a success it did not get.
 
 ## The surface
 
@@ -306,6 +307,24 @@ walk the pictures one at a time or a line at a time, crossing from one
 category into the next, Home and End go to the ends, Enter or Space chooses,
 and Up from the first line steps back onto the rows. The column follows the
 cursor's picture into view.
+
+## Displays
+
+One row, **Resolution**: the size the graphical desktop is drawn at. It offers
+the output's own size first, marked as the screen's own, then each smaller
+standard size of the output's shape (`tairix_geometry::desktop_modes`, from the
+output size the desktop record carries). The desktop is resampled onto the
+output, so the output's mode, the text console and every driver are
+untouched, and a smaller size makes everything on the desktop larger. A size
+stored on another monitor that this one does not offer stays listed at the
+end rather than being silently replaced.
+
+The row applies at once. The desktop draws the new size immediately and asks,
+in a prompt of its own, whether to keep it: *Keep Changes* is focused, and
+*Revert*, `Escape`, or fifteen seconds unanswered put the previous size back.
+Settings' apply is answered only once that is decided, so a reverted trial
+reads as the refusal it is and the row shows what the store holds. The UI
+scale is Appearance's ([the DPI page](./dpi.md)).
 
 ## Theme
 
@@ -694,9 +713,13 @@ reached past the fold of the strip by the strip's own scrollbar — each dump
 gated on the desktop session's witness that the frame carrying that pane's
 title is on screen. It then pages the strip back up, chooses the appearance
 the desktop did not boot in on Appearance and photographs the desktop redrawn
-in it, and passes only once the
-desktop's published settings document has been committed twice: for that
-choice, and for Compact density chosen on the same pane after the photograph.
+in it. It shrinks the window by its corner, asks Displays for the largest size
+the output offers below its own, keeps the trial with `Enter`, and photographs
+the desktop drawn at that size, compared pixel for pixel with that size's own
+wallpaper resampled onto the output. It passes only once the desktop's
+published settings document has been committed three times: for the
+appearance, for the kept resolution, and for Compact density chosen on
+Appearance after the last photograph.
 
 ## Authority map
 
@@ -716,11 +739,12 @@ the staged source of truth; the shape of it is:
   counters that do need `CAP_SYSINFO_KERNEL` stay the Switchboard's alone.
   The walk is an IPC round trip, so it runs on a worker and the pane draws
   what has arrived rather than waiting;
-- **user-scope panes** (Appearance, Wallpaper, Lock Screen, Screensaver,
-  Notifications, Keyboard, Mouse, Accessibility) post a document to the
-  desktop session, which validates it, applies it and persists it to its own
-  published app-data scope; the desktop adopts a change only after the write
-  succeeded, so memory and disk cannot diverge;
+- **user-scope panes** (Appearance, Wallpaper, Displays, Lock Screen,
+  Screensaver, Notifications, Keyboard, Mouse, Trackpad, Accessibility) post a
+  document to the desktop session, which validates it, applies it and persists
+  it to its own published app-data scope; the desktop adopts a change only
+  after the write succeeded, so memory and disk cannot diverge. A resolution is
+  persisted only once its trial is kept;
 - **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS,
   Language & Region) ask the console's elevation broker to re-authenticate an
   account that may, and run the same `configure` program the command line

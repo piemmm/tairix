@@ -1209,7 +1209,7 @@ where
     /// kernel policy — `tairix_users::system_accounts`) and installs it
     /// into this cell, so the system and service accounts resolve from
     /// first boot on every architecture, before any volume exists. The
-    /// encrypted-root unlock later replaces the held table with the merge
+    /// root unlock later replaces the held table with the merge
     /// of that same compiled half and the on-disk human accounts.
     ///
     /// Defaults to `None`: a boot path (or host harness) that wires no
@@ -1519,7 +1519,7 @@ where
     /// syscall dispatches into, consuming and returning `self`
     /// (`plans/CAPABILITY_USE.md` CU4).
     ///
-    /// Called by the boot path that unlocks the encrypted root, handing
+    /// Called by the boot path that mounts the root, handing
     /// the `&'static LateUsersAdmin` cell its unlock step installs the
     /// built engine into. Until then the handover holds
     /// [`crate::useradmin::NULL_USERS_ADMIN`] and every `users_admin`
@@ -1601,7 +1601,7 @@ where
     /// (`PREREQUISITES.md` P-C).
     ///
     /// Every production port hands the **same** `&'static LateIdentity` the
-    /// encrypted-root unlock later replaces with the merged system∪human
+    /// root unlock later replaces with the merged system∪human
     /// table (one authoritative table, no second copy). Until this is
     /// called the handover carries `None`: nothing is installed, the
     /// dispatch hook falls to the inert [`crate::syscalls::NULL_IDENTITY`],

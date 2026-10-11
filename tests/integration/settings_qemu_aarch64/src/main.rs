@@ -1,6 +1,7 @@
 //! QEMU integration vertical: **open Settings from the system quick-actions
-//! menu, walk its sidebar, and change the desktop's look through its
-//! Appearance pane** (`plans/NEW-DESKTOP-SETTINGS.md` DS13).
+//! menu, walk its sidebar, change the desktop's look through its Appearance
+//! pane, and draw the desktop smaller than its output through Displays**
+//! (`plans/NEW-DESKTOP-SETTINGS.md` DS13, `plans/DISPLAY.md` D11).
 //!
 //! # What this proves that no host test can
 //!
@@ -10,8 +11,9 @@
 //! they are wired to each other and to the desktop — that the capsule's menu
 //! launches the installed bundle, that a press on a strip row reaches the
 //! window and moves it to the pane drawn there, that the pane's frame reaches
-//! the screen, and that choosing an appearance becomes a durable change the
-//! desktop redraws itself in.
+//! the screen, that choosing an appearance becomes a durable change the
+//! desktop redraws itself in, and that a kept resolution is drawn scaled onto
+//! the output and stored.
 //!
 //! So the guest boots the **production** aarch64 pipeline
 //! (`boot_aarch64::boot`) against a planted encrypted root carrying the signed
@@ -21,37 +23,40 @@
 //! window on General, walk to a pane that states an absence, scroll the strip,
 //! walk to Storage, page the strip back up, walk to Appearance and choose
 //! the appearance the desktop did not boot in, photograph the desktop redrawn
-//! in it, and finally choose Compact density on the same pane. Only the audit sink is swapped, for the PASS
+//! in it, shrink the window, choose a smaller desktop on Displays and keep it,
+//! photograph the desktop drawn at that size, and finally choose Compact
+//! density on Appearance. Only the audit sink is swapped, for the PASS
 //! witnesses below.
 //!
 //! # The PASS gate
 //!
-//! Four latches, in order, each attributable to exactly one act:
+//! Five latches, in order, each attributable to exactly one act:
 //!
 //! 1. **Settings launched.** An `APP_LOADED` record naming the bundle
 //!    [`SETTINGS_APP_NAME`] spells — the menu row's own launch.
 //! 2. **Its window opened.** A `WINDOW_CREATE_REPLY_LEN` reply on the
 //!    reserved window endpoint after that load. Settings opens one window,
 //!    and the desktop's own surfaces never call the window channel.
-//! 3. **The pane's choice became durable.** A rename replacing the desktop's
-//!    published settings document after that create: the app-data service
-//!    commits a document by writing it whole and renaming it over the live
-//!    one, and only an adopted change of look rewrites it in this run.
-//! 4. **The next one did too.** A second such rename — the density choice.
-//!    It changes a key the first did not, so it commits whether or not
-//!    Settings has adopted the restyled desktop by the time it lands.
+//! 3. **The appearance choice became durable.** A rename replacing the
+//!    desktop's published settings document after that create: the app-data
+//!    service commits a document by writing it whole and renaming it over the
+//!    live one, and only the changes Settings asks for rewrite it in this run.
+//! 4. **The kept resolution did too.** A second such rename: the trial's
+//!    request, persisted once its prompt was answered *Keep Changes*.
+//! 5. **And the last choice.** A third — the density choice, on a key neither
+//!    before it changed.
 //!
 //! Counting renames of that one path is attributable because the path is the
 //! desktop's alone and nothing else in this world rewrites it.
 //!
 //! # Why the guest cannot exit early
 //!
-//! The last dump photographs the desktop after the pane's choice, and the
-//! choice that completes the PASS is made only after the runner has read that
-//! dump back: the runner sends no pointer step until every screendump it has
-//! asked for is on disk and parsed.
+//! The last dump photographs the desktop the trial drew, and the choice that
+//! completes the PASS is made only after the runner has read that dump back:
+//! the runner sends no pointer step until every screendump it has asked for is
+//! on disk and parsed.
 //!
-//! A panic before all four latches parks the CPU, the guest falls silent, and
+//! A panic before all five latches parks the CPU, the guest falls silent, and
 //! the runner reports a timeout — loud failure, never a false pass.
 
 #![cfg_attr(itest_aarch64, no_std)]
@@ -72,7 +77,7 @@ mod kernel {
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
     use tairix_test_settings_qemu_aarch64::{
-        is_desktop_document, APPEARANCE_CHANGES, RENAME_OP, SETTINGS_APP_NAME,
+        is_desktop_document, DESKTOP_CHANGES, RENAME_OP, SETTINGS_APP_NAME,
     };
     use tairix_util::fmt::format_hex_u64;
 
@@ -175,7 +180,7 @@ mod kernel {
 
         /// Whether every witness is in.
         fn passed(&self) -> bool {
-            self.committed.load(Ordering::Acquire) >= APPEARANCE_CHANGES
+            self.committed.load(Ordering::Acquire) >= DESKTOP_CHANGES
         }
     }
 

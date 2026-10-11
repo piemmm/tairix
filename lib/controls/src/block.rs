@@ -15,7 +15,9 @@ use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
-use crate::paint::{inset, paint_run, paint_surface_plate, plate_border, ChromeLayer};
+use crate::paint::{
+    inset, paint_run, paint_surface_plate, plate_border, plate_content_inset, ChromeLayer,
+};
 
 /// Paint a block's plate over `bounds`, answering the rectangle its content
 /// draws inside — or [`None`] when `bounds` is too small to seat one.
@@ -120,12 +122,10 @@ fn title_font(theme: &Theme, scale: Scale) -> BitmapFont {
 }
 
 /// How far a plate's content sits inside its slot: the plate's own margin,
-/// then its rim, then the theme's control padding.
+/// then its rim and padding.
 #[must_use]
 pub fn content_inset(scale: Scale, theme: &Theme) -> u32 {
-    plate_margin(scale, theme)
-        .saturating_add(plate_border(theme, scale))
-        .saturating_add(scale.scale_length(theme.metrics().control_inset).max(1))
+    plate_margin(scale, theme).saturating_add(plate_content_inset(theme, scale))
 }
 
 /// Draw a block's title at the top of `rect` and the hairline rule under it,

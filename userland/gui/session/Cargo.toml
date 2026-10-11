@@ -149,6 +149,10 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # the icon arrangement/sort — so the session has one owner of them and the
 # shell reads them from the desktop rather than keeping a second copy.
 tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# The network interface-configuration engine names the Settings pane that edits
+# its interfaces, which the bar's network menu hands over; the session reads
+# nothing else of it.
+tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0" }
 # The app-data client: the desktop's pinboard settings live in this
 # application's own *published* scope, so the session is the only principal
 # that can write them and any application may read what it says about its own

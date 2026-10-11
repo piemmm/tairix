@@ -823,7 +823,9 @@ a surface as already rounded rather than cut its arc a second time
 They are public because the taskbar *is* such a surface without being a control
 in this crate, and `plate_border` beside them is the one rim thickness the whole
 desktop states its edges at, so a surface painted outside this crate cannot
-invent a second.
+invent a second. `plate_content_inset` is that rim plus the control padding: a
+surface sized from its content adds it on every side and lays the content at
+it, so the size it asks for and the room its content gets are one arithmetic.
 
 ## Owner-supplied icon artwork
 

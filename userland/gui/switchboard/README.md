@@ -226,7 +226,7 @@ a timeout equal to the time until the next real sample is due
 command wake before the deadline is a no-op that never re-queries the
 system. That single wait covers every source (`src/wait.rs`):
 the termination signal, the command mailbox, the machine's memory-pressure
-band, and — only while a window is
+band, the `Network` notice, and — only while a window is
 open — that window's event mailbox, which joins the set when the window
 opens and leaves it when the window closes so a closed window's channel is
 never left armed. There is no poll loop and no sleep anywhere.
@@ -241,6 +241,11 @@ never left armed. There is no poll loop and no sleep anywhere.
   10 s) — the memory-pressure query is audited per call, so its rate is
   bounded independently of the sample period; the reading is carried
   forward between queries.
+- **Interfaces: on change** (`Cadence::OnNotice`) — their facts and state
+  are read once at start and again on each `Network` notice, retried at each
+  sample only while unanswered, and the network report the bar's network
+  signal draws is published when it differs from the last one the session
+  accepted, and offered again until the session takes it.
 - **Keepalive: 10 s** (`KEEPALIVE_NS`) — publication is change-only
   against the last *acknowledged* summary, with a keepalive republish so a
   quiet system still proves the service alive. The keepalive doubles as

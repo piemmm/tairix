@@ -20,15 +20,15 @@
 //!   `ARXFS`): the signed driver and program bundles and the discovered
 //!   system payload, in whole 32 MiB grains and at most one grain more than
 //!   they need ([`tairix_syshelp::build_system_volume`]).
-//! - **Root partition** ([`rootfs`], `ARXFS`, [`ROOT_PART_SECTORS`]): an
-//!   encrypted volume carrying the directory skeleton. Its
-//!   volume key is **derived from a passphrase**: the
-//!   build provisions an
-//!   [`UnlockDescriptor`] (a
-//!   per-volume random salt + PBKDF2 iteration count), derives the volume
-//!   key from the profile's [`passphrase_for`] under it, provisions the
-//!   root with that key, and lays the plaintext descriptor on the boot
-//!   partition
+//! - **Root partition** ([`rootfs`], `ARXFS`, [`ROOT_PART_SECTORS`]): the
+//!   writable volume carrying the directory skeleton, plaintext by default
+//!   ([`VolumeProtection`]) so the image boots with no passphrase; whether to
+//!   encrypt the system disk is the installer's question to the user. A
+//!   debug image may instead be built with an encrypted root, whose volume
+//!   key is **derived from [`DEBUG_PASSPHRASE`]**: the build provisions an
+//!   [`UnlockDescriptor`] (a per-volume random salt + PBKDF2 iteration
+//!   count), derives the key under it, provisions the root with that key,
+//!   and lays the plaintext descriptor on the boot partition
 //!   ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap can re-derive the key
 //!   before mounting. The passphrase itself is never stored in the image.
 //!
@@ -37,15 +37,11 @@
 //! (`tairix_users::system_accounts` / `system_groups`, `plans/USERS.md`)
 //! and never written to disk. **Installer** is the shippable form: it
 //! seeds an *empty* users database (the installer authors the first human
-//! user on first boot), and its encrypted root is unlocked by a **blank**
-//! passphrase ([`INSTALLER_PASSPHRASE`]) the bootstrap auto-enters with no
-//! prompt, so a fresh install boots straight into the installer. **Debug**
-//! is the development form: it seeds an interactive `root`/`root`
-//! administrator ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], uid
-//! [`DEBUG_UID`], salted and hashed per build), and its encrypted root is
-//! unlocked by the matching `root` passphrase ([`DEBUG_PASSPHRASE`], typed
-//! at the `Root passphrase:` prompt), so the login prompt is usable
-//! without running the installer. A debug image must never ship.
+//! user on first boot), so a fresh install boots straight into the
+//! installer. **Debug** is the development form: it seeds an interactive
+//! `root`/`root` administrator ([`DEBUG_USERNAME`]/[`DEBUG_PASSWORD`], uid
+//! [`DEBUG_UID`], salted and hashed per build), so the login prompt is
+//! usable without running the installer. A debug image must never ship.
 //!
 //! The builder is driven by `cargo xtask image --target aarch64-rpi` (or
 //! `cargo xtask build --target aarch64-rpi`) and by the `tairix-mkimage`
@@ -65,8 +61,8 @@ pub mod overlay;
 pub mod rootfs;
 
 pub use tairix_drv_fs_arxfs::{
-    EntropySource, UnlockDescriptor, VolumeKey, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
-    VOLUME_KEY_LEN,
+    EntropySource, Keying, UnlockDescriptor, VolumeKey, VolumeProtection,
+    UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN, VOLUME_KEY_LEN,
 };
 
 use firmware::FirmwareFile;
@@ -102,7 +98,7 @@ pub enum MkimageError {
     RootPartition(DriverError),
     /// Giving a seeded account's home its fixed shape failed.
     HomeShape(tairix_users::HomeShapeError),
-    /// Host randomness for the volume key is unavailable.
+    /// Host randomness for the volume's identity or keys is unavailable.
     Entropy(String),
     /// Provisioning or encoding the passphrase-unlock descriptor failed.
     Unlock(DriverError),
@@ -253,47 +249,81 @@ pub const DEBUG_PRIMARY_GID: Gid = Gid(tairix_users::FIRST_USER_GID);
 /// from capabilities, not from this group.
 pub const DEBUG_GROUP: &str = "wheel";
 
-/// Passphrase the **debug** image's encrypted root is unlocked with.
+/// Passphrase a debug image built with an encrypted root
+/// ([`VolumeProtection::Encrypted`]) is unlocked with.
 ///
 /// The debug profile is a bring-up image that must never ship (see
 /// [`ImageProfile::Debug`]); its root account is `root`/`root`
-/// ([`DEBUG_USERNAME`] / [`DEBUG_PASSWORD`]), and for a consistent,
-/// memorable bring-up experience the encrypted-root unlock passphrase is
-/// the same word. The operator types `root` at the `Root passphrase:`
-/// prompt to unlock the volume. Knowable by design — like the seeded
-/// account, it exists only for development hardware.
+/// ([`DEBUG_USERNAME`] / [`DEBUG_PASSWORD`]), and the unlock passphrase is
+/// the same word, typed at the `ARXFS passphrase:` prompt. Knowable by
+/// design — like the seeded account, it exists only for development
+/// hardware.
 pub const DEBUG_PASSPHRASE: &[u8] = b"root";
 
-/// Passphrase the **installer** image's encrypted root is provisioned
-/// under — **blank**.
+/// What kind of image to author: its profile and how its root is protected.
 ///
-/// The installer image's root is **re-provisioned by the installer**,
-/// which sets the user's real, operator-chosen passphrase when it authors
-/// the production root on first boot. Until then a blank passphrase
-/// unlocks it (auto-enterable, so a fresh install does not stall). The
-/// volume is still fully encrypted: a blank passphrase is run through
-/// PBKDF2 over the descriptor's per-volume random salt to derive a real
-/// 256-bit [`VolumeKey`], exactly as a typed one would be. A shippable,
-/// user-installed root MUST be unlocked by a passphrase the operator
-/// chooses at install time — never this blank default.
-pub const INSTALLER_PASSPHRASE: &[u8] = b"";
+/// Only a debug image may be encrypted — whether to encrypt a real
+/// installation is the installer's question to the user — so an encrypted
+/// installer image cannot be asked for at all.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ImageKind {
+    profile: ImageProfile,
+    root: VolumeProtection,
+}
 
-/// The encrypted-root unlock passphrase each [`ImageProfile`] is
-/// provisioned under.
-///
-/// The passphrase is fully determined by the profile (there is no
-/// operator choice at *image-build* time — the installer is where a
-/// real passphrase is chosen), so it is derived here rather than passed in
-/// alongside the profile, which removes any chance of provisioning an
-/// image under a passphrase that disagrees with the one its prompt expects
-/// (one source of truth).
-#[must_use]
-pub const fn passphrase_for(profile: ImageProfile) -> &'static [u8] {
-    match profile {
-        ImageProfile::Debug => DEBUG_PASSPHRASE,
-        ImageProfile::Installer => INSTALLER_PASSPHRASE,
+impl ImageKind {
+    /// An image of `profile` whose root is protected as `root` says; an
+    /// encrypted root is keyed by [`DEBUG_PASSPHRASE`].
+    ///
+    /// # Errors
+    ///
+    /// [`EncryptedInstallerRoot`] for an encrypted installer image.
+    pub const fn new(
+        profile: ImageProfile,
+        root: VolumeProtection,
+    ) -> Result<Self, EncryptedInstallerRoot> {
+        match (profile, root) {
+            (ImageProfile::Installer, VolumeProtection::Encrypted) => Err(EncryptedInstallerRoot),
+            _ => Ok(Self { profile, root }),
+        }
+    }
+
+    /// An image of `profile` with a plaintext root.
+    #[must_use]
+    pub const fn plaintext(profile: ImageProfile) -> Self {
+        Self {
+            profile,
+            root: VolumeProtection::Plaintext,
+        }
+    }
+
+    /// The image's profile.
+    #[must_use]
+    pub const fn profile(self) -> ImageProfile {
+        self.profile
+    }
+
+    /// How the image's root is protected.
+    #[must_use]
+    pub const fn root(self) -> VolumeProtection {
+        self.root
     }
 }
+
+/// An encrypted root asked of an installer image, which is never authored.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct EncryptedInstallerRoot;
+
+impl fmt::Display for EncryptedInstallerRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "only a debug image's root can be encrypted: whether to encrypt an \
+             installation is the installer's question",
+        )
+    }
+}
+
+impl std::error::Error for EncryptedInstallerRoot {}
 
 /// Build the profile's `/System/Security/Users` text.
 ///
@@ -412,17 +442,22 @@ pub struct RpiImage {
     /// The flashable image bytes, exactly as long as its partition table
     /// describes.
     pub image: Vec<u8>,
-    /// The passphrase-unlock descriptor the root was provisioned under,
-    /// laid down in the clear on the boot partition
-    /// ([`fatboot::ROOT_UNLOCK_NAME`]). It is not a secret — only the salt
-    /// and iteration count needed to re-derive the volume key from the
-    /// passphrase.
-    pub unlock: UnlockDescriptor,
-    /// The root volume key the image was provisioned under, derived from
-    /// the profile's [`passphrase_for`] and [`Self::unlock`]. Mounting the
-    /// root needs it; the key itself is stored nowhere inside the image (it
-    /// can be re-derived from the on-image descriptor and the passphrase).
-    pub root_key: VolumeKey,
+    /// What an encrypted root was provisioned under; `None` for a plaintext
+    /// root.
+    pub unlock: Option<RootUnlock>,
+}
+
+/// What an encrypted root was provisioned under.
+pub struct RootUnlock {
+    /// The passphrase-unlock descriptor, laid down in the clear on the boot
+    /// partition ([`fatboot::ROOT_UNLOCK_NAME`]). It is not a secret — only
+    /// the salt and iteration count needed to re-derive the volume key from
+    /// the passphrase.
+    pub descriptor: UnlockDescriptor,
+    /// The root volume key, derived from [`DEBUG_PASSPHRASE`] under
+    /// [`Self::descriptor`]. Mounting the root needs it; it is stored nowhere
+    /// inside the image.
+    pub key: VolumeKey,
 }
 
 /// Build the flashable Raspberry Pi 4 SD image.
@@ -431,19 +466,15 @@ pub struct RpiImage {
 /// `firmware` is the verified blob set from
 /// [`firmware::FirmwareManifest::load_dir`]; `entropy` draws the unlock
 /// descriptor's salt, the root volume's internal key hierarchy, and, on a
-/// debug build, the seeded account's password salt; `profile` selects the
-/// [`ImageProfile`] **and** the encrypted-root unlock passphrase
-/// ([`passphrase_for`]) — `root` for the debug image, blank for the
-/// installer. The passphrase is not a separate argument:
-/// deriving it from the profile makes it impossible to provision an image
-/// under a passphrase that disagrees with the one its prompt expects.
+/// debug build, the seeded account's password salt; `kind` selects the
+/// [`ImageProfile`] and the root's protection.
 ///
-/// The root is encrypted under a [`VolumeKey`] **derived** from the
-/// profile's passphrase through a freshly provisioned
-/// [`UnlockDescriptor`]; the
-/// plaintext descriptor is laid on the boot partition
-/// ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap re-derives the key
-/// from the passphrase before mounting.
+/// A plaintext root boots with no passphrase. An encrypted one — a debug
+/// image's only — is keyed by a
+/// [`VolumeKey`] **derived** from [`DEBUG_PASSPHRASE`] through a freshly
+/// provisioned [`UnlockDescriptor`], and the plaintext descriptor is laid on
+/// the boot partition ([`fatboot::ROOT_UNLOCK_NAME`]) so the bootstrap
+/// re-derives the key from the passphrase before mounting.
 ///
 /// `drivers` is the set of signed `.rxe` driver bundles to install into the
 /// read-only `/System/Drivers/` store, each as `(components, bytes)` where
@@ -483,11 +514,12 @@ pub fn build_rpi_image(
     kernel_elf: &[u8],
     firmware: &[FirmwareFile],
     entropy: &mut dyn EntropySource,
-    profile: ImageProfile,
+    kind: ImageKind,
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
     network_conf: &str,
 ) -> Result<RpiImage, MkimageError> {
+    let profile = kind.profile();
     let users_db = users_db(profile, entropy)?;
     let groups_db = groups_db(profile)?;
     // The debug image's interactive administrator gets its recorded home
@@ -519,30 +551,42 @@ pub fn build_rpi_image(
     let library_conf = library::library_catalog(apps)?;
     let kernel8 = elfflat::elf_to_flat(kernel_elf, elfflat::KERNEL_LOAD_ADDR)?;
 
-    // Derive the root volume key from the profile's passphrase under a
-    // fresh per-volume descriptor, then lay the (non-secret) descriptor
-    // beside the volume on the boot partition so the bootstrap can
-    // re-derive it.
-    let passphrase = passphrase_for(profile);
-    let unlock = UnlockDescriptor::provision(UNLOCK_DEFAULT_ITERATIONS, entropy)
-        .map_err(MkimageError::Unlock)?;
-    let root_key = unlock.derive_volume_key(passphrase);
-    let mut descriptor = [0u8; UNLOCK_DESCRIPTOR_LEN];
-    unlock
-        .encode(&mut descriptor)
-        .map_err(MkimageError::Unlock)?;
+    // An encrypted root's key is derived under a fresh per-volume descriptor,
+    // laid (non-secret) beside the volume on the boot partition so the
+    // bootstrap can re-derive it.
+    let unlock = match kind.root() {
+        VolumeProtection::Plaintext => None,
+        VolumeProtection::Encrypted => {
+            let descriptor = UnlockDescriptor::provision(UNLOCK_DEFAULT_ITERATIONS, entropy)
+                .map_err(MkimageError::Unlock)?;
+            let key = *descriptor
+                .derive_volume_key(DEBUG_PASSPHRASE)
+                .map_err(MkimageError::Unlock)?;
+            Some(RootUnlock { descriptor, key })
+        }
+    };
+    let mut encoded = [0u8; UNLOCK_DESCRIPTOR_LEN];
+    if let Some(unlock) = &unlock {
+        unlock
+            .descriptor
+            .encode(&mut encoded)
+            .map_err(MkimageError::Unlock)?;
+    }
 
     let boot = fatboot::build_boot_partition(
         BOOT_PART_SECTORS,
         firmware,
         &kernel8,
-        &descriptor,
+        unlock.as_ref().map(|_| &encoded[..]),
         CONSOLE_BAUD,
     )?;
     let system = rootfs::build_system_partition(entropy, drivers, apps, network_conf)?;
+    let keying = unlock
+        .as_ref()
+        .map_or(Keying::Plaintext, |unlock| Keying::Key(&unlock.key));
     let root = rootfs::build_root_partition(
         ROOT_PART_SECTORS,
-        &root_key,
+        keying,
         entropy,
         &rootfs::RootSeed {
             users_db: &users_db,
@@ -556,16 +600,12 @@ pub fn build_rpi_image(
 
     let image = tairix_syshelp::assemble_disk(&boot, &system, &root).map_err(MkimageError::Disk)?;
 
-    Ok(RpiImage {
-        image,
-        unlock,
-        root_key,
-    })
+    Ok(RpiImage { image, unlock })
 }
 
 /// Cryptographic randomness from the host operating system
-/// (`/dev/urandom`), used for the image's root volume key and the volume's
-/// internal key hierarchy. Fails closed when the host source is
+/// (`/dev/urandom`), used for every volume's identity and, for an encrypted
+/// root, its descriptor salt and internal key hierarchy. Fails closed when the host source is
 /// unavailable — an image is never provisioned with predictable key
 /// material.
 pub struct HostEntropy;
@@ -578,9 +618,44 @@ impl EntropySource for HostEntropy {
     }
 }
 
+/// Write `unlock`'s root volume key to `path` as its 64-hex-digit key-file
+/// body, readable by its owner alone before any key byte reaches it: the key
+/// mounts the image's root on a host.
+///
+/// # Errors
+///
+/// The I/O error that refused the open, the permission change, or the write.
+pub fn write_root_key(path: &std::path::Path, unlock: &RootUnlock) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    // The creation mode covers only a new file; an existing one is narrowed
+    // through the handle before it is written.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(volume_key_to_hex(&unlock.key).as_bytes())
+}
+
+/// Remove the root-key file an earlier encrypted build left at `path`, so it
+/// cannot be taken for the key of a plaintext image written beside it.
+/// Returns whether there was one.
+///
+/// # Errors
+///
+/// The I/O error that refused the removal; a file that is absent is none.
+pub fn remove_stale_root_key(path: &std::path::Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 /// Render a volume key as the 64-hex-digit key-file body.
-#[must_use]
-pub fn volume_key_to_hex(key: &VolumeKey) -> String {
+fn volume_key_to_hex(key: &VolumeKey) -> String {
     let mut text = String::with_capacity(VOLUME_KEY_LEN * 2 + 1);
     for byte in key {
         use fmt::Write as _;
@@ -684,7 +759,7 @@ mod tests {
         at..at + usize::try_from(part.block_count).expect("fits usize") * SECTOR_BYTES
     }
 
-    /// The bytes of `image`'s encrypted data-root partition.
+    /// The bytes of `image`'s data-root partition.
     fn root_partition(image: &[u8]) -> Vec<u8> {
         image[extent(image, PartitionType::ARXFSRoot)].to_vec()
     }
@@ -711,7 +786,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &[],
             &test_network_conf(),
@@ -724,7 +799,7 @@ mod tests {
         );
 
         // The MBR carries the expected three-partition table: FAT boot,
-        // read-only `/System`, encrypted data root.
+        // read-only `/System`, data root.
         assert_eq!(built.image[510], 0x55);
         assert_eq!(built.image[511], 0xaa);
         assert_eq!(built.image[446 + 4], mbr::PART_TYPE_FAT32_LBA);
@@ -751,19 +826,16 @@ mod tests {
         let info = fat.node_info(node).expect("kernel node info");
         assert_eq!(info.kind, NodeKind::RegularFile);
 
-        // The on-disk descriptor re-derives exactly the volume key the
-        // image was provisioned under (the bootstrap's path).
-        let descriptor = read_unlock_descriptor(&built.image);
-        assert_eq!(descriptor, built.unlock);
+        // A plaintext root carries no unlock descriptor and mounts with no
+        // key.
+        assert!(built.unlock.is_none());
         assert_eq!(
-            descriptor.derive_volume_key(INSTALLER_PASSPHRASE),
-            built.root_key
+            fat.lookup(root, fatboot::ROOT_UNLOCK_NAME.as_bytes()).err(),
+            Some(DriverError::NotFound)
         );
-
-        // The root partition mounts under that re-derived key.
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_partition(&built.image)).expect("whole sectors"),
-            &descriptor.derive_volume_key(INSTALLER_PASSPHRASE),
+            Keying::Plaintext,
         )
         .expect("root partition mounts");
         let arxfs_root = rfs.root();
@@ -783,14 +855,13 @@ mod tests {
 
     #[test]
     fn the_system_partition_mounts_read_only_and_carries_the_skeleton() {
-        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &[],
             &test_network_conf(),
@@ -817,18 +888,18 @@ mod tests {
             .expect("a data root is present");
         assert_eq!(root.start_lba, system.start_lba + system.block_count);
 
-        // It mounts read-only under the non-secret well-known key and its
-        // root *is* `/System`, carrying the skeleton directly.
+        // It mounts read-only as the plaintext volume it is, and its root
+        // *is* `/System`, carrying the skeleton directly.
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("/System mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System mounts read-only");
         let sys_root = sys.root();
         sys.lookup(sys_root, b"Drivers").expect("/System/Drivers");
         let security = sys.lookup(sys_root, b"Security").expect("/System/Security");
         sys.lookup(security, b"Keys")
             .expect("/System/Security/Keys");
         // The store carries no users database (that secret stays on the
-        // encrypted root).
+        // root volume).
         assert!(sys
             .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
             .is_err());
@@ -842,7 +913,6 @@ mod tests {
 
     #[test]
     fn an_installed_driver_bundle_reads_back_from_the_readonly_system_store() {
-        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // A synthetic bundle blob: this test proves the *planting* (path +
@@ -856,7 +926,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[(store_path, BUNDLE)],
             &[],
             &test_network_conf(),
@@ -872,8 +942,8 @@ mod tests {
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("/System mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System mounts read-only");
 
         let mut node = sys.root();
         for component in store_path {
@@ -887,12 +957,11 @@ mod tests {
     #[test]
     fn the_network_configuration_reads_back_from_the_readonly_system_store() {
         use tairix_abi::driver_store::SystemConfigFile;
-        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // The device manager reads this document off the read-only `/System`
         // volume through the pre-unlock store endpoint, so the whole assembly
-        // has to land it there — not on the encrypted root, whose
+        // has to land it there — not on the root volume, whose
         // `/System/Settings` sub-mount no bootstrap client can reach. An
         // image that plants it anywhere else boots with no managed interface
         // and never starts its DHCP client.
@@ -901,7 +970,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(23),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &[],
             conf,
@@ -914,8 +983,8 @@ mod tests {
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("/System mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System mounts read-only");
 
         let mut node = sys.root();
         for component in SystemConfigFile::Network.volume_path().split('/') {
@@ -936,7 +1005,6 @@ mod tests {
 
     #[test]
     fn an_installed_app_bundle_reads_back_beside_its_help_tree() {
-        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // Synthetic bundle files: this test proves the *planting* of a
@@ -964,7 +1032,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &app_files,
             &test_network_conf(),
@@ -977,8 +1045,8 @@ mod tests {
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("/System mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System mounts read-only");
 
         // Every planted bundle file reads back byte-for-byte at its store
         // path…
@@ -1003,7 +1071,6 @@ mod tests {
 
     #[test]
     fn the_desktop_icon_artwork_reads_back_from_system_graphics() {
-        use tairix_drv_fs_arxfs::SYSTEM_VOLUME_KEY;
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // The desktop's icon class masters ship under `/System/Graphics`,
@@ -1015,7 +1082,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &[],
             &test_network_conf(),
@@ -1028,8 +1095,8 @@ mod tests {
             .first_of_type(PartitionType::ARXFSSystem)
             .expect("a /System partition is present");
         let window = PartitionBlock::from_partition(disk, &system).expect("the /System window");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("/System mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System mounts read-only");
 
         for file in ["folder.svg", "file.png"] {
             let master = tairix_syshelp::GRAPHICS_FILES
@@ -1055,29 +1122,111 @@ mod tests {
     }
 
     #[test]
-    fn the_root_only_mounts_under_the_passphrase_derived_key() {
+    fn an_encrypted_debug_root_mounts_only_under_the_debug_passphrases_key() {
         let built = build_rpi_image(
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::new(ImageProfile::Debug, VolumeProtection::Encrypted)
+                .expect("a debug image may be encrypted"),
             &[],
             &[],
             &test_network_conf(),
         )
         .expect("image builds");
+        let unlock = built.unlock.as_ref().expect("an encrypted root's unlock");
+
+        // The on-disk descriptor re-derives exactly the key the image was
+        // provisioned under (the bootstrap's path).
         let descriptor = read_unlock_descriptor(&built.image);
+        assert_eq!(descriptor, unlock.descriptor);
+        assert_eq!(
+            *descriptor
+                .derive_volume_key(DEBUG_PASSPHRASE)
+                .expect("derive"),
+            unlock.key
+        );
+        let device = || MemBlock::from_bytes(root_partition(&built.image)).expect("whole sectors");
+        let mut rfs = ARXFS::open(device(), Keying::Key(&unlock.key)).expect("root mounts");
+        let arxfs_root = rfs.root();
+        rfs.lookup(arxfs_root, b"System").expect("/System exists");
 
         // A wrong passphrase derives a different key, which the volume's
-        // AEAD-wrapped master key rejects — no separate oracle.
-        let wrong = descriptor.derive_volume_key(b"not the passphrase");
-        assert_ne!(wrong, built.root_key);
-        let root_bytes = root_partition(&built.image);
-        assert!(ARXFS::open(
-            MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &wrong,
-        )
-        .is_err());
+        // AEAD-wrapped master key rejects — no separate oracle — and an
+        // encrypted root never mounts with no key.
+        let wrong = *descriptor
+            .derive_volume_key(b"not the passphrase")
+            .expect("derive");
+        assert_ne!(wrong, unlock.key);
+        assert!(ARXFS::open(device(), Keying::Key(&wrong)).is_err());
+        assert!(ARXFS::open(device(), Keying::Plaintext).is_err());
+    }
+
+    #[test]
+    fn only_a_debug_image_can_be_asked_for_with_an_encrypted_root() {
+        let encrypted = ImageKind::new(ImageProfile::Debug, VolumeProtection::Encrypted)
+            .expect("a debug image may be encrypted");
+        assert_eq!(encrypted.profile(), ImageProfile::Debug);
+        assert_eq!(encrypted.root(), VolumeProtection::Encrypted);
+        assert_eq!(
+            ImageKind::new(ImageProfile::Installer, VolumeProtection::Encrypted),
+            Err(EncryptedInstallerRoot)
+        );
+        for profile in [ImageProfile::Debug, ImageProfile::Installer] {
+            assert_eq!(
+                ImageKind::new(profile, VolumeProtection::Plaintext),
+                Ok(ImageKind::plaintext(profile))
+            );
+            assert_eq!(
+                ImageKind::plaintext(profile).root(),
+                VolumeProtection::Plaintext
+            );
+            assert_eq!(ImageKind::plaintext(profile).profile(), profile);
+        }
+    }
+
+    #[test]
+    fn the_root_key_file_is_owner_only_even_when_it_already_existed() {
+        let dir = std::env::temp_dir().join(format!("mkimage-rootkey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("image.rootkey");
+        std::fs::write(&path, b"stale").expect("a pre-existing file");
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .expect("world-readable to begin with");
+        let unlock = RootUnlock {
+            descriptor: UnlockDescriptor::provision(UNLOCK_DEFAULT_ITERATIONS, &mut TestEntropy(3))
+                .expect("provision"),
+            key: [0xA7; VOLUME_KEY_LEN],
+        };
+
+        write_root_key(&path, &unlock).expect("the key file is written");
+
+        let body = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(body, format!("{}\n", "a7".repeat(VOLUME_KEY_LEN)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_plaintext_rebuild_removes_the_key_file_an_encrypted_build_left() {
+        let dir = std::env::temp_dir().join(format!("mkimage-stalekey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("image.rootkey");
+        std::fs::write(&path, b"a key for an image no longer there").expect("a stale key file");
+
+        assert!(remove_stale_root_key(&path).expect("removed"));
+        assert!(!path.exists());
+        assert!(!remove_stale_root_key(&path).expect("absent is no error"));
+        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
     #[test]
@@ -1086,7 +1235,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Debug,
+            ImageKind::plaintext(ImageProfile::Debug),
             &[],
             &[],
             &test_network_conf(),
@@ -1096,7 +1245,7 @@ mod tests {
         let root_bytes = root_partition(&built.image);
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &built.root_key,
+            Keying::Plaintext,
         )
         .expect("root partition mounts");
         let arxfs_root = rfs.root();
@@ -1151,18 +1300,17 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &[],
             &test_network_conf(),
         )
         .expect("image builds");
 
-        // The installer root is provisioned under the blank passphrase.
         let root_bytes = root_partition(&built.image);
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &built.root_key,
+            Keying::Plaintext,
         )
         .expect("root partition mounts");
         let arxfs_root = rfs.root();
@@ -1216,7 +1364,7 @@ mod tests {
             &test_kernel_elf(),
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Debug,
+            ImageKind::plaintext(ImageProfile::Debug),
             &[],
             &[],
             &test_network_conf(),
@@ -1226,7 +1374,7 @@ mod tests {
         let root_bytes = root_partition(&built.image);
         let mut rfs = ARXFS::open(
             MemBlock::from_bytes(root_bytes).expect("whole sectors"),
-            &built.root_key,
+            Keying::Plaintext,
         )
         .expect("root partition mounts");
         let arxfs_root = rfs.root();
@@ -1268,31 +1416,12 @@ mod tests {
             b"not an elf",
             &test_firmware(),
             &mut TestEntropy(9),
-            ImageProfile::Installer,
+            ImageKind::plaintext(ImageProfile::Installer),
             &[],
             &[],
             &test_network_conf(),
         )
         .is_err());
-    }
-
-    #[test]
-    fn each_profile_maps_to_its_unlock_passphrase() {
-        // The debug image unlocks with `root` (typed at the prompt); the
-        // installer with a blank passphrase (auto-entered, no prompt) —
-        // . The two differ, so the wrong-passphrase test
-        // above is a genuine negative.
-        assert_eq!(passphrase_for(ImageProfile::Debug), DEBUG_PASSPHRASE);
-        assert_eq!(
-            passphrase_for(ImageProfile::Installer),
-            INSTALLER_PASSPHRASE
-        );
-        assert_eq!(passphrase_for(ImageProfile::Debug), b"root");
-        assert_eq!(passphrase_for(ImageProfile::Installer), b"");
-        assert_ne!(
-            passphrase_for(ImageProfile::Debug),
-            passphrase_for(ImageProfile::Installer)
-        );
     }
 
     #[test]

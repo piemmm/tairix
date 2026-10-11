@@ -2031,8 +2031,11 @@ fn fill_at(theme: &Theme, x: u32, y: u32) -> Pixel {
 /// the picture slot and the label band. Checked against a resting tile, which
 /// leaves such a row exactly as it found it, rather than trusted.
 fn clear_row(theme: &Theme) -> u32 {
-    let row = ONE_LINE.icon_side(TILE, Scale::ONE, theme)
-        + Scale::ONE.scale_length(theme.metrics().control_inset);
+    // The name band's first row: the tile halves its inset above the picture
+    // and again below it, so this sits past the picture's shadow and above
+    // the name's ink whatever the inset's parity.
+    let half = Scale::ONE.scale_length(theme.metrics().control_inset) / 2;
+    let row = ONE_LINE.icon_side(TILE, Scale::ONE, theme) + 2 * half;
     let resting = tile_over_backdrop(ControlState::idle(), theme, None);
     for x in 0..TW {
         assert_eq!(

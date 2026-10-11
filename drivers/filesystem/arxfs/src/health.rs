@@ -199,8 +199,8 @@ pub struct HealthReport {
     pub metadata_unrepairable: u64,
     /// Accumulated data blocks that failed the physical checksum.
     pub data_physical_faults: u64,
-    /// Accumulated data blocks whose AEAD tag failed.
-    pub data_aead_faults: u64,
+    /// Accumulated data blocks whose region seal failed.
+    pub data_seal_faults: u64,
     /// Accumulated data blocks whose plaintext failed its logical hash.
     pub data_logical_faults: u64,
     /// Number of scrubs health monitoring has triggered over the volume's
@@ -264,7 +264,7 @@ struct FaultCounters {
     metadata_repaired: u64,
     metadata_unrepairable: u64,
     data_physical_faults: u64,
-    data_aead_faults: u64,
+    data_seal_faults: u64,
     data_logical_faults: u64,
     scrubs_triggered: u64,
     metadata_damaged: u64,
@@ -278,7 +278,7 @@ impl FaultCounters {
             self.metadata_repaired,
             self.metadata_unrepairable,
             self.data_physical_faults,
-            self.data_aead_faults,
+            self.data_seal_faults,
             self.data_logical_faults,
             self.scrubs_triggered,
             self.metadata_damaged,
@@ -291,7 +291,7 @@ impl FaultCounters {
             metadata_repaired: a[0],
             metadata_unrepairable: a[1],
             data_physical_faults: a[2],
-            data_aead_faults: a[3],
+            data_seal_faults: a[3],
             data_logical_faults: a[4],
             scrubs_triggered: a[5],
             metadata_damaged: a[6],
@@ -324,9 +324,9 @@ impl FaultCounters {
         self.data_physical_faults = self
             .data_physical_faults
             .saturating_add(report.data_physical_faults);
-        self.data_aead_faults = self
-            .data_aead_faults
-            .saturating_add(report.data_aead_faults);
+        self.data_seal_faults = self
+            .data_seal_faults
+            .saturating_add(report.data_seal_faults);
         self.data_logical_faults = self
             .data_logical_faults
             .saturating_add(report.data_logical_faults);
@@ -336,7 +336,7 @@ impl FaultCounters {
     /// Total data faults across every class (saturating).
     fn total_data_faults(self) -> u64 {
         self.data_physical_faults
-            .saturating_add(self.data_aead_faults)
+            .saturating_add(self.data_seal_faults)
             .saturating_add(self.data_logical_faults)
     }
 }
@@ -602,7 +602,7 @@ impl<B: Block> ARXFS<B> {
             metadata_damaged: counters.metadata_damaged,
             metadata_unrepairable: counters.metadata_unrepairable,
             data_physical_faults: counters.data_physical_faults,
-            data_aead_faults: counters.data_aead_faults,
+            data_seal_faults: counters.data_seal_faults,
             data_logical_faults: counters.data_logical_faults,
             scrubs_triggered: counters.scrubs_triggered,
             metadata_scrub_recommended,

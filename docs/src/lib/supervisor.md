@@ -2,7 +2,7 @@
 
 The arch-neutral, `no_std` engine for the **pre-boot Supervisor console** —
 the command monitor an operator drops into from the boot screen before the
-encrypted root is mounted. The full design, boot-screen contract, command
+root is mounted. The full design, boot-screen contract, command
 reference, and security model live in
 [The pre-boot Supervisor console](../architecture/supervisor.md); this page
 records the crate's shape.
@@ -29,7 +29,8 @@ to the world only through object-safe seams:
 - `SupervisorHost` — the data and control seam (`version`, `mem`, `cpu`, `hw`,
   `disk`, `partitions`, `arxfs`, `ls`, `log`, `panic-log`, `uptime`, `date`,
   the interruptible `memtest`/`test disk`, and the audited control actions
-  `mount`, `reboot`, `poweroff`).
+  `mount`, `reboot`, `poweroff`). `root_lock` tells `mount` whether the root
+  takes a passphrase, so a plaintext root is mounted with no prompt.
 
 `run_supervisor` drives the `*` REPL to a `SupervisorExit` (`ContinueBoot` or
 `Mounted`) the boot path acts on. `ContinueBoot` carries the

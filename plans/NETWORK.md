@@ -2675,7 +2675,7 @@ No hidden state, no per-driver config files, no imperative boot scripts.
 - **A writable override layer exists for the store as a whole** (see 6.2
   for the `system.conf` half, which is wired end to end): the device manager
   reads the authoritative document at the canonical `/System/Settings/` path
-  when the encrypted root has been mounted, and the shipped default beneath
+  when the root has been mounted, and the shipped default beneath
   it otherwise. Neither layer is copied into the other.
 - **`network.conf` has no runtime writer, by design.** `configure` grows no
   interface sub-grammar, so the per-interface document stays image- and

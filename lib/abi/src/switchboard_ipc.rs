@@ -66,12 +66,15 @@
 //! against the process list it already samples rather than trusting names
 //! from the wire.
 //!
-//! [`SwitchboardCommand::WatchMachine`] asks for the one frame this endpoint
-//! carries besides a [`SwitchboardRequest`]: the [`MachineReport`] the
-//! desktop's System Monitor screensaver draws, published each sample while
-//! one watches.
+//! The endpoint carries two frames besides a [`SwitchboardRequest`], each told
+//! apart by its magic: the [`MachineReport`] the desktop's System Monitor
+//! screensaver draws, published each sample while one watches
+//! ([`SwitchboardCommand::WatchMachine`] asks for it), and the
+//! [`NetworkReport`] the notification area states, published whenever the
+//! network notice moves.
 
 mod machine;
+mod network;
 
 pub use machine::{
     is_machine_report, DeviceCapacity, MachineCommitted, MachineComposition, MachineCores,
@@ -80,6 +83,9 @@ pub use machine::{
     MachineStorage, MachineTask, MachineTasks, ReportPeriod, MACHINE_CORES_MAX,
     MACHINE_DEVICES_MAX, MACHINE_DEVICE_NAME_MAX, MACHINE_HISTORY_MAX, MACHINE_INTERFACES_MAX,
     MACHINE_PERIOD_MAX_MS, MACHINE_PERIOD_MIN_MS, MACHINE_REPORT_MAGIC, MACHINE_TASKS_MAX,
+};
+pub use network::{
+    is_network_report, NetworkReport, NETWORK_REPORT_INTERFACES_MAX, NETWORK_REPORT_MAGIC,
 };
 
 use crate::bounded_text::BoundedText;
@@ -114,14 +120,20 @@ pub const SWITCHBOARD_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"SWB1");
 /// The `switchboard-v1` protocol version.
 pub const SWITCHBOARD_VERSION_V1: u16 = 1;
 
-/// Maximum request, in bytes, the [`SWITCHBOARD_ENDPOINT`] accepts: the wider
-/// of its two frames, a fixed-width [`SwitchboardRequest`] and a
-/// [`MachineReport`].
-pub const SWITCHBOARD_MAX_REQUEST: usize = if MachineReport::WIRE_LEN > SwitchboardRequest::WIRE_LEN
-{
-    MachineReport::WIRE_LEN
-} else {
-    SwitchboardRequest::WIRE_LEN
+/// Maximum request, in bytes, the [`SWITCHBOARD_ENDPOINT`] accepts: the widest
+/// of its three frames, a fixed-width [`SwitchboardRequest`], a
+/// [`MachineReport`] and a [`NetworkReport`].
+pub const SWITCHBOARD_MAX_REQUEST: usize = {
+    let widest = if MachineReport::WIRE_LEN > SwitchboardRequest::WIRE_LEN {
+        MachineReport::WIRE_LEN
+    } else {
+        SwitchboardRequest::WIRE_LEN
+    };
+    if NetworkReport::WIRE_LEN > widest {
+        NetworkReport::WIRE_LEN
+    } else {
+        widest
+    }
 };
 
 /// Maximum encoded length, in bytes, of a tray summary's top-task name.

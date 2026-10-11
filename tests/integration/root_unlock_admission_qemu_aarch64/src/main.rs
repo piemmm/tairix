@@ -32,7 +32,7 @@
 //!    `login` is held behind the ownership gate meanwhile).
 //! 3. **Mounts + installs.** On its first dispatch the kthread brings the
 //!    virtio-blk device up over the production device-IRQ path, prompts
-//!    `Root passphrase: ` on the primary (UART) console, reads the
+//!    `ARXFS passphrase: ` on the primary (UART) console, reads the
 //!    passphrase the runner types, mounts the encrypted `ARXFS` root,
 //!    installs the users database into `LATE_USERS_DB`, and opens the
 //!    console-0 gate — logging the `USERS_DB_INSTALLED_MESSAGE` audit line.

@@ -34,7 +34,7 @@ use tairix_controls::{
     plate_border, ControlState, PointerState, ScrollAction, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollRange, ScrollView, WindowPreview,
 };
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
@@ -670,9 +670,4 @@ fn grid_rows(count: usize, columns: u32) -> u64 {
     let columns = u64::from(columns.max(1));
     let count = u64::try_from(count).unwrap_or(u64::MAX);
     count.div_ceil(columns)
-}
-
-/// Saturating `u32` → `i32`, clamping rather than wrapping.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }

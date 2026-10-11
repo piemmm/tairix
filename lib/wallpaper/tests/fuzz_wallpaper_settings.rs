@@ -62,6 +62,11 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["24", "801", "-100", "1e3"],
     ),
     (
+        "resolution",
+        &["native", "800x600", "1280x720", "3840x2400"],
+        &["Native", "801x600", "800X600", "800x", "0x0"],
+    ),
+    (
         "font.family",
         &["theme", "inter", "noto-serif", "gone-family"],
         &["Inter", "../fonts", ""],

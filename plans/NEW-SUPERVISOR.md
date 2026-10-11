@@ -3,7 +3,7 @@
 This is the staged, **binding** plan (under `AGENTS.md`) for the TAIRiX
 **Supervisor**: a small, built-in, pre-mount command monitor — a "quick
 busybox, but different" — that an operator can drop into from the boot
-screen *before* the encrypted root is mounted, to inspect and control the
+screen *before* the root is mounted, to inspect and control the
 machine while it is still at the bootstrap floor.
 
 Read `AGENTS.md` first (especially §1 Rust-only, §2, §4, §5, §9, §16, §17,
@@ -39,7 +39,9 @@ exception.
   on-screen strings below are byte-exact and are asserted by the QEMU
   vertical (§7). They are the contract; do not "improve" the wording.
   1. `[Press ESC for supervisor]` — shown for 2 seconds.
-  2. `ARXFS passphrase: ` — replaces (1) in place after the window.
+  2. `ARXFS passphrase: ` — replaces (1) in place after the window, for an
+     encrypted root; a plaintext root's line collapses to `ARXFS` instead
+     and mounts with no prompt.
   3. On ESC: the prompt/message line collapses to `ARXFS`, then a **blank
      line**, then `Supervisor`, then the REPL prompt `*`.
 - **Reuse, never re-derive (§2.2).** Every datum the Supervisor shows is
@@ -105,12 +107,12 @@ lib/
 
 ## 2. The boot-screen sequence (state machine)
 
-The trigger lives at the **very top** of
-`root_mount.rs :: unlock_root_disk_interactively_impl`, *before* the silent
-blank-passphrase probe, so the ESC window appears on **every** image —
-including the blank-passphrase installer image, which otherwise
-auto-unlocks with no prompt at all. (Decision confirmed: show it
-everywhere.)
+The trigger lives near the top of
+`root_mount.rs :: unlock_root_disk_interactively_impl`, after the root's lock
+is read and before anything mounts, so the ESC window appears on **every**
+image — including a plaintext root, which otherwise mounts with no prompt at
+all, and a disk whose lock cannot be read, which the Supervisor can then
+diagnose.
 
 State machine (all timed reads are parks, never spins):
 
@@ -141,8 +143,9 @@ State machine (all timed reads are parks, never spins):
    on the same line: `write_all(console, b"\rARXFS passphrase: \x1b[K")`. (The
    `\r` returns to column 0 of the announcement line and `\x1b[K` erases the
    longer message's tail — the same in-place technique `FS_UNLOCKED_LINE`
-   already uses.) The unlock then proceeds exactly as today (silent blank
-   probe, then the interactive loop). Because the announcement already opened a
+   already uses.) An encrypted root's unlock then proceeds to the interactive
+   loop; a plaintext root's line collapses to the bare label instead and the
+   root mounts. Because the announcement already opened a
    fresh line (step 1), the CR-in-place redraw leaves the prompt on that line
    with the blank line still above it — identical to the standalone
    `FS_UNLOCK_PROMPT`'s own-line spacing, so no line gap is lost. Keep both
@@ -218,10 +221,10 @@ spirit (§16.7) where a command has a coreutils analogue (`ls`, `echo`).
 - `poweroff` (alias `halt`) — orderly shutdown where the platform supports
   it (injected seam; on a port without one, report "not supported" fail-safe
   and stay in the REPL). **Audited.** *(Confirmed in scope for first cut.)*
-- `mount` — run the **real** `mount_root_disk_and_load_users` under a typed
-  passphrase (reuse the exact prompt/collapse/rate-limit/audit path of the
-  normal unlock — no oracle, no fail-open), then `continue` on success or
-  report fail-closed on failure. **Audited.**
+- `mount` — run the **real** `mount_root_disk_and_load_users`, held to how
+  the root is locked: a plaintext root with no passphrase, an encrypted one
+  under a typed passphrase (no oracle, no fail-open), then `continue` on
+  success or report fail-closed on failure. **Audited.**
 
 ### 4.2 Diagnostics / info
 
@@ -303,10 +306,10 @@ today (`unlock_orchestrate.rs` / arch crates).
 
 ## 6. Security (non-negotiable — §5.4, §2.17, §19.4)
 
-- **Never bypasses the passphrase.** `mount` runs the real unlock under a
-  typed passphrase in a zeroized on-stack `Zeroizing` buffer; there is no
-  command that unlocks without the secret and none that reveals key
-  material. No fail-open path exists.
+- **Never bypasses the passphrase.** `mount` runs the real mount, and an
+  encrypted root's typed passphrase lives in a zeroized on-stack buffer;
+  there is no command that unlocks an encrypted root without the secret and
+  none that reveals key material. No fail-open path exists.
 - **Fail closed & audited.** Entering the Supervisor and every
   state-changing command (`mount`, `continue`, `reboot`, `poweroff`) emits a
   stable `lib/log` event id — extend the `41xx` root-unlock range (e.g.

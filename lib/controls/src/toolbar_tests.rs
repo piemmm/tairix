@@ -31,9 +31,9 @@ use crate::toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 use tairix_icon::IconKind;
 
 const W: u32 = 220;
-const H: u32 = 28;
-const GAP: u32 = 8;
-const CH: u32 = 28;
+const H: u32 = 24;
+const GAP: u32 = 7;
+const CH: u32 = 24;
 
 /// The tallest run of consecutive rows in any one column carrying `want`.
 ///

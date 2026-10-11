@@ -19,14 +19,15 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::switchboard_ipc::TraySummary;
+use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
 use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::{Errno, ProcId};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    ControlRole, IconButton, PlatePlacement, PlateSeating, PointerState, TaskbarItem,
-    TraySignalAction,
+    plate_content_inset, readout_hover, ControlRole, FactList, IconButton, Measured,
+    PlatePlacement, PlateSeating, PointerState, TaskbarItem, TraySignalAction,
 };
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_input::InputEvent;
@@ -35,13 +36,14 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::apps::{AppSlot, AppStrip};
-use crate::clock::Clock;
+use crate::clock::{clock_room, clock_room_key, Clock};
 use crate::clock_menu::ClockPermits;
 use crate::edge::Edge;
 use crate::input::TaskbarResponse;
-use crate::layout::{local_rect, BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
+use crate::layout::{local_rect, BarLayout, Hit, NotificationsLayout, ReadoutLayout};
 use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
 use crate::menu::{self, MenuRequest, MenuSubject};
+use crate::network::{NetworkStatus, NETWORK_SIGNAL};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
 use crate::picker::{PickerEntry, PickerLayout, WindowPicker};
 use crate::repaint::TaskbarRepaint;
@@ -159,6 +161,13 @@ pub struct Taskbar {
     clock: Clock,
     tray: SwitchboardTray,
     sound: SoundPanel,
+    network: NetworkStatus,
+    /// Whether the pointer holds the network readout open: over the signal,
+    /// or over the open readout.
+    network_hover: PointerState,
+    /// The clock's room, measured once per face and padding rather than on
+    /// every layout a pointer motion asks for.
+    clock_room: Measured<(BitmapFont, u32)>,
     elevation_available: bool,
     switch_user_available: bool,
     repaint: TaskbarRepaint,
@@ -190,6 +199,9 @@ impl Taskbar {
             clock: Clock::new(),
             tray: SwitchboardTray::new(),
             sound: SoundPanel::new(),
+            network: NetworkStatus::default(),
+            network_hover: PointerState::None,
+            clock_room: Measured::default(),
             elevation_available: false,
             switch_user_available: false,
             repaint: TaskbarRepaint::NONE,
@@ -375,7 +387,6 @@ impl Taskbar {
     /// on the bar and the panel on its own surface, so each latches only
     /// when its own pixels moved. Answers whether either did.
     pub fn set_sound(&mut self, state: SoundState) -> bool {
-        let mut moved = false;
         let mut signals: Vec<StatusSignal> = self
             .notifications
             .signals()
@@ -384,16 +395,139 @@ impl Taskbar {
             .cloned()
             .collect();
         signals.extend(state.signals());
-        if signals != self.notifications.signals() {
-            self.notifications.set_signals(signals);
-            self.repaint |= TaskbarRepaint::BAR;
-            moved = true;
-        }
+        let mut moved = self.replace_signals(signals);
         if self.sound.adopt(state.output) {
             self.repaint |= TaskbarRepaint::SOUND;
             moved = true;
         }
         moved
+    }
+
+    /// Adopt the network report the Switchboard published (`None` once it is
+    /// gone), answering whether the bar's network signal or readout moved.
+    ///
+    /// The signal leads the other status signals and replaces only its own
+    /// slot, as the sound feed replaces only its own.
+    pub fn set_network(&mut self, report: Option<NetworkReport>) -> bool {
+        if !self.network.adopt(report) {
+            return false;
+        }
+        let mut signals: Vec<StatusSignal> = self.network.signal().into_iter().collect();
+        signals.extend(
+            self.notifications
+                .signals()
+                .iter()
+                .filter(|signal| signal.id != NETWORK_SIGNAL)
+                .cloned(),
+        );
+        let _ = self.replace_signals(signals);
+        if self.network.signal().is_none() {
+            self.network_hover = PointerState::None;
+        }
+        self.repaint |= TaskbarRepaint::NETWORK;
+        true
+    }
+
+    /// Show `signals` in the notification area, answering whether they
+    /// changed. A change that moves the network signal's slot closes its
+    /// readout: the readout hangs from the slot it opened at, and only the
+    /// pointer's next motion can say whether it still rests on the signal.
+    fn replace_signals(&mut self, signals: Vec<StatusSignal>) -> bool {
+        if signals == self.notifications.signals() {
+            return false;
+        }
+        let place = |signals: &[StatusSignal]| {
+            let index = signals
+                .iter()
+                .position(|signal| signal.id == NETWORK_SIGNAL);
+            (index, signals.len())
+        };
+        let moved = place(&signals) != place(self.notifications.signals());
+        self.notifications.set_signals(signals);
+        self.repaint |= TaskbarRepaint::BAR;
+        if moved && self.network_hover == PointerState::Hover {
+            self.network_hover = PointerState::None;
+            self.repaint |= TaskbarRepaint::NETWORK;
+        }
+        true
+    }
+
+    /// The network signal's slot on `layout`, when the signal is shown.
+    fn network_slot(&self, layout: &BarLayout) -> Option<Rect> {
+        let index = self
+            .notifications
+            .signals()
+            .iter()
+            .position(|signal| signal.id == NETWORK_SIGNAL)?;
+        layout
+            .notifications
+            .get(index)
+            .copied()
+            .filter(|slot| !slot.is_empty())
+    }
+
+    /// The network readout's facts: each interface, its condition and its
+    /// addresses.
+    #[must_use]
+    pub const fn network_facts(&self) -> &FactList {
+        self.network.facts()
+    }
+
+    /// The network readout's geometry, or `None` while the pointer is not
+    /// holding it open or the signal has no slot.
+    #[must_use]
+    pub fn network_readout_layout(&self, scale: Scale) -> Option<ReadoutLayout> {
+        if self.network_hover != PointerState::Hover {
+            return None;
+        }
+        self.network_readout_on(&self.layout(scale), scale)
+    }
+
+    /// [`network_readout_layout`](Self::network_readout_layout) over a bar
+    /// layout the caller already holds.
+    fn network_readout_on(&self, bar: &BarLayout, scale: Scale) -> Option<ReadoutLayout> {
+        if self.network_hover != PointerState::Hover {
+            return None;
+        }
+        let slot = self.network_slot(bar)?;
+        let facts = self.network.facts();
+        let edges = plate_content_inset(&self.theme, scale).saturating_mul(2);
+        Some(ReadoutLayout::compute(
+            self.config.edge,
+            bar,
+            slot,
+            (
+                facts
+                    .measured_width(scale, &self.theme)
+                    .saturating_add(edges),
+                facts
+                    .measured_height(scale, &self.theme)
+                    .saturating_add(edges),
+            ),
+            (self.config.screen_width, self.config.screen_height),
+            scale,
+            &self.theme,
+        ))
+    }
+
+    /// The chain the desktop should open for the network signal, anchored at
+    /// it, its settings row actionable only while the catalog holds the
+    /// settings bundle.
+    pub(crate) fn network_menu(&self, anchor: Rect, scale: Scale) -> MenuRequest {
+        MenuRequest {
+            subject: MenuSubject::Network,
+            model: menu::network_menu(self.installed(system::SETTINGS_BUNDLE)),
+            placement: self.menu_placement(anchor, scale),
+        }
+    }
+
+    /// Whether the notification slot at `index` is the network signal's.
+    #[must_use]
+    pub(crate) fn is_network_slot(&self, index: usize) -> bool {
+        self.notifications
+            .signals()
+            .get(index)
+            .is_some_and(|signal| signal.id == NETWORK_SIGNAL)
     }
 
     /// The volume panel.
@@ -450,15 +584,6 @@ impl Taskbar {
             scale,
             &self.theme,
         ))
-    }
-
-    /// Replace the notification area's status signals — how the session hands
-    /// the bar its tray signals (network, volume, battery). The persistent
-    /// signal glyphs draw on the bar itself, so this latches only
-    /// [`bar`](TaskbarRepaint::bar).
-    pub fn set_status_signals(&mut self, signals: Vec<StatusSignal>) {
-        self.notifications.set_signals(signals);
-        self.repaint |= TaskbarRepaint::BAR;
     }
 
     /// Raise (or update in place) a transient notification, latching a repaint
@@ -625,7 +750,7 @@ impl Taskbar {
     ) -> Option<TraySignalAction> {
         let layout = self.layout(scale);
         let readout = self
-            .tray_readout_layout(scale)
+            .tray_readout_on(&layout, scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
         let mut reported = damage::sink();
         let (_, action) = self.tray.on_pointer(
@@ -773,12 +898,14 @@ impl Taskbar {
     /// counts at the desktop `scale` (the compositor's output density).
     #[must_use]
     pub fn layout(&self, scale: Scale) -> BarLayout {
+        let key = clock_room_key(&self.theme, scale);
+        let clock_room = self.clock_room.get_or(key, || clock_room(key));
         BarLayout::compute(
             &self.config,
             &self.theme,
             scale,
-            self.apps.len(),
-            self.notifications.signal_count(),
+            clock_room,
+            (self.apps.len(), self.notifications.signal_count()),
         )
     }
 
@@ -885,25 +1012,30 @@ impl Taskbar {
     ///
     /// The readout opens outward from the Switchboard slot on the bar's
     /// edge; the window manager places it and rounds it with
-    /// [`TrayReadoutLayout::corner_radius`], exactly as it does the bar's
+    /// [`ReadoutLayout::corner_radius`], exactly as it does the bar's
     /// other popovers.
     #[must_use]
-    pub fn tray_readout_layout(&self, scale: Scale) -> Option<TrayReadoutLayout> {
+    pub fn tray_readout_layout(&self, scale: Scale) -> Option<ReadoutLayout> {
         if !self.tray.is_expanded() {
             return None;
         }
-        let bar = self.layout(scale);
-        if bar.switchboard.is_empty() {
+        self.tray_readout_on(&self.layout(scale), scale)
+    }
+
+    /// [`tray_readout_layout`](Self::tray_readout_layout) over a bar layout
+    /// the caller already holds.
+    fn tray_readout_on(&self, bar: &BarLayout, scale: Scale) -> Option<ReadoutLayout> {
+        if !self.tray.is_expanded() || bar.switchboard.is_empty() {
             return None;
         }
-        Some(TrayReadoutLayout::compute(
+        Some(ReadoutLayout::compute(
             self.config.edge,
-            &bar,
-            self.config.screen_width,
-            self.config.screen_height,
+            bar,
+            bar.switchboard,
+            self.tray.signal().readout_size(scale, &self.theme),
+            (self.config.screen_width, self.config.screen_height),
             scale,
             &self.theme,
-            self.tray.signal(),
         ))
     }
 
@@ -1224,7 +1356,7 @@ impl Taskbar {
     pub(crate) fn track_hover(&mut self, point: Option<Point>, scale: Scale) {
         let layout = self.layout(scale);
         let readout = self
-            .tray_readout_layout(scale)
+            .tray_readout_on(&layout, scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
         let mut reported = damage::sink();
 
@@ -1266,6 +1398,20 @@ impl Taskbar {
         }
         owe(&mut self.repaint.bar, &reported, layout.bar);
         owe(&mut self.repaint.readout, &reported, readout);
+
+        let network_hover = match (point, self.network_slot(&layout)) {
+            (Some(at), Some(slot)) => {
+                let open = self
+                    .network_readout_on(&layout, scale)
+                    .map_or(Rect::EMPTY, |readout| readout.panel);
+                readout_hover(at, slot, open, self.network_hover == PointerState::Hover)
+            }
+            _ => PointerState::None,
+        };
+        if network_hover != self.network_hover {
+            self.network_hover = network_hover;
+            self.repaint |= TaskbarRepaint::NETWORK;
+        }
 
         // The popup's rows follow its own routing while the pointer is on the
         // bar's surfaces; one that has left them lights nothing there.

@@ -32,6 +32,7 @@ enum Step {
     AcquireSeat,
     QueryMode,
     Reconfigure(u32, u32),
+    PublishDesktop,
     RepaintAll(u32, u32),
 }
 
@@ -125,6 +126,10 @@ impl SeatPresentation for FakePresentation {
         self.log
             .push(Step::Reconfigure(mode.width_px, mode.height_px));
         self.reconfigure
+    }
+
+    fn publish_desktop(&mut self) {
+        self.log.push(Step::PublishDesktop);
     }
 
     fn repaint_all(&mut self, mode: DisplayMode) -> Result<(), Errno> {
@@ -336,14 +341,16 @@ fn a_foreground_wake_reacquires_requeries_and_repaints_in_full() {
     assert_eq!(switch.resume(&mut screen), Ok(mode(1280, 720)));
 
     // The seat first, then the mode as it is *now*, then a frame sized to
-    // it, then black, then every pixel of it — so the repaint appears out
-    // of the black the seat came back cleared to.
+    // it and every application told of it, then black, then every pixel of
+    // it — so the repaint appears out of the black the seat came back cleared
+    // to, and no application is left laid out to the screen it last saw.
     assert_eq!(
         screen.log,
         vec![
             Step::AcquireSeat,
             Step::QueryMode,
             Step::Reconfigure(1280, 720),
+            Step::PublishDesktop,
             Step::FadeIn,
             Step::RepaintAll(1280, 720),
         ]
@@ -403,6 +410,7 @@ fn each_failing_resume_step_stops_the_ones_after_it() {
                 Step::AcquireSeat,
                 Step::QueryMode,
                 Step::Reconfigure(800, 600),
+                Step::PublishDesktop,
                 Step::FadeIn,
                 Step::RepaintAll(800, 600),
             ],

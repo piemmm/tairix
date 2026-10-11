@@ -1560,8 +1560,8 @@ fn enter_kernel_core(
     // Hand the syscall dispatch hook the shared set-once credential cell
     // (`plans/PI.md` P11 Chunk B-2): `users_db_read` reads it on every
     // call, and the in-kernel root-unlock kthread publishes the mounted
-    // root volume's database into the *same* cell once the operator's
-    // passphrase unlocks the encrypted root. Until that install the cell
+    // root volume's database into the *same* cell once the root is mounted.
+    // Until that install the cell
     // fails every read closed, identical to the previous `NULL_USERS_DB`
     // default — so login refuses every attempt until a root is mounted, and the metal-confirmed boot is unaffected.
     .with_users_db(&crate::root_mount::LATE_USERS_DB)
@@ -1580,7 +1580,7 @@ fn enter_kernel_core(
     // caller groups against the late-installed identity table. Both cells
     // fail closed (`NotImplemented`) until the disk-owning task publishes the
     // `/System` window (`crate::system_mount::install_system_mount`) and the
-    // encrypted-root unlock publishes the identity table, so wiring the hook
+    // root unlock publishes the identity table, so wiring the hook
     // here changes no boot behaviour until those installs land.
     .with_filesystem(&crate::system_mount::FS_SERVICE)
     // Resolve `id::<volume-id>/…` paths against the volume forest the

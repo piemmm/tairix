@@ -14,7 +14,7 @@ use core::fmt::Write as _;
 use tairix_abi::window_ipc::CursorShape;
 use tairix_colour::Rgb;
 use tairix_controls::{Button, Keystroke, NumberField, Tab, Tabs, TabsAction, TabsOrientation};
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
@@ -1069,10 +1069,6 @@ fn set_channel(colour: &mut Rgb, cell: usize, level: u8) {
 
 fn percent(permille: u32) -> i32 {
     i32::try_from(permille / 10).unwrap_or(i32::MAX)
-}
-
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// `panes` in words.

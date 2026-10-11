@@ -1,7 +1,7 @@
 //! Passphrase-derived volume-key unlock (`plans/PI.md`
 //! P11).
 //!
-//! A [`ARXFS`](crate::ARXFS) volume is opened with a 32-byte
+//! An encrypted [`ARXFS`](crate::ARXFS) volume is opened with a 32-byte
 //! [`VolumeKey`] (the key-encryption key that unwraps the on-disk master
 //! key, [`crate::crypto`]). That key is high-entropy random material no
 //! human can type, so it cannot itself be the thing an operator supplies
@@ -50,10 +50,12 @@
 
 use core::num::NonZeroU32;
 
+use tairix_abi::boot::MAX_ROOT_PASSPHRASE_LEN;
 use tairix_abi::driver::DriverError;
 use tairix_crypto::pbkdf2_sha256;
+use zeroize::Zeroizing;
 
-use crate::crypto::{EntropySource, VolumeKey, VOLUME_KEY_LEN};
+use crate::crypto::{EntropySource, VolumeKey};
 
 /// Length, in bytes, of the per-volume unlock salt.
 ///
@@ -111,23 +113,6 @@ pub const UNLOCK_DESCRIPTOR_LEN: usize = 4 + 1 + 3 + 4 + UNLOCK_SALT_LEN;
 /// beside [`UnlockDescriptor`] so both ends share one definition rather
 /// than each carrying a private copy of the literal.
 pub const ROOT_UNLOCK_NAME: &str = "root.unlock";
-
-/// The fixed, **non-secret** volume key the read-only, signed-bundle
-/// `/System` volume is formatted and mounted under (the design-B
-/// pre-unlock driver store, `plans/PI.md`).
-///
-/// `ARXFS` has no plaintext layout — every volume is encrypted under a
-/// [`VolumeKey`] — but the `/System` store carries **no secrets** and must
-/// be readable *before* any passphrase is typed (it holds the keyboard
-/// driver needed to type the encrypted-root passphrase). So it is keyed by
-/// this well-known constant, embedded identically in the image author
-/// (`tools/mkimage`) and the boot path that mounts it:
-/// the volume is effectively unencrypted, and its integrity rests on the
-/// per-bundle Ed25519 signatures the load gate verifies, not on key
-/// secrecy. It must **never** be used for a volume
-/// that carries secrets — those use a passphrase-derived
-/// [`UnlockDescriptor::derive_volume_key`] key.
-pub const SYSTEM_VOLUME_KEY: VolumeKey = *b"TAIRiX-/System-RO-public-key:001";
 
 /// The plaintext key-derivation descriptor stored beside an encrypted
 /// volume (on a Pi SD image, in a file on the FAT boot partition).
@@ -190,19 +175,33 @@ impl UnlockDescriptor {
         &self.salt
     }
 
-    /// Derive the volume key from `passphrase` under this descriptor.
+    /// Derive the volume key from `passphrase` under this descriptor, wiped
+    /// when it drops.
     ///
     /// The 256-bit PBKDF2 output is the [`VolumeKey`] verbatim. A wrong
     /// passphrase yields the wrong key, which [`ARXFS::open`](crate::ARXFS::open)
     /// then rejects through the AEAD authentication of the wrapped master
     /// key — there is no separate "passphrase correct?" oracle here, so a
     /// guess costs a full mount attempt.
-    #[must_use]
-    pub fn derive_volume_key(&self, passphrase: &[u8]) -> VolumeKey {
-        let hash = pbkdf2_sha256(passphrase, &self.salt, self.iterations);
-        let mut key = [0u8; VOLUME_KEY_LEN];
-        key.copy_from_slice(&hash);
-        key
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for an empty passphrase or one longer than
+    /// [`MAX_ROOT_PASSPHRASE_LEN`]. This is the one derivation provisioning and
+    /// unlock share, so no volume is ever provisioned under a passphrase a boot
+    /// prompt cannot accept.
+    pub fn derive_volume_key(
+        &self,
+        passphrase: &[u8],
+    ) -> Result<Zeroizing<VolumeKey>, DriverError> {
+        if passphrase.is_empty() || passphrase.len() > MAX_ROOT_PASSPHRASE_LEN {
+            return Err(DriverError::OutOfRange);
+        }
+        Ok(Zeroizing::new(pbkdf2_sha256(
+            passphrase,
+            &self.salt,
+            self.iterations,
+        )))
     }
 
     /// Encode the descriptor into the first [`UNLOCK_DESCRIPTOR_LEN`] bytes
@@ -327,24 +326,44 @@ mod tests {
         let mut ent = FixedEntropy(0x11);
         let desc = UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut ent)
             .expect("provision succeeds");
-        let a = desc.derive_volume_key(b"correct horse");
-        let b = desc.derive_volume_key(b"correct horse");
-        let c = desc.derive_volume_key(b"wrong horse");
+        let derive = |passphrase: &[u8]| *desc.derive_volume_key(passphrase).expect("derive");
+        let a = derive(b"correct horse");
+        let b = derive(b"correct horse");
+        let c = derive(b"wrong horse");
         assert_eq!(a, b, "same passphrase + salt derives the same key");
         assert_ne!(a, c, "a different passphrase derives a different key");
     }
 
     #[test]
     fn derive_is_salt_sensitive() {
-        let mut a_ent = FixedEntropy(1);
-        let mut b_ent = FixedEntropy(2);
-        let a = UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut a_ent)
-            .expect("provision")
-            .derive_volume_key(b"same passphrase");
-        let b = UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut b_ent)
-            .expect("provision")
-            .derive_volume_key(b"same passphrase");
-        assert_ne!(a, b, "a different salt derives a different key");
+        let derive = |fill: u8| {
+            *UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut FixedEntropy(fill))
+                .expect("provision")
+                .derive_volume_key(b"same passphrase")
+                .expect("derive")
+        };
+        assert_ne!(
+            derive(1),
+            derive(2),
+            "a different salt derives a different key"
+        );
+    }
+
+    #[test]
+    fn no_key_is_derived_from_a_passphrase_no_boot_prompt_accepts() {
+        let desc = UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut FixedEntropy(7))
+            .expect("provision");
+        assert_eq!(
+            desc.derive_volume_key(b"").err(),
+            Some(DriverError::OutOfRange)
+        );
+        let longest = [b'p'; MAX_ROOT_PASSPHRASE_LEN];
+        assert!(desc.derive_volume_key(&longest).is_ok());
+        let over = [b'p'; MAX_ROOT_PASSPHRASE_LEN + 1];
+        assert_eq!(
+            desc.derive_volume_key(&over).err(),
+            Some(DriverError::OutOfRange)
+        );
     }
 
     #[test]

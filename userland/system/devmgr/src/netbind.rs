@@ -320,8 +320,7 @@ fn audit(
     node_location: u64,
     error: Option<Errno>,
 ) {
-    let len = iface.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
-    let name = core::str::from_utf8(&iface[..len]).unwrap_or("?");
+    let name = tairix_abi::net_ipc::if_name_str(iface);
     let named = [
         Field {
             key: "iface",

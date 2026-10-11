@@ -19,6 +19,7 @@ use tairix_controls::damage::Repaint;
 
 use crate::menu::{
     ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, ModelRefused, SurfaceKind,
+    SUBMENU_SETTLE_NS,
 };
 
 const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
@@ -196,6 +197,15 @@ fn local_row(chain: &MenuChain, depth: usize, row: usize, g: &ChainGeometry<'_>)
     )
 }
 
+/// The plate at `depth` painted whole, as the session presents it.
+fn paint(chain: &MenuChain, depth: usize, g: &ChainGeometry<'_>) -> tairix_raster::Surface {
+    let rect = plate(chain, depth);
+    let mut surface =
+        tairix_raster::Surface::new(rect.width, rect.height).expect("a plate surface");
+    chain.render_surface(SurfaceKind::Plate(depth), &mut surface, g);
+    surface
+}
+
 /// How many plates the chain has up.
 fn plates(chain: &MenuChain) -> usize {
     chain
@@ -228,7 +238,7 @@ fn settle_on(
     g: &ChainGeometry<'_>,
 ) -> (ChainAction, Point) {
     let at = row_point(chain, depth, row, g);
-    let acted = chain.handle(&moved(at.x, at.y), at, g);
+    let acted = chain.handle(&moved(at.x, at.y), at, g, 0);
     (acted, at)
 }
 
@@ -462,7 +472,7 @@ fn travelling_from_a_parent_row_into_its_own_child_keeps_the_child_open() {
     // Leaving the parent row's rectangle for the child's own plate must not
     // close what the pointer is travelling to.
     let into = Point::new(child.left() + 4, child.top() + 4);
-    chain.handle(&moved(into.x, into.y), into, &g);
+    chain.handle(&moved(into.x, into.y), into, &g, 0);
     assert_eq!(plates(&chain), 2, "the child the pointer entered stayed up");
 }
 
@@ -503,6 +513,346 @@ fn a_disabled_submenu_row_opens_nothing() {
     assert_eq!(acted, ChainAction::Redraw);
 }
 
+/// A submenu row with siblings beneath it, the second behind a group break,
+/// so a path aimed at the child crosses both the break and a row.
+fn aim_model() -> ChainModel {
+    let mut model = ChainModel::new("Aim");
+    model.push(ChainRow::item(id(1), MenuItem::new("First")));
+    let more = model.push(ChainRow::submenu(MenuItem::new("More")));
+    model.push(ChainRow::item(
+        id(2),
+        MenuItem::new("Below").with_group_break(true),
+    ));
+    model.push(ChainRow::item(id(3), MenuItem::new("Last")));
+    for (raw, label) in [(4, "One"), (5, "Two"), (6, "Three")] {
+        model.push(ChainRow::item(id(raw), MenuItem::new(label)).under(more));
+    }
+    model
+}
+
+/// The aim model open with its submenu up, and the point it was opened from.
+fn aimed_chain(g: &ChainGeometry<'_>) -> (MenuChain, Point) {
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, aim_model(), Point::new(40, 40), g);
+    let (_, at) = settle_on(&mut chain, 0, 1, g);
+    assert_eq!(plates(&chain), 2, "the submenu is up");
+    (chain, at)
+}
+
+/// Three quarters of the way from `at` to the child's near edge, at `y`: a
+/// step plainly aimed at the child.
+fn towards_child(chain: &MenuChain, at: Point, y: i32) -> Point {
+    let child = plate(chain, 1);
+    Point::new(at.x + 3 * (child.left() - at.x) / 4, y)
+}
+
+/// The parent's last column is its rim: on the plate, on no row. Crossing it
+/// is crossing into the child, not settling anywhere else.
+#[test]
+fn the_parents_rim_on_the_way_to_its_child_keeps_the_child_open() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, at) = aimed_chain(&g);
+    let resting = paint(&chain, 0, &g);
+    let rim = Point::new(plate(&chain, 0).right() - 1, at.y);
+    chain.handle(&moved(rim.x, rim.y), rim, &g, 1);
+    assert_eq!(plates(&chain), 2, "the rim is not a different row");
+    assert_eq!(
+        paint(&chain, 0, &g).pixels(),
+        resting.pixels(),
+        "the open row keeps its highlight"
+    );
+    let into = Point::new(plate(&chain, 1).left(), at.y);
+    chain.handle(&moved(into.x, into.y), into, &g, 2);
+    assert_eq!(plates(&chain), 2);
+}
+
+/// A group break lies between rows, so a pointer in it has settled on none.
+#[test]
+fn a_group_break_on_the_way_to_the_child_keeps_the_child_open() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, at) = aimed_chain(&g);
+    let more = chain.row_rect(0, 1, &g).expect("the submenu row");
+    let gap = towards_child(&chain, at, more.bottom() + 2);
+    chain.handle(&moved(gap.x, gap.y), gap, &g, 1);
+    assert_eq!(plates(&chain), 2, "the break is not a row");
+}
+
+/// Aiming at the child's lower rows crosses the row beneath the parent row:
+/// the crossing waits, the open row keeps its highlight, and reaching the
+/// child ends the wait.
+#[test]
+fn a_path_aimed_at_the_child_may_cross_the_row_beneath() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, at) = aimed_chain(&g);
+    let resting = paint(&chain, 0, &g);
+    let below = row_point(&chain, 0, 2, &g);
+    let step = towards_child(&chain, at, below.y);
+    chain.handle(&moved(step.x, step.y), step, &g, 10);
+    assert_eq!(plates(&chain), 2, "the crossing waits while it heads in");
+    assert_eq!(paint(&chain, 0, &g).pixels(), resting.pixels());
+    assert_eq!(chain.park_deadline_ns(10, u64::MAX), SUBMENU_SETTLE_NS);
+
+    let into = Point::new(plate(&chain, 1).left() + 4, below.y);
+    chain.handle(&moved(into.x, into.y), into, &g, 20);
+    assert_eq!(plates(&chain), 2);
+    assert_eq!(
+        chain.park_deadline_ns(20, u64::MAX),
+        u64::MAX,
+        "reaching the child ends the wait"
+    );
+}
+
+/// A step onto a sibling that turns away from the child is a choice at once.
+#[test]
+fn a_step_onto_a_sibling_away_from_the_child_chooses_it_at_once() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, at) = aimed_chain(&g);
+    let below = row_point(&chain, 0, 2, &g);
+    let away = Point::new(at.x - 8, below.y);
+    chain.handle(&moved(away.x, away.y), away, &g, 10);
+    assert_eq!(plates(&chain), 1, "turning away chose the row");
+    assert_eq!(chain.park_deadline_ns(10, u64::MAX), u64::MAX);
+}
+
+/// A pointer that stops on the row it crossed has chosen it, once the wait
+/// runs out: the child closes and the highlight moves to that row.
+#[test]
+fn resting_on_a_crossed_row_chooses_it_when_the_wait_runs_out() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, at) = aimed_chain(&g);
+    let below = row_point(&chain, 0, 2, &g);
+    let step = towards_child(&chain, at, below.y);
+    chain.handle(&moved(step.x, step.y), step, &g, 10);
+
+    assert!(
+        !chain.tick(10 + SUBMENU_SETTLE_NS - 1, &g),
+        "not before its time"
+    );
+    assert_eq!(plates(&chain), 2);
+    assert!(chain.tick(10 + SUBMENU_SETTLE_NS, &g));
+    assert_eq!(plates(&chain), 1, "the rest chose the crossed row");
+    assert_eq!(chain.park_deadline_ns(0, u64::MAX), u64::MAX);
+
+    let mut direct = MenuChain::new();
+    open(&mut direct, APP, aim_model(), Point::new(40, 40), &g);
+    settle_on(&mut direct, 0, 2, &g);
+    assert_eq!(
+        paint(&chain, 0, &g).pixels(),
+        paint(&direct, 0, &g).pixels(),
+        "the highlight is on the row the pointer rests on"
+    );
+}
+
+/// With nothing waiting the chain asks for no wake at all.
+#[test]
+fn a_chain_with_nothing_waiting_asks_for_no_deadline() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, _) = aimed_chain(&g);
+    assert_eq!(chain.park_deadline_ns(0, 1234), 1234);
+    assert!(!chain.tick(u64::MAX, &g));
+}
+
+/// Walk the pointer a pixel at a time from `from` towards `to`, a vertical
+/// step first wherever the line allows one — a slow hand's path, whose step
+/// off the open row is a pure vertical one — and hand each sample to the
+/// chain, failing at the first that closed the child.
+fn staircase(chain: &mut MenuChain, from: Point, to: Point, g: &ChainGeometry<'_>) {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let (step_x, step_y) = (dx.signum(), dy.signum());
+    let mut at = from;
+    let mut now = 1;
+    while at != to {
+        let (done_x, done_y) = ((at.x - from.x).abs(), (at.y - from.y).abs());
+        if at.y != to.y && done_y * dx.abs() <= done_x * dy.abs() {
+            at.y += step_y;
+        } else {
+            at.x += step_x;
+        }
+        chain.handle(&moved(at.x, at.y), at, g, now);
+        now += 1;
+        assert_eq!(plates(chain), 2, "the child closed at {at:?}");
+    }
+}
+
+/// A slow hand moves a pixel at a time, so the step that leaves the open row
+/// is a pure vertical one. Judged from where the path left the open row it
+/// still heads into the child, so the crossing waits all the way in.
+#[test]
+fn a_one_pixel_staircase_towards_the_child_keeps_it_open() {
+    let theme = theme();
+    let g = geom(&theme);
+    let (mut chain, at) = aimed_chain(&g);
+    let below = row_point(&chain, 0, 2, &g);
+    let into = Point::new(plate(&chain, 1).left() + 2, below.y);
+    staircase(&mut chain, at, into, &g);
+    assert_eq!(
+        chain.park_deadline_ns(0, u64::MAX),
+        u64::MAX,
+        "reaching the child ended the wait"
+    );
+}
+
+/// A child with no room beside its parent opens on the other side, and a path
+/// aimed at it there is judged against the edge it actually faces.
+#[test]
+fn a_path_aimed_at_a_child_opening_leftwards_may_cross_the_row_beneath() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(
+        &mut chain,
+        APP,
+        aim_model(),
+        Point::new(SCREEN.right() - 10, 40),
+        &g,
+    );
+    let (_, at) = settle_on(&mut chain, 0, 1, &g);
+    assert_eq!(plates(&chain), 2);
+    let (parent, child) = (plate(&chain, 0), plate(&chain, 1));
+    assert!(child.right() <= parent.left(), "the child opened leftwards");
+    let below = row_point(&chain, 0, 2, &g);
+    let step = Point::new(at.x - 3 * (at.x - child.right()) / 4, below.y);
+    chain.handle(&moved(step.x, step.y), step, &g, 10);
+    assert_eq!(plates(&chain), 2, "the crossing waits while it heads in");
+    assert_eq!(chain.park_deadline_ns(10, u64::MAX), SUBMENU_SETTLE_NS);
+    let into = Point::new(child.right() - 2, below.y);
+    staircase(&mut chain, step, into, &g);
+}
+
+/// The aim model with a crossing of the row beneath waiting, at `now` 10.
+fn waiting_chain(g: &ChainGeometry<'_>) -> MenuChain {
+    let (mut chain, at) = aimed_chain(g);
+    let below = row_point(&chain, 0, 2, g);
+    let step = towards_child(&chain, at, below.y);
+    chain.handle(&moved(step.x, step.y), step, g, 10);
+    assert_eq!(chain.park_deadline_ns(10, u64::MAX), SUBMENU_SETTLE_NS);
+    chain
+}
+
+/// The band is no row: a pointer that turned onto it has rested on no
+/// crossed row, so the wait ends without choosing anything.
+#[test]
+fn a_move_onto_the_band_ends_a_wait_without_choosing() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = waiting_chain(&g);
+    let parent = plate(&chain, 0);
+    let band = Point::new(parent.left() + 20, parent.top() + 2);
+    chain.handle(&moved(band.x, band.y), band, &g, 20);
+    assert_eq!(chain.park_deadline_ns(20, u64::MAX), u64::MAX);
+    assert!(!chain.tick(20 + SUBMENU_SETTLE_NS, &g));
+    assert_eq!(plates(&chain), 2, "nothing was chosen");
+}
+
+/// A key, a press, and the pointer leaving the chain each end a wait: none of
+/// them is the pointer resting on the crossed row.
+#[test]
+fn a_key_a_press_or_leaving_the_chain_ends_a_wait() {
+    let theme = theme();
+    let g = geom(&theme);
+    let outside = Point::new(SCREEN.right() - 1, SCREEN.bottom() - 1);
+    for (what, event) in [
+        ("a key", key(NamedKey::Down)),
+        ("a press", PRESS),
+        ("leaving", moved(outside.x, outside.y)),
+    ] {
+        let mut chain = waiting_chain(&g);
+        let at = if what == "leaving" {
+            outside
+        } else {
+            row_point(&chain, 0, 2, &g)
+        };
+        chain.handle(&event, at, &g, 20);
+        assert_eq!(chain.park_deadline_ns(20, u64::MAX), u64::MAX, "{what}");
+    }
+}
+
+/// A child the keyboard opened has an apex all the same — where the pointer
+/// stood when the key opened it — so the pointer's first move, aimed at the
+/// child across a sibling, waits like any other.
+#[test]
+fn a_child_opened_from_the_keyboard_is_aimed_at_from_where_the_pointer_was() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, aim_model(), Point::new(40, 40), &g);
+    let first = row_point(&chain, 0, 0, &g);
+    for named in [NamedKey::Home, NamedKey::Down, NamedKey::Right] {
+        chain.handle(&key(named), first, &g, 0);
+    }
+    assert_eq!(plates(&chain), 2, "the keyboard opened the submenu");
+    let step = Point::new(first.x + 6, first.y + 4);
+    chain.handle(&moved(step.x, step.y), step, &g, 10);
+    assert_eq!(plates(&chain), 2, "the first move heads into the child");
+    assert_eq!(chain.park_deadline_ns(10, u64::MAX), SUBMENU_SETTLE_NS);
+}
+
+/// A row that can open nothing borrows the open row's highlight while the
+/// pointer rests on it, so its Authority Mark can be read; the open row takes
+/// it back once the pointer moves on to the child.
+#[test]
+fn a_disabled_sibling_borrows_the_highlight_and_gives_it_back() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut model = ChainModel::new("Lend");
+    let more = model.push(ChainRow::submenu(MenuItem::new("More")));
+    model.push(ChainRow::item(
+        id(1),
+        MenuItem::new("Shut").with_state(refused_state()),
+    ));
+    model.push(ChainRow::item(id(2), MenuItem::new("One")).under(more));
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, model, Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 0, &g);
+    assert_eq!(plates(&chain), 2);
+    let resting = paint(&chain, 0, &g);
+
+    let shut = row_point(&chain, 0, 1, &g);
+    let away = Point::new(plate(&chain, 0).left() + 6, shut.y);
+    let acted = chain.handle(&moved(away.x, away.y), away, &g, 10);
+    assert_eq!(plates(&chain), 2, "a disabled row closes nothing");
+    assert_eq!(acted, ChainAction::Redraw, "the highlight moved onto it");
+    assert_ne!(paint(&chain, 0, &g).pixels(), resting.pixels());
+
+    let child = plate(&chain, 1);
+    let into = Point::new(child.left() + 4, child.bottom() - 4);
+    let acted = chain.handle(&moved(into.x, into.y), into, &g, 20);
+    assert_eq!(acted, ChainAction::Redraw, "the open row took it back");
+    assert_eq!(paint(&chain, 0, &g).pixels(), resting.pixels());
+}
+
+/// A row with no child that takes down the quick-entry field has changed the
+/// chain, and says so.
+#[test]
+fn settling_on_a_plain_row_closes_the_entry_field_and_asks_for_a_redraw() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut model = ChainModel::new("Entry");
+    model.push(ChainRow::item(id(1), MenuItem::new("Plain")));
+    model.push(ChainRow::entry(id(2), id(3), "name", MenuItem::new("Name")));
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, model, Point::new(40, 40), &g);
+    settle_on(&mut chain, 0, 1, &g);
+    let has_entry = |chain: &MenuChain| {
+        chain
+            .surfaces()
+            .iter()
+            .any(|surface| surface.kind == SurfaceKind::Entry)
+    };
+    assert!(has_entry(&chain), "the field opened");
+    let plain = row_point(&chain, 0, 0, &g);
+    let away = Point::new(plate(&chain, 0).left() + 6, plain.y);
+    let acted = chain.handle(&moved(away.x, away.y), away, &g, 10);
+    assert!(!has_entry(&chain), "the plain row took the field down");
+    assert_eq!(acted, ChainAction::Redraw);
+}
+
 // --- the drag ------------------------------------------------------------
 
 #[test]
@@ -521,12 +871,12 @@ fn dragging_a_band_moves_that_plate_and_its_descendants_but_not_its_ancestors() 
 
     // Press the child's band, then cross the drag threshold.
     let band = Point::new(child_before.left() + 20, child_before.top() + 2);
-    chain.handle(&moved(band.x, band.y), band, &g);
-    chain.handle(&PRESS, band, &g);
+    chain.handle(&moved(band.x, band.y), band, &g, 0);
+    chain.handle(&PRESS, band, &g, 0);
     let to = Point::new(band.x + 60, band.y + 40);
-    chain.handle(&moved(to.x, to.y), to, &g);
+    chain.handle(&moved(to.x, to.y), to, &g, 0);
     let further = Point::new(to.x + 10, to.y + 5);
-    chain.handle(&moved(further.x, further.y), further, &g);
+    chain.handle(&moved(further.x, further.y), further, &g, 0);
 
     assert_eq!(plate(&chain, 0), root_before, "the ancestor stayed put");
     let child_after = plate(&chain, 1);
@@ -552,11 +902,11 @@ fn a_dragged_plate_keeps_its_position_when_the_chain_re_places() {
 
     let root = plate(&chain, 0);
     let band = Point::new(root.left() + 20, root.top() + 2);
-    chain.handle(&moved(band.x, band.y), band, &g);
-    chain.handle(&PRESS, band, &g);
+    chain.handle(&moved(band.x, band.y), band, &g, 0);
+    chain.handle(&PRESS, band, &g, 0);
     let to = Point::new(band.x + 80, band.y + 30);
-    chain.handle(&moved(to.x, to.y), to, &g);
-    chain.handle(&RELEASE, to, &g);
+    chain.handle(&moved(to.x, to.y), to, &g, 0);
+    chain.handle(&RELEASE, to, &g, 0);
     let dragged = plate(&chain, 0);
     assert_ne!(dragged, root);
 
@@ -613,8 +963,8 @@ fn choosing_the_information_row_answers_nothing_and_keeps_its_panel() {
     open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
     let (_, at) = settle_on(&mut chain, 0, 1, &g);
 
-    chain.handle(&PRESS, at, &g);
-    let acted = chain.handle(&RELEASE, at, &g);
+    chain.handle(&PRESS, at, &g, 0);
+    let acted = chain.handle(&RELEASE, at, &g, 0);
     assert_ne!(
         acted,
         ChainAction::Closed,
@@ -631,8 +981,8 @@ fn clicking_a_submenu_row_keeps_its_plate_rather_than_acting() {
     let mut chain = MenuChain::new();
     open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
     let (_, at) = settle_on(&mut chain, 0, 1, &g);
-    chain.handle(&PRESS, at, &g);
-    let acted = chain.handle(&RELEASE, at, &g);
+    chain.handle(&PRESS, at, &g, 0);
+    let acted = chain.handle(&RELEASE, at, &g, 0);
     assert_ne!(
         acted,
         ChainAction::Closed,
@@ -652,7 +1002,7 @@ fn a_press_outside_the_chain_dismisses_it_and_is_consumed() {
     open(&mut chain, APP, flat_model(), Point::new(40, 40), &g);
     let away = Point::new(SCREEN.right() - 5, SCREEN.bottom() - 5);
     assert_eq!(
-        chain.handle(&PRESS, away, &g),
+        chain.handle(&PRESS, away, &g, 0),
         ChainAction::Closed,
         "the press ended the chain"
     );
@@ -676,7 +1026,7 @@ fn a_press_on_the_information_panel_is_claimed_and_acts_on_nothing() {
     let placed = info(&chain).expect("the panel hangs");
 
     let inside = Point::new(placed.left() + 8, placed.top() + 8);
-    let acted = chain.handle(&PRESS, inside, &g);
+    let acted = chain.handle(&PRESS, inside, &g, 0);
     assert_eq!(
         acted,
         ChainAction::Consumed,
@@ -695,10 +1045,10 @@ fn traversal_moves_within_a_plate_and_in_and_out_of_a_child() {
     open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
     let at = Point::ORIGIN;
 
-    chain.handle(&key(NamedKey::Down), at, &g);
-    chain.handle(&key(NamedKey::Down), at, &g);
+    chain.handle(&key(NamedKey::Down), at, &g, 0);
+    chain.handle(&key(NamedKey::Down), at, &g, 0);
     assert_eq!(
-        chain.handle(&key(NamedKey::Right), at, &g),
+        chain.handle(&key(NamedKey::Right), at, &g, 0),
         ChainAction::Redraw
     );
     assert_eq!(
@@ -708,14 +1058,14 @@ fn traversal_moves_within_a_plate_and_in_and_out_of_a_child() {
     );
 
     assert_eq!(
-        chain.handle(&key(NamedKey::Left), at, &g),
+        chain.handle(&key(NamedKey::Left), at, &g, 0),
         ChainAction::Redraw
     );
     assert_eq!(plates(&chain), 1, "Left backed out of it");
 
-    chain.handle(&key(NamedKey::Home), at, &g);
+    chain.handle(&key(NamedKey::Home), at, &g, 0);
     assert_eq!(
-        chain.handle(&key(NamedKey::Enter), at, &g),
+        chain.handle(&key(NamedKey::Enter), at, &g, 0),
         ChainAction::Closed
     );
     assert_eq!(
@@ -736,12 +1086,12 @@ fn escape_closes_the_deepest_child_first_and_then_dismisses() {
     assert_eq!(plates(&chain), 3);
     let at = Point::ORIGIN;
 
-    chain.handle(&key(NamedKey::Escape), at, &g);
+    chain.handle(&key(NamedKey::Escape), at, &g, 0);
     assert_eq!(plates(&chain), 2);
-    chain.handle(&key(NamedKey::Escape), at, &g);
+    chain.handle(&key(NamedKey::Escape), at, &g, 0);
     assert_eq!(plates(&chain), 1);
     assert_eq!(
-        chain.handle(&key(NamedKey::Escape), at, &g),
+        chain.handle(&key(NamedKey::Escape), at, &g, 0),
         ChainAction::Closed
     );
     assert_eq!(
@@ -759,7 +1109,7 @@ fn escape_closes_the_information_panel_before_the_menu_that_opened_it() {
     open(&mut chain, APP, info_model(), Point::new(40, 40), &g);
     settle_on(&mut chain, 0, 1, &g);
 
-    let acted = chain.handle(&key(NamedKey::Escape), Point::ORIGIN, &g);
+    let acted = chain.handle(&key(NamedKey::Escape), Point::ORIGIN, &g, 0);
     assert_eq!(acted, ChainAction::Redraw);
     assert!(info(&chain).is_none(), "the panel closed first");
     assert!(chain.is_open(), "and the chain it hung on survived");
@@ -830,7 +1180,7 @@ fn a_closed_chain_lists_no_surfaces_at_any_depth() {
     assert_eq!(chain.surfaces().len(), 3);
 
     let away = Point::new(SCREEN.right() - 5, SCREEN.bottom() - 5);
-    assert_eq!(chain.handle(&PRESS, away, &g), ChainAction::Closed);
+    assert_eq!(chain.handle(&PRESS, away, &g, 0), ChainAction::Closed);
     assert!(
         chain.surfaces().is_empty(),
         "the reconcile that takes plates down reads this list, so every depth \
@@ -1013,14 +1363,14 @@ fn a_pointer_travelling_within_one_row_costs_no_repaint() {
     let row = chain.row_rect(0, 1, &g).expect("the second row");
     let first = Point::new(row.left() + 4, row.top() + 2);
     assert_eq!(
-        chain.handle(&moved(first.x, first.y), first, &g),
+        chain.handle(&moved(first.x, first.y), first, &g, 0),
         ChainAction::Redraw,
         "arriving on the row moved the highlight onto it"
     );
     for step in 1..4 {
         let along = Point::new(first.x + step * 3, first.y + 1);
         assert_eq!(
-            chain.handle(&moved(along.x, along.y), along, &g),
+            chain.handle(&moved(along.x, along.y), along, &g, 0),
             ChainAction::Consumed,
             "a sample inside the row it is already on changes no pixel"
         );
@@ -1111,11 +1461,11 @@ fn traversing_by_keyboard_owes_the_two_rows_too() {
     let g = geom(&theme);
     let mut chain = MenuChain::new();
     open(&mut chain, APP, flat_model(), Point::new(40, 40), &g);
-    chain.handle(&key(NamedKey::Down), Point::ORIGIN, &g);
+    chain.handle(&key(NamedKey::Down), Point::ORIGIN, &g, 0);
     present_all(&mut chain);
 
     assert_eq!(
-        chain.handle(&key(NamedKey::Down), Point::ORIGIN, &g),
+        chain.handle(&key(NamedKey::Down), Point::ORIGIN, &g, 0),
         ChainAction::Redraw
     );
     assert_eq!(
@@ -1184,10 +1534,10 @@ fn dragging_a_plate_owes_no_repaint() {
 
     let root = plate(&chain, 0);
     let band = Point::new(root.left() + 20, root.top() + 2);
-    chain.handle(&moved(band.x, band.y), band, &g);
-    chain.handle(&PRESS, band, &g);
+    chain.handle(&moved(band.x, band.y), band, &g, 0);
+    chain.handle(&PRESS, band, &g, 0);
     let to = Point::new(band.x + 60, band.y + 40);
-    chain.handle(&moved(to.x, to.y), to, &g);
+    chain.handle(&moved(to.x, to.y), to, &g, 0);
 
     assert_ne!(plate(&chain, 0), root, "the plate moved");
     assert_eq!(
@@ -1213,7 +1563,7 @@ fn the_information_panel_owes_its_pixels_once() {
         let panel = info(&chain).expect("the panel hangs");
         Point::new(panel.left() + 8, panel.top() + 8)
     };
-    chain.handle(&moved(inside.x, inside.y), inside, &g);
+    chain.handle(&moved(inside.x, inside.y), inside, &g, 0);
     assert_eq!(
         owed(&chain, SurfaceKind::Info),
         covering(&[]),
@@ -1228,13 +1578,7 @@ fn the_information_panel_owes_its_pixels_once() {
 fn repainting_a_plates_damaged_rows_lands_what_a_whole_paint_would() {
     let theme = theme();
     let g = geom(&theme);
-    let paint_whole = |chain: &MenuChain| -> tairix_raster::Surface {
-        let plate = plate(chain, 0);
-        let mut surface =
-            tairix_raster::Surface::new(plate.width, plate.height).expect("a plate surface");
-        chain.render_surface(SurfaceKind::Plate(0), &mut surface, &g);
-        surface
-    };
+    let paint_whole = |chain: &MenuChain| paint(chain, 0, &g);
 
     // Two chains driven identically: one repainted whole at every step, the
     // other keeping its buffer and painting only what it said had changed.
@@ -1442,7 +1786,7 @@ fn a_closed_chain_explains_nothing() {
     settle_on(&mut chain, 0, 1, &g);
     assert!(chain.hovered_tip(&g).is_some());
 
-    chain.handle(&key(NamedKey::Escape), row_point(&chain, 0, 1, &g), &g);
+    chain.handle(&key(NamedKey::Escape), row_point(&chain, 0, 1, &g), &g, 0);
     assert_eq!(
         chain.hovered_tip(&g),
         None,

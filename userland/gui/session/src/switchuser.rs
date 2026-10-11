@@ -144,6 +144,11 @@ pub trait SeatPresentation {
     /// present into.
     fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno>;
 
+    /// Tell every application what the desktop now is: the screen a session
+    /// comes back to need not be the one it stepped aside from, and an
+    /// application that was not told would lay itself out to the old one.
+    fn publish_desktop(&mut self);
+
     /// Repaint every pixel of `mode` and present it.
     ///
     /// The whole screen, not a damage rectangle: another account has been
@@ -388,6 +393,7 @@ impl SwitchUser {
         presentation
             .reconfigure(mode)
             .map_err(ResumeFailure::FrameRefused)?;
+        presentation.publish_desktop();
         // Before the repaint, so the frame it presents is the first of the
         // fade rather than the full-strength desktop appearing at once.
         presentation.fade_in();

@@ -161,6 +161,21 @@ impl NetAddrFamily {
     }
 }
 
+/// The significant part of a NUL-padded interface-name field: its bytes
+/// before the first NUL.
+#[must_use]
+pub fn if_name_bytes(name: &[u8; IF_NAME_LEN]) -> &[u8] {
+    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
+    &name[..len]
+}
+
+/// The name a NUL-padded interface-name field spells, or `"?"` for one that
+/// is not text; a name decoded from the wire is validated ASCII and always is.
+#[must_use]
+pub fn if_name_str(name: &[u8; IF_NAME_LEN]) -> &str {
+    core::str::from_utf8(if_name_bytes(name)).unwrap_or("?")
+}
+
 /// Validate an interface-name field: NUL-padded, non-empty, at most
 /// [`IF_NAME_LEN`] significant bytes of lowercase ASCII letters or
 /// digits (the ALIAS admin-chosen alias grammar), with nothing after
@@ -173,7 +188,7 @@ impl NetAddrFamily {
 /// [`Errno::OutOfRange`] on an empty name, an illegal byte, or a
 /// non-NUL byte after the terminator.
 pub fn validate_if_name(name: &[u8; IF_NAME_LEN]) -> Result<usize, Errno> {
-    let len = name.iter().position(|&b| b == 0).unwrap_or(IF_NAME_LEN);
+    let len = if_name_bytes(name).len();
     if len == 0 {
         return Err(Errno::OutOfRange);
     }
@@ -1669,6 +1684,16 @@ impl NetIfKind {
             1 => Ok(Self::Loopback),
             2 => Ok(Self::Bond),
             _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The kind's display name (`ethernet`, `loopback`, `bond`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ethernet => "ethernet",
+            Self::Loopback => "loopback",
+            Self::Bond => "bond",
         }
     }
 }

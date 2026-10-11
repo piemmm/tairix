@@ -68,9 +68,10 @@ any desktop UI for editing metadata — the file manager's Properties window and
 ## 3. Non-negotiable invariants
 
 - Extended attributes are **first-class inode metadata**, held to the same COW,
-  integrity, redundancy, encryption, and authentication rules as all other
-  ARXFS metadata (arxfs-spec §4, §5, §7, §8): self-identifying,
-  checksummed/authenticated, two physical copies, encrypted, no plaintext.
+  integrity, redundancy, and protection rules as all other ARXFS metadata
+  (arxfs-spec §4, §5, §7, §8): self-identifying, checksummed/authenticated,
+  two physical copies, and sealed as the volume is — encrypted on an encrypted
+  volume.
 - Attributes are **namespaced** and the namespace decides the **capability**
   required to read or write them (§5). There is no "open by default" attribute
   surface (charter §2.7, §5.4).
@@ -205,8 +206,8 @@ while reusing the entire data pipeline (charter §2.2 — no second data path).
 - Every input validated: namespace membership, key bytes (no `/`, no NUL,
   length ≤ `KEY_MAX`, valid UTF-8 per the grammar), value size ≤ `VALUE_MAX`,
   per-inode caps. Fail closed on any violation.
-- Attribute keys and values live in the encrypted-metadata domain like filenames
-  (arxfs-spec §7); no plaintext attribute leaks on a raw-device read.
+- Attribute keys and values are sealed like filenames (arxfs-spec §7): on an
+  encrypted volume no plaintext attribute leaks on a raw-device read.
 - Untrusted source: attributes copied **in** from a foreign filesystem or an
   archive are untrusted input — the importing path validates them against the
   grammar and caps and runs in the normal parser-sandbox discipline where a
@@ -374,8 +375,9 @@ Incomplete unless these pass (charter §7, §16, §23.4):
 1. set/get/list/remove round-trips for every namespace; case-sensitive keys are
    distinct; unknown namespace rejected; oversize key/value/count rejected;
 2. attribute changes are one COW transaction — crash replay leaves prior-or-new;
-3. attributes are encrypted at rest (no plaintext key/value on a raw-device
-   read) and authenticated (a flipped attribute block is detected and repaired
+3. attributes are encrypted at rest on an encrypted volume (no plaintext
+   key/value on a raw-device read) and authenticated (a flipped attribute
+   block is detected and repaired
    from the duplicate copy, like other metadata, arxfs-spec §16);
 4. capability gate: `system`/`trusted` namespaces refused without the
    capability, allowed with it, listing omits unreadable namespaces, decisions

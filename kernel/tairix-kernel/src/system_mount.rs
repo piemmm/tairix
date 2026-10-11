@@ -14,12 +14,12 @@
 //!
 //! The system has two `ARXFS` volumes on the one bootstrap-floor disk:
 //!
-//! * the **encrypted, writable root volume** (`ARXFSRoot`) — the persistent
-//!   home of every writable path: `/` itself, `/Users`, `/Apps`, `/Storage`,
-//!   and the two writable `/System` exceptions `/System/Logs` and
-//!   `/System/Settings`; and
-//! * the **read-only, well-known-keyed `/System` volume** (`ARXFSSystem`) —
-//!   the immutable kernel image, drivers, and libraries.
+//! * the **writable root volume** (`ARXFSRoot`), plaintext or encrypted —
+//!   the persistent home of every writable path: `/` itself, `/Users`,
+//!   `/Apps`, `/Storage`, and the two writable `/System` exceptions
+//!   `/System/Logs` and `/System/Settings`; and
+//! * the **read-only, plaintext `/System` volume** (`ARXFSSystem`) — the
+//!   immutable kernel image, drivers, and libraries.
 //!
 //! The writable volume is mounted as `/` (`MountTable::back_root`); the
 //! read-only `/System` volume is mounted *over* it at `/System`, and the
@@ -41,8 +41,8 @@
 //! are already park-safe through the device's `SleepLock`), publishes the
 //! mount-table layout into [`LATE_FILESYSTEM`], and registers the read-only
 //! `/System` driver against it. The writable root driver is registered
-//! separately by [`register_writable_state`] once the encrypted root is
-//! unlocked; the identity half is published by the encrypted-root unlock step
+//! separately by [`register_writable_state`] once the root is mounted; the
+//! identity half is published by the root-unlock step
 //! (`crate::root_mount`, [`LATE_IDENTITY`]).
 //!
 //! # Why the driver type is erased
@@ -56,8 +56,8 @@
 //! let the boxed driver satisfy the read/write/security/stats-plus-`Send`
 //! bound the service requires.
 //!
-//! Until the writable root driver is registered (after the encrypted root is
-//! unlocked), every operation on `/` and its writable subtrees fails closed
+//! Until the writable root driver is registered (after the root is mounted),
+//! every operation on `/` and its writable subtrees fails closed
 //! `NotImplemented`, never a silent fallback to the read-only `/System`. The
 //! read-only `/System` volume itself never accepts a write through its
 //! handle.
@@ -71,7 +71,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
 };
 use tairix_abi::DriverHandle;
-use tairix_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
+use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::{
@@ -183,11 +183,11 @@ const SYSTEM_MOUNT_HANDLE: u64 = 0x5959_5359; // "YYSY"
 /// table — the root mount `/` and every writable sub-mount of it (`/Users`,
 /// `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`).
 ///
-/// All of these are the *one* encrypted root volume (the persistent writable
+/// All of these are the *one* root volume (the persistent writable
 /// partition), so they share a single handle — one driver, one per-mount
 /// [`SleepLock`](tairix_kernel_core) serialising every operation on the
 /// volume. The driver is registered by [`register_writable_state`] after the
-/// encrypted root is unlocked; until then `/` and its writable subtrees
+/// root is mounted; until then `/` and its writable subtrees
 /// resolve to no driver and every write/read fails closed (`NotImplemented`),
 /// never a silent fallback to the read-only `/System`. Crate-visible so the
 /// unlock path charges the volume's transform cache to the same identity.
@@ -198,7 +198,7 @@ pub(crate) const ROOT_VOLUME_HANDLE: u64 = 0x524F_4F54; // "ROOT"
 /// volume.
 const SYSTEM_FS_MOUNTED: EventId = EventId(4143);
 
-/// Audit event: the writable encrypted-root driver was registered as the
+/// Audit event: the writable root driver was registered as the
 /// backing for `/` and its writable subtrees (`/Users`, `/Apps`,
 /// `/Storage`, `/System/Logs`, `/System/Settings`), so userland writes to
 /// the persistent volume now resolve to a live driver.
@@ -291,7 +291,7 @@ pub(crate) fn publish_volume_identity(
 /// `ro`/`nosuid`/`nodev`/`noexec` flags) and attaches a backing volume to each
 /// mount, leaving the layout's flags untouched:
 ///
-/// * `/` — the encrypted, writable root volume ([`ROOT_VOLUME_HANDLE`]): the
+/// * `/` — the writable root volume ([`ROOT_VOLUME_HANDLE`]): the
 ///   persistent home of `/Users`, `/Apps`, `/Storage`, and `/` itself.
 /// * `/System` — read-only, the `ARXFSSystem` volume
 ///   ([`SYSTEM_MOUNT_HANDLE`], whole-volume so no rebasing): the kernel
@@ -305,7 +305,7 @@ pub(crate) fn publish_volume_identity(
 ///   the read-only `/System` (the only writable paths beneath it).
 ///
 /// The writable root driver is registered by [`register_writable_state`]
-/// only after the encrypted root is unlocked; until then `/` and its
+/// only after the root is mounted; until then `/` and its
 /// writable subtrees fail closed `NotImplemented`, never a silent fallback
 /// to the read-only `/System`.
 ///
@@ -324,7 +324,7 @@ fn system_vfs() -> Result<Vfs, VfsError> {
     let root_backing = MountBacking::new(root_handle, None);
     {
         let mut mounts = vfs.mounts_write();
-        // The encrypted, writable root volume *is* `/`.
+        // The writable root volume *is* `/`.
         mounts.back_root(root_backing)?;
         // The read-only `/System` volume shadows `/` at `/System`; its
         // content is the volume's own root, so it is a whole-volume mount
@@ -362,14 +362,13 @@ fn system_vfs() -> Result<Vfs, VfsError> {
 /// the same `'static`-leaked [`DriverStoreService`] that backs the store. The
 /// window is independent of the store's own window — concurrent windows over
 /// one disk are serialised park-safely by the device `SleepLock` — and of the
-/// encrypted-root unlock window.
+/// root-unlock window.
 ///
 /// Every step is fail-soft and fail-closed: a disk with no `ARXFSSystem`
 /// partition, an out-of-range window, an unmountable volume, or a VFS/install
 /// refusal leaves the `fs_*` syscalls failing closed (`NotImplemented`) and is
 /// audited, never panicked and never a silent device fallback. No secret is
-/// consumed or logged — the `/System` volume is keyed by the non-secret
-/// well-known [`SYSTEM_VOLUME_KEY`].
+/// consumed or logged — the `/System` volume is plaintext.
 pub fn install_system_mount<B: Block + 'static>(
     store: &'static DriverStoreService<B>,
     audit: &'static (dyn Sink + Sync),
@@ -403,11 +402,10 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "system_window_out_of_range");
         return;
     };
-    // Mount read-only under the non-secret well-known key; the volume carries
-    // no secrets and the kernel can never mutate it through this handle. The
-    // volume's compressed clusters (driver bundles, libraries) are served
-    // through the SMART3 transform cache, charged to this mount's identity.
-    let Ok(fs) = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
+    // Read-only: the kernel can never mutate the store through this handle.
+    // Its compressed clusters (driver bundles, libraries) are served through
+    // the SMART3 transform cache, charged to this mount's identity.
+    let Ok(fs) = ARXFS::open_read_only(window, Keying::Plaintext) else {
         unavailable(audit, "system_mount_failed");
         return;
     };
@@ -427,9 +425,8 @@ pub fn install_system_mount<B: Block + 'static>(
     };
     // Publish the shared VFS layout once, then register the read-only
     // `/System` driver against its handle. The writable root driver (the
-    // encrypted root volume backing `/` and its writable subtrees) is
-    // registered later by `register_writable_state`, once the root is
-    // unlocked.
+    // root volume backing `/` and its writable subtrees) is registered later
+    // by `register_writable_state`, once the root is mounted.
     if LATE_FILESYSTEM.install_vfs(vfs).is_err() {
         unavailable(audit, "already_installed");
         return;
@@ -491,13 +488,13 @@ pub fn install_system_mount<B: Block + 'static>(
     crate::app_store::APP_STORE.note_available();
 }
 
-/// Register the live, writable encrypted-root driver as the backing for the
+/// Register the live, writable root driver as the backing for the
 /// writable root volume — the root mount `/` and every writable sub-mount of
 /// it (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`),
 /// which all share the one `ROOT_VOLUME_HANDLE`.
 ///
-/// Called once by the encrypted-root unlock path after the root volume is
-/// unlocked, with a read-write [`KernelFs`] over that volume (a second,
+/// Called once by the root-unlock path after the root volume is mounted,
+/// with a read-write [`KernelFs`] over that volume (a second,
 /// independent `'static` window, park-safe through the device `SleepLock`,
 /// distinct from the unlock task's own read window). Until this lands, every
 /// write/read under `/` and its writable subtrees fails closed

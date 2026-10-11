@@ -234,6 +234,13 @@ wallpaper gap  ┌────────────────────�
   panel 1). A secondary press on the clock opens the clock's own menu (T17);
   a primary press on it is claimed and inert, as on a status signal other
   than the volume signal, which opens its panel.
+- **Clock:** the time is set in the body face (`TextRole::Body`), a step above
+  a caption, because it is read at a glance from across the bar, and it
+  follows the user's chosen text size like every role. On a horizontal bar its
+  region is at least `clock_extent` and grows to the widest `HH:mm` reading at
+  that size, so no minute is drawn cut short; a label that a region cannot
+  hold whole — a side bar's, at a large size — is not drawn at all, because a
+  time cut short reads as another time.
 - **Account capsule:** always the trailing-most element, reserved, immovable;
   no application or tray icon may occupy or displace its slot. It is the
   Switchboard tray — its badges, seam, rail, readout, and gestures are the
@@ -987,13 +994,53 @@ reserved Switchboard slot. What now stands:
 Status signals carry **no fabricated hardware** — empty by default. The
 session feeds the sound ones from the audio service (`Taskbar::set_sound`): a
 volume signal while there is a default sink, and a recording indicator while
-any capture stream moves frames; network and battery have no feed yet. Tested in the abi suite
+any capture stream moves frames. Battery has no feed yet.
+
+**The network signal.** Interface state and addresses are gated queries the
+session neither holds nor should, so the Switchboard reads them and the
+session relays:
+
+- The netstack publishes `NoticeTopic::Network` (`plans/NOTICE.md`) on every
+  change to an interface's presence, link, addresses or address states,
+  resuming its count past the board's so a restart is always an edge. The
+  Switchboard re-reads the interfaces once at start and on each edge
+  (`Cadence::OnNotice`), retrying at each sample only while a reading goes
+  unanswered, and publishes a bounded `NetworkReport`
+  (`lib/abi::switchboard_ipc`, magic `SWN1`) of the interface-state records
+  over `SWITCHBOARD_ENDPOINT` when it changed, offering it again until the
+  session takes it. A publisher whose authority does not reach the state
+  query sends `NetworkReport::UNMEASURED`.
+- The session accepts the frame only from the Switchboard it launched, feeds
+  `Taskbar::set_network`, and clears it when that instance is reaped. The
+  signal leads the area and replaces only its own slot.
+- The signal is `Network` while any interface has link and a preferred
+  address beyond the link and the machine, `NetworkOffline` otherwise, and
+  absent without a measured interface: an unreadable network is never drawn
+  as an offline one.
+- Hovering opens a readout window (`ReadoutLayout`, presented like the
+  capsule's): each interface, its condition, and every address with prefix
+  and state, sized inside the plate's rim (`plate_content_inset`) and held to
+  the room beside the bar. The fact list is built once per report. It shares
+  the capsule's hover rule (`lib/controls::readout_hover`), which also holds
+  the readout across the bar's rim between the control and the panel. A signal
+  arriving or leaving beside it moves its slot, so the readout closes until
+  the pointer next moves.
+- A secondary press opens the network menu (`MenuSubject::Network`):
+  *Network Settings…* (`TaskbarResponse::OpenNetworkSettings`, launching
+  Settings at `tairix_netconfig::SETTINGS_PANE`, disabled "Not installed"
+  without a settings bundle) and *Network Activity…* (the Switchboard's
+  Resources section). A primary press is inert.
+
+Tested in the abi suite
 (round-trip + refusal matrix + fuzz), the kernel suite (the seat-lease bind of
-both seat-scoped endpoints, refused without the lease), the taskbar suite
+both seat-scoped endpoints, refused without the lease; the network notice's
+publish authority), the taskbar suite
 (model ordering/upsert/clear/`clear_producer`, popover layout + degenerate
-fail-closed, click-to-dismiss, inert status press, and card render across
-dark/light/high-contrast/reduced-motion), and the session suite (the
-producer→attest→relay→dismiss path with producer isolation).
+fail-closed, click-to-dismiss, inert status press, card render across
+dark/light/high-contrast/reduced-motion, and the network signal, readout,
+rim crossing and menu), and the session suite (the
+producer→attest→relay→dismiss path with producer isolation, and the network
+report's attested relay and readout window).
 
 ## T9 — The trailing account capsule (always right-most, immovable)
 

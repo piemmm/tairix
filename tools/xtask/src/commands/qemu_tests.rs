@@ -425,6 +425,9 @@ enum FsDisk {
     /// `/System/Security/Users` — the root-mount->login vertical's backing
     /// (`plans/PI.md` P11 Chunk B-2).
     EncryptedRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout with a plaintext root and no
+    /// unlock descriptor, as a shipped image has.
+    PlaintextRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the kernel-signed autoload driver
     /// bundles — the virtio-input keyboard driver, the framebuffer display
@@ -674,6 +677,13 @@ const fn is_line_of(line: &[u8], value: &[u8]) -> bool {
 
 /// The passphrase line the admission vertical types at `ARXFS passphrase: `.
 const UNLOCK_PASSPHRASE_LINE: &str = "unlock-vertical correct horse battery staple\n";
+
+/// How every encrypted-root disk is protected: under the passphrase
+/// [`UNLOCK_PASSPHRASE_LINE`] types.
+const ENCRYPTED_ROOT: tairix_test_encrypted_root_image::RootProtection<'static> =
+    tairix_test_encrypted_root_image::RootProtection::Passphrase(
+        tairix_test_encrypted_root_image::PASSPHRASE,
+    );
 
 /// The pre-boot-Supervisor ESC boot-screen serial script
 /// (`plans/NEW-SUPERVISOR.md` §7), shared by every arch's Supervisor ESC
@@ -974,6 +984,21 @@ const WINDOW_SIZED_MARKER: &str = tairix_desktop_session::WINDOW_SIZED_MESSAGE;
 /// wallpaper — because each application redraws its own window for a new look
 /// on its own time.
 const DESKTOP_RESTYLED_MARKER: &str = tairix_desktop_session::DESKTOP_RESTYLED_MESSAGE;
+
+/// Serial marker a keystroke answering the resolution prompt waits on: the
+/// session's announcement that the trial's prompt is up and holds the
+/// keyboard.
+const TRIAL_SHOWN_MARKER: &str = tairix_desktop_session::TRIAL_SHOWN_MESSAGE;
+
+/// Serial marker a dump of a resized desktop waits on: the session's
+/// announcement that a frame shows the desktop whole at its new size, the
+/// wallpaper fitted to it settled.
+const DESKTOP_RESIZED_MARKER: &str = tairix_desktop_session::DESKTOP_RESIZED_MESSAGE;
+
+/// Serial marker a settings gesture after a resolution trial waits on: the
+/// session's announcement that the trial's call is answered, so the desktop
+/// takes settings calls again.
+const TRIAL_CONCLUDED_MARKER: &str = tairix_desktop_session::TRIAL_CONCLUDED_MESSAGE;
 
 /// Serial marker a vertical gates a click on a *resident* application's
 /// icon-bar slot on: the session's own announcement that a frame carrying
@@ -4377,8 +4402,8 @@ static TESTS: &[QemuTest] = &[
     // program rows (`plans/APPS.md` deliverable 8): `devmgr` is spawned
     // from its verified on-disk `/System` store bundle, so this vertical
     // carries the shared encrypted-root whole-disk image. The read-only
-    // `/System` volume is mounted under its well-known key *before* any
-    // passphrase dialogue, so the parked service spawns resolve without
+    // `/System` volume is plaintext and mounted *before* any passphrase
+    // dialogue, so the parked service spawns resolve without
     // touching the console and the run still needs no scripted serial
     // input (the unanswered unlock prompt is harmless to this vertical's
     // witness). Single CPU; the 120-second budget covers the disk bring-up
@@ -6566,6 +6591,34 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         x86_64_cpu: None,
         serial: SUPERVISOR_MOUNT_SCRIPT,
+        expect: Expect::Pass,
+    },
+    // A plaintext root boots with no passphrase: the same production bin as
+    // the Supervisor verticals above over a plaintext whole-disk image, and no
+    // serial input at all. The ESC window elapses, the root mounts with no
+    // key, and the install witness (`EventId(4139)`) reports PASS; a root that
+    // asked for a passphrase would wait on a prompt nothing answers and time
+    // out.
+    QemuTest {
+        package: "tairix-test-supervisor-esc-qemu-aarch64",
+        binary: "tairix-test-supervisor-esc-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::PlaintextRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
         expect: Expect::Pass,
     },
     // `plans/OPEN-DEFECTS.md` D7 + D8: the x86_64 disk-completion-interrupt
@@ -9088,11 +9141,11 @@ static TESTS: &[QemuTest] = &[
     // serial gates the in-window click. From there every stage is keyed on
     // the kernel/ipc `MessageDelivered` records the desktop's app-ward
     // event deliveries emit — the shared interaction contract in the test
-    // crate's lib target: delivery 2 (Focus + Pressed from the window
-    // click) keys the second screendump (the served window on the
-    // desktop), and a handshake click (delivery 3, injected only after
-    // delivery 2 appeared and held while the second dump is pending) is
-    // the wake boundary the terminal stage gates on.
+    // crate's lib target: the window's first present focuses it (delivery
+    // 2), the pointer's first delivery once it is on screen (delivery 3)
+    // keys the second screendump (the served window on the desktop), and
+    // the next (delivery 4) is the wake boundary the terminal stage gates
+    // on, behind a handshake click held while the second dump is pending.
     //
     // AW4 then takes the run into the windowed terminal: keyed on the
     // handshake's own delivery, the script clicks the taskbar's Library
@@ -9555,22 +9608,31 @@ static TESTS: &[QemuTest] = &[
     //
     // It boots the same graphical world, types the unlock passphrase, logs in
     // and starts `desktop`, then opens Settings from the Switchboard capsule's
-    // system menu. Four dumps read the screen: the window on General; a pane
-    // that states an absence; Storage, reached past the fold of the strip by
-    // its own scrollbar; and the desktop redrawn in the other appearance after
-    // the Appearance pane's choice. Each window dump is gated on the session's witness that a
-    // frame carrying that pane's title is on screen — the window retitles only
-    // after presenting the pane — and the restyled dump on the session's witness
-    // that the restyled desktop is. The walk photographs every pane before it
-    // changes the appearance, because each application redraws itself for a
-    // new look on its own time and a dump of its window could otherwise catch
-    // that redraw half done.
+    // system menu. The dumps read the window on General, on Lock Screen, on a
+    // pane that states an absence, and on Storage, reached past the fold of
+    // the strip by its own scrollbar; the desktop redrawn in the other
+    // appearance after the Appearance pane's choice; and the desktop drawn
+    // smaller than its output after Displays asks for the largest size the
+    // output offers below its own. Each window dump is gated on the session's
+    // witness that a frame carrying that pane's title is on screen — the
+    // window retitles only after presenting the pane — the restyled dump on
+    // the witness that the restyled desktop is, and the resized dump on the
+    // witness that the desktop is on screen whole at its new size. The walk
+    // photographs every pane before it changes the appearance, because each
+    // application redraws itself for a new look on its own time and a dump of
+    // its window could otherwise catch that redraw half done.
     //
-    // PASS needs the guest's four witnesses in order: an `APP_LOADED` naming
-    // the settings bundle, the create reply of its window, and two commits of
-    // the desktop's published settings document — the pane's appearance choice,
-    // then its Compact density, the last gesture, which the runner sends only
-    // once the restyled dump is read back.
+    // Before asking for the smaller desktop the walk shrinks the window by its
+    // corner, so it fits that desktop as it stands and leaves wallpaper bare
+    // beside it. The trial's prompt holds the keyboard, and `Enter` keeps it as
+    // soon as it is up: the countdown is the user's, so the keystroke never
+    // waits on anything slower than the prompt itself.
+    //
+    // PASS needs the guest's witnesses in order: an `APP_LOADED` naming the
+    // settings bundle, the create reply of its window, and three commits of
+    // the desktop's published settings document — the appearance choice, the
+    // kept resolution, then Compact density, the last gesture, which the
+    // runner sends only once the resized dump is read back.
     //
     // Single CPU and the same 300-second *inactivity* budget its siblings
     // carry: the longest the guest may fall silent, never a runtime deadline,
@@ -9596,6 +9658,8 @@ static TESTS: &[QemuTest] = &[
                 UNLOCK_PASSPHRASE_LINE,
             ),
             TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            // The prompt opens with Keep Changes focused.
+            TypedStep::text(TRIAL_SHOWN_MARKER, 1, "\n"),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -9627,6 +9691,12 @@ static TESTS: &[QemuTest] = &[
                 occurrences: 1,
                 suffix: SETTINGS_RESTYLED_DUMP,
                 assert: assert_settings_restyled_screendump,
+            },
+            ScreendumpPlan {
+                marker: DESKTOP_RESIZED_MARKER,
+                occurrences: 1,
+                suffix: SETTINGS_RESIZED_DUMP,
+                assert: assert_settings_resized_screendump,
             },
         ],
         pointer_script: Some(settings_pointer_script),
@@ -11263,14 +11333,16 @@ pub(crate) fn enrolments() -> Vec<Enrolment> {
         .collect()
 }
 
-/// The whole-disk encrypted-root image an `EncryptedRootDisk` enrolment
-/// boots: the shared fixture with the complete self-contained application
-/// bundles — each discovered program's signed `AppInfo` + `Run` beside its
-/// `Help/` tree — planted on the read-only `/System` volume, exactly as a
-/// real image ships them (`plans/APPS.md` deliverable 8).
-fn encrypted_root_disk_bytes(
+/// The whole-disk image an `EncryptedRootDisk` or `PlaintextRootDisk`
+/// enrolment boots: the shared fixture with the complete self-contained
+/// application bundles — each discovered program's signed `AppInfo` + `Run`
+/// beside its `Help/` tree — planted on the read-only `/System` volume, exactly
+/// as a real image ships them (`plans/APPS.md` deliverable 8), and the root
+/// protected as `protection` says.
+fn root_disk_bytes(
     t: &QemuTest,
     apps: &[super::image_apps::AppStoreFile],
+    protection: tairix_test_encrypted_root_image::RootProtection<'_>,
 ) -> Result<Vec<u8>, String> {
     let plants = root_plants(t, apps)?;
     let borrowed = root_plant_refs(&plants);
@@ -11279,12 +11351,13 @@ fn encrypted_root_disk_bytes(
         .map(|(components, bytes)| (components.as_slice(), *bytes))
         .collect();
     super::image_apps::with_plant_refs(apps, |files| {
-        tairix_test_encrypted_root_image::build_image_with_apps(files, &root_files).map_err(|e| {
-            format!(
-                "test --qemu ({}): build encrypted-root image: {e:?}",
-                t.package
-            )
-        })
+        tairix_test_encrypted_root_image::build_image_with_contents(
+            &[],
+            files,
+            &root_files,
+            protection,
+        )
+        .map_err(|e| format!("test --qemu ({}): build root image: {e:?}", t.package))
     })
 }
 
@@ -11484,6 +11557,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     let profile = tairix_mkimage::ImageProfile::Debug;
     let apps = match t.fs_disk {
         FsDisk::EncryptedRootDisk
+        | FsDisk::PlaintextRootDisk
         | FsDisk::NetToolRootDisk
         | FsDisk::AutoloadRootDisk
         | FsDisk::RtcRootDisk
@@ -11856,9 +11930,6 @@ fn assert_desktop_wallpaper(
     theme: &tairix_theme::Theme,
     excluded: &[tairix_geometry::Rect],
 ) -> Result<(), String> {
-    // A frame so covered that fewer points survive is not one this
-    // assertion can judge, and says so rather than passing vacuously.
-    const MIN_SAMPLES: usize = 8;
     let wallpaper = expected_wallpaper()?;
     if wallpaper.width != image.width || wallpaper.height != image.height {
         return Err(format!(
@@ -11872,8 +11943,28 @@ fn assert_desktop_wallpaper(
             wallpaper.height,
         ));
     }
-    let covered = desktop_chrome_regions(theme, excluded);
-    let samples = wallpaper_sample_points(image.width, image.height, &covered);
+    assert_wallpaper_points(
+        t,
+        path,
+        image,
+        wallpaper,
+        &desktop_chrome_regions(theme, excluded),
+    )
+}
+
+/// Every lattice point of `image` outside `covered` is exactly what
+/// `wallpaper` holds there, and enough of them survive to judge the frame by.
+fn assert_wallpaper_points(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+    wallpaper: &ExpectedWallpaper,
+    covered: &[tairix_geometry::Rect],
+) -> Result<(), String> {
+    // A frame so covered that fewer points survive is not one this
+    // assertion can judge, and says so rather than passing vacuously.
+    const MIN_SAMPLES: usize = 8;
+    let samples = wallpaper_sample_points(image.width, image.height, covered);
     if samples.len() < MIN_SAMPLES {
         return Err(format!(
             "test --qemu ({}): screendump {} leaves only {} sampleable wallpaper points \
@@ -11923,22 +12014,35 @@ fn desktop_chrome_regions(
     theme: &tairix_theme::Theme,
     excluded: &[tairix_geometry::Rect],
 ) -> Vec<tairix_geometry::Rect> {
+    let (width, height) = ramfb_screen();
+    let centre = tairix_geometry::Point::new(
+        tairix_geometry::to_i32(width / 2),
+        tairix_geometry::to_i32(height / 2),
+    );
+    chrome_regions_on(theme, (width, height), centre, excluded)
+}
+
+/// [`desktop_chrome_regions`] on a desktop of `screen` with the pointer
+/// resting at `pointer`.
+fn chrome_regions_on(
+    theme: &tairix_theme::Theme,
+    screen: (u32, u32),
+    pointer: tairix_geometry::Point,
+    excluded: &[tairix_geometry::Rect],
+) -> Vec<tairix_geometry::Rect> {
     /// Half-width of the box kept clear of the pointer: comfortably larger
     /// than the cursor artwork at unit scale.
     const CURSOR_CLEARANCE_PX: u32 = 64;
     /// Width of the margin kept clear of the desktop's icon column,
     /// whether or not a fixture's `Desktop` folder holds icons to draw.
     const ICON_COLUMN_PX: u32 = 224;
-    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
-    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
-    let cursor_left = (width / 2).saturating_sub(CURSOR_CLEARANCE_PX);
-    let cursor_top = (height / 2).saturating_sub(CURSOR_CLEARANCE_PX);
+    let clearance = tairix_geometry::to_i32(CURSOR_CLEARANCE_PX);
     let mut regions = vec![
-        taskbar_bar_rect(theme),
-        tairix_geometry::Rect::new(0, 0, ICON_COLUMN_PX, height),
+        taskbar_bar_rect_on(theme, screen),
+        tairix_geometry::Rect::new(0, 0, ICON_COLUMN_PX, screen.1),
         tairix_geometry::Rect::new(
-            i32::try_from(cursor_left).unwrap_or(0),
-            i32::try_from(cursor_top).unwrap_or(0),
+            pointer.x - clearance,
+            pointer.y - clearance,
             2 * CURSOR_CLEARANCE_PX,
             2 * CURSOR_CLEARANCE_PX,
         ),
@@ -11956,11 +12060,16 @@ fn desktop_chrome_regions(
 /// point must stay clear of. Only the bar's own extent is read, which no
 /// pin, task, or tray entry moves.
 fn taskbar_bar_rect(theme: &tairix_theme::Theme) -> tairix_geometry::Rect {
+    taskbar_bar_rect_on(theme, ramfb_screen())
+}
+
+/// [`taskbar_bar_rect`] on a desktop of `(width, height)`.
+fn taskbar_bar_rect_on(
+    theme: &tairix_theme::Theme,
+    (width, height): (u32, u32),
+) -> tairix_geometry::Rect {
     let taskbar = tairix_taskbar::Taskbar::new(
-        tairix_taskbar::TaskbarConfig::bottom_bar(
-            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
-            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
-        ),
+        tairix_taskbar::TaskbarConfig::bottom_bar(width, height),
         &theme.clone().floating(),
     );
     taskbar.layout(tairix_geometry::Scale::ONE).bar
@@ -12002,7 +12111,7 @@ fn wallpaper_sample_points(
 }
 
 /// The wallpaper the desktop session composites behind its icons and
-/// windows, recomputed on the host by [`compute_expected_wallpaper`].
+/// windows, recomputed on the host by [`compute_wallpaper_on`].
 ///
 /// Straight-alpha RGBA8 samples, row-major, `width * height * 4` bytes.
 /// Every sample is opaque (checked when the canvas is built), and both the
@@ -12044,7 +12153,7 @@ fn expected_wallpaper() -> Result<&'static ExpectedWallpaper, String> {
     static CANVAS: std::sync::OnceLock<Result<ExpectedWallpaper, String>> =
         std::sync::OnceLock::new();
     CANVAS
-        .get_or_init(compute_expected_wallpaper)
+        .get_or_init(|| compute_wallpaper_on(ramfb_screen()))
         .as_ref()
         .map_err(Clone::clone)
 }
@@ -12145,11 +12254,11 @@ fn decode_wallpaper_master(
     })
 }
 
-/// Recompute the wallpaper the desktop session paints across the emulated
-/// screen: the shipped default master decoded, placed, and resampled
-/// through the very crates the guest's own render path runs, so both sides
-/// share one definition of the artwork, the placement arithmetic, and the
-/// resampler.
+/// Recompute the wallpaper the desktop session paints across a desktop of
+/// `(width, height)`: the shipped default master decoded, placed, and
+/// resampled through the very crates the guest's own render path runs, so
+/// both sides share one definition of the artwork, the placement arithmetic,
+/// and the resampler.
 ///
 /// # Errors
 ///
@@ -12159,9 +12268,7 @@ fn decode_wallpaper_master(
 /// pass, the placement or resample refuses, or the result is not fully
 /// opaque — each of which would make an exact pixel comparison meaningless
 /// rather than merely inconvenient.
-fn compute_expected_wallpaper() -> Result<ExpectedWallpaper, String> {
-    let width = tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX;
-    let height = tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX;
+fn compute_wallpaper_on((width, height): (u32, u32)) -> Result<ExpectedWallpaper, String> {
     let (master, fit) = default_wallpaper_master()?;
     let decoded = decode_wallpaper_master(master, width, height)?;
     let placement =
@@ -12441,24 +12548,36 @@ fn wintersun_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     Ok(pen.steps())
 }
 
-/// Every `WINDOW_SIZED` record in `serial`, in order, read from the line shape
-/// the kernel's diagnostic sink writes (`id=<n> <message> key=value …`).
-fn window_sized_witnesses(serial: &str) -> Vec<SizedRecord<'_>> {
-    let head = format!(
-        "id={} {WINDOW_SIZED_MARKER}",
-        tairix_desktop_session::WINDOW_SIZED.0
-    );
+/// The field text of every line in `serial` that logs `id` with `message`, in
+/// order, read from the line shape the kernel's diagnostic sink writes
+/// (`id=<n> <message> key=value …`).
+fn witness_lines<'a>(
+    serial: &'a str,
+    id: tairix_log::EventId,
+    message: &str,
+) -> impl Iterator<Item = &'a str> {
+    let head = format!("id={} {message}", id.0);
     serial
         .lines()
-        .filter_map(|line| {
-            let fields = line.get(line.find(&head)? + head.len()..)?;
-            SizedRecord::read(|key| {
-                fields
-                    .split_whitespace()
-                    .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
-            })
-        })
-        .collect()
+        .filter_map(move |line| line.get(line.find(&head)? + head.len()..))
+}
+
+/// The value a witness line's field text carries under `key`.
+fn witness_field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
+    fields
+        .split_whitespace()
+        .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// Every `WINDOW_SIZED` record in `serial`, in order.
+fn window_sized_witnesses(serial: &str) -> Vec<SizedRecord<'_>> {
+    witness_lines(
+        serial,
+        tairix_desktop_session::WINDOW_SIZED,
+        WINDOW_SIZED_MARKER,
+    )
+    .filter_map(|fields| SizedRecord::read(|key| witness_field(fields, key)))
+    .collect()
 }
 
 /// The `ordinal`-th (one-based) `WINDOW_SIZED` record in `serial` names
@@ -12896,19 +13015,18 @@ fn served_window_layout(
 /// less the production taskbar's own band, through the session's own
 /// definition rather than a hand-copied inset.
 fn served_work_area(theme: &tairix_theme::Theme) -> tairix_geometry::Rect {
+    served_work_area_on(theme, ramfb_screen())
+}
+
+/// [`served_work_area`] on a desktop of `(width, height)`.
+fn served_work_area_on(
+    theme: &tairix_theme::Theme,
+    (width, height): (u32, u32),
+) -> tairix_geometry::Rect {
     tairix_desktop_session::shell::work_area_excluding(
-        tairix_geometry::Rect::new(
-            0,
-            0,
-            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
-            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
-        ),
-        taskbar_bar_rect(theme),
-        tairix_taskbar::TaskbarConfig::bottom_bar(
-            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
-            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
-        )
-        .edge,
+        tairix_geometry::Rect::new(0, 0, width, height),
+        taskbar_bar_rect_on(theme, (width, height)),
+        tairix_taskbar::TaskbarConfig::bottom_bar(width, height).edge,
     )
 }
 
@@ -13667,6 +13785,29 @@ impl PointerPen {
         );
     }
 
+    /// Press `button` at `from`, carry the pointer to `to` in one move and let
+    /// go there: a drag, every step gated on the same witness.
+    fn drag(
+        &mut self,
+        marker: &str,
+        occurrences: u32,
+        button: tairix_qemu::MouseButton,
+        (from, to): (tairix_geometry::Point, tairix_geometry::Point),
+    ) {
+        self.aim(marker, occurrences, from);
+        self.push(
+            marker,
+            occurrences,
+            tairix_qemu::PointerAction::Press(button),
+        );
+        self.aim(marker, occurrences, to);
+        self.push(
+            marker,
+            occurrences,
+            tairix_qemu::PointerAction::Release(button),
+        );
+    }
+
     /// Turn the wheel `detents` detents `turn`-ward with the pointer at `at`,
     /// once `marker` has appeared `occurrences` times.
     fn wheel(
@@ -13711,13 +13852,14 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 }
 
 /// The Settings vertical's screendump names: the window on General, on Lock
-/// Screen, on a pane that states an absence, on Storage, and the desktop
-/// redrawn in the other appearance.
+/// Screen, on a pane that states an absence, on Storage, the desktop redrawn
+/// in the other appearance, and the desktop drawn smaller than its output.
 const SETTINGS_GENERAL_DUMP: &str = "general";
 const SETTINGS_LOCK_DUMP: &str = "lock-screen";
 const SETTINGS_ABSENCE_DUMP: &str = "absence";
 const SETTINGS_STORAGE_DUMP: &str = "storage";
 const SETTINGS_RESTYLED_DUMP: &str = "restyled";
+const SETTINGS_RESIZED_DUMP: &str = "resized";
 
 /// The cascade slot the Settings window takes: the first, because nothing has
 /// opened a served window before it — the autostarted file manager holds a bar
@@ -13768,12 +13910,156 @@ struct SettingsWalk {
     appearance_row: tairix_geometry::Point,
     appearance_combo: tairix_geometry::Point,
     restyled_choice: tairix_geometry::Point,
-    density_combo: tairix_geometry::Point,
-    compact_choice: tairix_geometry::Point,
+    trial: SettingsTrialWalk,
     general: SettingsFrame,
     lock: SettingsFrame,
     absence: SettingsFrame,
     storage: SettingsFrame,
+}
+
+/// The Settings walk's presses through its resolution trial and after it.
+struct SettingsTrialWalk {
+    /// The window's bottom-right corner, and where the drag that shrinks the
+    /// window lets go of it.
+    shrink: (tairix_geometry::Point, tairix_geometry::Point),
+    displays_row: tairix_geometry::Point,
+    resolution_combo: tairix_geometry::Point,
+    resolution_choice: tairix_geometry::Point,
+    /// Appearance's row again, once the trial has drawn the desktop smaller.
+    appearance_row: tairix_geometry::Point,
+    density_combo: tairix_geometry::Point,
+    compact_choice: tairix_geometry::Point,
+    resized: ResizedDesktop,
+}
+
+/// The desktop the resolution trial draws, as its dump reads it.
+#[derive(Copy, Clone, Debug)]
+struct ResizedDesktop {
+    /// Its size, smaller than the output it is resampled onto.
+    size: (u32, u32),
+    /// The Settings window's outer rectangle on it.
+    window: tairix_geometry::Rect,
+    /// Where the pointer rests on it.
+    pointer: tairix_geometry::Point,
+}
+
+/// The Settings window through the vertical's resolution trial, as the
+/// production window manager moves it.
+struct SettingsTrialWindow {
+    /// Where the drag that shrinks the window presses, and where it lets go.
+    drag: (tairix_geometry::Point, tairix_geometry::Point),
+    /// The window once shrunk, on the output-sized desktop.
+    shrunk: tairix_controls::FrameLayout,
+    /// The same window fitted onto the trial's smaller desktop.
+    refit: tairix_controls::FrameLayout,
+}
+
+/// Drag the Settings window at `layout` by its bottom-right corner to
+/// `corner`, then draw the desktop at `trial`, through a host copy of the
+/// production window manager: its input router decides the size the drag
+/// settles on, held to the sizes the application declares, and its refit
+/// decides where the window stands on the smaller desktop.
+fn settings_trial_window(
+    layout: tairix_controls::FrameLayout,
+    corner: tairix_geometry::Point,
+    trial: (u32, u32),
+    theme: &tairix_theme::Theme,
+) -> Result<SettingsTrialWindow, String> {
+    use tairix_controls::{FurniturePart, ResizeEdge};
+    use tairix_geometry::Point;
+    use tairix_wm::{InputEvent, InputRouter, PointerButton, Surface, Window};
+
+    let fail = |what: &str| format!("settings script: {what}");
+    let scale = RECONSTRUCTION_SCALE;
+    let frame = window_frame(tairix_settings::WIN_RESIZABLE);
+    let mut compositor = host_compositor(theme, &tairix_reclaim::Unpressured)?;
+    let client = Surface::new(layout.client.width, layout.client.height)
+        .ok_or_else(|| fail("no surface for the window"))?;
+    let wm = compositor.add_window(Point::ORIGIN, client);
+    if !compositor.set_window_frame(wm, window_frame(tairix_settings::WIN_RESIZABLE)) {
+        return Err(fail("the window refused its frame"));
+    }
+    compositor.move_window(wm, layout.outer.origin);
+    let sizing = tairix_settings::win_sizing(scale);
+    if !compositor.set_window_client_size_range(
+        wm,
+        (sizing.min_width_px(), sizing.min_height_px()),
+        (sizing.max_width_px(), sizing.max_height_px()),
+    ) {
+        return Err(fail("the window refused its size range"));
+    }
+
+    let from = Point::new(layout.outer.right() - 1, layout.outer.bottom() - 1);
+    if frame.hit(layout.outer, scale, theme, from)
+        != FurniturePart::ResizeEdge(ResizeEdge::BottomRight)
+    {
+        return Err(fail(
+            "the window's last pixel is not its bottom-right resize edge",
+        ));
+    }
+    let to = Point::new(corner.x - 1, corner.y - 1);
+    let mut router = InputRouter::new();
+    for event in [
+        InputEvent::PointerMoved { to: from },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerMoved { to },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        router.handle(event, &mut compositor, 0);
+    }
+    let bounds = |compositor: &tairix_wm::Compositor| {
+        compositor
+            .window(wm)
+            .map(Window::bounds)
+            .ok_or_else(|| fail("the window went away"))
+    };
+    let shrunk = frame.layout(bounds(&compositor)?, scale, theme);
+    if shrunk.outer.right() != corner.x || shrunk.outer.bottom() != corner.y {
+        return Err(fail(&format!(
+            "the drag settled the window at {:?}, not on {corner:?}",
+            shrunk.outer
+        )));
+    }
+
+    if !compositor.set_desktop_size(trial.0, trial.1) {
+        return Err(fail("the host compositor refused the trial's size"));
+    }
+    compositor.refit_windows(served_work_area_on(theme, trial));
+    Ok(SettingsTrialWindow {
+        drag: (from, to),
+        shrunk,
+        refit: frame.layout(bounds(&compositor)?, scale, theme),
+    })
+}
+
+/// `local`, a point in the Settings client laid out at `layout`, on screen —
+/// checked against the frame's own hit map, because a point in the invisible
+/// resize zone over the client's outer pixels is the window manager's and
+/// would never reach the application.
+fn settings_press(
+    layout: tairix_controls::FrameLayout,
+    local: tairix_geometry::Point,
+    theme: &tairix_theme::Theme,
+) -> Result<tairix_geometry::Point, String> {
+    let at = tairix_geometry::Point::new(
+        layout.client.left() + local.x,
+        layout.client.top() + local.y,
+    );
+    match window_frame(tairix_settings::WIN_RESIZABLE).hit(
+        layout.outer,
+        RECONSTRUCTION_SCALE,
+        theme,
+        at,
+    ) {
+        tairix_controls::FurniturePart::Client => Ok(at),
+        part => Err(format!(
+            "settings script: a press at {at:?} would reach the window's {part:?}, not Settings"
+        )),
+    }
 }
 
 /// Where the session composites the Settings window, laid out from the
@@ -14063,34 +14349,23 @@ fn settings_walk() -> Result<&'static SettingsWalk, String> {
 
 /// Reconstruct the whole Settings walk (see [`SettingsWalk`]).
 fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
-    use tairix_abi::desktop::Density;
     use tairix_controls::ScrollPart;
     use tairix_geometry::{Point, Rect};
     use tairix_settings::{Category, Setting, Shell, WIN_HEIGHT, WIN_WIDTH};
     use tairix_taskbar::SystemAction;
     let scale = RECONSTRUCTION_SCALE;
     let theme = booted_theme();
+    let output = ramfb_screen();
     let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
     let window = settings_window_layout(&theme);
     let origin = Point::new(window.client.left(), window.client.top());
-    // Every press is checked against the frame's own hit map: a point in the
-    // invisible resize zone over the client's outer pixels is the window
-    // manager's, and would never reach the application.
-    let frame = window_frame(tairix_settings::WIN_RESIZABLE);
-    let to_screen = |local: Point| {
-        let at = Point::new(origin.x + local.x, origin.y + local.y);
-        match frame.hit(window.outer, scale, &theme, at) {
-            tairix_controls::FurniturePart::Client => Ok(at),
-            part => Err(format!(
-                "settings script: a press at {at:?} would reach the window's {part:?}, not Settings"
-            )),
-        }
-    };
+    let to_screen = |local: Point| settings_press(window, local, &theme);
 
     let (capsule, settings_row) = system_menu_aim(SystemAction::Settings)?;
 
     let mut shell = Shell::new(tairix_wallpaper::DesktopSettings::default())
         .ok_or_else(|| "settings script: the registry holds no category".to_string())?;
+    shell.adopt_output(output);
     shell.lay_out(viewport, scale, &theme);
     let general = settings_frame(&shell, viewport, &theme, origin)?;
 
@@ -14152,18 +14427,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         viewport,
         &theme,
     )?;
-    // The last gesture changes a key the first did not, so it commits whether
-    // or not Settings has adopted the restyled desktop by the time it lands.
-    let (density_combo, compact_choice) = settings_choose(
-        &mut shell,
-        (
-            Setting::Density,
-            choice_index(&Density::ALL, &Density::Compact)?,
-            Density::Compact.as_str(),
-        ),
-        viewport,
-        &theme,
-    )?;
+
+    let trial = reconstruct_settings_trial(&mut shell, window, &theme)?;
 
     Ok(SettingsWalk {
         capsule,
@@ -14177,8 +14442,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         appearance_row: to_screen(appearance_row)?,
         appearance_combo: to_screen(appearance_combo)?,
         restyled_choice: to_screen(restyled_choice)?,
-        density_combo: to_screen(density_combo)?,
-        compact_choice: to_screen(compact_choice)?,
+        trial,
         general,
         lock,
         absence,
@@ -14186,19 +14450,110 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
     })
 }
 
+/// Reconstruct the walk's resolution trial from `shell` on Appearance, its
+/// window laid out at `window` (see [`SettingsTrialWalk`]).
+fn reconstruct_settings_trial(
+    shell: &mut tairix_settings::Shell,
+    window: tairix_controls::FrameLayout,
+    theme: &tairix_theme::Theme,
+) -> Result<SettingsTrialWalk, String> {
+    use tairix_abi::desktop::Density;
+    use tairix_geometry::{to_i32, Point, Rect};
+    use tairix_settings::{Category, Setting};
+    use tairix_wallpaper::Resolution;
+    let scale = RECONSTRUCTION_SCALE;
+    let output = ramfb_screen();
+    // The trial asks for the largest size the output offers below its own.
+    // The window is shrunk first so that, once the desktop is drawn smaller,
+    // the window still fits as it stands — as tall as that desktop's work area
+    // allows — and leaves wallpaper bare beside it for the dump to read.
+    let trial = tairix_geometry::desktop_modes(output)
+        .nth(1)
+        .ok_or_else(|| format!("settings script: a {output:?} output offers no smaller desktop"))?;
+    let corner = Point::new(
+        to_i32(trial.0 * 3 / 4),
+        served_work_area_on(theme, trial).bottom(),
+    );
+    let moved = settings_trial_window(window, corner, trial, theme)?;
+    let shrunk = Rect::new(0, 0, moved.shrunk.client.width, moved.shrunk.client.height);
+    let extent = |layout: tairix_controls::FrameLayout| (layout.client.width, layout.client.height);
+    if extent(moved.refit) != extent(moved.shrunk) {
+        return Err(format!(
+            "settings script: the trial would resize the shrunk window to {:?}, so the presses \
+             after it would aim at a layout this walk does not reconstruct",
+            moved.refit.client
+        ));
+    }
+    shell.lay_out(shrunk, scale, theme);
+    let displays_row = settings_walk_to(shell, Category::Displays, shrunk, theme)?;
+    let ladder: Vec<Resolution> = tairix_geometry::desktop_modes(output)
+        .map(|size| Resolution::of(size, output))
+        .collect();
+    let chosen = Resolution::of(trial, output);
+    let (resolution_combo, resolution_choice) = settings_choose(
+        shell,
+        (
+            Setting::Resolution,
+            choice_index(&ladder, &chosen)?,
+            &chosen.render_value(),
+        ),
+        shrunk,
+        theme,
+    )?;
+    let resolution_choice = settings_press(moved.shrunk, resolution_choice, theme)?;
+    if !Rect::new(0, 0, trial.0, trial.1).contains(resolution_choice) {
+        return Err(format!(
+            "settings script: the pointer rests at {resolution_choice:?}, which the {trial:?} \
+             desktop would pull it off"
+        ));
+    }
+
+    // Once the trial is kept the last gesture changes a key nothing before it
+    // did, on the desktop the trial left drawn.
+    let resized_appearance_row = settings_walk_to(shell, Category::Appearance, shrunk, theme)?;
+    let (density_combo, compact_choice) = settings_choose(
+        shell,
+        (
+            Setting::Density,
+            choice_index(&Density::ALL, &Density::Compact)?,
+            Density::Compact.as_str(),
+        ),
+        shrunk,
+        theme,
+    )?;
+
+    Ok(SettingsTrialWalk {
+        shrink: moved.drag,
+        displays_row: settings_press(moved.shrunk, displays_row, theme)?,
+        resolution_combo: settings_press(moved.shrunk, resolution_combo, theme)?,
+        resolution_choice,
+        appearance_row: settings_press(moved.refit, resized_appearance_row, theme)?,
+        density_combo: settings_press(moved.refit, density_combo, theme)?,
+        compact_choice: settings_press(moved.refit, compact_choice, theme)?,
+        resized: ResizedDesktop {
+            size: trial,
+            window: moved.refit.outer,
+            pointer: resolution_choice,
+        },
+    })
+}
+
 /// Open Settings from the capsule's system menu, walk its strip to a stated
 /// absence, wheel it down past the fold to Storage, page it back up to
-/// Appearance, choose the appearance the desktop did not boot in, then choose
-/// Compact density on the same pane.
+/// Appearance, and choose the appearance the desktop did not boot in; then
+/// shrink the window, ask on Displays for a smaller desktop, and — once the
+/// trial the keyboard keeps has been answered — choose Compact density on
+/// Appearance, on the desktop the trial left drawn.
 ///
 /// Every gate is the session's own witness that what the next press aims at is
-/// on screen: the menu drawn, the window's first frame, and — for each pane —
-/// the frame carrying the title the window takes after presenting it. The
-/// presses that share a gate are one gesture each (a page then the row it
-/// brought in; a list opened then a choice on it), which the application
-/// applies strictly in order. The last press is the one whose commit
-/// completes the guest's PASS, and it is sent only once the restyled dump is
-/// read back.
+/// on screen: the menu drawn, the window's first frame, each pane's frame (the
+/// window retitles only after presenting it), the window at the size the drag
+/// left it, and the trial answered, after which the desktop takes settings
+/// calls again. The presses that share a gate are one gesture each (a page
+/// then the row it brought in; a list opened then a choice on it; a drag),
+/// which the application applies strictly in order. The last press is the one
+/// whose commit completes the guest's PASS, and it is sent only once the dump
+/// of the resized desktop is read back.
 fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
 
@@ -14256,17 +14611,47 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         MouseButton::Primary,
         walk.restyled_choice,
     );
-    pen.click(
+    pen.drag(
         DESKTOP_RESTYLED_MARKER,
         1,
         MouseButton::Primary,
-        walk.density_combo,
+        walk.trial.shrink,
     );
     pen.click(
-        DESKTOP_RESTYLED_MARKER,
+        WINDOW_SIZED_MARKER,
         1,
         MouseButton::Primary,
-        walk.compact_choice,
+        walk.trial.displays_row,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        5,
+        MouseButton::Primary,
+        walk.trial.resolution_combo,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        5,
+        MouseButton::Primary,
+        walk.trial.resolution_choice,
+    );
+    pen.click(
+        TRIAL_CONCLUDED_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.trial.appearance_row,
+    );
+    pen.click(
+        WINDOW_RETITLED_MARKER,
+        6,
+        MouseButton::Primary,
+        walk.trial.density_combo,
+    );
+    pen.click(
+        DESKTOP_RESIZED_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.trial.compact_choice,
     );
     Ok(pen.steps())
 }
@@ -14746,7 +15131,7 @@ fn assert_restyled(
     Ok(())
 }
 
-/// [`ScreendumpPlan`] assertion for the Settings vertical's **last** dump,
+/// [`ScreendumpPlan`] assertion for the Settings vertical's restyle dump,
 /// taken on the session's witness that the restyled desktop is on screen: the
 /// wallpaper is still exactly the composited desktop, and the bar and the
 /// Settings window's own title bar — the session's surfaces — are drawn in the
@@ -14790,6 +15175,126 @@ fn assert_settings_restyled_screendump(
         "Settings title bar",
         restyled_appearance(),
     )
+}
+
+/// The desktop's wallpaper as a desktop of `size` draws it, resampled onto an
+/// `output` the way the compositor presents a desktop smaller than its output:
+/// one pass of the shared resampler over the whole frame, which is what the
+/// compositor's windowed passes assemble into.
+fn scaled_wallpaper(size: (u32, u32), output: (u32, u32)) -> Result<ExpectedWallpaper, String> {
+    let desktop = compute_wallpaper_on(size)?;
+    let image = tairix_raster::Rgba8Image::new(desktop.width, desktop.height, &desktop.pixels)
+        .map_err(|e| format!("scaled wallpaper: the {size:?} canvas is refused: {e:?}"))?;
+    let whole = tairix_raster::Region {
+        x: 0,
+        y: 0,
+        width: desktop.width,
+        height: desktop.height,
+    };
+    let pixels = tairix_raster::resample(&image, whole, output.0, output.1).map_err(|e| {
+        format!("scaled wallpaper: the {size:?} canvas does not resample onto {output:?}: {e:?}")
+    })?;
+    Ok(ExpectedWallpaper {
+        width: output.0,
+        height: output.1,
+        pixels,
+    })
+}
+
+/// [`ScreendumpPlan`] assertion for the Settings vertical's **last** dump,
+/// taken on the session's witness that the desktop is on screen whole at the
+/// size the trial asked for.
+///
+/// The serial names that size and a kept trial, the output keeps its own mode,
+/// and wherever nothing the session draws can reach — the bar, the icon
+/// column, the pointer, the Settings window and the trial's prompt, each
+/// widened by the resampler's reach — the frame is exactly that size's own
+/// wallpaper resampled onto the output. Only a desktop drawn at the trial's
+/// size and scaled on its way to the display produces those pixels: one drawn
+/// at the output's size shows the output-sized wallpaper there instead.
+fn assert_settings_resized_screendump(
+    t: &QemuTest,
+    path: &Path,
+    serial: &str,
+) -> Result<(), String> {
+    use tairix_desktop_session::{ResizedRecord, TrialOutcome};
+
+    let fail = |what: String| {
+        format!(
+            "test --qemu ({}): screendump {}: {what}",
+            t.package,
+            path.display()
+        )
+    };
+    let resized = settings_walk()?.trial.resized;
+    let (width, height) = resized.size;
+    let announced: Vec<ResizedRecord> = witness_lines(
+        serial,
+        tairix_desktop_session::DESKTOP_RESIZED,
+        DESKTOP_RESIZED_MARKER,
+    )
+    .filter_map(|fields| ResizedRecord::read(|key| witness_field(fields, key)))
+    .collect();
+    if announced.first() != Some(&ResizedRecord { width, height }) {
+        return Err(fail(format!(
+            "the session announced {announced:?}, not the {width}x{height} desktop the trial \
+             asked for"
+        )));
+    }
+    let concluded: Vec<TrialOutcome> = witness_lines(
+        serial,
+        tairix_desktop_session::TRIAL_CONCLUDED,
+        TRIAL_CONCLUDED_MARKER,
+    )
+    .filter_map(|fields| TrialOutcome::read(|key| witness_field(fields, key)))
+    .collect();
+    if concluded != [TrialOutcome::Kept] {
+        return Err(fail(format!(
+            "the trial concluded {concluded:?}, not kept once"
+        )));
+    }
+
+    let image = read_screendump(t, path)?;
+    let output = ramfb_screen();
+    if (image.width, image.height) != output {
+        return Err(fail(format!(
+            "the output was re-moded to {}x{}: a desktop resolution never changes the \
+             output's own",
+            image.width, image.height
+        )));
+    }
+    let wallpaper = scaled_wallpaper(resized.size, output)?;
+    assert_wallpaper_points(
+        t,
+        path,
+        &image,
+        &wallpaper,
+        &resized_desktop_covered(resized, output),
+    )
+}
+
+/// The output pixels anything the session draws on the `resized` desktop can
+/// reach once it is resampled onto `output`: the chrome a desktop frame
+/// always carries, the Settings window, and the trial's prompt, which may
+/// still be up — each widened by the resampler's reach.
+fn resized_desktop_covered(
+    resized: ResizedDesktop,
+    output: (u32, u32),
+) -> Vec<tairix_geometry::Rect> {
+    use tairix_desktop_session::resolution::{WIN_HEIGHT, WIN_WIDTH};
+
+    let screen = tairix_geometry::Rect::new(0, 0, resized.size.0, resized.size.1);
+    let origin = tairix_desktop_session::shell::prompt_origin(screen, (WIN_WIDTH, WIN_HEIGHT));
+    let prompt = tairix_geometry::Rect::new(origin.x, origin.y, WIN_WIDTH, WIN_HEIGHT);
+    chrome_regions_on(
+        &restyled_theme(),
+        resized.size,
+        resized.pointer,
+        &[resized.window, prompt],
+    )
+    .into_iter()
+    .map(|rect| tairix_wm::output_reach(rect, resized.size, output))
+    .collect()
 }
 
 /// Build the desktop-hover script: launch the `framestats` fixture from the
@@ -16394,13 +16899,12 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         step(WINDOW_SHOWN_MARKER, 1, move_by(files_slot, window)),
         step(WINDOW_SHOWN_MARKER, 1, click),
         // The handshake click on the still-focused window: keyed on the
-        // first click's own deliveries reaching that window and
-        // additionally held while the second dump is pending, so the dump
-        // captures the staged frame and the terminal stage below
-        // starts in a strictly later wake.
+        // pointer's first delivery reaching that window and additionally held
+        // while the second dump is pending, so the dump captures the staged
+        // frame and the terminal stage below starts in a strictly later wake.
         step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, click),
-        // --- The AW4 terminal stage, keyed on the handshake click's own
-        // delivery. Click the Library button, then the popup's "Terminal"
+        // --- The AW4 terminal stage, keyed on the window's next delivery.
+        // Click the Library button, then the popup's "Terminal"
         // entry, spawning the terminal bundle from the on-disk store through
         // the planted catalog. The row click waits on the popup's own
         // on-screen witness: no app-ward delivery or window-frame map marks a
@@ -16552,10 +17056,23 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
             total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
         FsDisk::EncryptedRootDisk => {
-            let bytes = encrypted_root_disk_bytes(t, apps)?;
+            let bytes = root_disk_bytes(t, apps, ENCRYPTED_ROOT)?;
             let total_sectors = image_total_sectors(&bytes);
             Some(FsImage {
                 extension: "encrypted-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
+        FsDisk::PlaintextRootDisk => {
+            let bytes = root_disk_bytes(
+                t,
+                apps,
+                tairix_test_encrypted_root_image::RootProtection::Plaintext,
+            )?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "plaintext-root.img",
                 bytes,
                 total_sectors,
             })
@@ -16564,7 +17081,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         // driver store): the same builder as `EncryptedRootDisk`, planting
         // the standard store plus the one test-only fixture bundle.
         FsDisk::MemsoakRootDisk => {
-            let bytes = encrypted_root_disk_bytes(t, apps_with_memsoak)?;
+            let bytes = root_disk_bytes(t, apps_with_memsoak, ENCRYPTED_ROOT)?;
             let total_sectors = image_total_sectors(&bytes);
             Some(FsImage {
                 extension: "memsoak-root.img",
@@ -16576,7 +17093,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         // author: it needs no driver store, only the standard store plus its
         // one test-only fixture bundle.
         FsDisk::StalltraceRootDisk => {
-            let bytes = encrypted_root_disk_bytes(t, apps_with_stalltrace)?;
+            let bytes = root_disk_bytes(t, apps_with_stalltrace, ENCRYPTED_ROOT)?;
             let total_sectors = image_total_sectors(&bytes);
             Some(FsImage {
                 extension: "stalltrace-root.img",
@@ -16588,7 +17105,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         // encrypted-root author: the standard store, with its `netstack`
         // bundle substituted for the fixture.
         FsDisk::WatchdogRootDisk => {
-            let bytes = encrypted_root_disk_bytes(t, apps_with_watchdog)?;
+            let bytes = root_disk_bytes(t, apps_with_watchdog, ENCRYPTED_ROOT)?;
             let total_sectors = image_total_sectors(&bytes);
             Some(FsImage {
                 extension: "watchdog-root.img",
@@ -16753,7 +17270,7 @@ fn net_root_image(
                 driver_files,
                 app_files,
                 &root_files,
-                tairix_test_encrypted_root_image::PASSPHRASE,
+                ENCRYPTED_ROOT,
             )
         })
     })
@@ -17593,6 +18110,33 @@ mod tests {
         }
     }
 
+    /// The resized desktop the Settings vertical photographs leaves enough
+    /// bare wallpaper on the output to judge the frame by, and its trial is a
+    /// desktop smaller than the output on both axes.
+    #[test]
+    fn the_settings_resized_dump_leaves_wallpaper_to_judge() {
+        use super::{
+            ramfb_screen, resized_desktop_covered, settings_walk, wallpaper_sample_points,
+        };
+
+        let resized = settings_walk()
+            .expect("the walk reconstructs")
+            .trial
+            .resized;
+        let output = ramfb_screen();
+        assert!(resized.size.0 < output.0 && resized.size.1 < output.1);
+        let samples = wallpaper_sample_points(
+            output.0,
+            output.1,
+            &resized_desktop_covered(resized, output),
+        );
+        assert!(
+            samples.len() >= 8,
+            "only {} lattice points of the resized desktop are bare wallpaper",
+            samples.len()
+        );
+    }
+
     /// Every desktop click a pointer script drives is **one** step.
     ///
     /// The runner sends at most one step per poll tick, and a desktop acts on
@@ -17601,10 +18145,56 @@ mod tests {
     /// effect can exit with the release still owed, which fails the run for an
     /// incomplete script. The icon-bar vertical lost exactly that race when the
     /// terminal stopped spawning a shell before asking for its window, so the
-    /// scripts state a click as the single gesture it is.
+    /// scripts state a click as the single gesture it is. A separate press and
+    /// release is a drag, which carries the pointer between them, and never
+    /// ends a script.
     #[test]
     fn every_desktop_pointer_click_is_one_step() {
         use tairix_qemu::PointerAction;
+
+        /// Whether `steps[index]` halves a click: a press not followed by
+        /// motion and then its own release, or a release no such drag ends.
+        fn halves_a_click(steps: &[tairix_qemu::PointerStep], index: usize) -> bool {
+            let action = |at: usize| steps.get(at).map(|step| step.action);
+            match action(index) {
+                Some(PointerAction::Press(button)) => !matches!(
+                    (action(index + 1), action(index + 2)),
+                    (Some(PointerAction::Move { .. }), Some(PointerAction::Release(released)))
+                        if released == button
+                ),
+                Some(PointerAction::Release(button)) => {
+                    index < 2
+                        || !matches!(
+                            (action(index - 2), action(index - 1)),
+                            (Some(PointerAction::Press(pressed)), Some(PointerAction::Move { .. }))
+                                if pressed == button
+                        )
+                }
+                _ => false,
+            }
+        }
+        let script = |actions: &[PointerAction]| -> Vec<tairix_qemu::PointerStep> {
+            actions
+                .iter()
+                .map(|&action| tairix_qemu::PointerStep {
+                    ready_marker: String::new(),
+                    ready_occurrences: 1,
+                    action,
+                })
+                .collect()
+        };
+        let primary = tairix_qemu::MouseButton::Primary;
+        let halved = script(&[
+            PointerAction::Press(primary),
+            PointerAction::Release(primary),
+        ]);
+        assert!(halves_a_click(&halved, 0) && halves_a_click(&halved, 1));
+        let dragged = script(&[
+            PointerAction::Press(primary),
+            PointerAction::Move { dx: 4, dy: 0 },
+            PointerAction::Release(primary),
+        ]);
+        assert!((0..dragged.len()).all(|index| !halves_a_click(&dragged, index)));
 
         for (label, script) in [
             ("icon bar", appbar_pointer_script()),
@@ -17618,10 +18208,7 @@ mod tests {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
             for (index, step) in steps.iter().enumerate() {
                 assert!(
-                    !matches!(
-                        step.action,
-                        PointerAction::Press(_) | PointerAction::Release(_)
-                    ),
+                    !halves_a_click(&steps, index),
                     "{label} step {index} halves a click across poll ticks: {:?}",
                     step.action
                 );

@@ -188,7 +188,7 @@ fn the_home_is_the_one_the_calling_uid_owns() {
 
 #[test]
 fn an_unreachable_volume_is_distinct_from_an_absent_store() {
-    // Before the encrypted root is unlocked the store is not missing, it is
+    // Before the root is mounted the store is not missing, it is
     // unreachable — and a caller must be told which, not handed a default.
     let mut fs = TestFs::provisioned();
     fs.fail_all(Errno::DeviceOffline);

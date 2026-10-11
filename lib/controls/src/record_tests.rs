@@ -709,3 +709,26 @@ fn a_fact_or_event_too_long_for_its_row_is_elided_with_the_mark() {
         "an event's text"
     );
 }
+
+/// A list laid out at its measured width seats every label and value whole:
+/// the width is the widest row's label, gap and value.
+#[test]
+fn a_fact_list_measures_its_widest_row() {
+    let theme = Theme::dark();
+    let short = FactList::new(vec![Fact::new("IPv4", "10.0.2.15/24")]);
+    let long = FactList::new(vec![
+        Fact::new("IPv4", "10.0.2.15/24"),
+        Fact::new("IPv6", "fe80::5054:ff:fe12:3456/64"),
+    ]);
+    let font = font();
+    let gap = theme.metrics().control_gap;
+    assert_eq!(
+        long.measured_width(Scale::ONE, &theme),
+        font.text_width("IPv6") + gap + font.text_width("fe80::5054:ff:fe12:3456/64")
+    );
+    assert!(long.measured_width(Scale::ONE, &theme) > short.measured_width(Scale::ONE, &theme));
+    assert_eq!(
+        FactList::new(Vec::new()).measured_width(Scale::ONE, &theme),
+        0
+    );
+}

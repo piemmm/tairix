@@ -31,8 +31,16 @@
 //! [`BootSession`] is the third: the operator's one-boot choice of a text
 //! or graphical login, made in the pre-boot Supervisor and read back by
 //! the ungated `boot_session_get` syscall.
+//!
+//! [`MAX_ROOT_PASSPHRASE_LEN`] bounds the root-volume passphrase, so the boot
+//! prompts and the tools that provision a volume agree on one length.
 
 use crate::le::{read_u16, read_u32, read_u64};
+
+/// Longest root-volume passphrase, in bytes: what every boot prompt reads and
+/// every encrypted root is provisioned under. A longer line is refused, never
+/// truncated to a shorter — and wrong — secret.
+pub const MAX_ROOT_PASSPHRASE_LEN: usize = 256;
 
 /// Length, in bytes, of a [`BootId`].
 pub const BOOT_ID_LEN: usize = 16;

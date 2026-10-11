@@ -4,7 +4,7 @@
 //! Every Tier-1 port that brings a bootstrap-floor root block device up
 //! feeds it into the *same* two-task tail: the one brought-up disk is shared
 //! for the life of the system by two independent preemptive tasks — a spawned
-//! interactive encrypted-root unlock, and the persistent driver-store serve
+//! interactive root unlock, and the persistent driver-store serve
 //! loop the user-space `devmgr` reads signed `/System` drivers through. That
 //! tail is device- and architecture-independent, so it lives here rather than
 //! being copied into each `kernel/arch/<target>/` sibling: a port supplies
@@ -30,7 +30,7 @@ use core::convert::Infallible;
 use tairix_abi::blkio::kernel_block_device;
 use tairix_abi::driver::block::Block;
 use tairix_crypto::Ed25519PublicKey;
-use tairix_drv_fs_arxfs::{VolumeKey, ARXFS};
+use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, SleepLock,
@@ -139,10 +139,11 @@ const BOOT_DISK_DEV: u64 = kernel_block_device(0);
 /// all resolve to this one volume
 /// ([`crate::system_mount::register_writable_state`]).
 ///
-/// This is the only path that can mount the writable state: the encrypted
-/// root is the one writable partition, so its key — live only at the moment
-/// of a successful unlock — is required, and until it lands every write to
-/// `/` and its subtrees fails closed. The read window the unlock used for
+/// This is the only path that can mount the writable state: the root is the
+/// one writable partition, so the keying it was mounted with — an encrypted
+/// root's key is live only at the moment of a successful unlock — is
+/// required, and until it lands every write to `/` and its subtrees fails
+/// closed. The read window the unlock used for
 /// `/System/Security` is already dropped, so this read-write view is the sole
 /// writer of the volume. Fail-soft and audited: any partition/window/mount
 /// refusal leaves the writable tree failing closed and never disturbs the
@@ -161,7 +162,7 @@ struct WritableStateSink<B: Block + 'static> {
 impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
     fn publish(
         &self,
-        volume_key: &VolumeKey,
+        keying: Keying<'_>,
     ) -> Option<alloc::sync::Arc<SleepLock<alloc::boxed::Box<dyn KernelFs>>>> {
         // Locate the ARXFSRoot extent on a throwaway probe window, then open
         // the durable owned `'static` window onto it.
@@ -193,12 +194,12 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             );
             return None;
         };
-        // Re-open the same encrypted volume read-write under the just-derived
-        // key. The driver retains the derived master key for the life of the
+        // Re-open the same volume read-write as the mount found it; an
+        // encrypted root's driver retains its master key for the life of the
         // mount, exactly as the read mount does. Compressed clusters are
         // served through the SMART3 transform cache, charged to the root
         // volume's mount identity and governed by the shared pressure gauge.
-        let Ok(fs) = ARXFS::open(window, volume_key) else {
+        let Ok(fs) = ARXFS::open(window, keying) else {
             note(
                 self.audit,
                 Level::Error,
@@ -279,7 +280,7 @@ pub fn finish_virtio_unlock<T: Transport + 'static>(
 /// tasks reach it through independent serialised windows:
 ///
 /// * A **separate, spawned** preemptive task runs the interactive
-///   encrypted-root unlock against the *user-data* volume and, when it
+///   root unlock against the *user-data* volume and, when it
 ///   resolves (installed or fail-closed), releases the console to `login`
 ///   through [`UnlockConsole::release_console0_to_login`].
 /// * **This** task becomes the persistent driver-store serve loop: it binds
@@ -330,7 +331,7 @@ pub fn finish_unlock<B: Block + 'static>(
     // The one brought-up disk, boot-leaked to `'static` behind the
     // block-sharing layer so two independent preemptive tasks drive it through
     // their own serialised windows: *this* task is the driver-store serve loop
-    // (below), and a *separate* spawned task runs the encrypted-root unlock. A
+    // (below), and a *separate* spawned task runs the root unlock. A
     // geometry fault refuses the device fail-closed. The device sits behind
     // the SMART11 block cache (`plans/SMARTRAM.md`), on the device side of the
     // sharing lock, so every window reads through one coherent,
@@ -349,8 +350,8 @@ pub fn finish_unlock<B: Block + 'static>(
             io,
         )));
 
-    // Spawn the encrypted-root unlock as its own preemptive task. The
-    // user-data volume's passphrase is independent of the always-readable
+    // Spawn the root unlock as its own preemptive task. The user-data
+    // volume's protection is independent of the always-readable
     // `/System` driver store (`plans/PI.md` design B), so the store endpoint
     // (bound + served by *this* task below) answers `devmgr` immediately — the
     // keyboard driver loads in user space *before* the prompt, with no
@@ -438,7 +439,7 @@ pub fn finish_unlock<B: Block + 'static>(
         // shared boot disk through its own windows, so it never contends with
         // the passphrase prompt's window.
         let mut supervisor =
-            crate::supervisor_host::KernelSupervisorHost::new(store, &install, audit);
+            crate::supervisor_host::KernelSupervisorHost::new(store, &install, audit, &retry_delay);
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
@@ -559,7 +560,7 @@ fn serve_driver_store<B: Block + 'static>(
     // reads the signed `/System` driver store through, real-parking on
     // `SERVE_WAITQ` between requests. It serves over its own `/System` window
     // onto the `'static`-leaked shared disk, independently of the
-    // encrypted-root unlock task spawned above (`plans/PI.md` design B).
+    // root-unlock task spawned above (`plans/PI.md` design B).
     // `login`, PID 1, `devmgr`, the unlock task, and every other task run on
     // their own tasks.
     //

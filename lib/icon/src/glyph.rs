@@ -101,6 +101,9 @@ pub enum IconKind {
     Microphone,
     /// A speaker struck through, for a muted output.
     VolumeMuted,
+    /// The [`Network`](Self::Network) bars beside a cross: no interface is
+    /// connected.
+    NetworkOffline,
     /// A run/bolt mark, for an executable.
     Executable,
     /// A left arrow, for the file manager's Back navigation command.
@@ -324,6 +327,7 @@ impl IconKind {
             "repeat-one" => Self::RepeatOne,
             "microphone" => Self::Microphone,
             "volume-muted" => Self::VolumeMuted,
+            "network-offline" => Self::NetworkOffline,
             "file" => Self::File,
             "app-bundle" => Self::AppBundle,
             "text" => Self::Text,
@@ -541,6 +545,7 @@ impl IconKind {
             Self::RepeatOne => 106,
             Self::Microphone => 107,
             Self::VolumeMuted => 108,
+            Self::NetworkOffline => 109,
         }
     }
 
@@ -667,6 +672,7 @@ impl IconKind {
             Self::RepeatOne => "repeat-one",
             Self::Microphone => "microphone",
             Self::VolumeMuted => "volume-muted",
+            Self::NetworkOffline => "network-offline",
         }
     }
 }
@@ -732,6 +738,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::RepeatOne => repeat(color, true),
         IconKind::Microphone => microphone(color),
         IconKind::VolumeMuted => volume_muted(color),
+        IconKind::NetworkOffline => network_offline(color),
         IconKind::Executable => executable(color),
         IconKind::NavBack => nav_back(color),
         IconKind::NavForward => nav_forward(color),
@@ -826,6 +833,16 @@ fn network(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, MID),
         IconLayer::from_points(color, TALL),
     ]
+}
+
+/// The signal bars with a cross in the corner above the short bar.
+fn network_offline(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FALLING: &[(i32, i32)] = &[(2, 4), (4, 2), (10, 8), (8, 10)];
+    const RISING: &[(i32, i32)] = &[(8, 2), (10, 4), (4, 10), (2, 8)];
+    let mut layers = network(color);
+    layers.push(IconLayer::from_points(color, FALLING));
+    layers.push(IconLayer::from_points(color, RISING));
+    layers
 }
 
 /// A speaker cone (a rectangle joined to a triangular horn).

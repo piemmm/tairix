@@ -1,5 +1,6 @@
-//! Single-source-of-truth whole-disk encrypted-root image fixture for the
-//! `plans/PI.md` P11 Chunk B-2 root-mount->login QEMU vertical.
+//! Single-source-of-truth whole-disk root image fixture for the `plans/PI.md`
+//! P11 Chunk B-2 root-mount->login QEMU verticals: an encrypted root, and the
+//! plaintext root a shipped image carries ([`RootProtection`]).
 //!
 //! [`build_image`] assembles a whole disk of the exact shape `tools/mkimage`
 //! writes a real installable image from, through the **real** in-tree
@@ -10,13 +11,13 @@
 //!    back, laid out by the one assembly `tools/mkimage` uses
 //!    ([`tairix_syshelp::assemble_disk`]).
 //! 2. A **FAT32 boot partition** at [`BOOT_PART_LBA`], authored by the real
-//!    [`Fat32`] driver, carrying the plaintext `root.unlock`
-//!    key-derivation descriptor ([`ROOT_UNLOCK_NAME`]).
-//! 3. The read-only **`/System` partition** at [`SYSTEM_PART_LBA`], sized to
-//!    the signed bundles and discovered system payload it carries.
-//! 4. An **encrypted `ARXFS` root partition** directly after it, whose
-//!    volume key is **derived from [`PASSPHRASE`]** through the descriptor
-//!    above, carrying `/System/Security/Users` with the
+//!    [`Fat32`] driver, carrying — for an encrypted root — the plaintext
+//!    `root.unlock` key-derivation descriptor ([`ROOT_UNLOCK_NAME`]).
+//! 3. The read-only plaintext **`/System` partition** at [`SYSTEM_PART_LBA`],
+//!    sized to the signed bundles and discovered system payload it carries.
+//! 4. An **`ARXFS` root partition** directly after it — encrypted under a
+//!    volume key **derived from [`PASSPHRASE`]** through the descriptor
+//!    above, or plaintext — carrying `/System/Security/Users` with the
 //!    single [`USERNAME`]/[`PASSWORD`] account — the shared
 //!    [`tairix_test_arxfs_image`] users-root volume.
 //!
@@ -46,7 +47,7 @@ use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{
-    EntropySource, UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY,
+    EntropySource, Keying, UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME,
     UNLOCK_DESCRIPTOR_LEN, UNLOCK_MIN_ITERATIONS,
 };
 use tairix_drv_fs_fat32::Fat32;
@@ -55,9 +56,20 @@ use tairix_test_arxfs_image as root_image;
 
 pub use tairix_syshelp::{BOOT_PART_LBA, BOOT_PART_SECTORS, SECTOR_BYTES, SYSTEM_PART_LBA};
 
-/// Sectors in the encrypted `ARXFS` root partition — the shared
+/// Sectors in the `ARXFS` root partition — the shared
 /// [`tairix_test_arxfs_image`] users-root volume's footprint.
 pub const ROOT_SECTORS: u64 = root_image::TOTAL_SECTORS;
+
+/// How the fixture's root volume is protected.
+#[derive(Copy, Clone, Debug)]
+pub enum RootProtection<'a> {
+    /// Plaintext, as a shipped image's root is: the boot partition carries no
+    /// unlock descriptor, and the root mounts with no prompt.
+    Plaintext,
+    /// Encrypted under the key this passphrase derives through the
+    /// `root.unlock` descriptor planted on the boot partition.
+    Passphrase(&'a [u8]),
+}
 
 /// The passphrase the test "operator" types at the unlock prompt. The root
 /// volume's key is derived from it through the on-disk descriptor; the
@@ -155,46 +167,46 @@ impl Block for MemDisk {
 /// The descriptor carries [`UNLOCK_MIN_ITERATIONS`] — the format floor — so
 /// the per-build and per-boot PBKDF2 derivations stay fast under QEMU TCG
 /// while still exercising the real key-derivation path.
-/// Passing a **blank** `passphrase` builds the installer-profile image,
-/// which the bootstrap unlocks with no prompt.
 ///
 /// # Errors
 ///
-/// Propagates any [`DriverError`] from descriptor provisioning or encoding.
+/// Propagates any [`DriverError`] from descriptor provisioning, the
+/// derivation (an empty or over-long `passphrase`), or encoding.
 fn provision(passphrase: &[u8]) -> Result<([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKey), DriverError> {
     let descriptor =
         UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut FixtureEntropy { next: 7 })?;
-    let key = descriptor.derive_volume_key(passphrase);
+    let key = *descriptor.derive_volume_key(passphrase)?;
     let mut bytes = [0u8; UNLOCK_DESCRIPTOR_LEN];
     descriptor.encode(&mut bytes)?;
     Ok((bytes, key))
 }
 
-/// Author the FAT32 boot partition through the real [`Fat32`] driver and
-/// plant `descriptor` under [`ROOT_UNLOCK_NAME`] — the exact write
-/// `tools/mkimage` performs. Returns the partition's
-/// on-disk bytes.
-fn build_boot_partition(descriptor: &[u8]) -> Result<Vec<u8>, DriverError> {
+/// Author the FAT32 boot partition through the real [`Fat32`] driver,
+/// planting `descriptor`, an encrypted root's, under [`ROOT_UNLOCK_NAME`] —
+/// the exact write `tools/mkimage` performs. Returns the partition's on-disk
+/// bytes.
+fn build_boot_partition(descriptor: Option<&[u8]>) -> Result<Vec<u8>, DriverError> {
     // A fixed test serial: the fixture's boot partition never meets the
     // volume forest.
     let mut fs = Fat32::format(MemDisk::new(BOOT_PART_SECTORS), 0x0B00_7F1E)?;
-    let root = fs.root();
-    fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)?;
-    let written = fs.write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, descriptor)?;
-    if written != descriptor.len() {
-        return Err(DriverError::DeviceFault);
+    if let Some(descriptor) = descriptor {
+        let root = fs.root();
+        fs.create(root, ROOT_UNLOCK_NAME.as_bytes(), NodeKind::RegularFile)?;
+        let written = fs.write_at(root, ROOT_UNLOCK_NAME.as_bytes(), 0, descriptor)?;
+        if written != descriptor.len() {
+            return Err(DriverError::DeviceFault);
+        }
     }
     fs.flush()?;
     Ok(fs.into_block().store)
 }
 
 /// Author the read-only `/System` partition through the sizing and file walk
-/// `tools/mkimage` uses (`tairix_syshelp::build_system_volume`): an `ARXFS`
-/// volume under the non-secret well-known [`SYSTEM_VOLUME_KEY`] with the
-/// `Drivers` and `Security` skeleton at its root, carrying the discovered
-/// system payload, `drivers` and `apps`. The kernel mounts it read-only and
-/// autoloads the `Drivers/` store **before** unlocking the encrypted root
-/// (`plans/PI.md` design B / B2).
+/// `tools/mkimage` uses (`tairix_syshelp::build_system_volume`): a plaintext
+/// `ARXFS` volume with the `Drivers` and `Security` skeleton at its root,
+/// carrying the discovered system payload, `drivers` and `apps`. The kernel
+/// mounts it read-only and autoloads the `Drivers/` store **before** it
+/// mounts the root (`plans/PI.md` design B / B2).
 ///
 /// Each file is `(path_components, bytes)`, its path relative to the volume
 /// root, which *is* `/System` (e.g. `&[b"Drivers", b"input", b"virtio_kbd",
@@ -208,7 +220,7 @@ fn build_system_partition(
         let mut fs = ARXFS::format(
             MemDisk::new(sectors),
             64,
-            &SYSTEM_VOLUME_KEY,
+            Keying::Plaintext,
             &mut FixtureEntropy { next: 3 },
         )?;
         let root = fs.root();
@@ -252,79 +264,33 @@ impl tairix_syshelp::SystemVolume for SystemVolume {
 /// authoring, or the disk assembly: a fixture defect, surfaced rather than
 /// panicked because the fixture also links into the freestanding guest.
 pub fn build_image() -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], &[], &[], PASSPHRASE)
+    build_image_with_contents(&[], &[], &[], RootProtection::Passphrase(PASSPHRASE))
 }
 
-/// Build the whole-disk encrypted-root image with the signed application
-/// bundles `apps` planted into the read-only `/System` app/service stores
-/// beside their `Help/` trees — each `(path_components, bytes)` a
-/// volume-relative bundle file (e.g. `&[b"Apps", b"ls.app", b"AppInfo"]`),
-/// composed and signed by the caller (`plans/APPS.md` deliverable 8) —
-/// plus `root_files` planted on the **encrypted root volume** (each
-/// relative to that volume's root, e.g. the seeded program-library catalog
-/// under `System/Settings/…`, which the writable `/System/Settings` child
-/// mount rebases onto — `plans/NEW-TASKBAR.md` T3).
+/// Build the whole-disk image with a plaintext root, as a shipped image is:
+/// no unlock descriptor, and a root the boot path mounts with no prompt.
+/// Delegates to [`build_image_with_contents`] with empty stores (one
+/// authoring path).
 ///
 /// # Errors
 ///
-/// Propagates any [`DriverError`] from the underlying whole-disk assembly
-/// (surfaced rather than panicked).
-pub fn build_image_with_apps(
-    apps: &[(&[&[u8]], &[u8])],
-    root_files: &[(&[&[u8]], &[u8])],
-) -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], apps, root_files, PASSPHRASE)
+/// Propagates any [`DriverError`] from FAT/`ARXFS` authoring or the disk
+/// assembly (surfaced rather than panicked).
+pub fn build_plaintext_image() -> Result<Vec<u8>, DriverError> {
+    build_image_with_contents(&[], &[], &[], RootProtection::Plaintext)
 }
 
-/// Build the whole-disk encrypted-root image whose root is encrypted under
-/// `passphrase` (rather than the default [`PASSPHRASE`]).
+/// Build the whole-disk image, planting `drivers` and the application-bundle
+/// files `apps` into the read-only `/System` stores — each
+/// `(path_components, bytes)` a volume-relative bundle file (e.g.
+/// `&[b"Commands", b"ls.app", b"AppInfo"]`), composed and signed by the caller
+/// (`plans/APPS.md` deliverable 8) — and `root_files` onto the root volume
+/// (volume-relative: the home of state the writable `/System/Settings` child
+/// mount rebases onto, e.g. the seeded program-library catalog), protecting
+/// the root as `protection` says.
 ///
-/// A **blank** `passphrase` builds the installer-profile image: the
-/// bootstrap unlocks it with no prompt, so this is the
-/// fixture the kernel's silent auto-unlock regression mounts. Delegates to
-/// [`build_image_with_contents`] with empty stores (one authoring path).
-///
-/// # Errors
-///
-/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
-/// authoring, or the disk assembly (surfaced rather than panicked).
-pub fn build_image_with_passphrase(passphrase: &[u8]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(&[], &[], &[], passphrase)
-}
-
-/// Build the whole-disk encrypted-root image, additionally planting a set of
-/// installed driver bundles into the read-only `/System` volume's `Drivers/`
-/// store.
-///
-/// This is [`build_image`] with the discovered driver store populated:
-/// each `(path_components, bytes)` is laid into the **read-only `/System`
-/// volume**'s `Drivers/` store exactly as a real installation carries it, so
-/// the pre-unlock autoload
-/// (`tairix_kernel::root_mount::autoload_system_drivers` →
-/// `driver_autoload::autoload_from_mounted_root`) discovers, verifies, and
-/// spawns the bundle off the `/System` volume *before* the encrypted root is
-/// unlocked (design B — the store lives on a volume reachable before the
-/// passphrase). [`build_image`] delegates here with no drivers (one authoring path).
-///
-/// # Errors
-///
-/// Propagates any [`DriverError`] from descriptor provisioning, FAT/`ARXFS`
-/// authoring, or the disk assembly (surfaced rather than panicked).
-pub fn build_image_with_drivers(drivers: &[(&[&[u8]], &[u8])]) -> Result<Vec<u8>, DriverError> {
-    build_image_with_contents(drivers, &[], &[], PASSPHRASE)
-}
-
-/// Build the whole-disk encrypted-root image, planting `drivers` and the
-/// application-bundle files `apps` into the read-only `/System` stores,
-/// `root_files` onto the **encrypted root volume** (volume-relative — the
-/// home of state the writable `/System/Settings` child mount rebases onto,
-/// e.g. the seeded program-library catalog), and
-/// encrypting the root under `passphrase`.
-///
-/// The single authoring path behind [`build_image`],
-/// [`build_image_with_drivers`], [`build_image_with_apps`], and
-/// [`build_image_with_passphrase`]: they differ only in the planted
-/// contents and the passphrase the root volume key is derived from.
+/// The single authoring path behind [`build_image`] and
+/// [`build_plaintext_image`].
 ///
 /// # Errors
 ///
@@ -334,12 +300,22 @@ pub fn build_image_with_contents(
     drivers: &[(&[&[u8]], &[u8])],
     apps: &[(&[&[u8]], &[u8])],
     root_files: &[(&[&[u8]], &[u8])],
-    passphrase: &[u8],
+    protection: RootProtection<'_>,
 ) -> Result<Vec<u8>, DriverError> {
-    let (descriptor, key) = provision(passphrase)?;
-    let boot = build_boot_partition(&descriptor)?;
     let system = build_system_partition(drivers, apps)?;
-    let root = root_image::build_users_root_image_with_key(&key, root_files)?;
+    let (boot, root) = match protection {
+        RootProtection::Plaintext => (
+            build_boot_partition(None)?,
+            root_image::build_users_root_image_keyed(Keying::Plaintext, root_files)?,
+        ),
+        RootProtection::Passphrase(passphrase) => {
+            let (descriptor, key) = provision(passphrase)?;
+            (
+                build_boot_partition(Some(&descriptor))?,
+                root_image::build_users_root_image_keyed(Keying::Key(&key), root_files)?,
+            )
+        }
+    };
     tairix_syshelp::assemble_disk(&boot, &system, &root).map_err(|refused| match refused {
         DiskLayoutError::Table(_) => DriverError::DeviceFault,
         DiskLayoutError::PartialSector(_)
@@ -436,8 +412,13 @@ mod tests {
             &[b"System", b"Settings", b"ProgramLibrary", b"library.conf"],
             CATALOG,
         )];
-        let bytes =
-            build_image_with_apps(&apps, &root_files).expect("the whole-disk image assembles");
+        let bytes = build_image_with_contents(
+            &[],
+            &apps,
+            &root_files,
+            RootProtection::Passphrase(PASSPHRASE),
+        )
+        .expect("the whole-disk image assembles");
         let mut disk = MemDisk {
             store: bytes.clone(),
         };
@@ -447,8 +428,8 @@ mod tests {
             .expect("a /System partition is present");
         let window = PartitionBlock::new(disk, system.start_lba, system.block_count)
             .expect("the /System window is in range");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("the /System volume mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System volume mounts read-only");
 
         for (components, expected) in &apps {
             let mut node = sys.root();
@@ -477,7 +458,7 @@ mod tests {
         let (_descriptor, key) = provision(PASSPHRASE).expect("the descriptor provisions");
         let window = PartitionBlock::new(disk, root_part.start_lba, root_part.block_count)
             .expect("the root window is in range");
-        let mut rootvol = tairix_drv_fs_arxfs::ARXFS::open(window, &key)
+        let mut rootvol = tairix_drv_fs_arxfs::ARXFS::open(window, Keying::Key(&key))
             .expect("the root mounts under the descriptor-derived key");
         let mut node = rootvol.root();
         for component in root_files[0].0 {
@@ -492,10 +473,10 @@ mod tests {
         assert_eq!(&buf[..read], CATALOG);
     }
 
-    /// The `/System` partition mounts read-only under the non-secret
-    /// well-known key and carries the `Drivers` store directory.
+    /// The `/System` partition is plaintext, mounts read-only, and carries
+    /// the `Drivers` store directory.
     #[test]
-    fn the_system_window_mounts_read_only_under_the_public_key() {
+    fn the_system_window_mounts_read_only_with_no_key() {
         let bytes = build_image().expect("the whole-disk image assembles");
         let mut disk = MemDisk { store: bytes };
         let table = parse_partition_table(&mut disk).expect("the MBR parses");
@@ -504,8 +485,8 @@ mod tests {
             .expect("a /System partition is present");
         let window = PartitionBlock::new(disk, system.start_lba, system.block_count)
             .expect("the /System window is in range");
-        let mut sys = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY)
-            .expect("the /System volume mounts read-only under the public key");
+        let mut sys = ARXFS::open_read_only(window, Keying::Plaintext)
+            .expect("the plaintext /System volume mounts read-only");
         let root = sys.root();
         sys.lookup(root, b"Drivers")
             .expect("/System/Drivers exists");
@@ -528,6 +509,53 @@ mod tests {
         let (_descriptor, key) = provision(PASSPHRASE).expect("the descriptor provisions");
         let window = PartitionBlock::new(disk, root.start_lba, root.block_count)
             .expect("the root window is in range");
-        ARXFS::open(window, &key).expect("the root mounts under the descriptor-derived key");
+        ARXFS::open(window, Keying::Key(&key))
+            .expect("the root mounts under the descriptor-derived key");
+    }
+
+    /// A plaintext-root image carries no unlock descriptor, and its root
+    /// mounts with no key and refuses to be opened with one.
+    #[test]
+    fn a_plaintext_root_image_carries_no_descriptor_and_mounts_with_no_key() {
+        use tairix_abi::driver::filesystem::FilesystemRead;
+        use tairix_drv_fs_arxfs::VolumeProtection;
+
+        let bytes = build_plaintext_image().expect("the whole-disk image assembles");
+        let mut disk = MemDisk {
+            store: bytes.clone(),
+        };
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let boot = table
+            .first_of_type(PartitionType::FatBoot)
+            .expect("a FAT boot partition is present");
+        let window = PartitionBlock::new(disk, boot.start_lba, boot.block_count)
+            .expect("the boot window is in range");
+        let mut fat = Fat32::open(window).expect("the boot partition mounts");
+        let root = fat.root();
+        assert_eq!(
+            fat.lookup(root, ROOT_UNLOCK_NAME.as_bytes()).err(),
+            Some(DriverError::NotFound),
+            "a plaintext root has no unlock descriptor"
+        );
+
+        let mut disk = MemDisk { store: bytes };
+        let table = parse_partition_table(&mut disk).expect("the MBR parses");
+        let part = table
+            .first_of_type(PartitionType::ARXFSRoot)
+            .expect("a ARXFS root partition is present");
+        let mut window = PartitionBlock::new(disk, part.start_lba, part.block_count)
+            .expect("the root window is in range");
+        assert_eq!(
+            ARXFS::probe_protection(&mut window),
+            Ok(VolumeProtection::Plaintext)
+        );
+        let mut rootvol =
+            ARXFS::open(window, Keying::Plaintext).expect("the plaintext root mounts");
+        let mut node = rootvol.root();
+        for component in [b"System".as_slice(), b"Security", b"Users"] {
+            node = rootvol
+                .lookup(node, component)
+                .expect("the users database is planted");
+        }
     }
 }

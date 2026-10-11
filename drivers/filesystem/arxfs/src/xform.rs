@@ -98,8 +98,8 @@ pub(crate) fn copy_from_cluster(
     chunk
 }
 
-/// Zero a transient plaintext buffer before it is dropped: the volumes
-/// are encrypted at rest, so decompressed cluster bytes must not linger
+/// Zero a transient plaintext buffer before it is dropped: decompressed
+/// cluster bytes, decrypted user data on an encrypted volume, must not linger
 /// in reusable heap memory once the read they served is finished. The
 /// wipe is volatile (`zeroize`), so the compiler cannot elide it on the
 /// grounds that the buffer is about to be freed.

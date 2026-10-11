@@ -361,7 +361,8 @@ crypto — use `lib/crypto`), §2.13 (no compat shim; `abi-v1` mutable pre-relea
 ambient authority; encrypted swap; zero-on-free), §5.2/§5.4 (capabilities,
 kernel-side checks, fail closed), §6 (lib/crate registration + stability tiers),
 §7 (whole-project gate; coverage), §8 (driver class, `register`, QEMU tests),
-§9 (versioned/hashed ABI), §11 (installer: seal-or-passphrase, no plaintext),
+§9 (versioned/hashed ABI), §11 (installer: the user chooses whether to encrypt,
+an encrypted root sealed or passphrase-unlocked),
 §16.4 (curated libs — only if a TPM client lib is offered), §16.6 (sysinfo-style
 ABI discipline), §17.2 (Arch HAL: firmware-call/measurement primitives), §18
 (hardware-tree discovery, no `cfg(target_arch)` leakage), §19.2 (boot

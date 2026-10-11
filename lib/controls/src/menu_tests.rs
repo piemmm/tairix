@@ -32,7 +32,7 @@ use crate::testkit::{
 };
 
 const W: u32 = 200;
-const ROW_H: u32 = 28;
+const ROW_H: u32 = 24;
 const BORDER: u32 = 1;
 
 /// A `u32` coordinate as an `i32` (test coordinates always fit).
@@ -683,6 +683,64 @@ fn hover_sets_the_current_row_and_click_activates_it() {
     );
 }
 
+/// The row whose child is open keeps the highlight while the pointer crosses
+/// another row, and the rim where no row is, on its way to the child.
+#[test]
+fn a_held_row_keeps_the_highlight_wherever_the_pointer_travels() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    let _ = menu.on_pointer(
+        &moved(xi(W) / 2, row_centre_y(0)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    menu.hold(Some(0));
+    for at in [
+        moved(xi(W) / 2, row_centre_y(1)),
+        moved(xi(W) - 1, row_centre_y(0)),
+    ] {
+        let _ = menu.on_pointer(&at, bounds, Scale::ONE, &theme, &mut sink());
+        assert_eq!(menu.current(), Some(0));
+    }
+}
+
+/// Releasing a hold while the pointer is still hands the highlight to the row
+/// under it, and reports both rows the highlight moved between.
+#[test]
+fn releasing_a_hold_highlights_the_row_under_a_still_pointer() {
+    let theme = Theme::dark();
+    let mut menu = three_item_menu();
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, W, h);
+    menu.hold(Some(0));
+    let _ = menu.on_pointer(
+        &moved(xi(W) / 2, row_centre_y(2)),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(menu.current(), Some(0));
+
+    menu.hold(None);
+    let mut damage = sink();
+    menu.refresh_hover(bounds, Scale::ONE, &theme, &mut damage);
+    assert_eq!(menu.current(), Some(2));
+    for row in [0, 2] {
+        let rect = menu
+            .row_rect(row, bounds, Scale::ONE, &theme)
+            .expect("a row");
+        assert!(
+            damage.rects().iter().any(|d| d.intersection(&rect) == rect),
+            "row {row} reported"
+        );
+    }
+}
+
 #[test]
 fn release_outside_the_pressed_row_does_not_activate() {
     let theme = Theme::dark();
@@ -840,6 +898,18 @@ fn grouped_menu() -> Menu {
         MenuItem::new("Configure").with_group_break(true),
         MenuItem::new("Shut Down").with_role(ControlRole::Destructive),
     ])
+}
+
+/// A group break costs its rule and half a control gap either side, not a
+/// whole gap: at normal density that is 9 pixels rather than 15.
+#[test]
+fn a_group_break_band_is_its_rule_and_half_a_gap_either_side() {
+    let theme = Theme::dark();
+    let half_gap = theme.metrics().control_gap.div_ceil(2);
+    let band = grouped_menu().preferred_height(Scale::ONE, &theme)
+        - three_item_menu().preferred_height(Scale::ONE, &theme);
+    assert_eq!(band, theme.metrics().border_thickness + 2 * half_gap);
+    assert_eq!(band, 9);
 }
 
 #[test]
@@ -1019,6 +1089,34 @@ fn grouped_row_rects_still_mirror_hit_testing() {
         );
     }
     assert_eq!(menu.row_rect(3, bounds, Scale::ONE, &theme), None);
+}
+
+/// The rule stops a whole control gap short of either rim, whatever the
+/// contrast: halving the gap above and below it did not narrow it.
+#[test]
+fn the_divider_rule_stops_a_control_gap_short_of_either_rim() {
+    for theme in [Theme::dark(), high_contrast()] {
+        let menu = grouped_menu();
+        let h = menu.preferred_height(Scale::ONE, &theme);
+        let bounds = Rect::new(0, 0, W, h);
+        let surface = render(&menu, &theme, h);
+        let below = menu.row_rect(1, bounds, Scale::ONE, &theme).expect("row 1");
+        let rule_y = u32::try_from(below.top()).expect("in range")
+            - theme.metrics().control_gap.div_ceil(2)
+            - 1;
+        let border = premul(theme.palette().border);
+        let plate_rim = crate::paint::plate_border(&theme, Scale::ONE);
+        let inked: alloc::vec::Vec<u32> = (plate_rim..W - plate_rim)
+            .filter(|&x| surface.get(x, rule_y) == Some(border))
+            .collect();
+        let inset = theme.metrics().control_gap;
+        assert_eq!(
+            (inked.first().copied(), inked.last().copied()),
+            (Some(plate_rim + inset), Some(W - plate_rim - inset - 1)),
+            "{}",
+            theme.name()
+        );
+    }
 }
 
 #[test]

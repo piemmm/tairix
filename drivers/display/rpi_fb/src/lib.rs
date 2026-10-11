@@ -25,10 +25,9 @@ use tairix_abi::driver::display::{
     DamageRect, Display, DisplayDeviceReport, DisplayMode, DisplayPower,
 };
 use tairix_abi::driver::mailbox::MailboxChannel;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError};
 use tairix_vcmailbox::{
-    decode_blank_screen_response, encode_blank_screen, MailboxError,
-    FIRMWARE_FRAMEBUFFER_COMPATIBLE,
+    decode_blank_screen_response, encode_blank_screen, MailboxError, FIRMWARE_FRAMEBUFFER_KEY,
 };
 
 #[cfg(test)]
@@ -40,17 +39,10 @@ mod tests;
 const BIND_PRIORITY: u16 = 20;
 
 /// The driver's canonical bind table: a scan-out surface the `VideoCore`
-/// firmware allocated, as the aarch64 port publishes it.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    match HwMatchKey::compatible(FIRMWARE_FRAMEBUFFER_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
-)];
+/// firmware allocated, as the aarch64 port publishes it, and the device its
+/// blank requests are admitted for.
+pub const BIND_KEYS: &[DriverBindKey] =
+    &[DriverBindKey::new(BIND_PRIORITY, FIRMWARE_FRAMEBUFFER_KEY)];
 
 /// The capabilities the service needs, and the single definition of them:
 /// the surface window, the client frame regions, the reserved rendezvous,

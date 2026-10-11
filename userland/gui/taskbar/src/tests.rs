@@ -20,7 +20,7 @@ use tairix_controls::testkit::beyond_round_rect;
 use tairix_controls::{
     ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState, MenuItem,
     MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
-    WindowPreview,
+    WindowPreview, WHEEL_STEP,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -30,7 +30,9 @@ use tairix_icon::{
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Contrast, SignalRole, TextRole, Theme, ThemeId};
+use tairix_theme::{
+    Appearance, Contrast, DesktopText, Fonts, SignalRole, TextRole, Theme, ThemeId,
+};
 
 use tairix_hash::BuildFastHash;
 use tairix_log::{Event, Sink};
@@ -168,6 +170,18 @@ fn painted_readout(renderer: &TaskbarRenderer, bar: &Taskbar, scale: Scale) -> O
     })
 }
 
+/// The whole network readout, painted — `None` while it is closed.
+fn painted_network_readout(
+    renderer: &TaskbarRenderer,
+    bar: &Taskbar,
+    scale: Scale,
+) -> Option<Surface> {
+    let layout = bar.network_readout_layout(scale)?;
+    painted(layout.panel, |surface, rects| {
+        renderer.paint_network_readout(bar, scale, surface, rects);
+    })
+}
+
 use tairix_controls::{ChainChild, ChainModel, ChainRow, INFO_ROW_LABEL};
 
 use crate::apps::{AppIdentity, AppSlot};
@@ -177,8 +191,8 @@ use crate::layout::{local_rect, Hit};
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
 use crate::menu::{EntryRow, MenuRequest, MenuSubject};
 use crate::notifications::{
-    IconId, NotifySeverity, Producer, StatusKind, StatusSignal, TransientNotification,
-    NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
+    IconId, NotificationArea, NotifySeverity, Producer, StatusKind, StatusSignal,
+    TransientNotification, NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
 };
 use crate::picker::{
     has_picker, slot_has_picker, PickerEntry, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS,
@@ -378,7 +392,7 @@ fn ask_entry_menu(input: &mut TaskbarInput, taskbar: &mut Taskbar) -> (EntryId, 
 }
 
 /// A dark theme with `contrast` swapped in, for accessibility renders.
-fn dark_with_contrast(contrast: Contrast) -> Theme {
+pub(crate) fn dark_with_contrast(contrast: Contrast) -> Theme {
     let base = Theme::dark();
     Theme::new(
         ThemeId(97),
@@ -507,17 +521,22 @@ fn previous_task_remembers_the_last_real_handover() {
 
 #[test]
 fn status_signals_set_and_dedup() {
-    let mut bar = bottom_bar();
-    bar.set_status_signals(alloc::vec![
+    let mut area = NotificationArea::new();
+    area.set_signals(alloc::vec![
         StatusSignal::new(IconId(1), StatusKind::Network),
         StatusSignal::new(IconId(1), StatusKind::Volume), // later duplicate id dropped
         StatusSignal::new(IconId(2), StatusKind::Battery),
     ]);
-    let signals = bar.notifications().signals();
+    let signals = area.signals();
     assert_eq!(signals.len(), 2, "the later duplicate id is dropped");
     assert_eq!(signals[0].kind, StatusKind::Network);
     assert_eq!(signals[1].kind, StatusKind::Battery);
-    assert_eq!(bar.notifications().signal_count(), 2);
+    assert_eq!(area.signal_count(), 2);
+}
+
+/// Raise the network signal through its own feed.
+fn show_network(bar: &mut Taskbar) {
+    assert!(bar.set_network(Some(crate::network::tests::connected())));
 }
 
 /// A producer instance `n` of a source named after it.
@@ -763,11 +782,11 @@ fn the_leading_launcher_partitions_the_leading_end() {
     let strip = top + 1;
     assert_eq!(layout.bar, Rect::new(5, top, 990, THICKNESS));
     assert_eq!(layout.library, Rect::new(6, strip, 48, STRIP));
-    // The rule sits a control gap (8) past the Library button, one border
-    // thick, inset a control padding (10) from both long edges of the content
-    // strip; the application strip follows the whole 17 px gutter.
-    assert_eq!(layout.separator, Rect::new(62, strip + 10, 1, STRIP - 20));
-    assert_eq!(layout.app_strip.left(), 71);
+    // The rule sits a control gap (7) past the Library button, one border
+    // thick, inset a control padding (9) from both long edges of the content
+    // strip; the application strip follows the whole 15 px gutter.
+    assert_eq!(layout.separator, Rect::new(61, strip + 9, 1, STRIP - 18));
+    assert_eq!(layout.app_strip.left(), 69);
     // The account capsule owns the trailing end of that strip, at the same
     // extent as the leading launcher; the clock ends where it starts.
     assert_eq!(layout.switchboard, Rect::new(946, strip, 48, STRIP));
@@ -778,10 +797,7 @@ fn the_leading_launcher_partitions_the_leading_end() {
 fn hit_testing_resolves_every_region() {
     let mut bar = bottom_bar();
     bar.set_apps(alloc::vec![app("Editor")], Scale::ONE);
-    bar.set_status_signals(alloc::vec![StatusSignal::new(
-        IconId(7),
-        StatusKind::Network
-    )]);
+    show_network(&mut bar);
     let layout = bar.layout(Scale::ONE);
 
     assert_eq!(
@@ -845,7 +861,7 @@ fn vertical_bar_places_the_launcher_at_the_top() {
     // the application strip begins one whole gutter below it.
     assert_eq!(layout.bar, Rect::new(5, 5, THICKNESS, 790));
     assert_eq!(layout.library, Rect::new(6, 6, STRIP, 48));
-    assert_eq!(layout.app_strip.top(), 71);
+    assert_eq!(layout.app_strip.top(), 69);
 }
 
 /// `rect`'s `(main start, main end, cross start, cross end)` on a bar
@@ -979,7 +995,7 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
     assert!(layout.separator.is_empty());
     assert_eq!(
         layout.app_strip.left(),
-        71,
+        69,
         "the flow keeps its places whether or not the rule is drawn"
     );
     assert_eq!(layout.hit_test(Point::new(61, 790)), None);
@@ -998,11 +1014,11 @@ fn a_bar_too_thin_to_inset_the_rule_drops_it_and_keeps_the_flow() {
 #[test]
 fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
     // 79 px, less the two 5 px margins and the bar's two 1 px rims, leaves a
-    // 67 px content strip: room for the whole Library button and the 17 px
-    // separator gutter, and 2 px for everything after them. The launcher
+    // 67 px content strip: room for the whole Library button and the 15 px
+    // separator gutter, and 4 px for everything after them. The launcher
     // clips last, so it is whole and the strip is what collapses; of the
     // trailing regions the Switchboard capsule outranks the clock and the
-    // icons, so the 2 px that remain are its.
+    // icons, so the 4 px that remain are its.
     // The screen is also too shallow for the bar's whole thickness: it keeps
     // the 5 px margin against the edge it faces and takes what is left, so
     // the rule is inset a control padding from the shortened content strip.
@@ -1010,10 +1026,10 @@ fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
     let layout = bar.layout(Scale::ONE);
     let across = THICKNESS.min(50 - 5);
     assert_eq!(layout.library.width, 48);
-    assert_eq!(layout.separator, Rect::new(62, 11, 1, across - 2 - 20));
+    assert_eq!(layout.separator, Rect::new(61, 10, 1, across - 2 - 18));
     assert!(layout.app_strip.is_empty());
     assert!(layout.clock.is_empty());
-    assert_eq!(layout.switchboard.width, 2);
+    assert_eq!(layout.switchboard.width, 4);
 
     // No room for the rule or anything after it: every region past the
     // launcher is empty and none can ever be hit.
@@ -1160,14 +1176,14 @@ fn app_slots_clip_fail_closed_on_a_tiny_screen() {
         TaskbarConfig::bottom_bar(213, 40),
         &Theme::dark().floating(),
     );
-    // The Library launcher (48) plus the separator gutter (17) takes 65. The
+    // The Library launcher (48) plus the separator gutter (15) takes 63. The
     // account capsule (48) plus clock (80) take 128. Screen 213, less the two
     // 5 px margins the bar floats in and the two 1 px rims its content sits
-    // inside, leaves 201. Remaining for the application strip: 201 - 193 = 8.
+    // inside, leaves 201. Remaining for the application strip: 201 - 191 = 10.
     bar.set_apps(alloc::vec![app("App")], Scale::ONE);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
-    assert_eq!(layout.apps[0].width, 8, "the slot clips to fit");
+    assert_eq!(layout.apps[0].width, 10, "the slot clips to fit");
 
     // Even smaller: the slot is empty and can never be hit.
     let mut bar = Taskbar::new(
@@ -1725,10 +1741,7 @@ fn a_second_click_on_the_focused_application_never_minimises_it() {
 #[test]
 fn status_icon_and_clock_presses_are_claimed_and_inert() {
     let mut bar = bottom_bar();
-    bar.set_status_signals(alloc::vec![StatusSignal::new(
-        IconId(3),
-        StatusKind::Volume
-    )]);
+    show_network(&mut bar);
     let mut input = TaskbarInput::new();
     let layout = bar.layout(Scale::ONE);
     // A status signal is a live readout, not an action target this stage.
@@ -3778,7 +3791,12 @@ fn wheel_scrolls_the_overflowing_popup() {
         "a scroll repaints only the popup"
     );
     let scrolled = bar.library_layout(Scale::ONE);
-    assert_eq!(scrolled.rows[0].0, 1, "the viewport moved down one row");
+    let rows_per_detent = WHEEL_STEP / bar.theme().metrics().control_height;
+    assert_eq!(
+        scrolled.rows[0].0,
+        usize::try_from(rows_per_detent).expect("row count fits"),
+        "the viewport moved down one detent's worth of rows"
+    );
 
     // The panel never grows past the space between the bar and the screen
     // edge: it fits entirely above the bar.
@@ -5202,10 +5220,7 @@ fn an_app_slot_carries_no_presence_or_focus_mark() {
 fn status_signal_glyph_draws_in_the_muted_role() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    bar.set_status_signals(alloc::vec![StatusSignal::new(
-        IconId(1),
-        StatusKind::Network
-    )]);
+    show_network(&mut bar);
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
@@ -5223,15 +5238,14 @@ fn status_signal_glyph_draws_in_the_muted_role() {
     ));
 }
 
-/// A bar showing one status signal of each kind the built-in set draws,
-/// so a render rasterises several distinct glyphs into the cache.
+/// A bar showing the network, volume and recording signals, raised by their
+/// own feeds, so a render rasterises several distinct glyphs into the cache.
 fn bar_with_status_signals() -> Taskbar {
     let mut bar = bottom_bar();
-    bar.set_status_signals(alloc::vec![
-        StatusSignal::new(IconId(1), StatusKind::Network),
-        StatusSignal::new(IconId(2), StatusKind::Volume),
-        StatusSignal::new(IconId(3), StatusKind::Battery),
-    ]);
+    show_network(&mut bar);
+    let mut sound = crate::sound::tests::speakers(-600, false, true);
+    sound.recording = true;
+    assert!(bar.set_sound(sound));
     bar
 }
 
@@ -5385,6 +5399,93 @@ fn app_strip_and_menu_actions_latch_repaints() {
         bar.take_repaint(),
         bar_owes(&bar, Scale::ONE, &[layout.apps[0]])
     );
+}
+
+/// The time is set in the body face, a step larger than a caption: the test
+/// face draws every digit as a solid cell the font's full height, so the
+/// rows the label inks are exactly the face's height.
+#[test]
+fn the_clock_is_set_a_step_larger_than_a_caption() {
+    let theme = Theme::dark();
+    let mut bar = bottom_bar();
+    bar.clock_mut().set_label("12:34");
+    let layout = bar.layout(Scale::ONE);
+    let surface = painted_bar(
+        &mut TaskbarRenderer::new(test_icon_cache()),
+        &bar,
+        Scale::ONE,
+        &mut NoArtwork,
+    )
+    .expect("bar renders");
+    let fg = role(theme.palette().on_surface);
+    let bg = floating_ground(&theme, theme.palette().surface_raised);
+    let inked = (layout.clock.top()..layout.clock.bottom())
+        .filter(|&y| {
+            (layout.clock.left()..layout.clock.right())
+                .any(|x| is_coverage_blend(pixel_at(&surface, layout.bar, x, y), fg, bg))
+        })
+        .count();
+    let face = |role: TextRole| BitmapFont::for_role(theme.fonts(), role, Scale::ONE);
+    assert!(face(TextRole::Body).pixel_height() > face(TextRole::Caption).pixel_height());
+    assert_eq!(
+        u32::try_from(inked).expect("row count fits"),
+        face(TextRole::Body).pixel_height()
+    );
+}
+
+/// At the largest text size a person can choose, the clock's region still
+/// holds any time it can be given, so no reading is drawn cut short.
+#[test]
+fn the_clock_holds_any_time_at_the_largest_text_size() {
+    let base = Theme::dark().floating();
+    let largest =
+        DesktopText::new(base.fonts().ui_family(), Fonts::MAX_BASE_SIZE_PX).expect("a size");
+    let theme = base.with_text(Some(largest));
+    let bar = Taskbar::new(TaskbarConfig::bottom_bar(1920, 1080), &theme);
+    let layout = bar.layout(Scale::ONE);
+    let face = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
+    for digit in '0'..='9' {
+        let label = alloc::format!("{digit}{digit}:{digit}{digit}");
+        assert!(
+            face.text_width(&label) <= layout.clock.width,
+            "{label} does not fit {}",
+            layout.clock.width
+        );
+    }
+    assert!(face.text_width(crate::clock::UNSET_LABEL) <= layout.clock.width);
+}
+
+/// A side bar's clock is only as wide as the bar is thick. A time it cannot
+/// hold whole is not drawn at all: cut short, it reads as another time.
+#[test]
+fn a_time_the_clock_cannot_hold_whole_is_not_drawn() {
+    let base = Theme::dark().floating();
+    let largest =
+        DesktopText::new(base.fonts().ui_family(), Fonts::MAX_BASE_SIZE_PX).expect("a size");
+    let theme = base.with_text(Some(largest));
+    let config = TaskbarConfig {
+        edge: Edge::Left,
+        ..TaskbarConfig::bottom_bar(1920, 1080)
+    };
+    let mut bar = Taskbar::new(config, &theme);
+    bar.clock_mut().set_label("12:34");
+    let layout = bar.layout(Scale::ONE);
+    let face = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
+    assert!(face.text_width("12:34") > layout.clock.width, "too narrow");
+    let surface = painted_bar(
+        &mut TaskbarRenderer::new(test_icon_cache()),
+        &bar,
+        Scale::ONE,
+        &mut NoArtwork,
+    )
+    .expect("bar renders");
+    assert!(!region_has_role_ink(
+        &surface,
+        layout.bar,
+        layout.clock,
+        theme.palette().on_surface,
+        floating_ground(&theme, theme.palette().surface_raised),
+    ));
 }
 
 #[test]
@@ -6789,22 +6890,19 @@ fn switchboard_is_trailing_most_on_every_edge() {
 fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
     // 109 px, less the two 5 px margins the bar floats in and the two 1 px
     // rims its content sits inside, leaves 97: the leading end (48 of
-    // launcher plus the 17 px separator gutter) and what remains for the
+    // launcher plus the 15 px separator gutter) and what remains for the
     // capsule. The clock and the notification area collapse to nothing
-    // first, and the capsule clips into the leftover 32 px rather than
+    // first, and the capsule clips into the leftover 34 px rather than
     // overlaying the launcher.
     let mut bar = Taskbar::new(
         TaskbarConfig::bottom_bar(109, 800),
         &Theme::dark().floating(),
     );
-    bar.set_status_signals(alloc::vec![StatusSignal::new(
-        IconId(1),
-        StatusKind::Network
-    )]);
+    show_network(&mut bar);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(
         layout.switchboard,
-        Rect::new(71, coord(800 - 5 - THICKNESS) + 1, 32, STRIP)
+        Rect::new(69, coord(800 - 5 - THICKNESS) + 1, 34, STRIP)
     );
     assert!(layout.clock.is_empty());
     assert!(layout.notification_area.is_empty());
@@ -6817,11 +6915,11 @@ fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
 
 #[test]
 fn tiny_screen_clips_the_switchboard_against_the_launcher() {
-    // 77 px is exactly the permanent launcher and the separator gutter after
+    // 75 px is exactly the permanent launcher and the separator gutter after
     // it: every region beyond, the capsule included, fails closed to empty
     // rather than overlaying it.
     let bar = Taskbar::new(
-        TaskbarConfig::bottom_bar(77, 800),
+        TaskbarConfig::bottom_bar(75, 800),
         &Theme::dark().floating(),
     );
     let layout = bar.layout(Scale::ONE);
@@ -7682,6 +7780,43 @@ fn readout_renders_the_state_and_value_lines() {
     ));
 }
 
+#[test]
+fn the_network_readout_states_its_facts_on_the_raised_ground_in_either_theme() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut bar = Taskbar::new(
+            TaskbarConfig::bottom_bar(1000, 800),
+            &theme.clone().floating(),
+        );
+        let renderer = TaskbarRenderer::new(test_icon_cache());
+        assert!(painted_network_readout(&renderer, &bar, Scale::ONE).is_none());
+        assert!(bar.set_network(Some(crate::network::tests::connected())));
+        let mut input = TaskbarInput::new();
+        let signal = centre_of(bar.layout(Scale::ONE).notifications[0]);
+        input.handle(
+            InputEvent::PointerMoved { to: signal },
+            &mut bar,
+            Scale::ONE,
+            NOW_NS,
+        );
+
+        let layout = bar.network_readout_layout(Scale::ONE).expect("open");
+        let surface =
+            painted_network_readout(&renderer, &bar, Scale::ONE).expect("readout renders");
+        assert_eq!(beyond_round_rect(&surface, layout.corner_radius), None);
+        assert!(
+            region_has_role_ink(
+                &surface,
+                layout.panel,
+                layout.panel,
+                theme.palette().on_surface,
+                floating_ground(&theme, theme.palette().surface_raised),
+            ),
+            "{}: the facts are inked on the raised ground",
+            theme.name()
+        );
+    }
+}
+
 /// The readout's *Open Switchboard* button is furniture standing on the
 /// glass, not part of it: a step more solid than the ground it sits on, so it
 /// reads as pressable, while the blurred desktop still shows through it.
@@ -7850,6 +7985,24 @@ enum Target {
     Slot(usize),
 }
 
+/// The readout opens against the bar's outer edge, so the bar's rim lies
+/// between the capsule and it; crossing the rim is travelling onto the
+/// readout, not leaving the capsule.
+#[test]
+fn the_capsule_readout_holds_open_across_the_bars_rim() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    let start = hover_switchboard(&mut input, &mut bar);
+    let panel = bar.tray_readout_layout(Scale::ONE).expect("expanded").panel;
+    for y in (panel.center().y..start.y).rev() {
+        moved_at(&mut input, &mut bar, Point::new(start.x, y), NOW_NS);
+        assert!(
+            bar.tray().is_expanded(),
+            "the readout collapsed at y = {y} on the way to it"
+        );
+    }
+}
+
 #[test]
 fn a_capsule_hover_owes_the_capsules_own_slot_and_never_the_readouts_pixels() {
     let mut bar = bottom_bar();
@@ -7884,65 +8037,42 @@ fn taskbar_repaint_none_and_all_are_the_expected_extremes() {
             | TaskbarRepaint::PICKER
             | TaskbarRepaint::NOTIFICATIONS
             | TaskbarRepaint::READOUT
-            | TaskbarRepaint::SOUND,
+            | TaskbarRepaint::SOUND
+            | TaskbarRepaint::NETWORK,
         TaskbarRepaint::ALL
     );
 }
 
 #[test]
 fn taskbar_repaint_single_surface_constants_owe_only_that_surface() {
-    for (named, owed) in [
-        (
-            TaskbarRepaint::BAR,
-            [true, false, false, false, false, false],
-        ),
-        (
-            TaskbarRepaint::LIBRARY,
-            [false, true, false, false, false, false],
-        ),
-        (
-            TaskbarRepaint::PICKER,
-            [false, false, true, false, false, false],
-        ),
-        (
-            TaskbarRepaint::NOTIFICATIONS,
-            [false, false, false, true, false, false],
-        ),
-        (
-            TaskbarRepaint::READOUT,
-            [false, false, false, false, true, false],
-        ),
-        (
-            TaskbarRepaint::SOUND,
-            [false, false, false, false, false, true],
-        ),
-    ] {
-        let surfaces = [
-            named.bar.clone(),
-            named.library.clone(),
-            named.picker.clone(),
-            named.notifications.clone(),
-            named.readout.clone(),
-            named.sound.clone(),
-        ];
-        for (surface, whole) in surfaces.iter().zip(owed) {
-            assert_eq!(
-                *surface == Repaint::Whole,
-                whole,
-                "{named:?}: only the named surface owes its whole self"
-            );
-        }
-    }
-    for single in [
+    let singles = [
         TaskbarRepaint::BAR,
         TaskbarRepaint::LIBRARY,
         TaskbarRepaint::PICKER,
         TaskbarRepaint::NOTIFICATIONS,
         TaskbarRepaint::READOUT,
         TaskbarRepaint::SOUND,
-    ] {
-        assert!(single.any());
-        assert_ne!(single, TaskbarRepaint::NONE);
+        TaskbarRepaint::NETWORK,
+    ];
+    for (index, named) in singles.iter().enumerate() {
+        let surfaces = [
+            &named.bar,
+            &named.library,
+            &named.picker,
+            &named.notifications,
+            &named.readout,
+            &named.sound,
+            &named.network,
+        ];
+        for (at, surface) in surfaces.iter().enumerate() {
+            assert_eq!(
+                **surface == Repaint::Whole,
+                at == index,
+                "{named:?}: only the named surface owes its whole self"
+            );
+        }
+        assert!(named.any());
+        assert_ne!(*named, TaskbarRepaint::NONE);
     }
 }
 
@@ -7958,6 +8088,7 @@ fn taskbar_repaint_bit_or_composes_without_losing_either_side() {
             notifications: Repaint::clean(),
             readout: Repaint::clean(),
             sound: Repaint::clean(),
+            network: Repaint::clean(),
         }
     );
 
@@ -8203,6 +8334,32 @@ fn offered_tip(request: &MenuRequest, index: usize) -> Option<&str> {
     table_chain_row(request, index)
         .unwrap_or_else(|| panic!("row {index} is offered"))
         .tip()
+}
+
+/// The network signal's Settings row opens the settings bundle, so it fails
+/// closed exactly as the system menu's own Settings row does when the catalog
+/// holds no such bundle.
+#[test]
+fn the_network_menus_settings_row_follows_the_catalog() {
+    let settings = crate::network_menu::ROWS
+        .iter()
+        .position(|row| *row == crate::network_menu::NetworkRow::Settings)
+        .expect("a listed row");
+    for (mut bar, installed) in [(bottom_bar(), false), (bar_with_task_shell(), true)] {
+        assert!(bar.set_network(Some(crate::network::tests::connected())));
+        let mut input = TaskbarInput::new();
+        let signal = centre_of(bar.layout(Scale::ONE).notifications[0]);
+        let request = ask_menu(&mut input, &mut bar, signal).expect("the signal asks for its menu");
+        assert_eq!(request.subject, MenuSubject::Network);
+        assert_eq!(
+            offered_row(&request, settings).state().is_actionable(),
+            installed
+        );
+        assert_eq!(
+            offered_tip(&request, settings),
+            (!installed).then_some(crate::system::REASON_NOT_INSTALLED)
+        );
+    }
 }
 
 #[test]

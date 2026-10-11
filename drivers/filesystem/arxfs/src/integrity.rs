@@ -1,51 +1,26 @@
-//! `ARXFS` per-data-record integrity primitives
+//! `ARXFS` per-data-block integrity primitives
 //! (`docs/src/filesystem/arxfs-spec.md` §6, §8).
 //!
-//! Stage 4 authenticates a data block only through the AEAD tag in its
-//! encryption trailer. Stage 5 adds the spec's two-layer data-integrity field
-//! to every file-data block, stored in a fixed trailer that follows the crypto
-//! trailer:
+//! Every file-data block carries two integrity layers beside its seal, in a
+//! fixed trailer after the seal's own:
 //!
 //! ```text
-//! [ ciphertext content ][ crypto trailer ][ logical hash ][ physical checksum ]
-//!   <-- data_capacity -->  <-- nonce+tag -->  <-- 32 B  -->   <-- 4 B  -->
+//! [ sealed content ][ seal trailer ][ descriptor ][ logical hash ][ physical checksum ]
+//!                     nonce + tag     5 B           32 B            4 B
 //! ```
 //!
-//! - The **logical content hash** ([`logical_hash`]) names the block's
-//!   decrypted content: the logical block's plaintext for a raw record, or
-//!   the block's slice of the compressed cluster frame for a cluster block
-//!   (the cluster's end-to-end plaintext integrity then rests on the AEAD
-//!   plus the exact-size decompression of the authenticated frame). For raw
-//!   records it is the seam Stage 7 deduplication keys on
-//!   (`docs/src/filesystem/arxfs-spec.md` §9) and detects a corruption that
-//!   survives decryption. It is computed through `lib/crypto`'s audited
-//!   SHA-256 (never hand-rolled). The spec's fixed-v1
-//!   constant names BLAKE3-256; `lib/crypto` exposes only the audited
-//!   `RustCrypto` SHA-256, and pulling a `blake3` crate in would widen the
-//!   trusted computing base with a SIMD backend that does not build cleanly on
-//!   the bare-metal kernel targets (the same freestanding-SIMD problem already
-//!   documented for `chacha20`/`curve25519-dalek` in `.cargo/config.toml`).
-//!   SHA-256 is a 256-bit collision-resistant hash that serves the
-//!   integrity-and-dedupe role identically, so `ARXFS` v1 uses it and the spec
-//!   records the choice (outranks the spec's named
-//!   primitive: use the audited `lib/crypto` hash, do not hand-roll or import
-//!   an unvetted one).
-//! - The **physical checksum** ([`physical_checksum`]) is a fast,
-//!   non-cryptographic checksum over the at-rest representation (ciphertext +
-//!   crypto trailer + logical hash). It detects media / transport corruption
-//!   cheaply and is verified *first* on read, so bit rot in the stored block
-//!   is caught by the fast check before the AEAD runs. It is **CRC-32C**
-//!   (Castagnoli), through the shared `lib/crc32c` — the same error-detecting
-//!   checksum ext4 metadata and btrfs use, with guaranteed Hamming-distance
-//!   properties an ad-hoc hash lacks and a one-instruction hardware path on
-//!   the cores that have it (selected once, self-verified against the portable
-//!   reference). A checksum is not a cryptographic primitive, so a first-party
-//!   implementation is permitted; the keyed authenticity of the block still
-//!   rests on the AEAD and the metadata MAC.
+//! - The **logical content hash** (`crate::crypto::ContentHash`) names the
+//!   block's opened content: a raw record's plaintext, or the block's slice of
+//!   a compressed cluster frame. Deduplication keys on it, and it catches a
+//!   corruption the seal let through. On an encrypted volume it is keyed, so
+//!   the stored hash says nothing of the plaintext to whoever holds the disk.
+//! - The **physical checksum** ([`physical_checksum`]) is a CRC-32C
+//!   (`lib/crc32c`) over the stored bytes, verified first on read, so media
+//!   rot is caught before the seal is opened. It authenticates nothing: on an
+//!   encrypted volume the AEAD and the metadata MAC do, and a plaintext
+//!   volume's seal is a checksum too.
 
-use tairix_crypto::sha256;
-
-/// Length, in bytes, of a data block's logical content hash (SHA-256).
+/// Length, in bytes, of a data block's logical content hash, keyed or not.
 pub const LOGICAL_HASH_LEN: usize = tairix_crypto::SHA256_OUTPUT_LEN;
 
 /// Length, in bytes, of a data block's fast physical checksum (CRC-32C is a
@@ -61,7 +36,7 @@ pub const DATA_INTEGRITY_TRAILER: usize = LOGICAL_HASH_LEN + PHYS_CHECKSUM_LEN;
 /// (`docs/src/filesystem/arxfs-spec.md` §8 — the data-record *compression
 /// state* field). It sits between the crypto trailer and the logical hash, so
 /// the fast physical checksum covers it (a corrupted descriptor is caught by
-/// the first-layer check before the AEAD runs). The layout is one state
+/// the first-layer check before the seal is opened). The layout is one state
 /// byte followed by a little-endian `u32` whose meaning depends on the state
 /// ([`StoredForm`]).
 pub const COMPRESSION_DESCRIPTOR_LEN: usize = 1 + 4;
@@ -134,26 +109,18 @@ pub fn read_stored_form(src: &[u8]) -> Result<StoredForm, DataFault> {
 /// single [`tairix_abi::DriverError::DeviceFault`] (the `abi-v1` error surface
 /// is frozen), but kept distinct internally so a media /
 /// transport corruption (the fast [`Physical`](Self::Physical) checksum) is
-/// not confused with a ciphertext tamper (the [`Aead`](Self::Aead) tag) or a
-/// plaintext corruption that survived decryption ([`Logical`](Self::Logical)).
+/// not confused with a failed region seal ([`Seal`](Self::Seal)) or content
+/// corruption that survived it ([`Logical`](Self::Logical)).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DataFault {
     /// The fast physical checksum over the at-rest block did not match:
     /// media or transport corruption.
     Physical,
-    /// The AEAD tag failed: the ciphertext or its crypto trailer was tampered.
-    Aead,
+    /// The region seal failed: an encrypted block's AEAD tag, or a plaintext
+    /// block's checksum or the address it binds.
+    Seal,
     /// The decrypted plaintext did not match its stored logical hash.
     Logical,
-}
-
-/// The logical content hash of a data block's decrypted content: the SHA-256
-/// digest, through `lib/crypto`. Identical content hashes identically (the
-/// Stage 7 dedupe seam keys on it for raw records); a single flipped byte
-/// hashes differently.
-#[must_use]
-pub fn logical_hash(plaintext: &[u8]) -> [u8; LOGICAL_HASH_LEN] {
-    sha256(plaintext)
 }
 
 /// A fast, non-cryptographic checksum over the at-rest `bytes` of a data
@@ -177,8 +144,8 @@ pub fn physical_checksum(bytes: &[u8]) -> [u8; PHYS_CHECKSUM_LEN] {
 #[cfg(test)]
 mod tests {
     use super::{
-        logical_hash, physical_checksum, read_stored_form, write_stored_form, DataFault,
-        StoredForm, COMPRESSION_DESCRIPTOR_LEN, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
+        physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
+        COMPRESSION_DESCRIPTOR_LEN, PHYS_CHECKSUM_LEN,
     };
 
     #[test]
@@ -203,16 +170,6 @@ mod tests {
     }
 
     #[test]
-    fn logical_hash_is_stable_and_content_sensitive() {
-        let a = [0x41u8; 200];
-        let mut b = a;
-        b[100] ^= 0x01;
-        assert_eq!(logical_hash(&a), logical_hash(&a));
-        assert_ne!(logical_hash(&a), logical_hash(&b));
-        assert_eq!(logical_hash(&a).len(), LOGICAL_HASH_LEN);
-    }
-
-    #[test]
     fn physical_checksum_detects_single_bit_flips() {
         let a = [0x5au8; 256];
         let mut b = a;
@@ -231,6 +188,5 @@ mod tests {
             physical_checksum(b"123456789"),
             0xE306_9283u32.to_le_bytes()
         );
-        assert_eq!(logical_hash(&[]), logical_hash(&[]));
     }
 }

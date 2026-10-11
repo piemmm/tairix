@@ -54,8 +54,8 @@ pub const PIN_MALFORMED: EventId = EventId(21_007);
 /// format's fixed bounds. Refused whole rather than truncated.
 pub const DOCUMENT_REFUSED: EventId = EventId(21_008);
 
-/// The store volume could not be reached — the encrypted root is not yet
-/// unlocked, or a read or write failed.
+/// The store volume could not be reached — the root is not yet mounted, or a
+/// read or write failed.
 pub const STORE_UNAVAILABLE: EventId = EventId(21_009);
 
 /// An account's app-data master secret is missing while a sealed document

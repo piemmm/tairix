@@ -45,8 +45,10 @@ panicking (`AGENTS.md` §2.9).
 ## The glyph set
 
 `IconKind` is the closed set of built-in glyphs: the status kinds (`Network`
-— rising signal bars, `Volume` and `VolumeMuted` — the speaker cone, then struck
-through — `Microphone` for sound being recorded, `Battery`, `Bell`), the
+— rising signal bars, and `NetworkOffline` — the same bars with a cross in the
+corner above the short one — `Volume` and `VolumeMuted` — the speaker cone,
+then struck through — `Microphone` for sound being recorded, `Battery`,
+`Bell`), the
 file-manager kinds
 (`Folder`/`FolderFilled`/`FolderOpen` — an empty folder, one that holds
 something, and an open one — the `FolderBack`/`FolderFront` halves a folder's

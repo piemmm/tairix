@@ -81,9 +81,9 @@ use tairix_abi::switchboard_ipc::{
     decode_publish_reply, CommandSection, DeviceCapacity, FrameReport, MachineCommitted,
     MachineComposition, MachineCores, MachineCpu, MachineDevice, MachineDeviceName, MachineHistory,
     MachineHost, MachineInterface, MachineInterfaceName, MachineMemory, MachineNetwork,
-    MachineReport, MachineScope, MachineStorage, MachineTask, MachineTasks, Permille, ReportPeriod,
-    SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPressure, TrayPressureCount,
-    TrayPressureKind, TraySummary, TrayTask, TrayTaskName,
+    MachineReport, MachineScope, MachineStorage, MachineTask, MachineTasks, NetworkReport,
+    Permille, ReportPeriod, SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPressure,
+    TrayPressureCount, TrayPressureKind, TraySummary, TrayTask, TrayTaskName,
 };
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerRecord, CacheReportRequest,
@@ -856,6 +856,16 @@ fn exercise_switchboard_ipc(bytes: &[u8]) {
             bytes.get(..MachineReport::WIRE_LEN),
             Some(&encoded[..]),
             "an accepted machine report must be its own canonical encoding"
+        );
+    }
+    // The network report reaches the icon bar from a process the session
+    // spawned but did not write, so an accepted frame must likewise be its own
+    // canonical encoding: nothing is normalised on the way in.
+    if let Ok(report) = NetworkReport::from_bytes(bytes) {
+        assert_eq!(
+            bytes.get(..NetworkReport::WIRE_LEN),
+            Some(&report.to_le_bytes()[..]),
+            "an accepted network report must be its own canonical encoding"
         );
     }
 }
@@ -2425,6 +2435,84 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
 }
 
 #[test]
+fn structured_network_reports_with_corrupted_fields_never_panic() {
+    use tairix_abi::net_ipc::{
+        NetAddrFamily, NetAddrState, NetIfAddr, NetInterfaceStateRecord, IF_NAME_LEN,
+        NET_IF_MAX_ADDRS,
+    };
+    let interface = |name: &[u8], link_up, addrs: &[NetIfAddr]| {
+        let mut bytes = [0u8; IF_NAME_LEN];
+        bytes[..name.len()].copy_from_slice(name);
+        let mut slots = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+        slots[..addrs.len()].copy_from_slice(addrs);
+        NetInterfaceStateRecord {
+            name: bytes,
+            link_up,
+            addr_count: u8::try_from(addrs.len()).expect("a few"),
+            addrs: slots,
+        }
+    };
+    let v4 = NetIfAddr {
+        family: NetAddrFamily::V4,
+        prefix: 24,
+        state: NetAddrState::Preferred,
+        addr: [10, 0, 2, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let v6 = NetIfAddr {
+        family: NetAddrFamily::V6,
+        prefix: 64,
+        state: NetAddrState::Tentative,
+        addr: [
+            0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x50, 0x54, 0, 0xff, 0xfe, 0x12, 0x34, 0x56,
+        ],
+    };
+    let report = NetworkReport::measured(&[
+        interface(b"eth0", true, &[v4, v6]),
+        interface(b"eth1", false, &[]),
+    ]);
+    let mut base = report.to_le_bytes();
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base);
+            base[byte] ^= 1 << bit;
+        }
+    }
+    mutate_within_budget(
+        "structured_network_reports_with_corrupted_fields_never_panic",
+        &base,
+    );
+}
+
+/// Frames [`mutate_within_budget`] tries per round: each costs every decoder
+/// a read of a whole long frame, so a round is shorter than the short-input
+/// loop's.
+const MUTATIONS_PER_ROUND: u64 = 1_000;
+
+/// Exercise `base`, a frame too long for the short-input loop to reach, with
+/// up to four of its bytes rewritten at random, until the run's budget is
+/// spent: the single-bit sweep never puts two faults in one frame.
+fn mutate_within_budget(name: &str, base: &[u8]) {
+    let mut rng =
+        tairix_fuzzseed::Prng::new(tairix_fuzzseed::start(name, tairix_fuzzseed::FUZZ_SEED_ENV));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut frame = base.to_vec();
+    loop {
+        for _ in 0..MUTATIONS_PER_ROUND {
+            frame.copy_from_slice(base);
+            for _ in 0..=rng.below(4) {
+                let at = rng.below(frame.len());
+                frame[at] = rng.next_u8();
+            }
+            exercise(&frame);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
 fn structured_machine_reports_with_corrupted_fields_never_panic() {
     // The report the session draws over the lock: walk the boundary of a
     // frame carrying every reading — a flipped presence bit, count, length
@@ -2508,6 +2596,10 @@ fn structured_machine_reports_with_corrupted_fields_never_panic() {
             base[byte] ^= 1 << bit;
         }
     }
+    mutate_within_budget(
+        "structured_machine_reports_with_corrupted_fields_never_panic",
+        &base,
+    );
 }
 
 #[test]

@@ -18,7 +18,7 @@
 //! leaks nothing). It is therefore single-copy and updated in place, exactly
 //! like the allocation map, and never copy-on-written.
 //!
-//! Every page is still **sealed** with the ordinary keyed block header, and
+//! Every page is still **sealed** with the ordinary block header, and
 //! the pass **writes every page before it reads any**: the array's contents
 //! drive corrections to authoritative refcounts, so a page a hostile or
 //! failing device substituted must be rejected rather than believed, and
@@ -445,7 +445,7 @@ impl<B: Block> ARXFS<B> {
             BlockType::Scratch,
             self.fs_uuid,
             phys,
-            &self.mac_key,
+            &self.protection.meta,
         )?;
         if header.owner != array.role.sentinel() || header.logical_addr != page {
             return Err(DriverError::DeviceFault);
@@ -488,7 +488,7 @@ impl<B: Block> ARXFS<B> {
             physical_addr: array.start + page,
             payload_len: crate::as_u32(page_payload_len(bs)),
         };
-        header.seal(&mut buf[..bs], &self.mac_key)
+        header.seal(&mut buf[..bs], &self.protection.meta)
     }
 }
 

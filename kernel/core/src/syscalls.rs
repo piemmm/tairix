@@ -1656,7 +1656,7 @@ where
     /// syscall dispatches into, consuming and returning `self`
     /// (`plans/CAPABILITY_USE.md` CU4).
     ///
-    /// Called once by the boot path that unlocks the encrypted root,
+    /// Called once by the boot path that mounts the root,
     /// handing the `&'static LateUsersAdmin` cell its unlock step
     /// installs the built engine into. Until this is called the handler
     /// holds [`NULL_USERS_ADMIN`] and `users_admin` fails closed with
@@ -8934,12 +8934,16 @@ where
         // released or lost its lease is refused and re-publishes when it
         // re-acquires on foreground wake. What the machine is recording, and
         // that its sound devices moved, are the audio service's to state, by
-        // its reserved rendezvous. Every kernel-owned topic refuses outright
-        // inside `notice::publish`.
+        // its reserved rendezvous, and that the interfaces moved is the
+        // network stack's, by its own. Every kernel-owned topic refuses
+        // outright inside `notice::publish`.
         let refused = match topic {
             NoticeTopic::Desktop => !self.seat_registry.holds_live_lease(seat_owner(caller)),
             NoticeTopic::AudioCapture | NoticeTopic::AudioDevices => {
                 !crate::notice::binds(tairix_abi::audio::AUDIO_ENDPOINT, caller.process().0)
+            }
+            NoticeTopic::Network => {
+                !crate::notice::binds(tairix_abi::net_ipc::NETSTACK_ENDPOINT, caller.process().0)
             }
             NoticeTopic::Mounts | NoticeTopic::MemoryPressure | NoticeTopic::DisplayLease => false,
         };
@@ -43694,6 +43698,42 @@ mod tests {
             Ok(capture_len as u64)
         );
         crate::callreg::unregister(EndpointId(audio));
+    }
+
+    /// Only the network stack, by its reserved rendezvous, may state that the
+    /// interfaces moved; anybody may read that they did.
+    #[test]
+    fn the_network_stack_alone_states_that_the_interfaces_moved() {
+        let _calls = crate::callreg::registry_guard();
+        let _registry = crate::notice::registry_guard();
+        let world = LeaseTopicWorld::new();
+        let h = world.handlers();
+        let (stack, bystander) = (world.ctx(LEASE_SERVICE), world.ctx(LEASE_BYSTANDER));
+        let network = tairix_abi::NoticeTopic::Network;
+        let len = network.payload_len();
+        assert_eq!(
+            h.notice_publish(&stack, network.as_u32(), 0x2000, len),
+            Err(Errno::PermissionDenied),
+            "not before it binds the rendezvous"
+        );
+        let endpoint = tairix_abi::net_ipc::NETSTACK_ENDPOINT;
+        assert_eq!(
+            h.call_create(&stack, endpoint, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&stack, network.as_u32(), 0x2000, len),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&bystander, network.as_u32(), 0x2000, len),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.notice_read(&bystander, network.as_u32(), 0x2000, len),
+            Ok(len as u64)
+        );
+        crate::callreg::unregister(EndpointId(endpoint));
     }
 
     /// The display service is woken once by each lease edge, and a member

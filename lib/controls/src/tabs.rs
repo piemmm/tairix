@@ -48,16 +48,16 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{edge_weight, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::damage;
 use crate::disclosure::{tree_step, TreeKey, TreeRow, TreeStep};
 use crate::paint::{
-    draw_outline, ground_fill, heavy_contrast, icon_slot_side, line_budget, paint_bead,
-    paint_chevron, paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width,
-    seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape,
-    ChevronDir, ChromeLayer, TextBlock, FULL_COLOUR,
+    draw_outline, ground_fill, icon_slot_side, line_budget, paint_bead, paint_chevron,
+    paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width, seam_thickness,
+    seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir,
+    ChromeLayer, TextBlock, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -1187,9 +1187,7 @@ impl Tabs {
                 TabsOrientation::Vertical => rail_thickness(theme, scale),
                 // Heavier contrast doubles the selected seam, so selection
                 // still carries where a hue shift alone would not.
-                TabsOrientation::Horizontal => {
-                    base.saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
-                }
+                TabsOrientation::Horizontal => base.saturating_mul(edge_weight(theme.contrast())),
             };
             (mark.min(cross), along)
         } else if tab.is_loading() {

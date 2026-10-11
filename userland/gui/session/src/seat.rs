@@ -286,7 +286,7 @@ mod tests {
         );
         assert_eq!(
             source
-                .poll_record(0)
+                .poll_record(0, None)
                 .map(|polled| polled.map(|(event, _)| event)),
             Ok(Some(InputEvent::KeyPressed {
                 key: Key::Named(NamedKey::Enter),
@@ -296,7 +296,7 @@ mod tests {
                 },
             }))
         );
-        assert_eq!(source.poll_record(0), Ok(None));
+        assert_eq!(source.poll_record(0, None), Ok(None));
     }
 
     #[test]

@@ -99,13 +99,14 @@ fn wallpaper_none_is_accepted() {
     assert_eq!(settings.wallpaper, WallpaperChoice::None);
 }
 
-#[test]
-fn the_render_is_canonical_and_round_trips() {
+/// A document with every key off its default, so a render that dropped or
+/// misspelled one cannot pass.
+fn every_key_moved() -> DesktopSettings {
     let mut sound = SoundControls::default();
     assert!(sound.set_output("0000000000000051.0"));
     assert!(sound.set_levels("0000000000000051.0:-6.5dB"));
     assert!(sound.set_muted("0000000000000052.0"));
-    let settings = DesktopSettings {
+    DesktopSettings {
         wallpaper: WallpaperChoice::None,
         fit: WallpaperFit::Stretch,
         backdrop: Backdrop::Colour(Rgb::new(0xaa, 0xbb, 0xcc)),
@@ -116,6 +117,10 @@ fn the_render_is_canonical_and_round_trips() {
         density: Density::Comfortable,
         motion: Motion::Reduced,
         scale: Scale::from_percent(150).expect("150% is a scale"),
+        resolution: crate::Resolution::Size {
+            width: 1280,
+            height: 720,
+        },
         text_family: TextFamily::Named(
             tairix_theme::FamilyKey::new("noto-serif").expect("a family key"),
         ),
@@ -143,7 +148,12 @@ fn the_render_is_canonical_and_round_trips() {
         screensaver_options: retuned_scenes(),
         lock_after: IdleAfter::Minutes(15),
         sound,
-    };
+    }
+}
+
+#[test]
+fn the_render_is_canonical_and_round_trips() {
+    let settings = every_key_moved();
     let text = rendered(&settings);
     assert_eq!(
         text,
@@ -157,6 +167,7 @@ fn the_render_is_canonical_and_round_trips() {
          density = comfortable\n\
          motion = reduced\n\
          scale = 150\n\
+         resolution = 1280x720\n\
          font.family = noto-serif\n\
          font.size = 12\n\
          cursor.set = High Visibility\n\
@@ -925,9 +936,10 @@ fn a_refused_merge_changes_nothing_at_all() {
 fn the_key_groups_partition_the_registry() {
     // Every key belongs to exactly one group, so a surface that renders
     // its group can never leave a key with no owner or post one twice.
-    let groups: [&[SettingsKey]; 9] = [
+    let groups: [&[SettingsKey]; 10] = [
         &SettingsKey::PINBOARD,
         &SettingsKey::APPEARANCE,
+        &SettingsKey::DISPLAY,
         &SettingsKey::NOTIFICATIONS,
         &SettingsKey::POINTER,
         &SettingsKey::TOUCHPAD,

@@ -28,9 +28,10 @@ use tairix_controls::RecoveryState;
 use tairix_font::ELLIPSIS;
 
 use crate::model::{process_count, process_recovery, RollingMeters};
-use crate::resource_report::{busiest_by_cpu, served_rates, storage_subjects, trim_nul};
+use crate::resource_report::{busiest_by_cpu, served_rates, storage_subjects};
 use crate::sample::Sample;
 use crate::schedule::SAMPLE_PERIOD_NS;
+use tairix_abi::net_ipc::if_name_bytes;
 
 /// The sample period in whole milliseconds, the unit a report states it in.
 const PERIOD_MS: u64 = SAMPLE_PERIOD_NS / 1_000_000;
@@ -178,15 +179,11 @@ fn network(sample: &Sample) -> Option<MachineNetwork> {
         .filter_map(|iface| {
             let rates = served_rates(sample, &iface.name);
             Some(MachineInterface {
-                name: fitted(trim_nul(&iface.name))?,
+                name: fitted(if_name_bytes(&iface.name))?,
                 link_up: sample
                     .net_state
                     .as_ref()
-                    .and_then(|states| {
-                        states
-                            .iter()
-                            .find(|state| trim_nul(&state.name) == trim_nul(&iface.name))
-                    })
+                    .and_then(|states| states.iter().find(|state| state.name == iface.name))
                     .map(|state| state.link_up),
                 receive_rate: rates.map(NetInterfaceRatesRecord::rx_bytes_per_sec),
                 send_rate: rates.map(NetInterfaceRatesRecord::tx_bytes_per_sec),

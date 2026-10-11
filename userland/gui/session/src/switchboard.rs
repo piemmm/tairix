@@ -16,15 +16,16 @@
 //!
 //! The same endpoint carries the machine reports the System Monitor
 //! screensaver draws ([`MachineReport`]), and [`MachineWatch`] decides when
-//! the live instance is asked to publish them.
+//! the live instance is asked to publish them; and the network reports the
+//! bar's network signal states ([`NetworkReport`]).
 
 use alloc::collections::BTreeSet;
 
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::switchboard_ipc::{
-    encode_publish_reply, is_machine_report, CommandSection, FrameReport, MachineReport,
-    OwnerBundleDir, SeatReport, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
-    SWITCHBOARD_PUBLISH_REPLY_LEN,
+    encode_publish_reply, is_machine_report, is_network_report, CommandSection, FrameReport,
+    MachineReport, NetworkReport, OwnerBundleDir, SeatReport, SwitchboardCommand,
+    SwitchboardRequest, SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_PUBLISH_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_log::EventId;
@@ -227,6 +228,11 @@ pub fn serve_switchboard_request(
         } else {
             SwitchboardOutcome::Unwatched
         });
+    }
+    if is_network_report(request) {
+        let report = NetworkReport::from_bytes(request).map_err(SwitchboardRefusal::Malformed)?;
+        shell.set_network_report(compositor, Some(report));
+        return Ok(SwitchboardOutcome::Plain);
     }
     let request = SwitchboardRequest::from_bytes(request).map_err(SwitchboardRefusal::Malformed)?;
     match request {
@@ -763,10 +769,12 @@ impl FrameReportGate {
         let Some(pid) = live else {
             return;
         };
-        let mode = compositor.mode();
+        // The desktop the frame was composed on, not the output it is
+        // resampled onto: the damage is counted in its pixels.
+        let screen = compositor.screen_rect();
         let stats = compositor.frame_stats();
         let report = FrameReport {
-            screen_px: u64::from(mode.width_px).saturating_mul(u64::from(mode.height_px)),
+            screen_px: u64::from(screen.width).saturating_mul(u64::from(screen.height)),
             damaged_px: stats.damaged_px,
             blended_px: stats.blended_px,
             opaque_px: stats.opaque_px,

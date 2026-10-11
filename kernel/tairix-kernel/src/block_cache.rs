@@ -3,7 +3,7 @@
 //! [`BlockCache`] wraps the one brought-up boot disk *below* the
 //! block-sharing layer (`crate::shared_block::SharedBlock`), so every
 //! window onto the disk — the read-only `/System` driver-store window,
-//! the encrypted-root unlock window, and the writable-root window —
+//! the root-unlock window, and the writable-root window —
 //! reads through one coherent cache of recently used device blocks.
 //! It complements the higher layers rather than duplicating them:
 //! `kernel/core::fs::CachedFs` retains *served plaintext* per volume
@@ -20,7 +20,7 @@
 //! [`ReclaimClass::CleanFileData`] (clean, rebuildable bytes
 //! re-readable from the device by one bounded read), owned by the
 //! kernel block-device subsystem, cheap to rebuild, treated as user
-//! data (the disk carries the encrypted user volume), precisely
+//! data (the disk carries the user volume), precisely
 //! invalidated by the device's single serialised writer, droppable on
 //! demand — and classifies it through the `kernel/mem::reclaim`
 //! admission gate. A refusal poisons the cache from birth: every
@@ -52,8 +52,8 @@
 //! credential-bearing block is ever retained. Every cached buffer is
 //! volatilely wiped before its entry is released — on invalidation,
 //! eviction, pressure shrink, poisoning, and teardown — because the
-//! disk carries the encrypted user volume and cached ciphertext is
-//! still treated as user data.
+//! disk carries the user volume, whose cached blocks are user data even
+//! when they are ciphertext.
 //!
 //! # Bypasses
 //!
@@ -325,9 +325,8 @@ impl<B: Block> BlockCache<B> {
         (self.block_size(), MAP_ENTRY_OVERHEAD)
     }
 
-    /// Volatilely wipe a cached buffer: the disk carries the encrypted
-    /// user volume, so released bytes must not linger in reusable heap
-    /// memory.
+    /// Volatilely wipe a cached buffer: the disk carries the user volume,
+    /// so released bytes must not linger in reusable heap memory.
     fn wipe(data: &mut Vec<u8>) {
         data.as_mut_slice().zeroize();
     }

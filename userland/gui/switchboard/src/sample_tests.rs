@@ -576,14 +576,13 @@ fn graphics_device() -> DisplayStats {
 }
 
 /// The readings the cadence policy issues on every sample.
-const EVERY_SAMPLE: [SysinfoQueryId; 11] = [
+const EVERY_SAMPLE: [SysinfoQueryId; 10] = [
     SysinfoQueryId::GLOBAL_PROCESS_LIST,
     SysinfoQueryId::CPU_TIME_STATS,
     SysinfoQueryId::UPTIME,
     SysinfoQueryId::LOAD_AVERAGE,
     SysinfoQueryId::CPU_INFO,
     SysinfoQueryId::CPU_LOAD,
-    SysinfoQueryId::NET_INTERFACE_STATE,
     SysinfoQueryId::NET_INTERFACE_RATES,
     SysinfoQueryId::VOLUME_IO_STATS,
     SysinfoQueryId::VOLUME_IO_QUEUE,
@@ -606,10 +605,15 @@ const INVENTORY: [SysinfoQueryId; 5] = [
 ];
 
 /// The readings fetched once and cached for the sampler's life.
-const STATIC: [SysinfoQueryId; 3] = [
+const STATIC: [SysinfoQueryId; 2] = [
     SysinfoQueryId::SYSTEM_IDENTITY,
     SysinfoQueryId::MEMORY_TOTAL,
+];
+
+/// The readings held until the network notice drops them.
+const ON_NOTICE: [SysinfoQueryId; 2] = [
     SysinfoQueryId::NET_INTERFACE_FACTS,
+    SysinfoQueryId::NET_INTERFACE_STATE,
 ];
 
 #[test]
@@ -1573,6 +1577,7 @@ fn the_cadence_issues_every_reading_on_the_first_sample() {
         .chain(MEMORY.iter())
         .chain(INVENTORY.iter())
         .chain(STATIC.iter())
+        .chain(ON_NOTICE.iter())
     {
         assert_eq!(
             fixture.count_of(*query),
@@ -1592,13 +1597,47 @@ fn the_cadence_issues_only_the_fast_readings_on_the_second_sample() {
     for query in EVERY_SAMPLE {
         assert_eq!(fixture.count_of(query), 2, "{query:?} is a per-sample read");
     }
-    for query in MEMORY.iter().chain(INVENTORY.iter()).chain(STATIC.iter()) {
+    for query in MEMORY
+        .iter()
+        .chain(INVENTORY.iter())
+        .chain(STATIC.iter())
+        .chain(ON_NOTICE.iter())
+    {
         assert_eq!(
             fixture.count_of(*query),
             1,
             "{query:?} must not be re-read on the second sample"
         );
     }
+}
+
+/// The interfaces are read again only when the network notice says they
+/// moved: once for each edge, never on the sample timer.
+#[test]
+fn the_interfaces_are_read_again_once_per_network_edge() {
+    let fixture = Fixture::new();
+    let mut sampler = Sampler::new(granted());
+    let _ = sampler.sample(&fixture, 0);
+    assert!(sampler.take_network_read(), "the start reads them");
+    let _ = sampler.sample(&fixture, NS);
+    assert!(
+        !sampler.take_network_read(),
+        "a quiet sample reads nothing new"
+    );
+    sampler.network_moved();
+    let mut degradations = Vec::new();
+    sampler.refresh_network(&fixture, &mut degradations);
+    assert!(sampler.take_network_read(), "the edge reads them again");
+    let _ = sampler.sample(&fixture, 2 * NS);
+    assert!(!sampler.take_network_read());
+    for query in ON_NOTICE {
+        assert_eq!(
+            fixture.count_of(query),
+            2,
+            "{query:?} once at start, once at the edge"
+        );
+    }
+    assert!(sampler.network_report().is_measured());
 }
 
 #[test]
@@ -1620,8 +1659,8 @@ fn the_cadence_brings_the_slower_readings_round_again_on_their_own_cycles() {
     for query in INVENTORY {
         assert_eq!(fixture.count_of(query), 2, "{query:?} on 0 and 15");
     }
-    for query in STATIC {
-        assert_eq!(fixture.count_of(query), 1, "{query:?} is read once");
+    for query in STATIC.iter().chain(ON_NOTICE.iter()) {
+        assert_eq!(fixture.count_of(*query), 1, "{query:?} is read once");
     }
 }
 

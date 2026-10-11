@@ -4,8 +4,9 @@ Status: implementation spec
 Target: TAIRiX  
 Driver path: `drivers/filesystem/arxfs/`
 
-ARXFS is the native TAIRiX filesystem: copy-on-write, encrypted, checksummed,
-compressed, deduplicating, SSD-aware, and recoverable. It is optimised for high
+ARXFS is the native TAIRiX filesystem: copy-on-write, checksummed, compressed,
+deduplicating, SSD-aware, and recoverable, and encrypted or plaintext as chosen
+when the volume is formatted. It is optimised for high
 I/O throughput, low CPU use, data integrity, and clean fsck/recovery.
 
 This spec is subordinate to `AGENTS.md`; conflicts are resolved in favour of
@@ -29,6 +30,11 @@ default and not tunable / not tuneable** by mkfs option, mount option, ioctl,
 per-volume policy, per-file policy, build feature, environment variable, or
 userland configuration.
 
+The one property a volume carries is its **protection** — encrypted or
+plaintext — fixed when it is formatted and declared in its superblock (§7). It
+is a fact about the volume, not a knob: nothing changes it while the volume
+exists, and integrity is checked under either.
+
 Forbidden knobs include, but are not limited to:
 
 ```text
@@ -40,7 +46,6 @@ trim=off
 health=off
 scrub=off
 metadata_copies=1
-plaintext
 performance_mode_that_weakens_integrity
 ```
 
@@ -66,7 +71,7 @@ configuration.
 | Metadata integrity | Every metadata block is self-identifying and authenticated/checksummed. |
 | Data integrity | Every physical record is checksummed; every logical record has a strong hash. |
 | Redundancy | Critical metadata has at least two physical copies. |
-| Encryption | Every ARXFS volume is encrypted. Plaintext ARXFS is forbidden. |
+| Protection | Fixed at format and declared in the superblock: encrypted, every region sealed with ChaCha20-Poly1305 and every metadata block with HMAC-SHA256, or plaintext, every seal a CRC-32C. A volume opened as the other is refused (§7). |
 | Compression | First-party TAIRiX zstd-fast-style compression is always active. |
 | Deduplication | Exact verified dedupe is always active; it may miss duplicates but may never merge unequal bytes. |
 | Shared extents | Reflink/shared immutable chunks are core storage. |
@@ -78,7 +83,7 @@ configuration.
 | Rescue | Damaged-volume root discovery and file extraction. |
 | Time | All persistent timestamps use TAIRiX `Time64`. |
 | Security | POSIX bits + ACLs + capability gates on every inode. |
-| Extended metadata | Every inode has a namespaced extended-attribute store (encrypted, mirrored, COW); foreign per-file metadata (Acorn/Amiga/Atari/Mac) is preserved across copies (§21). |
+| Extended metadata | Every inode has a namespaced extended-attribute store (sealed as the volume is, mirrored, COW); foreign per-file metadata (Acorn/Amiga/Atari/Mac) is preserved across copies (§21). |
 | Symbolic links | A first-class inode kind whose target is stored as node data; a volume holding one declares the `symlinks` incompatible feature so a reader without it refuses the volume rather than misreading it (§20). |
 | Hard links | An inode may be named by several directory entries; `nlink` counts them and its storage is freed only at zero. A volume holding one declares the `hardlinks` incompatible feature, because a reader without it would free an inode a surviving name still reaches (§20.5). |
 | Feature declaration | The superblock carries an incompatible-feature word; a volume declaring a bit the reader does not implement is refused at mount, never mounted and misread (§4). |
@@ -158,11 +163,27 @@ superblock ring
 The superblock also carries an **incompatible-feature word**: a bitmap of
 on-disk structures a reader must understand to mount the volume at all. It is
 plaintext (a reader must consult it before it can unwrap a key) and is covered
-by the block's keyed authenticator, so a bit that survives the check is one the
-volume's own writer set. A volume declaring a bit outside the reader's
+by the block's authenticator, so on an encrypted volume a bit that survives the
+check is one the volume's own writer set. A volume declaring a bit outside the reader's
 supported set is **refused with that reason**, never mounted and misread. A bit
 is set the first time the volume uses the structure it names, so a volume that
 has never used one stays readable by a build that does not know it.
+
+Beside it sits the **protection word**: `1` encrypted, `2` plaintext, and any
+other value refused `Unsupported`. `ARXFS::probe_protection` reads it without a
+key, so a boot path learns whether to ask for one; an encrypted copy's word
+cannot be authenticated without the key, so the open that follows is what
+verifies it (§7). A plaintext claim is believed only from a copy its checksum
+verifies. A copy whose word names no protection is passed over for its mirror,
+and the volume is refused `Unsupported` only when no copy names one. A
+plaintext slot whose crypto header is not zero is damaged and skipped.
+
+An open pins the volume's UUID only from a copy that verifies under the
+protection it declares, so one damaged copy cannot misname the volume while
+its mirror is whole; only a rescue, which exists for a ring no copy of
+verifies, falls back to the first copy that claims the volume. `format`
+zeroes every ring copy first, so no slot of a volume formatted on the device
+before survives to be taken for the new one's.
 
 Authoritative metadata:
 
@@ -233,7 +254,7 @@ above the superblock ring, at block `RING_BLOCKS`:
   summary reports wholly free is *synthesised as zeroes* rather than read —
   which is also why laying the map out on a huge volume writes only the
   summary, never a bitmap page per terabyte;
-- every region block is sealed with the ordinary keyed block header under
+- every region block is sealed with the ordinary block header under
   `BlockType::AllocMap`, **one copy, deliberately not mirrored**: free space
   is rebuildable, so a page that fails to authenticate makes the mount
   rebuild rather than repair it.
@@ -339,13 +360,15 @@ uses:
 filesystem block size:       the device's logical block size, 512..4096
 metadata block:              one filesystem block (128-byte identity header)
 data record:                 one filesystem block, block_size - 69 usable
-                             (28-byte crypto trailer, 5-byte stored-form
+                             (28-byte seal trailer, 5-byte stored-form
                              descriptor, 36-byte integrity trailer)
 compression cluster:         16 filesystem blocks, compressed as one frame
                              into fewer physical blocks
 small-file storage:          one data record; no inline or packed form
-logical hash:                SHA-256 through lib/crypto (see note)
-metadata authenticator:      lib/crypto keyed hash/MAC (HMAC-SHA256)
+logical hash:                HMAC-SHA256 under a per-volume key (encrypted);
+                             SHA-256 (plaintext); through lib/crypto (see note)
+metadata authenticator:      HMAC-SHA256 through lib/crypto (encrypted);
+                             CRC-32C in the same field (plaintext)
 physical checksum:           CRC-32C (Castagnoli, fast, first-party via lib/crc32c)
 critical metadata copies:    2 minimum, companion at primary + 1
 root history:                retained for rollback and safe discard
@@ -390,17 +413,17 @@ plaintext logical record
   -> all-zero detection (§19)
   -> if all zero: store a metadata-only ZERO/Hole extent and stop
   -> logical hash
-  -> same-encryption-domain dedupe lookup
+  -> same-domain dedupe lookup
   -> byte-verify duplicate candidate, or continue as unique
   -> first-party zstd-fast compression attempt
   -> store raw if compression does not win
-  -> encrypt stored representation
+  -> seal stored representation (encrypt, or checksum on a plaintext volume)
   -> checksum/authenticate metadata and physical record
   -> write new physical record
   -> commit new COW root
 ```
 
-The zero-detection step runs before compression, dedupe, encryption, and
+The zero-detection step runs before compression, dedupe, sealing, and
 physical allocation: an all-zero logical record never reaches those stages
 and never consumes a physical block (§19).
 
@@ -409,7 +432,7 @@ Read path:
 ```text
 read physical record
   -> verify physical checksum
-  -> decrypt
+  -> open the seal (decrypt, or verify the checksum on a plaintext volume)
   -> decompress if compressed
   -> verify logical hash
   -> return plaintext
@@ -422,8 +445,8 @@ verification before sharing, and rebuildable dedupe metadata.
 
 > **Cluster granularity (implementation).** The compression step operates on
 > whole aligned **clusters** of 16 logical blocks, never on a single block: a
-> compressed frame stored inside one fixed 1:1 block can free nothing (its
-> padding is encrypted, so not even a lower layer could reclaim it), so a
+> compressed frame stored inside one fixed 1:1 block can free nothing (the
+> whole block is written either way), so a
 > single-block record is always stored raw and only a whole-cluster write is
 > compressed — into strictly fewer contiguous physical blocks, recorded as one
 > compressed extent (§10). Zero detection still runs first: an all-zero
@@ -431,23 +454,46 @@ verification before sharing, and rebuildable dedupe metadata.
 
 ---
 
-## 7. Encryption
+## 7. Protection
 
-ARXFS volumes are always encrypted. `mkfs.arxfs` must fail if no valid key
-source is supplied by the installer, recovery flow, or storage policy service.
+A volume is **encrypted** or **plaintext**, chosen when it is formatted and
+declared by the superblock's protection word (§4). A shipped image's root is
+plaintext; the installer asks whether to encrypt it (`AGENTS.md` §11). The
+mount's one `Protection` value seals and opens every block, so no read or write
+path picks a primitive itself (`drivers/filesystem/arxfs/src/crypto.rs`).
 
-Rules:
+| | Encrypted | Plaintext |
+|---|---|---|
+| Name and content regions | ChaCha20-Poly1305, the block's address bound as associated data | A zero nonce, then CRC-32C over the block's address and the region |
+| Metadata blocks | HMAC-SHA256 in the authenticator field | CRC-32C in its first four bytes, the rest zero |
+| Superblock crypto header | The wrapped master key, its salt and wrap nonce | Zero, and checked to be |
+| Logical content hash | HMAC-SHA256 under the content-hash key | SHA-256 |
+| Dedupe domain | Derived from the master key | Derived from the volume UUID |
+| Refuses | Rot, a misdirected write, and a deliberate rewrite | Rot and a misdirected write, but not a deliberate rewrite |
 
-- no plaintext ARXFS format exists;
+An encrypted volume keys its logical content hash because the hash is stored
+outside the sealed region and in chunk records: unkeyed, it would let whoever
+holds the disk confirm a guessed file block by block, or search a low-entropy
+one offline. Every other layer above the seal — COW, mirroring, dedupe,
+compression, scrub, check and rescue — is the same in both.
+
+`ARXFS::format`, `open`, `open_read_only` and `rescue` take one
+`Keying::{Plaintext, Key(&VolumeKey)}`, and an open is held to the protection
+the volume declares: a key offered to a plaintext volume is refused
+`Unsupported`, so a caller expecting protection is never handed a volume without
+it, and no key offered to an encrypted one is refused `PermissionDenied`.
+
+Rules for the encrypted protection:
+
 - data, filenames, directory entries, and sensitive metadata are encrypted;
-- only the minimal unlock/discovery header may remain plaintext;
-- primitives come from `lib/crypto` only;
-- AES-256-XTS is preferred when hardware acceleration is available;
-- Adiantum or another approved wide-block mode is selected automatically when
-  AES is unsuitable;
-- encryption mode selection is automatic and not user-tunable;
+- only the minimal unlock/discovery header remains plaintext;
+- primitives come from `lib/crypto` only, and the protection is not tunable
+  beyond the choice made at format;
+- a region's nonce is derived from its key, its physical address and the
+  generation writing it, so no two seals under one key share a nonce;
 - dedupe is allowed only within the same encryption domain;
-- keys are never stored unwrapped on disk;
+- keys are never stored unwrapped on disk, and every derived key is zeroed when
+  it is dropped;
 - fresh per-volume key material (the master key, the wrapping salt, and the
   wrap nonce) and the per-volume UUID are drawn from the platform RNG
   (`lib/rng`'s cryptographically secure `CsRng`, `AGENTS.md` §1/§4), not
@@ -458,24 +504,24 @@ Rules:
 Key hierarchy:
 
 ```text
-volume wrapping key
-  -> domain key
-      -> content key
-      -> filename key
-      -> metadata authentication key
-      -> dedupe-domain key
+volume key (caller-supplied)
+  -> wrapping key (KDF) ----- unwraps -----> master key (on disk, AEAD-wrapped)
+                                               -> metadata-authentication key (HMAC)
+                                               -> filename key (AEAD)
+                                               -> content key (AEAD)
+                                               -> content-hash key (HMAC)
+                                               -> dedupe domain
 ```
 
 Secret-holding allocations inherit TAIRiX zero-on-free requirements.
 
 > **Implementation.** `ARXFS::format` takes an `EntropySource` seam onto the
 > platform RNG and draws the master key, wrapping salt, wrap nonce, and UUID
-> from it (`drivers/filesystem/arxfs/src/crypto.rs`). The driver never reaches
-> for a global RNG; the concrete `CsRng` is injected at the composition root,
-> mirroring the seam `kernel/mem`'s encrypted swap uses, so the driver stays
-> architecture-neutral (§17.2). Only the wrapping key remains a deterministic
-> KDF of the volume key and the random salt, because `open` must recompute it
-> to unseal the master key on mount.
+> from it. The driver never reaches for a global RNG; the concrete `CsRng` is
+> injected at the composition root, mirroring the seam `kernel/mem`'s encrypted
+> swap uses, so the driver stays architecture-neutral (§17.2). Only the
+> wrapping key remains a deterministic KDF of the volume key and the random
+> salt, because `open` must recompute it to unseal the master key on mount.
 
 ### Passphrase-derived volume key
 
@@ -498,15 +544,18 @@ count is bounded (`UNLOCK_MIN_ITERATIONS..=UNLOCK_MAX_ITERATIONS`) and a
 descriptor outside the range, with a wrong magic/KDF id, or a non-zero reserved
 byte is refused fail-closed (§2.9 / §5.4.3).
 
-This `VolumeKey`-from-passphrase layer is authored by the §11 installer flow
-(it sets the real passphrase when it provisions the user's encrypted root) and,
-for development, by the debug Pi image (a known passphrase, never shipped, like
-the debug `root` account). A **shippable installer image must not** bake in a
-known passphrase: the installed root is (re-)provisioned at install time under
-the operator's chosen passphrase. The descriptor format and derivation are the
-landed primitive; wiring the boot path to read the descriptor, prompt for the
-passphrase on the console, mount the root, and serve
-`/System/Security/Users` to login is staged (`plans/PI.md` P11).
+This layer is authored by the installer when its user chooses an encrypted
+root (`AGENTS.md` §11), and for development by a debug image built with
+`--encrypt-root` (a known passphrase, never shipped, like the debug `root`
+account). A shipped image's root is plaintext and carries no descriptor.
+`derive_volume_key` refuses an empty passphrase or one longer than
+`tairix_abi::boot::MAX_ROOT_PASSPHRASE_LEN`, the bound every boot prompt reads,
+so no root is provisioned under a passphrase no prompt accepts, and it returns
+the key already wrapped to be zeroed on drop. At boot the root's protection
+decides the path (`kernel/tairix-kernel/src/root_mount.rs`): a plaintext root
+mounts with no prompt, an encrypted one prompts for its passphrase, and a boot
+partition that disagrees with the root — a descriptor beside a plaintext root,
+or none beside an encrypted one — is refused.
 
 > **Hardware-backed key storage (future, §19.9).** Typing a passphrase at every
 > boot is the baseline available on any board. A platform with a hardware root
@@ -548,13 +597,14 @@ On verification failure, ARXFS must try redundant copies, repair bad copies
 from good copies, return an error if no valid copy exists, and record affected
 inode/range details for health, scrub, and check.
 
-> **Stage 5 implementation.** Of the data-record fields above, the **plaintext
-> logical hash** (SHA-256 of the block's plaintext content) and the
+> **Stage 5 implementation.** Of the data-record fields above, the **logical
+> hash** of the block's plaintext content — keyed HMAC-SHA256 on an encrypted
+> volume, SHA-256 on a plaintext one — and the
 > **physical checksum** (CRC-32C over the at-rest block, through the shared
 > `lib/crc32c` — a first-party error-detecting checksum with a portable
 > baseline and a hardware `crc32c*` / SSE4.2 path selected once at boot and
 > self-verified against the baseline) land in Stage 5, stored in a fixed
-> 36-byte trailer (32-byte SHA-256 logical hash + 4-byte CRC-32C) appended to
+> 36-byte trailer (32-byte logical hash + 4-byte CRC-32C) appended to
 > every file-data block after the Stage-4 crypto trailer
 > (`drivers/filesystem/arxfs/src/integrity.rs`).
 > The read path verifies the physical checksum first (media corruption is
@@ -680,7 +730,8 @@ open target exclusively
 read discard and health capabilities
 record initial health snapshot when available
 issue full-range discard when supported
-create encrypted ARXFS structures
+zero every superblock-ring copy
+create ARXFS structures under the chosen protection
 flush
 store health baseline
 ```
@@ -792,7 +843,7 @@ the same footprint.
   next mount finds free — free space is derived from the authoritative trees,
   so an interrupted pass leaks nothing. Like the allocation map it is
   single-copy and updated in place, never copy-on-written.
-- Every page is nonetheless **sealed** with the ordinary keyed block header,
+- Every page is nonetheless **sealed** with the ordinary block header,
   and the pass **writes every page before it reads any**, so a page that fails
   to authenticate at its own address under its array's owner is a device fault.
   The array's contents drive corrections to authoritative refcounts, so
@@ -1038,7 +1089,8 @@ remaining work — including the two prerequisites no stage names — is
 1. On-disk headers, superblock ring, transaction roots.
 2. COW metadata trees, inode tree, extent tree, free-space rebuild.
 3. Metadata authentication/checksums and duplicated critical metadata.
-4. Encrypted volume creation, key hierarchy, filename/data encryption.
+4. Volume protection: encrypted creation, the key hierarchy and filename/data
+   encryption, and the plaintext protection's checksum seals.
 5. Data records with physical checksum and logical hash.
 6. First-party TAIRiX compression codec and its ARXFS integration.
 7. Chunk table, refcounts, reverse refs, reflinks, dedupe index.
@@ -1079,7 +1131,9 @@ Minimum acceptance tests:
 - metadata bit flip detection and repair from duplicate copy;
 - data bit flip detection;
 - wrong key refuses mount;
-- plaintext ARXFS cannot be created;
+- each protection refuses to be opened as the other, and a protection word
+  naming neither refuses the mount;
+- a plaintext volume round-trips with no key and catches rotted content;
 - first-party zstd round-trip, corpus, malformed-input, and fuzz tests;
 - dedupe never merges unequal data;
 - dedupe index rebuild works;
@@ -1114,7 +1168,8 @@ Minimum acceptance tests:
 - extended attributes round-trip across every namespace and a remount, keys are
   case-sensitive, an unknown namespace and an oversize key/value/count are
   refused, a set that overflows its block fails closed leaving the prior set
-  intact, keys and values are encrypted at rest, a read-only mount refuses
+  intact, keys and values are encrypted at rest on an encrypted volume, a
+  read-only mount refuses
   mutation, a set is one transaction under crash replay, removing a file frees
   its attribute block, and a reflink's attributes are independent;
 - a sparse file allocates no data payload for a zero range, a non-zero write
@@ -1182,7 +1237,7 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 1 | Headers, superblock ring, transaction roots. | — | ✓ |
 | 2 | COW trees, inode tree, extent tree, free-space rebuild. | — | ✓ |
 | 3 | Metadata authentication and duplicated critical metadata. | — | ✓ |
-| 4 | Encrypted volume creation, keys, filename/data encryption. | — | ✓ |
+| 4 | Volume protection: encryption, keys, and the plaintext checksum seals. | — | ✓ |
 | 5 | Data records with physical checksum and logical hash. | — | ✓ |
 | 6 | First-party compression codec and its integration. | — | ✓ |
 | 7 | Chunks, refcounts, reverse refs, reflinks, dedupe index. | — | ✓ |
@@ -1201,8 +1256,8 @@ Status legend: `✓` done · `*` in progress · `!` blocked · (blank) not start
 | 20 | Snapshots. | `plans/ARXFS-SNAPSHOT.md` | |
 | 21 | FEC and multi-device redundancy. | `plans/ARXFS-FEC.md` | |
 
-**Stages 1–15 are shipped**, so ARXFS is a complete, encrypted, checksummed,
-compressing, deduplicating, sparse-aware, link-carrying, attribute-carrying
+**Stages 1–15 are shipped**, so ARXFS is a complete, checksummed,
+encrypted-or-plaintext, compressing, deduplicating, sparse-aware, link-carrying, attribute-carrying
 copy-on-write filesystem with online scrub, offline check, rescue, safe
 discard, and health tracking. Stages 16–21 are the named remaining work.
 
@@ -1223,27 +1278,35 @@ be adopted, taking each node from the walk's own path, and a two-cursor
 allocator keeps sequential data contiguous.
 
 **Redundancy and authentication (3).** Every metadata block is authenticated
-with a keyed HMAC-SHA256 over identity plus payload and stored in **two**
+over identity plus payload — a keyed HMAC-SHA256 on an encrypted volume, a
+CRC-32C on a plaintext one — and stored in **two**
 physical copies, the companion at `primary + 1`. One read path serves every
 metadata class: read the primary, fall back to the companion when the primary
 fails *or cannot be read*, and repair the bad copy from the good one. Both
 copies bad fails closed, never a panic.
 
-**Encryption (4).** There is no code path that lays out an unencrypted volume.
-`format` provisions a per-volume key hierarchy through `lib/crypto`: a master
-key drawn from the injected platform RNG, wrapped under a KDF of the
-caller-supplied volume key and stored only in wrapped form, deriving the
-metadata-authentication, filename, and content keys. A wrong key never
+**Protection (4).** A volume is encrypted or plaintext as `format` was told,
+and every open is held to that (§7); a volume is built only from an established
+protection, so nothing is sealed before it is known. An encrypted `format`
+provisions a per-volume key hierarchy through `lib/crypto`: a master key drawn
+from the injected platform RNG, wrapped under a KDF of the caller-supplied
+volume key and stored only in wrapped form, deriving the
+metadata-authentication, filename, content and content-hash keys. A wrong key never
 authenticates the wrapped blob, so the mount is refused with
 `PermissionDenied`. File data and directory-entry names are ChaCha20-Poly1305
-sealed per block, so a bit-flip is detected rather than mis-decrypted.
+sealed per block, so a bit-flip is detected rather than mis-decrypted. A
+plaintext volume seals the same regions with a CRC-32C bound to their address,
+which catches rot and a misdirected write but not a deliberate rewrite.
 
-**Data integrity (5).** Every data block carries a logical content hash
-(SHA-256 of the plaintext) and a fast physical checksum (CRC-32C through
+**Data integrity (5).** Every data block carries a logical content hash of its
+plaintext — HMAC-SHA256 under the content-hash key on an encrypted volume, so a
+stored hash confirms no guess about the plaintext to whoever holds the disk;
+SHA-256 on a plaintext one — and a fast physical checksum (CRC-32C through
 `lib/crc32c`). Write hashes the plaintext, seals, then checksums the at-rest
 block; read verifies the checksum first — media corruption is caught before the
-AEAD — then authenticates and decrypts, then verifies the logical hash. The
-three layers stay distinct (`integrity::DataFault`: `Physical`/`Aead`/`Logical`)
+seal — then opens the seal (authenticates and decrypts, or checks a plaintext
+volume's checksum), then verifies the logical hash. The
+three layers stay distinct (`integrity::DataFault`: `Physical`/`Seal`/`Logical`)
 because scrub and health classify against them.
 
 **Compression (6).** Always on, through the first-party `lib/compress` codec —
@@ -1305,7 +1368,7 @@ allocation, so a zero range never reaches the compressor or the dedupe index.
 Full behaviour: §19.
 
 **Extended metadata (14).** Every inode may carry a namespaced attribute set in
-one self-identifying `BlockType::Attr` block off its `attr_root`, encrypted and
+one self-identifying `BlockType::Attr` block off its `attr_root`, sealed and
 mirrored exactly like a directory block. The key grammar, bounds, and the
 foreign-metadata preset registry live once in `lib/fsmeta`. Full behaviour:
 §21; the preservation tooling is stage 16.
@@ -1361,9 +1424,9 @@ extent runs only, so a hole is never read, never faulted on, and needs no
 data-block recovery; check validates that the extent map is ordered and
 non-overlapping (§12). Space accounting separates logical size (includes
 holes) from allocated data (excludes holes, bar metadata overhead): a 10 MiB
-all-zero file reports a 10 MiB logical size and zero mapped data blocks. Because
-every volume is encrypted, a hole also leaves no plaintext data payload for the
-zero range; only the surrounding metadata is protected, as for any inode.
+all-zero file reports a 10 MiB logical size and zero mapped data blocks. A hole
+leaves no data payload for its zero range at all, so there is nothing for either
+protection to seal; only the surrounding metadata is, as for any inode.
 
 ---
 
@@ -1395,7 +1458,7 @@ second storage path to checksum, encrypt, scrub, relocate, or repair. What
 that inherits, deliberately:
 
 - **Checksummed and authenticated.** The target passes the §5/§8 data
-  pipeline — physical checksum, AEAD, logical hash — so a corrupt target is
+  pipeline — physical checksum, seal, logical hash — so a corrupt target is
   *detected* rather than resolved to some other path. This is the point of
   reusing the data path rather than packing the target into the inode record.
 - **Never compressed in practice.** Compression operates on whole aligned
@@ -1537,13 +1600,13 @@ Each inode gains an optional `attr_root`: the physical block of its
 extended-attribute set, `0` when it carries none. The set is one
 self-identifying, mirrored, copy-on-write metadata block
 (`BlockType::Attr`) reached from the inode, held to the same COW, integrity,
-redundancy, encryption, and authentication rules as every other ARXFS
-metadata block (§4, §5, §7, §8): it is authenticated by the keyed block
-header, stored in two physical copies (the §8 companion mirror,
-repaired-on-read), and its keys and values are **encrypted at rest** under the
-metadata (filename) key before authentication (encrypt-then-MAC), exactly like
-a directory block's entry names — so no plaintext attribute leaks on a
-raw-device read. Setting an attribute is one atomic transaction; a crash leaves
+redundancy, and protection rules as every other ARXFS metadata block (§4, §5,
+§7, §8): it is sealed by its block header, stored in two physical copies (the
+§8 companion mirror, repaired-on-read), and its keys and values are sealed as a
+directory block's entry names are — on an encrypted volume **encrypted at rest**
+under the metadata (filename) key before authentication (encrypt-then-MAC), so
+no plaintext attribute leaks on a raw-device read, and on a plaintext one
+stored as written under a checksum. Setting an attribute is one atomic transaction; a crash leaves
 the prior-or-new set, never a torn one (§14).
 
 An attribute is `(key, flags, value)`. Keys are namespaced,
@@ -1586,7 +1649,7 @@ self-identifying framing — serialises into a single metadata block on a
 4 KiB-block volume. A value larger than `VALUE_MAX` is **not** an extended
 attribute; it is a *named stream* (a fork — e.g. a classic-Mac resource fork),
 stored through the file-data pipeline (COW extents, checksummed, compressed,
-encrypted, dedupable, sparse-capable) under a `mac`/`tairix`-namespaced key, so
+sealed, dedupable, sparse-capable) under a `mac`/`tairix`-namespaced key, so
 large forks stay out of the inline set and reuse the whole data path with no
 second data path (§6–§10, §19). *(The named-stream content path is staged
 future work; see §18.)* On a smaller-block volume a set that does not fit one

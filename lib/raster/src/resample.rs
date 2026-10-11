@@ -83,7 +83,12 @@
 //! one, so assembling windows yields byte-for-byte the image one call would
 //! have produced and two windows agree exactly where they meet.
 //! [`resample`] is the whole-image case expressed through that same one
-//! implementation.
+//! implementation. [`crate::Surface::resample_window_into`] is the same
+//! window in the premultiplied space, written in place into a destination
+//! surface and spread across a job runner, which is how a desktop drawn
+//! smaller than its output reaches it a damaged rectangle at a time;
+//! [`resample_reach`] answers which destination samples a change to some
+//! source samples reaches, from the same footprints the filter reads.
 //!
 //! Both axes are windowed, which is what makes a *zoom* affordable: showing
 //! one screen-sized rectangle of a picture scaled to a hundred times its own
@@ -102,7 +107,9 @@
 //! a typed refusal rather than panicking or writing a partial result.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
+use tairix_parallel::JobRunner;
 use tairix_util::fallible;
 
 use crate::color::Pixel;
@@ -563,7 +570,8 @@ pub fn resample_window(
     // A validated byte length is a whole number of samples, so the ragged
     // tail this splits off is always empty.
     let (quads, _tail) = out.as_chunks_mut::<CHANNELS>();
-    filter_band(src, region, band, quads, &mut ResampleScratch::default())
+    let rows = quads.chunks_exact_mut((window.width as usize).max(1));
+    filter_band(src, region, band, rows, &mut ResampleScratch::default())
 }
 
 /// Resample `region` of the `width`×`height` premultiplied image `src` into
@@ -586,18 +594,7 @@ pub(crate) fn resample_pixels(
     out: &mut [Pixel],
     scratch: &mut ResampleScratch,
 ) -> Result<(), ResampleError> {
-    let (width, height, pixels) = src;
-    if width == 0 || height == 0 {
-        return Err(ResampleError::SourceSizeMismatch);
-    }
-    if pixels.len() != sample_count(width, height).ok_or(ResampleError::SourceSizeMismatch)? {
-        return Err(ResampleError::SourceSizeMismatch);
-    }
-    let image = PixelImage {
-        width,
-        height,
-        pixels,
-    };
+    let image = pixel_image(src)?;
     let (dest_width, dest_height) = dest;
     let band = Band {
         window: whole(dest_width, dest_height),
@@ -608,7 +605,153 @@ pub(crate) fn resample_pixels(
     if out.len() != samples {
         return Err(ResampleError::OutputSizeMismatch);
     }
-    filter_band(&image, region, band, out, scratch)
+    let rows = out.chunks_exact_mut((dest_width as usize).max(1));
+    filter_band(&image, region, band, rows, scratch)
+}
+
+/// The `width`×`height` image `src` names, refused unless it has an area and
+/// exactly that many pixels.
+fn pixel_image(
+    (width, height, pixels): (u32, u32, &[Pixel]),
+) -> Result<PixelImage<'_>, ResampleError> {
+    if width == 0 || height == 0 {
+        return Err(ResampleError::SourceSizeMismatch);
+    }
+    if pixels.len() != sample_count(width, height).ok_or(ResampleError::SourceSizeMismatch)? {
+        return Err(ResampleError::SourceSizeMismatch);
+    }
+    Ok(PixelImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Fewest destination pixels one band of a windowed resample carries before
+/// it is worth handing to another core.
+const MIN_PARALLEL_RESAMPLE_PX: usize = 16 * 1024;
+
+/// Resample the whole `width`×`height` premultiplied image `src` onto the
+/// whole of the `dest` image, writing only `window` of it, in bands of
+/// destination rows spread across `runner`, each in one slot of `scratch`.
+///
+/// Reached through
+/// [`Surface::resample_window_into`](crate::Surface::resample_window_into).
+/// A band computes its rows from the source and the plan alone, as every
+/// window does, so the split cannot change a pixel.
+///
+/// # Errors
+///
+/// As [`resample_pixels`], with [`ResampleError::OutputSizeMismatch`] for a
+/// `dest` whose length does not match its declared geometry, and
+/// [`ResampleError::OutOfMemory`] when `scratch` holds no slot.
+pub(crate) fn resample_pixels_window(
+    src: (u32, u32, &[Pixel]),
+    dest: (u32, u32, &mut [Pixel]),
+    window: Region,
+    scratch: &mut [ResampleScratch],
+    runner: &dyn JobRunner,
+) -> Result<(), ResampleError> {
+    let image = pixel_image(src)?;
+    let (dest_width, dest_height, out) = dest;
+    let band = Band {
+        window,
+        dest_width,
+        dest_height,
+    };
+    let region = whole(image.width, image.height);
+    validate(&image, region, band)?;
+    if out.len()
+        != sample_count(dest_width, dest_height).ok_or(ResampleError::OutputSizeMismatch)?
+    {
+        return Err(ResampleError::OutputSizeMismatch);
+    }
+    if scratch.is_empty() {
+        return Err(ResampleError::OutOfMemory);
+    }
+    let stride = dest_width as usize;
+    let (left, cols) = (window.x as usize, window.width as usize);
+    let rows = window.height as usize;
+    let count =
+        tairix_parallel::bands(runner, rows, MIN_PARALLEL_RESAMPLE_PX.div_ceil(cols.max(1)))
+            .min(scratch.len());
+    let per_band = crate::band_rows(rows, count).max(1);
+    let start = sample_offset(window.y, dest_width).ok_or(ResampleError::OutputSizeMismatch)?;
+    let end = sample_offset(window.y + window.height, dest_width)
+        .ok_or(ResampleError::OutputSizeMismatch)?;
+    let covered = out
+        .get_mut(start..end)
+        .ok_or(ResampleError::OutputSizeMismatch)?;
+    let pieces = covered
+        .chunks_mut(stride.saturating_mul(per_band as usize).max(1))
+        .zip(scratch.iter_mut())
+        .enumerate()
+        .map(|(index, (rows, scratch))| {
+            let top = window.y + per_band * u32::try_from(index).unwrap_or(u32::MAX);
+            let height = u32::try_from(rows.len() / stride.max(1)).unwrap_or(0);
+            (top, height, rows, scratch)
+        });
+    tairix_parallel::fold_drawn(
+        runner,
+        pieces,
+        Ok(()),
+        &|(top, band_height, rows, scratch): (u32, u32, &mut [Pixel], &mut ResampleScratch)| {
+            let band = Band {
+                window: Region {
+                    x: window.x,
+                    y: top,
+                    width: window.width,
+                    height: band_height,
+                },
+                dest_width,
+                dest_height,
+            };
+            let rows = rows
+                .chunks_exact_mut(stride.max(1))
+                .map(|row| row.get_mut(left..left + cols).unwrap_or_default());
+            filter_band(&image, region, band, rows, scratch)
+        },
+        &|first, second| first.and(second),
+    )
+}
+
+/// The destination samples a change to the source samples `source` reaches,
+/// on an axis resampled from `extent` samples to `dest_extent`: every sample
+/// whose filter reads one of them.
+///
+/// Answered from the footprints the filter itself reads, so a caller
+/// recomputing only what a change reaches recomputes every sample the full
+/// resample would have changed. Empty for an empty range or a degenerate axis.
+#[must_use]
+pub fn resample_reach(extent: u32, dest_extent: u32, source: Range<u32>) -> Range<u32> {
+    if source.is_empty() || extent == 0 || dest_extent == 0 {
+        return 0..0;
+    }
+    let (from, to) = (i64::from(source.start), i64::from(source.end));
+    let last = |dest_sample| {
+        let (first, taps) = footprint(dest_sample, extent, dest_extent);
+        first.saturating_add(i64::try_from(taps).unwrap_or(i64::MAX))
+    };
+    let low = partition_point(0..dest_extent, |dest_sample| last(dest_sample) <= from);
+    let high = partition_point(low..dest_extent, |dest_sample| {
+        footprint(dest_sample, extent, dest_extent).0 < to
+    });
+    low..high
+}
+
+/// The first value of `range` for which `before` is false, `before` holding
+/// for a prefix of it and failing for the rest.
+fn partition_point(range: Range<u32>, before: impl Fn(u32) -> bool) -> u32 {
+    let (mut low, mut high) = (range.start, range.end);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if before(mid) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
 }
 
 /// The rectangle covering the whole of a `width`×`height` image.
@@ -666,13 +809,16 @@ fn validate<R: Rows>(src: &R, region: Region, band: Band) -> Result<usize, Resam
 ///
 /// [`ResampleError::OutOfMemory`] when the allocator refuses one of the
 /// plan or scratch buffers, before any of `out` is written.
-fn filter_band<R: Rows>(
+fn filter_band<'o, R: Rows>(
     src: &R,
     region: Region,
     band: Band,
-    out: &mut [<R::Space as Space>::Sample],
+    out: impl Iterator<Item = &'o mut [<R::Space as Space>::Sample]>,
     scratch: &mut ResampleScratch,
-) -> Result<(), ResampleError> {
+) -> Result<(), ResampleError>
+where
+    <R::Space as Space>::Sample: 'o,
+{
     let window = band.window;
     let ResampleScratch {
         columns,
@@ -709,8 +855,7 @@ fn filter_band<R: Rows>(
     {
         return Err(ResampleError::OutOfMemory);
     }
-    let width = window.width as usize;
-    for (row, chunk) in (0..window.height as usize).zip(out.chunks_exact_mut(width.max(1))) {
+    for (row, chunk) in (0..window.height as usize).zip(out) {
         // The first contributing tap *writes* the accumulator and the rest
         // add to it, so a destination row never pays to clear a buffer it
         // is about to overwrite — which for a resample near 1:1, where a
@@ -760,19 +905,20 @@ fn filter_band<R: Rows>(
 /// A source row the plan names but the image does not hold is unreachable
 /// for a validated region; it leaves the destination row transparent
 /// rather than reporting samples it did not read.
-fn copy_rows<R: Rows>(
+fn copy_rows<'o, R: Rows>(
     src: &R,
     columns: &Axis,
     rows_plan: &Axis,
     window: Region,
-    out: &mut [<R::Space as Space>::Sample],
-) {
+    out: impl Iterator<Item = &'o mut [<R::Space as Space>::Sample]>,
+) where
+    <R::Space as Space>::Sample: 'o,
+{
     let left = columns.first_source() as usize;
     let right = left.saturating_add(window.width as usize);
     let blank = <R::Space as Space>::encode([0; CHANNELS]);
     let top = rows_plan.first_source();
-    for (row, chunk) in (0..window.height).zip(out.chunks_exact_mut((window.width as usize).max(1)))
-    {
+    for (row, chunk) in (0..window.height).zip(out) {
         let source_y = top.saturating_add(row);
         match src.row(source_y).and_then(|row| row.get(left..right)) {
             Some(span) => chunk.copy_from_slice(span),
@@ -1003,7 +1149,7 @@ fn area_weights(dest_sample: u32, extent: u32, dest_extent: u32, out: &mut [i32]
     let dest_wide = i128::from(dest_extent);
     let low = i128::from(dest_sample) * extent_wide;
     let high = low + extent_wide;
-    let first = low / dest_wide;
+    let first = area_first(dest_sample, extent, dest_extent);
     let mut written = 0;
     for (tap, slot) in out.iter_mut().enumerate() {
         let sample = first + i128::try_from(tap).unwrap_or(i128::MAX);
@@ -1031,11 +1177,7 @@ fn area_weights(dest_sample: u32, extent: u32, dest_extent: u32, out: &mut [i32]
 /// an exact copy instead of a half-pixel shift. Carried as a rational in
 /// halves of a source sample so the floor and the fraction are both exact.
 fn cubic_weights(dest_sample: u32, extent: u32, dest_extent: u32, out: &mut [i32]) -> (i64, usize) {
-    let denominator = 2 * i128::from(dest_extent);
-    let numerator =
-        (2 * i128::from(dest_sample) + 1) * i128::from(extent) - i128::from(dest_extent);
-    let floor = numerator.div_euclid(denominator);
-    let fraction = numerator.rem_euclid(denominator);
+    let (floor, fraction, denominator) = cubic_centre(dest_sample, extent, dest_extent);
     let one = 1i128 << CUBIC_SHIFT;
     let t = (fraction << CUBIC_SHIFT) / denominator;
     let t2 = (t * t) >> CUBIC_SHIFT;
@@ -1051,8 +1193,49 @@ fn cubic_weights(dest_sample: u32, extent: u32, dest_extent: u32, out: &mut [i32
     for (slot, value) in out.iter_mut().zip(doubled) {
         *slot = i32::try_from(value * WEIGHT_ONE_WIDE / (2 * one)).unwrap_or(0);
     }
-    let first = i64::try_from(floor).unwrap_or(i64::MAX).saturating_sub(1);
-    (first, CUBIC_TAPS)
+    (cubic_first(floor), CUBIC_TAPS)
+}
+
+/// The first source sample destination sample `dest_sample`'s area
+/// footprint covers.
+fn area_first(dest_sample: u32, extent: u32, dest_extent: u32) -> i128 {
+    i128::from(dest_sample) * i128::from(extent) / i128::from(dest_extent)
+}
+
+/// Where destination sample `dest_sample`'s centre falls among the source
+/// samples, as the floor and the fraction of a rational in halves of a
+/// source sample, and that rational's denominator.
+fn cubic_centre(dest_sample: u32, extent: u32, dest_extent: u32) -> (i128, i128, i128) {
+    let denominator = 2 * i128::from(dest_extent);
+    let numerator =
+        (2 * i128::from(dest_sample) + 1) * i128::from(extent) - i128::from(dest_extent);
+    (
+        numerator.div_euclid(denominator),
+        numerator.rem_euclid(denominator),
+        denominator,
+    )
+}
+
+/// The first tap of a cubic whose centre's floor is `floor`: the sample
+/// before it.
+fn cubic_first(floor: i128) -> i64 {
+    i64::try_from(floor).unwrap_or(i64::MAX).saturating_sub(1)
+}
+
+/// The first source sample destination sample `dest_sample` reads, as a
+/// local index before edge clamping, and how many it reads: the footprint
+/// [`Axis::plan`] weights, for [`resample_reach`] to invert.
+fn footprint(dest_sample: u32, extent: u32, dest_extent: u32) -> (i64, usize) {
+    if extent > dest_extent {
+        let first = area_first(dest_sample, extent, dest_extent);
+        (
+            i64::try_from(first).unwrap_or(i64::MAX),
+            area_taps(extent, dest_extent),
+        )
+    } else {
+        let (floor, _, _) = cubic_centre(dest_sample, extent, dest_extent);
+        (cubic_first(floor), CUBIC_TAPS)
+    }
 }
 
 /// Adjust `weights` so they sum to exactly [`WEIGHT_ONE`].

@@ -741,7 +741,10 @@ impl PaneMeasures {
     /// How broad pane `kind`'s plate stands, with the margin about it.
     fn width(self, kind: PaneKind, needs: Needs) -> u32 {
         match kind {
-            PaneKind::Tools => needs.tool_box + self.gap * 2,
+            // The dock's margin and the box's own inset, half a gap each side
+            // apiece, so a docked column fits its tools whatever the gap's
+            // parity.
+            PaneKind::Tools => needs.tool_box + 4 * (self.gap / 2),
             PaneKind::Colour | PaneKind::Adjustment => self.dock,
         }
     }

@@ -20,7 +20,7 @@
 //! painting.
 
 use tairix_abi::switchboard_ipc::{
-    MachineReport, SwitchboardCommand, SwitchboardRequest, TraySummary,
+    MachineReport, NetworkReport, SwitchboardCommand, SwitchboardRequest, TraySummary,
 };
 use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, SchedPriority, Signal};
@@ -158,6 +158,14 @@ pub trait ServiceHost {
     /// sample answers.
     fn publish_machine(&mut self, report: &MachineReport) -> Result<(), Errno>;
 
+    /// Publish `report` to the desktop session's Switchboard endpoint.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal or a transport failure;
+    /// [`Errno::WouldBlock`] is back-pressure the next sample answers.
+    fn publish_network(&mut self, report: &NetworkReport) -> Result<(), Errno>;
+
     /// Deliver `signal` to the process `pid`.
     ///
     /// # Errors
@@ -221,6 +229,29 @@ pub enum CycleOutcome {
     PublishFailed,
 }
 
+/// Where the network report stands with the session.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum NetworkOffer {
+    /// The session holds the report the readings make.
+    Settled,
+    /// The readings moved, or back-pressure held the report back: offer it
+    /// at the next sample.
+    Pending,
+    /// The session refused the report and the refusal was stated: offer it
+    /// at the next sample, stating nothing more until it is taken.
+    Refused,
+}
+
+impl NetworkOffer {
+    /// The interface readings moved, so the report may no longer be the
+    /// session's.
+    fn readings_moved(&mut self) {
+        if *self == Self::Settled {
+            *self = Self::Pending;
+        }
+    }
+}
+
 /// Log event for [`CycleOutcome::SessionRefused`], from this service's own
 /// reserved `21000..22000` range.
 ///
@@ -243,6 +274,12 @@ pub struct Service {
     sampled: bool,
     /// Whether a System Monitor screensaver is watching.
     watching: bool,
+    /// The network report the session last took, so an unchanged one is not
+    /// sent again.
+    network: Option<NetworkReport>,
+    /// Where the network report stands with the session. Pending at start, so
+    /// an instance that may not read the interfaces still says so once.
+    network_offer: NetworkOffer,
     /// Which bundle each window owner was launched from, as the session has
     /// reported it — the one fact the process list cannot carry.
     bundles: OwnerBundles,
@@ -286,6 +323,8 @@ impl Service {
             last_sample,
             sampled: false,
             watching: false,
+            network: None,
+            network_offer: NetworkOffer::Pending,
             bundles,
             home,
             next_sample_ns: 0,
@@ -326,6 +365,9 @@ impl Service {
         }
 
         let sample = self.sampler.sample(transport, now_ns);
+        if self.sampler.take_network_read() {
+            self.network_offer.readings_moved();
+        }
         for field in &sample.degradations {
             host.note_degradation(*field);
         }
@@ -347,10 +389,64 @@ impl Service {
         self.next_sample_ns = crate::schedule::advance_deadline(self.next_sample_ns, now_ns);
 
         let outcome = self.publish_summary(host, summary, now_ns);
-        if outcome == CycleOutcome::Continue && self.watching {
-            self.publish_machine(host);
+        if outcome == CycleOutcome::Continue {
+            self.publish_network(host);
+            if self.watching {
+                self.publish_machine(host);
+            }
         }
         outcome
+    }
+
+    /// The network notice moved: read the interfaces again now, rather than
+    /// at the next sample, and publish what changed.
+    pub fn network_moved(
+        &mut self,
+        host: &mut dyn ServiceHost,
+        transport: &dyn Transport,
+        authority: &dyn CapabilityQuery,
+    ) {
+        self.sampler.network_moved();
+        let mut degradations = alloc::vec::Vec::new();
+        self.sampler.refresh_network(transport, &mut degradations);
+        if self.sampler.take_network_read() {
+            self.network_offer.readings_moved();
+        }
+        for field in &degradations {
+            host.note_degradation(*field);
+        }
+        self.last_sample.net_facts = self.sampler.net_facts().map(<[_]>::to_vec);
+        self.last_sample.net_state = self.sampler.net_state().map(<[_]>::to_vec);
+        self.rebuild_if_shown(host, authority);
+        self.publish_network(host);
+    }
+
+    /// Publish the network report the interfaces in hand make, when they
+    /// moved and it is not the one the session already holds. A report the
+    /// session did not take stays pending, so the next sample offers it
+    /// again; a refusal is stated once until one is taken.
+    fn publish_network(&mut self, host: &mut dyn ServiceHost) {
+        if self.network_offer == NetworkOffer::Settled {
+            return;
+        }
+        let report = self.sampler.network_report();
+        if self.network == Some(report) {
+            self.network_offer = NetworkOffer::Settled;
+            return;
+        }
+        match host.publish_network(&report) {
+            Ok(()) => {
+                self.network = Some(report);
+                self.network_offer = NetworkOffer::Settled;
+            }
+            Err(Errno::WouldBlock) => {}
+            Err(refusal) => {
+                if self.network_offer != NetworkOffer::Refused {
+                    host.report_refusal("publish the network report", refusal);
+                }
+                self.network_offer = NetworkOffer::Refused;
+            }
+        }
     }
 
     /// Publish `summary` when the gate says it is worth publishing, and read

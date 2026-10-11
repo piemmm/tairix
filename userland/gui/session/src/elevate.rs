@@ -55,13 +55,6 @@ pub use tairix_controls::CREDENTIAL_WIDTH as WIN_WIDTH;
 /// The prompt window's height in logical pixels: the sheet's own.
 pub use tairix_controls::CREDENTIAL_HEIGHT as WIN_HEIGHT;
 
-/// Top-left of the prompt window, in screen pixels.
-///
-/// One deterministic spot, clear of the first window-cascade slots and of the
-/// confirmation prompt's, exported so a host-side observer drives the prompt
-/// where the session actually puts it rather than at a re-derived guess.
-pub const ELEVATE_ORIGIN: Point = Point::new(280, 160);
-
 /// One-shot: the credential prompt is on screen and holding the keyboard.
 ///
 /// Emitted when [`ElevatePrompt::ask`] successfully opens the window, so a
@@ -180,7 +173,7 @@ impl ElevatePrompt {
         let Some(surface) = render_surface(&sheet, compositor.scale(), shell) else {
             return false;
         };
-        let Some(wm) = shell.open_window(compositor, ELEVATE_ORIGIN, surface, TITLE) else {
+        let Some(wm) = shell.open_prompt(compositor, surface, TITLE) else {
             return false;
         };
         self.active = Some(ActivePrompt {

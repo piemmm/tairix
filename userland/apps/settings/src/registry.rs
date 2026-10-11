@@ -587,6 +587,9 @@ const APPEARANCE_SETTINGS: &[&str] = &[
     Setting::Scale.label(),
 ];
 
+/// The Displays pane's setting labels.
+const DISPLAY_SETTINGS: &[&str] = &[Setting::Resolution.label()];
+
 /// The Accessibility pane's setting labels: the shared rows, the pointer's
 /// own, and the aids that help find it.
 const ACCESSIBILITY_SETTINGS: &[&str] = &[
@@ -728,7 +731,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         group: Group::Look,
         panes: &[PaneRow {
             pane: Pane::Wallpaper,
-            name: "wallpaper",
+            name: tairix_wallpaper::WALLPAPER_PANE,
             title: "Wallpaper",
             icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Wallpaper)),
@@ -766,15 +769,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             name: "displays",
             title: "Displays",
             icon: None,
-            backing: PaneBacking::None {
-                missing: "This system cannot change how a screen is driven: the display \
-                          interface can be asked what a screen is doing and told to present to \
-                          it, but it lists no modes and sets none. The interface scale is set in \
-                          Appearance.",
-                needs: "Mode enumeration and mode setting in the display interface, with driver \
-                        support behind them.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Displays)),
+            settings: DISPLAY_SETTINGS,
         }],
     },
     CategoryRow {
@@ -841,7 +837,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
         panes: &[
             PaneRow {
                 pane: Pane::Ethernet,
-                name: "ethernet",
+                name: tairix_netconfig::SETTINGS_PANE,
                 title: "Ethernet",
                 icon: Some(IconKind::Ethernet),
                 backing: PaneBacking::Composed(PaneContent::Form(Composition::Ethernet)),

@@ -71,7 +71,7 @@ error taxonomy.
 
 ## Why it lives in `lib/`
 
-ARXFS compresses every file-data record before encrypting it
+ARXFS compresses every file-data record before sealing it
 (`docs/src/filesystem/arxfs-spec.md` §6, §10), and `AGENTS.md` §16.4 lists
 compression among the curated OS-provided shared-library classes, so the codec
 belongs in `lib/*` (§6) rather than buried in the filesystem driver. It is

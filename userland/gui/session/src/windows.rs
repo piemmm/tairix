@@ -46,8 +46,8 @@ use crate::launch::{
 use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
 use tairix_wm::{
-    Color, Compositor, InputResponse, Pixel, Point, Rect, Surface, Window, WindowControlKind,
-    WindowId,
+    Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Surface, Window,
+    WindowControlKind, WindowId,
 };
 
 use crate::apps::{AppBarBridge, BundleIndex};
@@ -61,6 +61,7 @@ use crate::layer::{
 use crate::lock::ScreenLock;
 use crate::menu::{ChainGeometry, ChainOwner, MenuChain, ModelRefused};
 use crate::picker::{PickerSlot, SessionPicker};
+use crate::resolution::ResolutionPrompt;
 use crate::session::DesktopSession;
 use crate::shell::DesktopShell;
 use crate::wallpaper::WallpaperService;
@@ -452,6 +453,41 @@ impl SessionWindows {
         }
     }
 
+    /// Fit every window to a screen that changed size, owing each application
+    /// whose window changed size its new extent.
+    pub fn refit(&mut self, compositor: &mut Compositor, work_area: Rect) {
+        let resized = compositor.refit_windows(work_area);
+        self.owe_resized(resized);
+    }
+
+    /// Put back where `before` says every window a change of size moved and
+    /// nothing has moved since — each still where `after` left it — owing
+    /// each application whose window changed size its new extent.
+    pub fn restore_placements(
+        &mut self,
+        compositor: &mut Compositor,
+        (before, after): (&[Placement], &[Placement]),
+        work_area: Rect,
+    ) {
+        let resized = compositor.restore_placements(before, after, work_area);
+        self.owe_resized(resized);
+    }
+
+    fn owe_resized(&mut self, resized: Vec<(WindowId, WindowSizeState, Rect)>) {
+        for (wm, state, client) in resized {
+            let Some(window_id) = self.ipc_id(wm) else {
+                continue;
+            };
+            self.note_sized(window_id, state, (client.width, client.height));
+            self.owed.push(WindowEvent::Resized {
+                window_id,
+                width_px: client.width,
+                height_px: client.height,
+                state,
+            });
+        }
+    }
+
     /// Window-channel ids that successfully presented since the last take,
     /// clearing the set so the next report decision starts fresh.
     pub fn take_presented(&mut self) -> Vec<u64> {
@@ -753,7 +789,8 @@ pub fn window_control_event(
 /// A drag is held to its window's range as it goes, so a range restated
 /// mid-drag binds the next sample; only the axis a drag is not moving is left
 /// where it was, so an `ended` drag is first held wholly inside the range, and
-/// the size settled on is the one it lands at. `None` for a window the session
+/// the size settled on is the one it lands at, announced like any other new
+/// size once the application has drawn at it. `None` for a window the session
 /// does not serve.
 #[must_use]
 pub fn resize_drag_event(
@@ -761,7 +798,7 @@ pub fn resize_drag_event(
     ended: bool,
     shell: &DesktopShell,
     compositor: &mut Compositor,
-    windows: &SessionWindows,
+    windows: &mut SessionWindows,
 ) -> Option<WindowEvent> {
     if ended {
         compositor.hold_window_in_size_range(wm, shell.work_area(compositor));
@@ -769,6 +806,9 @@ pub fn resize_drag_event(
     let window_id = windows.ipc_id(wm)?;
     let client = compositor.window_client_rect(wm)?;
     let state = compositor.window(wm)?.size_state();
+    if ended {
+        windows.note_sized(window_id, state, (client.width, client.height));
+    }
     Some(WindowEvent::Resized {
         window_id,
         width_px: client.width,
@@ -1145,13 +1185,13 @@ pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
 pub fn seat_held<S: DirectorySource, F: FnMut() -> S>(
     lock: &ScreenLock,
     picker: &SessionPicker<S, F>,
-    confirm: &ConfirmPrompt,
-    elevate: &ElevatePrompt,
+    (confirm, elevate, resolution): (&ConfirmPrompt, &ElevatePrompt, &ResolutionPrompt),
 ) -> bool {
     lock.is_locked()
         || picker.wm_id().is_some()
         || confirm.wm_id().is_some()
         || elevate.wm_id().is_some()
+        || resolution.is_open()
 }
 
 /// Where a window's own menu opens against the press `anchor` its application
@@ -1159,8 +1199,8 @@ pub fn seat_held<S: DirectorySource, F: FnMut() -> S>(
 ///
 /// Trailing with no clearance is what makes the press point a *corner* of the
 /// plate rather than a point inside it, and edge-adjacency is what a chain
-/// needs so travelling from a parent row into its own child crosses no dead
-/// space. Named here because two independent readers need the same values:
+/// needs so travelling from a parent row into its own child crosses only the
+/// parent's rim. Named here because two independent readers need the same values:
 /// the session, which places the chain, and the QEMU vertical, which
 /// reconstructs where a row was drawn in order to click it.
 #[must_use]
@@ -2095,11 +2135,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 /// there.
 pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
     let screen = compositor.screen_rect();
+    let output = compositor.mode();
     let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
     let theme = compositor.theme();
     let fonts = theme.fonts();
     Ok(
         DesktopInfo::new(screen.width, screen.height, scale, theme.appearance())?
+            .with_output(output.width_px, output.height_px)?
             .with_axes(
                 theme.contrast(),
                 theme.density(),
@@ -5278,7 +5320,7 @@ mod tests {
             })
         );
         assert_eq!(
-            resize_drag_event(wm, true, &shell, &mut compositor, &windows),
+            resize_drag_event(wm, true, &shell, &mut compositor, &mut windows),
             Some(WindowEvent::Resized {
                 window_id: 7,
                 width_px: 160,
@@ -5286,6 +5328,48 @@ mod tests {
                 state: WindowSizeState::Restored,
             }),
             "the drag settles where the live range left it"
+        );
+    }
+
+    /// An interactive resize is announced by the frame that shows the window at
+    /// the size the drag settled on, exactly as a size state is; the samples
+    /// before the release announce nothing.
+    #[test]
+    fn a_resize_drag_is_announced_once_the_frame_at_its_settled_size_is_on_screen() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let wm = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            open_one_full(host, 7, 200, 120, RESIZABLE)
+        });
+        let visible = |_| true;
+        assert_eq!(on_screen(&mut windows, visible).0, [7]);
+
+        drag_corner(&mut shell, &mut compositor, wm, Point::new(40, -30));
+        let _ = resize_drag_event(wm, false, &shell, &mut compositor, &mut windows);
+        assert_eq!(on_screen(&mut windows, visible).2, Vec::<Sized>::new());
+
+        shell.handle(
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        let _ = resize_drag_event(wm, true, &shell, &mut compositor, &mut windows);
+        assert_eq!(
+            on_screen(&mut windows, visible).2,
+            Vec::<Sized>::new(),
+            "the display still shows the frame drawn at the old size"
+        );
+        hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            let m = mode(240, 90, DisplayFormat::Rgba8888);
+            let frame = alloc::vec![0u8; 240 * 90 * 4];
+            host.window_presented(7, &m, &frame, &whole(&m))
+                .expect("presents");
+        });
+        assert_eq!(
+            on_screen(&mut windows, visible).2,
+            [(7, WindowSizeState::Restored, (240, 90))]
         );
     }
 

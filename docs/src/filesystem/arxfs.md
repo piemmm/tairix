@@ -44,7 +44,8 @@ validates the geometry from the selected superblock slot.
 
 The superblock also carries an **incompatible-feature word**: a plaintext
 bitmap of on-disk structures a reader must implement to mount at all, covered
-by the block's keyed authenticator. A volume declaring a bit this build does
+by the block's authenticator. Beside it sits the **protection word** that
+declares the volume encrypted or plaintext (see [Protection](#protection)). A volume declaring a bit this build does
 not know is refused with `DriverError::Unsupported` — refused with its reason
 rather than mounted and misread. Two bits are defined, `symlinks` and
 `hardlinks`, and a volume gains each from its first use of the structure it
@@ -54,13 +55,14 @@ readable by a build without the feature.
 Every **metadata** block is self-identifying (`AGENTS.md` §8 block
 identity): its first 128 bytes carry a magic, block type, format version,
 the volume UUID, an owner object, a generation, its logical and physical
-address, and a **keyed authenticator** — an HMAC-SHA256 tag computed
-through `lib/crypto` (`AGENTS.md` §2.12) over identity + payload. Decoding
-verifies all of that against the address the reader *expected*, so a stale,
-misdirected, wrong-type, torn, bit-rotted, or wrong-key block is rejected at
-decode time and the mount fails closed (`AGENTS.md` §5.4). Raw file-data
-blocks carry no header; their tail holds a 28-byte per-block crypto trailer
-(a 12-byte nonce and a 16-byte AEAD tag, see [Encryption](#encryption)), a
+address, and an **authenticator** over identity + payload — an HMAC-SHA256
+tag through `lib/crypto` (`AGENTS.md` §2.12) on an encrypted volume, a CRC-32C
+on a plaintext one. Decoding verifies all of that against the address the
+reader *expected*, so a stale, misdirected, wrong-type, torn, bit-rotted, or
+wrong-key block is rejected at decode time and the mount fails closed
+(`AGENTS.md` §5.4). Raw file-data blocks carry no header; their tail holds a
+28-byte per-block seal trailer (a 12-byte nonce and a 16-byte AEAD tag, or a
+plaintext volume's checksum; see [Protection](#protection)), a
 5-byte compression descriptor (see [Compression](#compression)), and a 36-byte
 **data-integrity trailer** (a 32-byte logical content hash and a 4-byte
 physical checksum, see [Data integrity](#data-integrity)), so a data block
@@ -75,8 +77,9 @@ whole volume and a large contiguous write collapses to a single extent
 record. Directories are block-addressed payloads of fixed-width **263-byte
 slots** (an 8-byte header — a 4-byte `inode` number and 4-byte `name_len` —
 plus a maximum-length 255-byte name) reached through the same extent map; the
-entry names are encrypted at rest and the block reserves the same 28-byte
-crypto trailer at its tail (see [Encryption](#encryption)). Names follow
+entry names are sealed as the volume is — encrypted at rest on an encrypted
+volume — and the block reserves the same 28-byte seal trailer at its tail (see
+[Protection](#protection)). Names follow
 ext4's rules — 1..=255 bytes, with `/` and NUL the only forbidden bytes —
 and are compared byte-for-byte, so they are **case-sensitive**; a directory
 grows by whole copy-on-write blocks as entries are added (one slot per
@@ -96,26 +99,27 @@ shrink is not offered). See [`arxfs-spec.md` §13](./arxfs-spec.md).
 
 > **Stage 5 of the [specification](./arxfs-spec.md).** The volume is a
 > complete, mountable copy-on-write filesystem whose metadata scales through
-> B-trees, is **authenticated** with a `lib/crypto` keyed MAC stored in **two
-> physical copies** repaired from each other, is **encrypted at rest** under a
-> real per-volume key hierarchy (see [Encryption](#encryption)), and now carries
-> a per-data-record **integrity field** — a logical content hash plus a fast
+> B-trees and is stored in **two physical copies** repaired from each other,
+> **sealed** as its protection says — a `lib/crypto` keyed MAC and at-rest
+> encryption under a per-volume key hierarchy, or CRC-32C checksums on a
+> plaintext volume (see [Protection](#protection)) — and now carries a
+> per-data-record **integrity field** — a logical content hash plus a fast
 > physical checksum, verified on every read (see [Data integrity](#data-integrity)).
-> ARXFS has no plaintext layout. Compression and dedupe are later stages.
+> Compression and dedupe are later stages.
 > Free space is now tracked by an on-disk paged allocation map, updated in
 > place and adopted at mount rather than rebuilt (see *Copy-on-write metadata
 > trees* below).
 
 ## Metadata authentication and redundancy (`arxfs-spec.md` §5, §8)
 
-Each metadata block is sealed with a **keyed authenticator** (HMAC-SHA256
-through `lib/crypto`, `AGENTS.md` §2.12 — crypto is the standing "don't roll
-your own" exception) covering the block's identity *and* its payload, so the
-tag detects not only a flipped payload byte but a stale, misdirected,
-wrong-type, torn, or wrong-key block. The metadata-authentication key is the
-volume's, derived from the per-volume master key (see
-[Encryption](#encryption)); a volume opened with the wrong key never recovers
-it and the mount is refused, fail-closed.
+Each metadata block is sealed with an **authenticator** covering the block's
+identity *and* its payload — HMAC-SHA256 through `lib/crypto` on an encrypted
+volume (`AGENTS.md` §2.12 — crypto is the standing "don't roll your own"
+exception), CRC-32C on a plaintext one — so the tag detects not only a flipped
+payload byte but a stale, misdirected, wrong-type, or torn block. On an
+encrypted volume the metadata-authentication key is derived from the
+per-volume master key (see [Protection](#protection)); a volume opened with the
+wrong key never recovers it and the mount is refused, fail-closed.
 
 Every metadata block is stored in **two physical copies** — a primary and a
 companion mirror at the adjacent block (`companion = primary + 1`), so
@@ -131,15 +135,28 @@ file's data blocks are single-copy and carry no header. Because every
 metadata block obeys the one `primary + 1` rule, there is a single
 redundancy mechanism rather than one per structure (`AGENTS.md` §2.2).
 
-## Encryption
+## Protection
 
-ARXFS is **encrypted by default and has no plaintext mode**
-(`arxfs-spec.md` §5, §7): there is no code path that lays out an unencrypted
-volume. Every volume is created with a caller-supplied **volume key** (the
-installer's, recovery flow's, or storage policy service's key material):
-`ARXFS::format(block, inode_hint, &volume_key, &mut entropy)` provisions the
-per-volume key hierarchy and `ARXFS::open(block, &volume_key)` recovers it.
-The `entropy` argument is the `EntropySource` seam onto the platform RNG
+A volume is **encrypted** or **plaintext** (`arxfs-spec.md` §4, §7), chosen
+when it is formatted and declared by the superblock's protection word. A
+shipped image's root is plaintext; whether to encrypt an installation is the
+installer's question. `ARXFS::format(block, inode_hint, keying, &mut entropy)`
+takes `Keying::Key(&volume_key)` — the installer's, recovery flow's, or storage
+policy service's key material — or `Keying::Plaintext`, and `open`,
+`open_read_only` and `rescue` take the same, held to the protection the volume
+declares: a key offered to a plaintext volume is refused `Unsupported`, none
+offered to an encrypted one `PermissionDenied`. `ARXFS::probe_protection` reads
+the word without a key, so a boot path knows whether to ask for one; the open
+that follows verifies it.
+
+A plaintext volume stores no key material: every metadata authenticator is a
+CRC-32C, and every name and content region carries a zero nonce and a CRC-32C
+over its physical address and bytes, so rot and a misdirected write are caught
+as on an encrypted volume, but a deliberate rewrite is not. Everything above
+the seal — the logical hash, COW, mirroring, dedupe, compression, scrub, check
+and rescue — is the same in both.
+
+On an encrypted volume the `entropy` argument is the `EntropySource` seam onto the platform RNG
 (`lib/rng`'s `CsRng`, `AGENTS.md` §1/§4); `ARXFS` never reaches for a global
 RNG itself, the concrete generator is injected at the composition root.
 
@@ -160,7 +177,7 @@ minimal unlock header the spec permits). `open` derives the wrapping key from
 the supplied volume key, unseals the master key, and derives the working
 keys. A **wrong key** never authenticates the wrapped blob, so the mount is
 refused with `PermissionDenied`, fail-closed (`AGENTS.md` §5.4), never a panic
-(§2.9).
+(§2.9). Every key is zeroed when it is dropped.
 
 - **File data** is encrypted per block under the content key with
   ChaCha20-Poly1305 (`lib/crypto/src/aead.rs`); the block's 28-byte trailer
@@ -194,17 +211,18 @@ Stage-4 AEAD tag: the AEAD proves *authenticity* of the ciphertext, while this
 field gives a cheap media-corruption check plus a content-addressable name for
 the plaintext.
 
-- **Logical content hash** (32 bytes). The hash of the block's decrypted
-  content slot, taken before encryption on write and recomputed after
-  decryption on read: the plaintext for a raw record — identical content
-  hashes identically, the seam Stage 7 deduplication keys on (`arxfs-spec.md`
-  §9) — or the block's slice of the compressed frame for a cluster block,
-  whose end-to-end plaintext integrity then rests on the AEAD plus the
-  exact-size decompression of the authenticated frame.
-- **Physical checksum** (8 bytes). A fast, non-cryptographic checksum over the
-  block's at-rest bytes (ciphertext + crypto trailer + stored-form descriptor +
-  logical hash). It is verified **first** on read, so media or transport bit
-  rot is caught cheaply before the AEAD runs.
+- **Logical content hash** (32 bytes). The hash of the block's opened content
+  slot, taken before sealing on write and recomputed after opening on read:
+  the plaintext for a raw record — identical content hashes identically, the
+  seam deduplication keys on (`arxfs-spec.md` §9) — or the block's slice of
+  the compressed frame for a cluster block. An encrypted volume keys it
+  (HMAC-SHA256 under a key derived from the master key), so the stored hash
+  confirms no guessed plaintext to whoever holds the disk; a plaintext volume
+  stores its SHA-256.
+- **Physical checksum** (4 bytes). A CRC-32C over the block's stored bytes
+  (sealed content + seal trailer + stored-form descriptor + logical hash). It
+  is verified **first** on read, so media or transport bit rot is caught
+  cheaply before the seal is opened.
 
 The write path is the spec's: take the logical hash of the content slot,
 encrypt it (a whole-cluster write compresses first — see *Compression*
@@ -213,12 +231,13 @@ the physical checksum, decrypt-and-authenticate, verify the logical hash,
 and decompress a compressed cluster's assembled frame.
 Each layer fails closed to a `DriverError` (never a panic, `AGENTS.md` §5.4 /
 §2.9) and is kept internally distinct (`integrity::DataFault` —
-`Physical`/`Aead`/`Logical`) so a media fault is not confused with a tamper or
+`Physical`/`Seal`/`Logical`) so a media fault is not confused with a tamper or
 a plaintext mismatch, the seam Stage 8 scrub and Stage 11 health will record
 against.
 
-The logical hash is computed through `lib/crypto`'s audited SHA-256
-(`AGENTS.md` §2.12 — never hand-rolled). The specification's fixed-v1 constant
+The logical hash is computed through `lib/crypto`'s audited SHA-256 — keyed
+as HMAC-SHA256 on an encrypted volume (`AGENTS.md` §2.12 — never
+hand-rolled). The specification's fixed-v1 constant
 names BLAKE3-256; `lib/crypto` exposes only the audited RustCrypto SHA-256, and
 importing a `blake3` crate would widen the trusted computing base with a SIMD
 backend that does not build cleanly on the bare-metal kernel targets (the same
@@ -227,9 +246,9 @@ freestanding-SIMD problem already pinned around for `chacha20` and
 the integrity-and-dedupe role identically, so ARXFS v1 uses it; `AGENTS.md`
 §2.12 (use the audited `lib/crypto` hash, do not hand-roll or import an unvetted
 one) takes precedence over the spec's named primitive. The physical checksum is
-a first-party FNV-1a — a checksum is not a cryptographic primitive, so §2.12
-does not bar rolling it, and the block's keyed authenticity still rests on the
-AEAD and the metadata MAC.
+CRC-32C through the shared `lib/crc32c` — a checksum is not a cryptographic
+primitive, so §2.12 does not bar rolling it — and on an encrypted volume the
+block's keyed authenticity still rests on the AEAD and the metadata MAC.
 
 ## Serving reads: one device request per contiguous run
 
@@ -315,8 +334,8 @@ allowed missed opportunity (§9 — merging is never risked).
 
 Deduplication is **mandatory and exact** (`arxfs-spec.md` §1, §9). A physical
 data record — a **chunk** — may be **shared** by more than one `(file, logical
-block)`, and it keys on the Stage-5 **logical hash** (the SHA-256 of the
-plaintext). Sharing is **exact and verified**: a candidate is taken only after
+block)`, and it keys on the **logical hash** (the keyed hash of the
+plaintext on an encrypted volume). Sharing is **exact and verified**: a candidate is taken only after
 its stored bytes are confirmed **byte-identical** to the incoming record, so a
 missed duplicate is acceptable but unequal data is never merged (§9 — merging
 unequal data is corruption).
@@ -326,7 +345,7 @@ Two copy-on-write trees back it, both the **same** generic `src/btree.rs`
 alongside the inode-tree root:
 
 - **Chunk/refcount tree.** Keyed by a chunk's physical block; the value is the
-  referrer count, the encryption domain, the plaintext logical hash, and the
+  referrer count, the encryption domain, the logical hash, and the
   logical length. It is authoritative for safe freeing.
 - **Reverse-reference tree.** Keyed by the same physical block; the value is the
   capped list of `(inode, logical block)` referrers, needed by scrub / check /
@@ -363,11 +382,10 @@ leaving the other sharer's compressed extent intact. It is an inherent driver
 operation, not a widening of a frozen `Filesystem*` ABI trait (`AGENTS.md`
 §2.4).
 
-Dedupe is **scoped to the encryption domain** (`arxfs-spec.md` §7): the domain
-(derived from the volume's master key) is carried in every chunk record and in
-the index key, so dedupe can never cross a domain. With a single volume key
-today there is exactly one domain, but the keying already enforces the rule for
-when multiple domains arrive.
+Dedupe is **scoped to the volume's domain** (`arxfs-spec.md` §7): the domain
+— derived from the master key on an encrypted volume, from the volume UUID on a
+plaintext one — is carried in every chunk record and in the index key, so
+dedupe can never cross a domain.
 
 ## Sparse files (`arxfs-spec.md` §19)
 
@@ -397,15 +415,15 @@ Reads of a hole synthesise zero bytes with no disk I/O. Extending a file (a
 larger `truncate`, or a write past EOF) leaves the new range a hole; shrinking
 frees the data extents beyond the new EOF and removed holes need no free. Scrub,
 check, and rescue iterate only the mapped extent runs, so a hole is never read
-and needs no data-block recovery. Because every volume is encrypted, a hole also
-leaves no plaintext data payload for the zero range.
+and needs no data-block recovery. A hole leaves no data payload for the zero
+range at all.
 
 ## Symbolic links (`arxfs-spec.md` §20)
 
 A link is an inode of on-disk kind `3` (beside `1` for a directory and `2` for
 a regular file) whose **stored target is its node data**: it goes through the
-ordinary file write path, so the target is checksummed, authenticated,
-encrypted, and dedupe-eligible exactly like file content, with no second
+ordinary file write path, so the target is checksummed, sealed, and
+dedupe-eligible exactly like file content, with no second
 storage path to maintain. The driver's `kind` is an enum rather than a
 directory/not-directory boolean, so every site that once treated "not a
 directory" as "a regular file" has to say what it means for a link.
@@ -449,7 +467,7 @@ What scrub verifies, and what it repairs versus records:
 - **Metadata (verify + repair).** Every live metadata block — the committed
   superblock slot, the transaction root, the inode and per-file extent
   B-trees, and the chunk and reverse-reference trees — is authenticated in
-  **both** physical copies. A copy that fails the keyed authenticator is
+  **both** physical copies. A copy that fails its authenticator is
   **repaired from its good companion** (the same redundancy seam `open` uses),
   and the repair is counted. There is exactly one copy-repair site
   (`ARXFS::repair_meta_copy`, `AGENTS.md` §2.2), so a read-only handle's
@@ -584,9 +602,11 @@ function (it takes the block device, not a mounted handle), capability-gated on
 `CAP_FS_MOUNT`, and **read-only** on the damaged volume — the repair-on-read
 paths are suppressed for its duration, so it never writes to the device. It:
 
-1. recovers the volume keys from a surviving superblock **discovery header**
-   (the wrapped master key, plaintext at rest), so a wounded superblock ring
-   does not stop key recovery;
+1. establishes the volume's protection from a surviving superblock
+   **discovery header** — for an encrypted volume, the wrapped master key,
+   plaintext at rest — so a wounded superblock ring does not stop it. It takes
+   the same `Keying` as `open` and is refused a volume that is not what that
+   keying expects;
 2. **scans** every physical block for a self-identifying §8 transaction root
    whose inline commit record validates (`TxnRoot::decode_any`, which needs no
    externally-supplied generation), and picks the **highest-generation** valid
@@ -653,7 +673,7 @@ skipped as still-in-use, and blocks deferred to a later pass), logging its
 outcome with a stable event ID in the `arxfs` `12000..13000` range.
 
 **mkfs-time discard.** On a discard-capable device, `format` issues a
-full-range discard before laying down the encrypted structures (open device →
+full-range discard before laying down the volume's structures (open device →
 read discard capability → full-range discard when supported → create structures
 → flush). A device without discard support is recorded, not failed: a fresh
 volume is still created and mounts.
@@ -1090,8 +1110,13 @@ panic) while the right key still mounts, a distinctive filename and file
 content being **absent from the raw on-disk bytes** (no plaintext at rest),
 a filename and file data **round-tripping through encryption across a
 remount**, and a **bit-flip in an encrypted data block being detected** on
-read; the Stage-5 data-integrity acceptance tests — a data block's three
-integrity layers (physical checksum, AEAD, logical hash) each detecting
+read; the plaintext-protection tests — a volume with no key keeping its files
+across a remount, storing names and content as written where an encrypted one
+never does, refusing to be opened as the other protection, catching rotted
+content, serving a rotted superblock from its mirror, refusing a protection
+word naming neither protection, and checking and rescuing with no key; the
+Stage-5 data-integrity acceptance tests — a data block's three integrity
+layers (physical checksum, seal, logical hash) each detecting
 **its own** class of corruption and all failing closed, identical plaintext
 sharing **one logical hash** while different plaintext differs (the dedupe
 seam) — identical content now also sharing one physical chunk (refcount 2)
@@ -1199,8 +1224,9 @@ harness (`fuzz_mount`, `AGENTS.md` §19.6): a per-byte flip sweep over a
 valid image (which also drives the authenticate-then-fall-back-to-mirror
 path), a duplicated-copy sweep that corrupts *both* copies of each block
 pair, and a per-run-seeded PRNG all drive `ARXFS::open` over arbitrary bytes,
-asserting it never panics and fails closed. Because each input mounts and
-fully re-checks an encrypted volume — far heavier than a byte decoder — a
+asserting it never panics and fails closed, over an encrypted and a plaintext
+base image alike. Because each input mounts and fully re-checks a volume — far
+heavier than a byte decoder — a
 plain `cargo test` (a developer machine and the per-PR `ci` gate, no budget)
 runs a single quick smoke pass: a small, seed-driven sample of the byte sweep
 plus a bounded PRNG batch, from a fresh, logged seed; the time-limited GitHub
@@ -1222,7 +1248,7 @@ additionally runs `health`, so the sweep drives the **health-baseline** record
 decode path too, asserting it never panics and fails closed. Since Stage 12
 each successful mount additionally **walks every reachable directory**
 (`read_dir`/`lookup`, bounded), driving the spec's required "directory decode"
-target — the encrypted dirent payload the free-space rebuild walk never
+target — the sealed dirent payload the free-space rebuild walk never
 reads — and asserting it never panics and fails closed. The
 first-party compression codec
 has its own `cargo xtask fuzz` harness (`fuzz_compress`, in `lib/compress`):

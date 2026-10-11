@@ -1899,7 +1899,7 @@ impl<'a> Init<'a> {
     /// narrow the running system to it.
     ///
     /// Pre-unlock the manager obeys the image's enrolment layer alone, because
-    /// the override document lives on the encrypted root. This is the moment
+    /// the override document lives on the root volume. This is the moment
     /// that narrowing arrives: every service the overrides disable and this
     /// boot started is stopped, each recorded with
     /// [`events::SERVICE_ENROLMENT_REVOKED`]. Nothing is *started* here — an
@@ -5174,7 +5174,7 @@ mod tests {
     #[test]
     fn adopting_a_late_override_layer_stops_what_it_disables() {
         // Pre-unlock the manager obeys the image's layer alone, because the
-        // administrator's document lives on the encrypted root. This is the
+        // administrator's document lives on the root volume. This is the
         // moment that narrowing arrives.
         use tairix_enrolment::EnrolmentOverride;
         let spawner = MockSpawner::new();

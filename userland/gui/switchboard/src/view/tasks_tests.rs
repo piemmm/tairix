@@ -904,10 +904,7 @@ fn a_pointer_over_the_pinned_headings_hovers_no_row_scrolled_beneath_them() {
         b,
         Scale::ONE,
         &theme,
-        &tairix_input::InputEvent::PointerScrolled {
-            dx: 0,
-            dy: i32::try_from(half).unwrap_or(0) * 5 / 2,
-        },
+        &crate::view::test_support::wheel_pixels(half),
     );
     assert_eq!(sb.scroll_offset(), u64::from(half));
 

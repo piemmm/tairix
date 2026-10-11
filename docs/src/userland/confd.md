@@ -237,11 +237,12 @@ would let an administrator or a package plant one.
 ### What protects the master secret
 
 The master secret is stored as drawn, in the gated store root: owned by this
-service, mode `0700`, gated on `CAP_APPDATA_ADMIN`. At rest it is protected by
-the encrypted root volume, which ARXFS has no plaintext mode for. So secrets are
-exactly as safe at rest as the volume, they survive an administrative password
-reset, and an application — including the account's own shell — cannot reach the
-record at all.
+service, mode `0700`, gated on `CAP_APPDATA_ADMIN`. At rest it is exactly as
+safe as the root volume: encrypted when the installation chose an encrypted
+root, and readable by whoever holds the disk when it chose a plaintext one,
+which is the shipped default. Either way the secrets survive an administrative
+password reset, and an application — including the account's own shell —
+cannot reach the record at all.
 
 It is deliberately **not** wrapped under a second key today, and there is
 deliberately no protector abstraction: at this stage there is no second secret

@@ -191,19 +191,13 @@ bundles, under a stable `ThemeId`:
   `resize_grabber_extent`, `resize_edge_grab`, `resize_corner_grab`,
   `hit_slop`).
   - `control_inset` is the room a control plate keeps for a **line of type**,
-    `10` logical pixels in both themes: the label's horizontal budget is the
-    plate less the frame border and this inset either side, so text stays clear
-    of the rounded corners. It is *not* a vertical budget — it exceeds what the
-    theme's own `control_height` can spare around a line of body type — and charging
-    it vertically withheld a plate's whole content rather than clipping it, so
-    every button laid out on a text row pitch drew as an empty plate (the
-    Properties and "Open With…" windows). The vertical budget is the plate less
-    the frame it must not overlap; the content is centred in it and the surface
-    clips, which is what every other blit in the crate does. It was also
-    sizing the glyph of an *icon-and-label* plate: on the 28px control plate
-    that left a 6px glyph beside 18px type — the same "tiny icon" defect
-    `icon_content_side` had already fixed for icon-*only* plates, still present
-    in this arm. The glyph is now the height of the type beside it.
+    `9` logical pixels at normal density in both themes: the label's horizontal
+    budget is the plate less the frame border and this inset either side, so
+    text stays clear of the rounded corners. It is *not* a vertical budget,
+    because it exceeds what `control_height` can spare around a line of body
+    type: the vertical budget is the plate less the frame it must not overlap,
+    the content is centred in it, and the surface clips. Beside a label, a
+    plate's glyph is the height of the type.
   - `taskbar_margin` is how far the taskbar stands off the screen edges it
     faces, `5` logical pixels in both themes. The bar floats: the margin
     applies to the three sides facing a screen edge — for a bottom bar the
@@ -538,13 +532,24 @@ whenever the selection or the axes move, never per call: `active` is read on
 every paint and every hit test, and re-deriving a metric table there would
 put the axis arithmetic on the hot path.
 
-`Theme::with_axes` is the one place an axis reaches the pixels. Contrast and
-the motion policy are carried as they are; **density** is applied by deriving
+`Theme::with_axes` is the one place an axis reaches the pixels. The motion
+policy is carried as it is; **density** is applied by deriving
 the theme's own metric table at that density (`Metrics::at_density`) rather
 than swapping in a second table. Density moves exactly the three lengths that
 decide how much room a control is given — `control_height` (which is also the
 minimum interactive target), `control_inset` and `control_gap` — one step
-either side of normal. Nothing else moves, and that is the point: corner
+either side of normal: compact keeps 87% of each and comfortable takes 115%,
+rounded to whole logical pixels. Normal is the theme's own table (24, 9 and 7),
+so comfortable lands on 28, 10 and 8 and compact on 21, 8 and 6; compact stops
+where a slider's knob and its borders still fit inside a control's height.
+**Contrast** is applied to the same table after it (`Metrics::at_contrast`).
+Either heavier contrast draws every edge — a rim, a rule, a rail, a seam, a
+focus outline — twice as heavy (`edge_weight`), and a control is never shorter
+than a slider's knob with its focus ring, two rims wide, above and below it.
+At compact that raises a control to normal's 24 rather than shrinking the
+knob, and because every length is scaled down to whole pixels, a floor that
+holds in logical pixels holds at every scale.
+Nothing else moves, and that is the point: corner
 radii, border and instrument thicknesses, selector and bead extents, and the
 window furniture are what a control *is*, not how much room it is given.
 Scaling them would make a compact desktop draw different-looking controls

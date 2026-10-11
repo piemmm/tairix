@@ -377,8 +377,8 @@ pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use number::{NumberAction, NumberField, MOST_PLACES};
 pub use paint::{
     blend_area, fill_area, ground_fill, inset, paint_framed_surface_plate, paint_icon_slot,
-    paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, withheld,
-    ChromeLayer, Run, FULL as FULL_PERMILLE, FULL_COLOUR,
+    paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, plate_content_inset,
+    run_width, withheld, ChromeLayer, Measured, Run, FULL as FULL_PERMILLE, FULL_COLOUR,
 };
 pub use picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
 pub use rail::{ActionRail, RailAction};
@@ -390,8 +390,9 @@ pub use scroll::{
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};
 pub use shell::{
-    Notification, NotificationAction, TaskbarItem, TaskbarItemAction, TrayBadge, TrayBadgeContent,
-    TrayBadgeTone, TraySignal, TraySignalAction, WindowPreview, WindowPreviewAction,
+    readout_hover, Notification, NotificationAction, TaskbarItem, TaskbarItemAction, TrayBadge,
+    TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction, WindowPreview,
+    WindowPreviewAction,
 };
 pub use state::{
     ActivityState, AuthorityState, ControlDisposition, ControlKind, ControlRole, ControlState,

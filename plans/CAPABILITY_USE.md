@@ -109,7 +109,7 @@ The life of a capability, from disk to exercise to revocation:
    ceiling (§4.1).
 2. **Install (at boot + unlock).** The kernel's `sec` boot phase builds,
    verifies, and installs the compiled system identity into the live
-   `LateIdentity` cell before any volume exists; the encrypted-root unlock
+   `LateIdentity` cell before any volume exists; the root unlock
    then replaces the held table with the verified merge of that compiled
    half and the on-disk human records — refusing, fail-closed, any on-disk
    record that collides with the compiled identity (a system-band id or a
@@ -473,7 +473,7 @@ authorises it; anything not listed is denied.
 - End-to-end QEMU acceptance vertical
   (`tests/integration/session_ceiling_qemu_aarch64`, enrolled in the
   `cargo xtask test --qemu` matrix): boots the production aarch64
-  pipeline with the encrypted-root disk, unlocks at `Root passphrase: `,
+  pipeline with the encrypted-root disk, unlocks at `ARXFS passphrase: `,
   authenticates `root`/`root`, and drives the spawned shell —
   `cd /Users/root` (CAP_FS_ACCESS, the B3 regression), `pwd`, spawning
   `/System/Commands/ps.app/Run` (CAP_PROC_SPAWN) — then the negative: a `ulimit`

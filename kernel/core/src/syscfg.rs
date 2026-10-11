@@ -1,10 +1,10 @@
 //! Boot-time system-configuration loader.
 //!
-//! The operator's boot-time policy lives in one text document on the
-//! encrypted root, `/System/Settings/Configuration/system.conf`, whose single
+//! The operator's boot-time policy lives in one text document on the root
+//! volume, `/System/Settings/Configuration/system.conf`, whose single
 //! definition is the [`tairix_sysconfig`] engine. This module is the kernel's
-//! reader of the cache-policy portion of that store: as the encrypted root is
-//! unlocked it reads the document off the just-mounted volume, parses it, and
+//! reader of the cache-policy portion of that store: as the root is mounted
+//! it reads the document off the just-mounted volume, parses it, and
 //! applies the operator's caching switches to the live cache-admission control
 //! ([`CACHE_CONTROL`](crate::cache_control::CACHE_CONTROL)).
 //!
@@ -38,7 +38,7 @@ use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
 /// Production passes the process-global
 /// [`CACHE_CONTROL`](crate::cache_control::CACHE_CONTROL) — the very control
 /// every cache consults — so the operator's policy takes effect on each
-/// cache's next operation. Called once from the encrypted-root unlock, right
+/// cache's next operation. Called once from the root unlock, right
 /// after the users and groups databases load. The store text carries no
 /// credential bytes (it is the public configuration document), so the read
 /// buffer needs no zeroisation.

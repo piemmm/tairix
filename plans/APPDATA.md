@@ -887,8 +887,9 @@ who could read the record, which is theatre rather than defence.
 
 What actually protects it is stated plainly instead. The master secret is stored
 as drawn, in the gated store root (`.vault-master`): owned by `confd`, mode
-`0700`, gated on `CAP_APPDATA_ADMIN`, on a volume ARXFS has no plaintext mode
-for. So secrets are exactly as safe at rest as the volume, they survive an
+`0700`, gated on `CAP_APPDATA_ADMIN`. So secrets are exactly as safe at rest as
+the root volume — encrypted only when the installation chose an encrypted root,
+otherwise readable by whoever holds the disk — they survive an
 administrative password reset, and an application — including the account's own
 shell — cannot reach the record at all. The record carries a version and binds
 the account's uid; the stage that brings the first protector with a real second

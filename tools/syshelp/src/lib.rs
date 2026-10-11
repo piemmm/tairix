@@ -400,7 +400,7 @@ pub enum DiskPartition {
     Boot,
     /// The read-only `/System` partition.
     System,
-    /// The encrypted data-root partition.
+    /// The data-root partition.
     Root,
 }
 

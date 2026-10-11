@@ -1,7 +1,7 @@
 # The pre-boot Supervisor console
 
 The **Supervisor** is a small, built-in command monitor an operator can drop
-into from the boot screen *before* the encrypted root is mounted — a "quick
+into from the boot screen *before* the root is mounted — a "quick
 busybox, but different" for inspecting and controlling the machine while it is
 still at the bootstrap floor. Its staged design is `plans/NEW-SUPERVISOR.md`.
 
@@ -18,9 +18,10 @@ The on-screen wording is fixed and byte-exact:
    blank line below the boot banner — the same one-blank-line spacing the
    `ARXFS passphrase: ` prompt uses, so the screen is laid out identically
    whether or not the operator enters the console.
-2. If no key is pressed, the announcement is replaced **in place** by the
-   `ARXFS passphrase: ` prompt (the blank line above it is preserved) and boot
-   proceeds normally.
+2. If no key is pressed, the announcement is replaced **in place** — by the
+   `ARXFS passphrase: ` prompt for an encrypted root (the blank line above it
+   is preserved), by the bare `ARXFS` label for a plaintext one, which mounts
+   with no prompt — and boot proceeds normally.
 3. If `ESC` is pressed — during the window or at the passphrase prompt — the
    prompt/message line collapses to `ARXFS`, then a blank line, then
    `Supervisor`, and the REPL opens with the prompt `*`:
@@ -37,9 +38,10 @@ The REPL echoes what the operator types like an ordinary command prompt: the
 being typed (the `mount` command or the live unlock prompt), never for the
 command line itself.
 
-Leaving the REPL with `continue` resumes the normal boot (the passphrase
-prompt is redrawn); `mount` performs the real unlock now and continues
-without a second prompt.
+Leaving the REPL with `continue` resumes the normal boot (an encrypted root's
+passphrase prompt is redrawn); `mount` performs the real mount now — asking for
+the passphrase only when the root is encrypted — and continues without a
+second prompt.
 
 `continue` takes an optional session operand — `continue text` (alias
 `console`) or `continue gui` (aliases `graphical`, `desktop`), matched
@@ -107,7 +109,9 @@ types a lone `ESC` as the line's first byte, deterministically exercising the
 live-passphrase-prompt drop (`read_passphrase_line`'s `Escape` outcome) rather
 than the window race. `SUPERVISOR_MOUNT_SCRIPT` runs the `mount` command inside
 the REPL — the Supervisor performing the real unlock itself, distinct from
-`continue` resuming the normal unlock. Because several enrolments now share one
+`continue` resuming the normal unlock. A fourth enrolment boots the same guest
+over a plaintext-root disk with no serial input at all, so it passes only if
+the root mounts with no prompt. Because several enrolments now share one
 built binary, the runner (`tools/xtask`'s `backing_image_path`) gives each a
 distinct planted-image path keyed on its stable index in the enrolment table, so
 the concurrent matrix cannot let one run clobber another's image; a host test
@@ -216,9 +220,10 @@ any user is authenticated, so its threat model is **physical-console access
 only** — the physical-attacker class already out of scope for the charter.
 The response is to audit loudly and fail closed, never to weaken a defence:
 
-- `mount` runs the real passphrase unlock (no oracle, no fail-open); the
-  typed passphrase lives in a fixed on-stack buffer wiped the instant the
-  attempt resolves and never renders.
+- `mount` runs the real mount (no oracle, no fail-open), held to how the root
+  is locked: a plaintext root takes no passphrase, and an encrypted root's
+  typed passphrase lives in a fixed on-stack buffer wiped on every return path
+  and never renders.
 - No command reveals key material; every command is read-only unless it is an
   explicit, audited control action.
 - Entering the console and every state-changing command emit a stable audit

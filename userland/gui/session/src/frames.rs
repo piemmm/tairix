@@ -88,13 +88,24 @@ pub struct FrameStatsPublisher {
     /// outstanding. They become [`last_sent`](Self::last_sent) once the
     /// service has accepted them, and are dropped if it refused.
     in_flight: Option<DesktopFrameTotals>,
+    /// The totals last refused for a reason restating them cannot change —
+    /// figures the service will not take, or no service to take them. They
+    /// are offered again only once they have moved, so an idle desktop does
+    /// not ask a refusing or absent service on a timer for ever.
+    refused: Option<DesktopFrameTotals>,
     /// When the last attempt was made, successful or not. `None` before the
     /// first attempt, so that attempt is never held back.
     last_attempt_ns: Option<u64>,
     /// Whether anything is still owed — a change suppressed by the limit, a
-    /// refused hand-off, or a submission whose verdict has yet to be
+    /// busy service's refusal, or a submission whose verdict has yet to be
     /// collected. Drives [`Self::park_deadline_ns`], so each gets one wake.
     pending: bool,
+}
+
+/// Whether a refusal says only that the service was busy, so the same figures
+/// are worth offering again once the limit allows.
+const fn passing(err: Errno) -> bool {
+    matches!(err, Errno::Busy | Errno::WouldBlock)
 }
 
 impl FrameStatsPublisher {
@@ -104,6 +115,7 @@ impl FrameStatsPublisher {
         Self {
             last_sent: None,
             in_flight: None,
+            refused: None,
             last_attempt_ns: None,
             pending: false,
         }
@@ -121,9 +133,9 @@ impl FrameStatsPublisher {
     ///
     /// A refused submission is dropped rather than retried in place — a
     /// retry loop would turn a busy or absent service into the spin this
-    /// design exists to avoid. It leaves the change pending and advances the
-    /// limiter exactly as a suppressed send does, so the next attempt rides
-    /// the loop's ordinary next pass.
+    /// design exists to avoid. A busy service is asked again once the limit
+    /// allows; figures the service will not take, or no service at all, are
+    /// asked again only once they have moved.
     pub fn maybe_publish(
         &mut self,
         compositor: &Compositor,
@@ -136,12 +148,14 @@ impl FrameStatsPublisher {
         // them, leaving the change to be restated.
         if let Some(outcome) = sink.settle() {
             let carried = self.in_flight.take();
-            if outcome.is_ok() {
-                self.last_sent = carried;
+            match outcome {
+                Ok(()) => self.last_sent = carried,
+                Err(err) if !passing(err) => self.refused = carried,
+                Err(_) => {}
             }
         }
         let totals = compositor.frame_totals();
-        if self.last_sent == Some(totals) {
+        if self.last_sent == Some(totals) || self.refused == Some(totals) {
             // Nothing new to say, but a submission still outstanding is owed
             // a collection, and that is what arms the wake for it.
             self.pending = self.in_flight.is_some();
@@ -179,8 +193,17 @@ impl FrameStatsPublisher {
         // A handed-over submission is not yet what the service holds, so the
         // change stays owed until its verdict lands — one wake, which collects
         // it. A refused hand-off is dropped rather than retried in place.
-        self.in_flight = sink.submit(&request[..len]).is_ok().then_some(totals);
-        self.pending = true;
+        self.pending = match sink.submit(&request[..len]) {
+            Ok(()) => {
+                self.in_flight = Some(totals);
+                true
+            }
+            Err(err) if passing(err) => true,
+            Err(_) => {
+                self.refused = Some(totals);
+                false
+            }
+        };
     }
 
     /// `park_ns` shortened to the moment a held-back change may be published,
@@ -199,7 +222,7 @@ impl FrameStatsPublisher {
             park_ns,
             self.pending.then(|| {
                 // `pending` is only ever set alongside a recorded attempt on
-                // the suppressed, handed-over and refused paths above. Failing closed to
+                // the suppressed, handed-over and busy paths above. Failing closed to
                 // "due now" if it somehow is not costs one extra pass of a
                 // loop that is already awake, never a missed publish.
                 let elapsed = self
@@ -233,8 +256,8 @@ mod tests {
         submissions: Vec<Vec<u8>>,
         /// Refuse the hand-off itself, as an absent service does.
         refuse: bool,
-        /// Take the hand-off but have the service refuse what it carried.
-        service_refuses: bool,
+        /// What the service answers a hand-off it takes.
+        verdict: Result<(), Errno>,
         /// Hold the verdict back, as a service that has not answered yet.
         withhold: bool,
         /// The verdict a taken submission has yet to give.
@@ -246,7 +269,7 @@ mod tests {
             Self {
                 submissions: Vec::new(),
                 refuse: false,
-                service_refuses: false,
+                verdict: Ok(()),
                 withhold: false,
                 outstanding: None,
             }
@@ -275,11 +298,7 @@ mod tests {
                 return Err(Errno::WouldBlock);
             }
             self.submissions.push(request.to_vec());
-            self.outstanding = Some(if self.service_refuses {
-                Err(Errno::LengthOutOfRange)
-            } else {
-                Ok(())
-            });
+            self.outstanding = Some(self.verdict);
             Ok(())
         }
 
@@ -429,22 +448,50 @@ mod tests {
     }
 
     #[test]
-    fn a_submission_the_service_refuses_is_not_adopted_and_is_restated() {
+    fn figures_the_service_refuses_are_not_adopted_and_offered_again_only_once_they_move() {
         let mut comp = crate::tests::compositor();
         comp.composite();
         let mut sink = Recorder::new();
-        sink.service_refuses = true;
+        sink.verdict = Err(Errno::LengthOutOfRange);
         let mut gate = FrameStatsPublisher::new();
 
         gate.maybe_publish(&comp, 0, &mut sink);
         assert_eq!(sink.submissions.len(), 1, "the hand-off was taken");
 
-        // The verdict lands on the next pass. The figures it carried are not
-        // what the service holds, so they are restated once the limit allows
-        // rather than assumed recorded.
-        sink.service_refuses = false;
+        // The verdict lands on the next pass. The service will not take these
+        // figures, so restating them changes nothing: no wake is armed for
+        // them.
         gate.maybe_publish(&comp, MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        assert_eq!(sink.submissions.len(), 1);
+        assert_eq!(
+            gate.park_deadline_ns(MIN_FRAME_PUBLISH_INTERVAL_NS, u64::MAX),
+            u64::MAX
+        );
+
+        // A frame later they have moved, and are offered again.
+        sink.verdict = Ok(());
+        comp.composite();
+        gate.maybe_publish(&comp, 2 * MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
         assert_eq!(sink.submissions.len(), 2);
+        assert_eq!(sink.totals(1), comp.frame_totals());
+    }
+
+    #[test]
+    fn a_busy_service_is_asked_again_once_the_limit_allows() {
+        let mut comp = crate::tests::compositor();
+        comp.composite();
+        let mut sink = Recorder::new();
+        sink.verdict = Err(Errno::Busy);
+        let mut gate = FrameStatsPublisher::new();
+
+        gate.maybe_publish(&comp, 0, &mut sink);
+        assert_eq!(sink.submissions.len(), 1);
+        assert!(gate.park_deadline_ns(0, u64::MAX) < u64::MAX);
+
+        sink.verdict = Ok(());
+        gate.maybe_publish(&comp, MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        gate.maybe_publish(&comp, 2 * MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        assert_eq!(sink.submissions.len(), 2, "the same figures, restated");
         assert_eq!(sink.totals(1), comp.frame_totals());
     }
 
@@ -479,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_submission_is_not_retried_in_place_and_stays_pending() {
+    fn an_absent_service_is_not_asked_on_a_timer_but_once_the_figures_move() {
         let mut comp = crate::tests::compositor();
         comp.composite();
         let mut sink = Recorder::new();
@@ -490,13 +537,14 @@ mod tests {
         assert!(sink.submissions.is_empty());
         assert_eq!(
             gate.park_deadline_ns(0, u64::MAX),
-            MIN_FRAME_PUBLISH_INTERVAL_NS,
-            "the refusal advances the limiter exactly as a suppressed send does"
+            u64::MAX,
+            "an idle desktop arms no timer to ask a service that is not there"
         );
 
-        // The refused figures were never accepted, so the next attempt after
-        // the interval re-sends them rather than treating them as published.
+        // The refused figures were never accepted, so once the desktop
+        // composes again they are offered rather than treated as published.
         sink.refuse = false;
+        comp.composite();
         gate.maybe_publish(&comp, MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
         assert_eq!(sink.submissions.len(), 1);
         assert_eq!(sink.totals(0), comp.frame_totals());

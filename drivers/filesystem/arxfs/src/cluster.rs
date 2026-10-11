@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use tairix_abi::DriverError;
 
 use crate::dedupe::{ChunkRecord, REVERSE_REF_CAP};
-use crate::integrity::{logical_hash, DataFault, StoredForm, LOGICAL_HASH_LEN};
+use crate::integrity::{DataFault, StoredForm, LOGICAL_HASH_LEN};
 use crate::xform;
 use crate::{
     as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, RunStage, ARXFS,
@@ -261,7 +261,7 @@ impl<B: Block> ARXFS<B> {
         } else {
             let record = ChunkRecord {
                 refcount: 2,
-                domain: self.dedupe_domain,
+                domain: self.protection.dedupe_domain,
                 length: plain_len,
                 logical_hash: *plain_hash,
             };
@@ -350,7 +350,7 @@ impl<B: Block> ARXFS<B> {
             xform::scrub(plain);
             return result;
         }
-        let hash = logical_hash(&plain);
+        let hash = self.protection.content_hash.of(&plain);
         let plain_len = as_u32(plain.len());
         xform::scrub(plain);
         self.share_cluster(ext, (src_ino, start), (dst_ino, start), &hash, plain_len)?;

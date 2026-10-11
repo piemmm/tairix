@@ -321,7 +321,7 @@ impl<B: Block> ARXFS<B> {
             BlockType::AllocMap,
             self.fs_uuid,
             region_block,
-            &self.mac_key,
+            &self.protection.meta,
         )?;
         self.allocator_mut()?
             .cache
@@ -378,7 +378,7 @@ impl<B: Block> ARXFS<B> {
             physical_addr: region_block,
             payload_len: as_u32(page_payload_len(bs)),
         };
-        header.seal(&mut buf[..bs], &self.mac_key)?;
+        header.seal(&mut buf[..bs], &self.protection.meta)?;
         self.dirty
             .stage(WritePhase::AfterBarrier, region_block, &buf)?;
         Ok(())
@@ -430,7 +430,7 @@ impl<B: Block> ARXFS<B> {
             physical_addr: geom.header_block(),
             payload_len: as_u32(page_payload_len(bs)),
         };
-        block.seal(&mut buf[..bs], &self.mac_key)?;
+        block.seal(&mut buf[..bs], &self.protection.meta)?;
         if clean {
             self.write_device(geom.header_block(), &buf)?;
         } else {
@@ -1162,7 +1162,7 @@ impl<B: Block> ARXFS<B> {
             BlockType::AllocMap,
             self.fs_uuid,
             geom.header_block(),
-            &self.mac_key,
+            &self.protection.meta,
         )
         .is_err()
         {

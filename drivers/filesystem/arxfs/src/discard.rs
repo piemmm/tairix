@@ -255,7 +255,7 @@ impl<B: Block> ARXFS<B> {
 
     /// mkfs-time full-range discard (`docs/src/filesystem/arxfs-spec.md`
     /// §11 mkfs flow): tell a discard-capable device the whole volume is free
-    /// before the encrypted structures are laid down. A device without discard
+    /// before the volume's structures are laid down. A device without discard
     /// support is recorded (the returned `bool` is `false`), never failed.
     ///
     /// # Errors

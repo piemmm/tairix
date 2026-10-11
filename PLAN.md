@@ -386,9 +386,9 @@ a load, use, unload and reload QEMU vertical, and the Stage 4.D acceptance gate
   returns (`plans/OPEN-DEFECTS.md` D167, D225–D227, D230).
 - **The floor is the storage path.** `driver_catalog::IN_KERNEL_DRIVERS` holds
   only virtio-blk, plus EMMC2 on aarch64. The signed driver store lives on a
-  read-only `/System` volume mounted before the encrypted root is unlocked and
-  kept mounted for life, so even the unlock keyboard is an autoloaded user-space
-  driver (`plans/PI.md`, designs B and D).
+  read-only `/System` volume mounted before the root and kept mounted for
+  life, so even the unlock keyboard is an autoloaded user-space driver
+  (`plans/PI.md`, designs B and D).
 - **The Pi 4 USB keyboard** is a chain of autoloaded pieces — FDT discovery,
   `pcie_brcm`, `vl805` (reloading the controller firmware through
   `vcmailbox`), the `xhci` host controller and `usb_hid` — ordered by the nodes
@@ -415,8 +415,9 @@ OS metadata carried by `lib/fsmeta`'s `acorn.*` keys). Each ships a first-party
 1 GiB `RamBlock`), and the ARXFS-over-virtio-blk vertical.
 
 **ARXFS** is one on-disk version with one mandatory profile (every feature on,
-none tunable): copy-on-write, always encrypted, checksummed, compressed and
-deduplicated, SSD-aware, recoverable, with sparse files and 255-byte names. The
+none tunable): copy-on-write, checksummed, compressed and deduplicated,
+SSD-aware, recoverable, with sparse files and 255-byte names, and encrypted or
+plaintext as chosen when a volume is formatted. The
 spec is `docs/src/filesystem/arxfs-spec.md`; every outstanding ARXFS item, with
 its owner and order, is `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`.
 
@@ -449,16 +450,17 @@ timing-equalised authentication).
 
 `login` runs the desktop when `os.loginType` is `graphical` (the default) and a
 graphical session is available, and the account's shell otherwise. It waits
-without prompting while the encrypted root is still being unlocked (the
-three-state `users_db_read`), so it never draws over the unlock prompt. One
+without prompting while the root is still being mounted (the three-state
+`users_db_read`), so it never draws over an encrypted root's unlock prompt. One
 login is supervised per installed text console, and local echo is the kernel's
 line discipline. A keyboard driver injects device-resolved key edges with
 `key_inject` under `CAP_INPUT_INJECT`, and the kernel encodes and routes each by
 whoever holds the seat: the focused console's queue, or the desktop's keyboard
-channel. The root volume is unlocked by an in-kernel kthread that
-reads the FAT `root.unlock` descriptor, derives the key, mounts ARXFS and loads
-the users database; it tries a blank passphrase silently first, so the
-installer image unlocks with no prompt.
+channel. The root volume is mounted by an in-kernel kthread that reads the
+root's protection and checks it against the FAT boot partition: a plaintext root
+mounts with no prompt, and an encrypted one is unlocked under the key its
+`root.unlock` descriptor derives from the typed passphrase. Either way it then
+loads the users database.
 
 ## Stage 7 — Graphics, window manager, taskbar
 
@@ -517,8 +519,16 @@ Cortex-A72 has no `FEAT_RNG`, so it boots unseeded and `random_get` answers
 - `userland/system/installer`, today a placeholder crate: text and graphical
   front ends over one core, implementing `AGENTS.md` §11 and laying out §16 —
   the four roots, the §11 and §16.3 mount flags, reserved legacy names refused
-  in expert mode, and encrypted root and encrypted swap by default, with
-  plaintext swap never offered.
+  in expert mode, and encrypted swap always, with plaintext swap never offered.
+- The root's protection is the user's choice. The installer asks whether to
+  encrypt the system disk, with unencrypted preselected: an encrypted root is
+  formatted under a key derived from the passphrase the user chooses, refused
+  when empty or longer than `tairix_abi::boot::MAX_ROOT_PASSPHRASE_LEN`, with its
+  `root.unlock` descriptor on the boot partition; an unencrypted root carries
+  no descriptor and mounts with no prompt. The upgrader keeps the protection
+  the installation was made with. Changing it afterwards is an offline pass that
+  re-seals every block of the root under the new protection, never an in-place
+  flag.
 - Swap brought up only through `kernel/mem::swap::EncryptedSwap`, the sole user
   of a `SwapBackend` (ChaCha20-Poly1305 per page, an ephemeral per-boot key,
   fail closed). The envelope exists; the pager, the backend and the activation
@@ -528,9 +538,10 @@ Cortex-A72 has no `FEAT_RNG`, so it boots unseeded and `random_get` answers
   needs), `images/tairix-riscv64.img`, and `images/tairix-web/`. The Raspberry
   Pi image is built (`cargo xtask image --target aarch64-rpi [--profile
   debug|installer]`, `plans/PI.md` P9): an MBR, a FAT partition of pinned and
-  checksummed firmware, the read-only signed `/System` volume and the encrypted
-  ARXFS root, each laid down by the in-tree drivers. `cargo xtask run --target
-  aarch64-rpi` boots the same image windowed on QEMU `virt`.
+  checksummed firmware, the read-only signed `/System` volume and the ARXFS
+  root, plaintext unless a debug image asks for `--encrypt-root`, each laid down
+  by the in-tree drivers. `cargo xtask run --target aarch64-rpi` boots the same
+  image windowed on QEMU `virt`.
 
 **Tests.** An end-to-end QEMU install (build, boot, install, reboot, log in as
 the created user, check permissions and layout), and a headless browser test of
@@ -897,6 +908,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-10 — §11: root encryption is the user's choice.** At the user's
+  direction a root no longer has to be encrypted: the installer asks, with
+  unencrypted preselected, so a machine boots without a passphrase unless its
+  owner chose one.
 - **2026-10-10 — §3: `lib/player`.** Both players — `play` and `music.app` —
   decode a programme in the sandbox and write it gapless into one stream, so
   the engine lives once rather than once per player.

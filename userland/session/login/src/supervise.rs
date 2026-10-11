@@ -1,21 +1,20 @@
 //! Console login supervision: reload the user database before each round,
-//! and wait — without prompting — while the encrypted root is still being
-//! unlocked.
+//! and wait — without prompting — while the root is still being mounted.
 //!
 //! A console's `login` process runs an unbounded sequence of login *rounds*
 //! ([`Login::run`](crate::login::Login::run)); between rounds it loops back
 //! to a fresh prompt. The user database it authenticates
-//! against is **not** owned by `login` — it lives on the encrypted root and
-//! is read through the capability-gated `users_db_read` syscall once that
-//! root is unlocked.
+//! against is **not** owned by `login` — it lives on the root volume and is
+//! read through the capability-gated `users_db_read` syscall once that root
+//! is mounted.
 //!
 //! Under design B (`plans/PI.md` P11), `init` spawns `login` *before* the
-//! in-kernel root-unlock kthread has mounted the encrypted root: the unlock
-//! prompts for its passphrase on the **same** console `login` would prompt
-//! on. Two problems follow, both fixed here:
+//! in-kernel root-unlock kthread has mounted the root, and for an encrypted
+//! root the unlock prompts for its passphrase on the **same** console `login`
+//! would prompt on. Two problems follow, both fixed here:
 //!
 //! 1. **Prompt contention.** If `login` printed `Username:` straight away it
-//!    would draw over the kthread's `Root passphrase:` prompt and the two
+//!    would draw over the kthread's `ARXFS passphrase:` prompt and the two
 //!    would fight over the one keyboard. So while the unlock is still
 //!    running, `users_db_read` reports [`DbLoad::Pending`] (the kernel's
 //!    `Errno::WouldBlock`); `login` then **waits** ([`supervise`] calls the
@@ -46,7 +45,7 @@ use tairix_users::UsersDb;
 pub enum DbLoad {
     /// A validated database is held; authenticate against it this round.
     Present(UsersDb),
-    /// The encrypted root is still being unlocked (`Errno::WouldBlock`):
+    /// The root is still being mounted (`Errno::WouldBlock`):
     /// wait without prompting, then re-check, so the unlock keeps the
     /// console.
     Pending,
@@ -60,8 +59,8 @@ pub enum DbLoad {
 ///
 /// `load_db` is invoked before each round to obtain the current state of
 /// the `/System/Security/Users` database ([`DbLoad`]). `wait` is called
-/// when the database is [`DbLoad::Pending`] (the encrypted root is still
-/// being unlocked); it should **block** until the database becomes
+/// when the database is [`DbLoad::Pending`] (the root is still being
+/// mounted); it should **block** until the database becomes
 /// available (e.g. `tairix_rt::users_db_wait`, which parks the task off the
 /// run queue rather than busy-yielding) so the in-kernel
 /// unlock kthread runs — `login` neither prompts nor reads the console
@@ -76,7 +75,7 @@ pub enum DbLoad {
 ///
 /// A [`DbLoad::Present`] round wires a [`UsersAuthenticator`]; a
 /// [`DbLoad::Absent`] round wires the fail-closed [`DenyAll`]. Reloading per round — rather than once at process start — is
-/// what lets a `login` spawned before the encrypted root is unlocked pick
+/// what lets a `login` spawned before the root is mounted pick
 /// up the database the instant it becomes available, instead of caching a
 /// stale answer for its whole lifetime (`plans/PI.md` P11).
 pub fn supervise<L, W, R>(mut load_db: L, mut wait: W, mut run_round: R)
@@ -89,7 +88,7 @@ where
     loop {
         match load_db() {
             // The unlock has not finished: do not prompt (it would race the
-            // `Root passphrase:` prompt for the console). Block until it
+            // `ARXFS passphrase:` prompt for the console). Block until it
             // resolves, then re-check — never a busy spin, `wait` parks the
             // task off the run queue.
             DbLoad::Pending => wait(),
@@ -141,7 +140,7 @@ mod tests {
     }
 
     /// The metal regression: under design B `login` is spawned before the
-    /// encrypted root is unlocked, so the early reads are `Pending` (the
+    /// root is mounted, so the early reads are `Pending` (the
     /// unlock owns the console). `login` must **wait** — not prompt — on
     /// those, then pick up the database the moment the unlock installs it
     /// and authenticate `root`/`root` against it (`plans/PI.md` P11). The

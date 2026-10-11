@@ -51,8 +51,8 @@ pub const SERVICE_OVERRIDES_DIR: &str = "/System/Settings/Services";
 /// `<service> enabled|disabled` line per service whose enrolment differs from
 /// the image's own.
 ///
-/// On the writable encrypted root, so it is readable only after the root is
-/// unlocked and holds only what was changed — a system update shipping a
+/// On the writable root volume, so it is readable only after the root is
+/// mounted and holds only what was changed — a system update shipping a
 /// different default then reaches every service the administrator has not
 /// spoken about. It is the only enrolment layer on disk: no document under
 /// `/System` is reliably readable at the instant the service manager must

@@ -61,6 +61,7 @@ mod program {
         NetBondConfigMsg, NetIfKind, NetInterfaceConfigMsg, NetstackRequest, IF_NAME_LEN,
         NETSTACK_ENDPOINT, NETSTACK_MAX_REPLY, NETSTACK_MAX_REQUEST,
     };
+    use tairix_abi::notice::NoticeTopic;
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{CapabilityId, Duration64, Errno, ORIGIN_WIRE_LEN};
@@ -73,6 +74,7 @@ mod program {
         NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService, StreamIo,
     };
     use tairix_rng::{FastRng, RandU64};
+    use tairix_rt::changenotice::ChangeNotice;
     use tairix_rt::servicenotice::Watchdog;
     use tairix_rt::LogSink;
 
@@ -319,6 +321,8 @@ mod program {
         let temp_factory =
             Box::new(move || Box::new(TempSource(temp_parent.fork())) as Box<dyn TempAddrSource>);
         let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(rng.fork()), hash_key);
+        let (mut state_notice, from) = ChangeNotice::resume(NoticeTopic::Network);
+        stack.resume_state_changes(from);
         // The socket table's demux indices hash under the same process key
         // as the bond's flow hash: a peer chooses half of a connection key.
         let mut sockets = SocketService::new(hash_key);
@@ -339,6 +343,7 @@ mod program {
             // Whatever the last event was, a link it moved is told to the
             // sockets whose memberships ride it before anything else is.
             publish_links(&mut stack, &mut sockets, set, &mut rooms);
+            publish_state(&mut stack, &mut state_notice);
             // Renew before computing the park, so a deadline that has just
             // lapsed is renewed now rather than yielding a zero timeout the
             // loop would spin on.
@@ -806,6 +811,25 @@ mod program {
             let tx = sockets.reclaim_owner(stack, owner, now());
             transmit_batch(stack, sockets, channels, secret, &tx);
         }
+    }
+
+    /// Announce that the interfaces moved, when they did, so every surface
+    /// that shows them reads them again. The first call announces whatever
+    /// the table holds: an earlier instance's interfaces are not this one's.
+    fn publish_state(stack: &mut Netstack, notice: &mut ChangeNotice) {
+        stack.publish_state();
+        if notice.announce(stack.state_changes()).is_ok() {
+            return;
+        }
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Error,
+                id: events::NOTICE_UNAVAILABLE,
+                message: "netstack: an interface change could not be published; surfaces may lag",
+                fields: &[],
+            },
+        );
     }
 
     /// Publish the links, tell each socket whose memberships ride one what

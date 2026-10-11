@@ -2,9 +2,9 @@
 //! INCREMENT (2)).
 //!
 //! Once the boot path has bound the bootstrap root block device
-//! ([`crate::root_storage`]) and the console keyboard is live, the
-//! encrypted root must be unlocked — the operator types the passphrase
-//! ([`crate::root_mount::unlock_root_disk_interactively`]) — before
+//! ([`crate::root_storage`]) and the console keyboard is live, the root
+//! must be mounted — an encrypted one only once the operator types its
+//! passphrase ([`crate::root_mount::unlock_root_disk_interactively`]) — before
 //! `login` can authenticate (the loaded database is published into
 //! [`crate::root_mount::LATE_USERS_DB`]). A blocking console read before
 //! the dispatch loop runs would deadlock, so the unlock runs as a
@@ -36,7 +36,7 @@ use tairix_sync::SpinLock;
 use crate::root_storage::RootBlockBinding;
 
 /// The audit message the unlock kthread logs once it has brought the root
-/// block device up, mounted the encrypted root, and installed the users
+/// block device up, mounted the root, and installed the users
 /// database into [`crate::root_mount::LATE_USERS_DB`] (the `UNLOCK_SERVICE`
 /// event, logged from the `crate::aarch64::root_unlock` kthread body).
 ///

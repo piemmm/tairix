@@ -13,9 +13,8 @@
 //! cleanly *and* whose referenced root also decodes cleanly (`transaction`).
 
 use tairix_abi::DriverError;
-use tairix_crypto::HmacSha256Key;
 
-use crate::crypto::CRYPTO_HEADER_LEN;
+use crate::crypto::{MetaSeal, VolumeProtection, CRYPTO_HEADER_LEN};
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::{rd_u32, rd_u64, wr_u32, wr_u64};
 
@@ -54,9 +53,9 @@ const P_TOTAL_BLOCKS: usize = HEADER_LEN + 8;
 const P_INODE_COUNT: usize = HEADER_LEN + 16;
 const P_GENERATION: usize = HEADER_LEN + 24;
 const P_ROOT_PHYS: usize = HEADER_LEN + 32;
-/// Offset, within the block, of the plaintext crypto discovery header — the
-/// wrapped master key and its salt (`crate::crypto`). It follows the geometry
-/// fields and precedes the keyed authenticator written by the header.
+/// Offset, within the block, of the plaintext crypto discovery header — an
+/// encrypted volume's wrapped master key and its salt (`crate::crypto`), and
+/// zeroes on a plaintext volume. It follows the geometry fields.
 pub const CRYPTO_OFFSET: usize = HEADER_LEN + 40;
 /// Offset, within the block, of the incompatible-feature word.
 ///
@@ -64,12 +63,17 @@ pub const CRYPTO_OFFSET: usize = HEADER_LEN + 40;
 /// because a reader must learn whether it understands the volume's on-disk
 /// features *before* it can unwrap a key or read a single tree node.
 const P_INCOMPAT: usize = CRYPTO_OFFSET + CRYPTO_HEADER_LEN;
+/// Offset, within the block, of the protection word
+/// ([`VolumeProtection::word`]): plaintext like the feature word before it,
+/// because it says how every other block is sealed.
+pub const P_PROTECTION: usize = P_INCOMPAT + 8;
 /// Bytes of meaningful superblock payload following the header: the 40-byte
-/// geometry block, the crypto discovery header, and the 8-byte feature word.
+/// geometry block, the crypto discovery header, the 8-byte feature word and
+/// the 4-byte protection word.
 // `CRYPTO_HEADER_LEN` is a tiny compile-time constant (< 256), so the
 // `usize`-to-`u32` widening cannot truncate.
 #[allow(clippy::cast_possible_truncation)]
-const PAYLOAD_LEN: u32 = 40 + CRYPTO_HEADER_LEN as u32 + 8;
+const PAYLOAD_LEN: u32 = 40 + CRYPTO_HEADER_LEN as u32 + 8 + 4;
 
 /// The volume stores symbolic links: inodes of on-disk kind `3`, whose
 /// target is held as node data (`docs/src/filesystem/arxfs-spec.md` §20).
@@ -119,6 +123,8 @@ pub struct Superblock {
     /// understand every set bit must refuse the volume, so the word is
     /// plaintext and validated before anything else is read.
     pub incompat: u64,
+    /// How the volume's blocks are sealed.
+    pub protection: VolumeProtection,
 }
 
 impl Superblock {
@@ -134,10 +140,10 @@ impl Superblock {
         block: &mut [u8],
         fs_uuid: u128,
         phys: u64,
-        key: &HmacSha256Key,
+        seal: &MetaSeal,
         crypto_header: &[u8; CRYPTO_HEADER_LEN],
     ) -> Result<(), DriverError> {
-        if block.len() < P_INCOMPAT + 8 {
+        if block.len() < P_PROTECTION + 4 {
             return Err(DriverError::DeviceFault);
         }
         for byte in block.iter_mut() {
@@ -150,6 +156,7 @@ impl Superblock {
         wr_u64(block, P_ROOT_PHYS, self.root_phys);
         block[CRYPTO_OFFSET..CRYPTO_OFFSET + CRYPTO_HEADER_LEN].copy_from_slice(crypto_header);
         wr_u64(block, P_INCOMPAT, self.incompat);
+        wr_u32(block, P_PROTECTION, self.protection.word());
         let header = BlockHeader {
             block_type: BlockType::Superblock,
             fs_uuid,
@@ -159,7 +166,7 @@ impl Superblock {
             physical_addr: phys,
             payload_len: PAYLOAD_LEN,
         };
-        header.seal(block, key)
+        header.seal(block, seal)
     }
 
     /// Decode and validate a superblock slot living at physical address
@@ -170,27 +177,29 @@ impl Superblock {
     /// passing `None` accepts whatever UUID a valid slot carries, which the
     /// caller then pins for the rest of the scan.
     ///
-    /// The keyed authenticator's `key` is the volume's metadata-authentication
-    /// key, which the caller has already recovered by unwrapping the master
-    /// key with the volume key (`crate::crypto`); the scan only authenticates
-    /// slots under it, it does not derive it.
+    /// `seal` is the volume's metadata seal, which the caller has already
+    /// established (`crate::crypto`): the scan only checks slots under it. A
+    /// slot whose protection word names another protection than `seal`'s, or a
+    /// plaintext slot carrying key material, is skipped, being no slot of the
+    /// volume as it is being opened.
     ///
     /// # Errors
     ///
-    /// [`DriverError::Unsupported`] when the slot authenticates but declares
-    /// an on-disk feature outside [`INCOMPAT_SUPPORTED`]. That is a definite
-    /// answer, not a slot to skip: the feature word is covered by the keyed
-    /// authenticator, so a bit that survives the check is one the volume's
-    /// own writer really set, and mounting past it would misread structure
-    /// this build does not know. Refusing here states the reason instead of
-    /// leaving the ring scan to report the volume as unrecognisable.
+    /// [`DriverError::Unsupported`] when the slot passes its seal but declares
+    /// an on-disk feature outside [`INCOMPAT_SUPPORTED`], or a protection word
+    /// naming no protection. That is a definite answer, not a slot to skip:
+    /// both words are covered by the seal, so what survives the check is what
+    /// the volume's own writer set, and mounting past it would misread
+    /// structure this build does not know. Refusing here states the reason
+    /// instead of leaving the ring scan to report the volume as
+    /// unrecognisable.
     pub fn try_decode(
         block: &[u8],
         expect_uuid: Option<u128>,
         phys: u64,
-        key: &HmacSha256Key,
+        seal: &MetaSeal,
     ) -> Result<Option<(Self, u128)>, DriverError> {
-        if block.len() < P_INCOMPAT + 8 {
+        if block.len() < P_PROTECTION + 4 {
             return Ok(None);
         }
         let probe_uuid = expect_uuid.unwrap_or_else(|| {
@@ -199,10 +208,18 @@ impl Superblock {
             u128::from_le_bytes(bytes)
         });
         let Some(header) =
-            BlockHeader::try_decode(block, BlockType::Superblock, probe_uuid, phys, key)
+            BlockHeader::try_decode(block, BlockType::Superblock, probe_uuid, phys, seal)
         else {
             return Ok(None);
         };
+        let protection = VolumeProtection::from_word(rd_u32(block, P_PROTECTION))
+            .ok_or(DriverError::Unsupported)?;
+        let discovery = &block[CRYPTO_OFFSET..CRYPTO_OFFSET + CRYPTO_HEADER_LEN];
+        if protection != seal.protection()
+            || (protection == VolumeProtection::Plaintext && discovery.iter().any(|&b| b != 0))
+        {
+            return Ok(None);
+        }
         let sb = Self {
             block_size: rd_u32(block, P_BLOCK_SIZE),
             total_blocks: rd_u64(block, P_TOTAL_BLOCKS),
@@ -210,6 +227,7 @@ impl Superblock {
             generation: rd_u64(block, P_GENERATION),
             root_phys: rd_u64(block, P_ROOT_PHYS),
             incompat: rd_u64(block, P_INCOMPAT),
+            protection,
         };
         if sb.incompat & !INCOMPAT_SUPPORTED != 0 {
             return Err(DriverError::Unsupported);

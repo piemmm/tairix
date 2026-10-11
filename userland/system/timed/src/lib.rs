@@ -725,7 +725,7 @@ const fn failure_name(failure: tairix_sandbox::timesync::TimeSyncFailure) -> &'s
 
 /// First delay before re-reading the configuration store, in nanoseconds.
 ///
-/// `timed` is a boot-floor service and starts *before* the encrypted root
+/// `timed` is a boot-floor service and starts *before* the root
 /// holding the store is mounted, so its first read normally finds nothing.
 /// There is no userland event for "the root is mounted", so the store is
 /// re-read on this bounded, doubling schedule folded into the reactor's own

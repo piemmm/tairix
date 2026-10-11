@@ -82,6 +82,8 @@ pub mod input;
 pub mod layout;
 pub mod library;
 pub mod menu;
+pub mod network;
+pub mod network_menu;
 pub mod notifications;
 pub mod picker;
 pub mod render;
@@ -100,7 +102,7 @@ pub use clock::Clock;
 pub use clock_menu::{ClockPermits, ClockRow};
 pub use edge::{Edge, Orientation};
 pub use input::{TaskbarInput, TaskbarResponse};
-pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, TrayReadoutLayout};
+pub use layout::{BarLayout, Hit, NotificationCard, NotificationsLayout, ReadoutLayout};
 pub use library::{
     folder_label, LibraryFocus, LibraryIconRequest, LibraryLayout, LibraryPopup, LibraryRow,
 };

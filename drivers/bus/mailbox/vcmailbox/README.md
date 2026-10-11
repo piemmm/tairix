@@ -37,13 +37,45 @@ error reply, never a dropped caller (`AGENTS.md` §5.4 / §2.9). The
 board-neutral protocol logic lives once in `lib/abi::mailbox_ipc::serve_request`
 (`AGENTS.md` §2.2).
 
+## What reaches the firmware
+
+Holding `CAP_MAILBOX` lets a driver ask, not command. The property interface
+runs code on the `VideoCore`, locks GPU memory, sets voltages and writes
+one-time-programmable bits, and the GPU masters the bus, so one compromised
+client would otherwise reach the whole machine. Before any exchange the
+service runs `lib/vcmailbox::admit_request` against the hardware-tree node the
+kernel attests the caller is the driver of (`call_peer_node`). It forwards a
+request only when it carries one tag, word for word in the shape that tag's
+driver sends, from the driver of the device the tag concerns:
+
+| Tag | Caller is the driver of | Value words |
+|---|---|---|
+| blank screen | the firmware framebuffer (`brcm,bcm2708-fb`) | off or on |
+| notify xHCI reset | the VL805 (PCI `1106:3483`, xHCI) | its own address |
+| get RTC register | the PMIC clock (`raspberrypi,rpi-rtc`) | time or backup volts, an empty slot |
+| set RTC register | the PMIC clock | time, any value |
+| get clock / max / min rate | the firmware clocks (`raspberrypi,firmware-clocks`) | ARM, an empty slot |
+| set clock rate | the firmware clocks | ARM, any rate, skip turbo |
+
+Each key is defined once in `lib/vcmailbox`, and each driver's bind table is
+built from it, so the device a caller is loaded for is exactly the one its
+requests are judged against. Everything else is refused with
+`PermissionDenied` (a malformed buffer with `LengthOutOfRange` or
+`OutOfRange`), including a caller loaded for no node. Each refusal, a frame too
+short to decode among them, is logged as event `24_500` with the caller's pid,
+the tag and the answer.
+
 ## Required capabilities
+
+The set is `lib/vcmailbox::SERVICE_CAPS`, which the bundle's manifest is
+authored from:
 
 - `CAP_MMIO_MAP` — map the discovered doorbell window.
 - `CAP_MEM_DMA` — carve the DMA-visible property buffer.
 - `CAP_IRQ_BIND` — bind the discovered inbox interrupt the reply waits park on.
 - `CAP_IPC_BIND_PRIVILEGED` — create the restricted-sender call endpoint
   (callers must hold `CAP_MAILBOX`).
+- `CAP_LOG_EMIT` — record a refused request.
 
 It runs in user space (no `CAP_DRV_KERNEL`).
 

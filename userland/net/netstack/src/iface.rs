@@ -306,6 +306,47 @@ impl Interface {
         &mut self.stack
     }
 
+    /// This interface's live link and addresses, as the interface-state page
+    /// and the network notice report them.
+    fn state_record(&self) -> NetInterfaceStateRecord {
+        let mut addrs = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
+        // Bounded by NET_IF_MAX_ADDRS (8), so u8 holds it exactly.
+        let mut count: u8 = 0;
+        if let Some((addr, prefix)) = self.stack.iface().ipv4() {
+            addrs[usize::from(count)] = NetIfAddr {
+                family: NetAddrFamily::V4,
+                prefix,
+                state: NetAddrState::Preferred,
+                addr: v4_bytes(addr),
+            };
+            count += 1;
+        }
+        for info in self.stack.iface().ipv6_addresses() {
+            if usize::from(count) == NET_IF_MAX_ADDRS {
+                break;
+            }
+            addrs[usize::from(count)] = NetIfAddr {
+                family: NetAddrFamily::V6,
+                prefix: info.prefix_len,
+                state: if info.tentative {
+                    NetAddrState::Tentative
+                } else if info.deprecated {
+                    NetAddrState::Deprecated
+                } else {
+                    NetAddrState::Preferred
+                },
+                addr: info.addr.octets(),
+            };
+            count += 1;
+        }
+        NetInterfaceStateRecord {
+            name: self.name,
+            link_up: self.link_up(),
+            addr_count: count,
+            addrs,
+        }
+    }
+
     /// Whether the link is up: a bond's when any member is eligible, a plain
     /// interface's as its device reported it.
     fn link_up(&self) -> bool {
@@ -401,6 +442,13 @@ pub struct Netstack {
     /// carries the epoch of its last change and a reader holding an older one
     /// knows it missed at least one edge, however many.
     link_epoch: u64,
+    /// Every interface's link and addresses as last published, the scratch
+    /// the next candidate is built into, and how many times it has changed:
+    /// what the network notice announces. Compared rather than tracked, like
+    /// the links.
+    published_state: Vec<NetInterfaceStateRecord>,
+    state_scratch: Vec<NetInterfaceStateRecord>,
+    state_changes: u64,
     /// Every multicast group a socket holds, with how many socket
     /// memberships hold it. The one count: every interface's engine holds
     /// each listed group exactly once, whenever the interface arrived and
@@ -439,6 +487,9 @@ impl Netstack {
             published_links: Vec::new(),
             links_scratch: Vec::new(),
             link_epoch: 0,
+            published_state: Vec::new(),
+            state_scratch: Vec::new(),
+            state_changes: 0,
             groups: Vec::new(),
             peer_hash_key,
         }
@@ -1112,7 +1163,6 @@ impl Netstack {
                 .stack
                 .iface()
                 .ipv6_addresses()
-                .iter()
                 .any(|info| info.addr == Ipv6Addr::from(addr)),
         })
     }
@@ -1354,46 +1404,46 @@ impl Netstack {
             .iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(|i| {
-                let mut addrs = [NetInterfaceStateRecord::EMPTY_ADDR; NET_IF_MAX_ADDRS];
-                // Bounded by NET_IF_MAX_ADDRS (8), so u8 holds it exactly.
-                let mut count: u8 = 0;
-                if let Some((addr, prefix)) = i.stack.iface().ipv4() {
-                    addrs[usize::from(count)] = NetIfAddr {
-                        family: NetAddrFamily::V4,
-                        prefix,
-                        state: NetAddrState::Preferred,
-                        addr: v4_bytes(addr),
-                    };
-                    count += 1;
-                }
-                for info in i.stack.iface().ipv6_addresses() {
-                    if usize::from(count) == NET_IF_MAX_ADDRS {
-                        break;
-                    }
-                    addrs[usize::from(count)] = NetIfAddr {
-                        family: NetAddrFamily::V6,
-                        prefix: info.prefix_len,
-                        state: if info.tentative {
-                            NetAddrState::Tentative
-                        } else if info.deprecated {
-                            NetAddrState::Deprecated
-                        } else {
-                            NetAddrState::Preferred
-                        },
-                        addr: info.addr.octets(),
-                    };
-                    count += 1;
-                }
-                let link_up = i.link_up();
-                NetInterfaceStateRecord {
-                    name: i.name,
-                    link_up,
-                    addr_count: count,
-                    addrs,
-                }
-            })
+            .map(Interface::state_record)
             .collect()
+    }
+
+    /// Publish every interface's link and addresses, answering whether they
+    /// moved since the last publication; [`Self::state_changes`] counts each
+    /// move. An unchanged table costs one pass and no allocation, and a
+    /// publication that cannot allocate leaves the last one standing, so the
+    /// next call makes it again.
+    pub fn publish_state(&mut self) -> bool {
+        self.state_scratch.clear();
+        if self
+            .state_scratch
+            .try_reserve(self.interfaces.len())
+            .is_err()
+        {
+            return false;
+        }
+        self.state_scratch
+            .extend(self.interfaces.iter().map(Interface::state_record));
+        if self.state_scratch == self.published_state {
+            return false;
+        }
+        core::mem::swap(&mut self.published_state, &mut self.state_scratch);
+        self.state_changes = self.state_changes.wrapping_add(1);
+        true
+    }
+
+    /// How many times [`Self::publish_state`] has seen the interfaces move,
+    /// on from where [`Self::resume_state_changes`] began the count.
+    #[must_use]
+    pub const fn state_changes(&self) -> u64 {
+        self.state_changes
+    }
+
+    /// Count on from `from`, the count the notice board resumes at, so this
+    /// stack's announcements continue an earlier instance's rather than
+    /// repeating them.
+    pub fn resume_state_changes(&mut self, from: u64) {
+        self.state_changes = from;
     }
 
     /// The host's active recursive-resolver server set (`plans/DNS.md`
@@ -1535,6 +1585,9 @@ impl Netstack {
             published_links: _,
             links_scratch: _,
             link_epoch: _,
+            published_state: _,
+            state_scratch: _,
+            state_changes: _,
             groups: _,
             peer_hash_key: _,
         } = self;

@@ -823,7 +823,7 @@ and those readers can never diverge. An unknown key, a value outside its
 key's closed set, or a store document the engine cannot fully parse is
 refused with the reason (and the valid choices) stated, and changes
 nothing; a set rewrites the whole document in canonical form, never a
-partial patch. The store lives on the encrypted root, so a change takes
+partial patch. The store lives on the root volume, so a change takes
 effect when its consumer next parses it — `os.loginType` at the next login
 prompt, and the `cache.*` caching switches at the next boot's root unlock
 (the kernel applies them into its cache-admission control). The `cache.*`

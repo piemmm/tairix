@@ -664,9 +664,9 @@ devices for input from the QEMU window (the autoloaded
 `drivers/input/virtio_kbd` bundle the image ships binds the discovered
 virtio-input nodes and injects decoded keys into the input-focus
 arbiter), and a virtio-net NIC on QEMU's user-mode network (below). The
-invoking terminal is the guest's serial console: type the
-encrypted-root unlock passphrase there (`root` for the `debug` profile;
-empty — just press Enter — for `installer`). The session has no
+invoking terminal is the guest's serial console, where an `--encrypt-root`
+image's passphrase (`root`) is typed; the default plaintext root asks for
+none. The session has no
 deadline; it ends when the QEMU window is closed or the guest powers
 off.
 
@@ -1496,6 +1496,21 @@ carve request) is what the service binds.
   `ipc_call(MAILBOX_ENDPOINT, …)`, so both drivers run unchanged in user
   space. The endpoint's send gate (`CAP_MAILBOX`) is enforced kernel-side; a
   caller without it fails closed (`AGENTS.md` §5.2 / §5.4).
+- **What reaches the firmware.** `CAP_MAILBOX` lets a driver ask. Before any
+  exchange the service runs `lib/vcmailbox::admit_request` against the
+  hardware-tree node the kernel attests the caller is the driver of
+  (`call_peer_node`), and forwards one tag of a driver's working set, word
+  for word in its shape, only from the driver of that tag's device: the
+  screen blank from the firmware framebuffer's, the xHCI reload notice for
+  the VL805's own address from the VL805's, the RTC time and backup reading
+  and the time write from the PMIC clock's, and the ARM clock's rates and its
+  rate write with the turbo transition skipped from the firmware clocks'.
+  The device keys are defined once in `lib/vcmailbox` and each driver's bind
+  table is built from its key. Code execution, GPU memory, voltages,
+  one-time-programmable bits, GPIO, framebuffer allocation and the revision
+  probe are refused to everyone, because the GPU masters the bus. Each
+  refusal is answered in-band and logged as event `24_500` with the caller's
+  pid, the tag and the answer.
 - **Bind identity.** The mailbox `compatible` string and the service's
   `BIND_KEYS` are one definition in `lib/vcmailbox` (`MAILBOX_COMPATIBLE`), so
   the discovery key here and the autoload match key can never diverge
@@ -1507,9 +1522,9 @@ carve request) is what the service binds.
   links), converts the linked PIE ELF to an
   `rxe` relocated for the production user-image bias and stamped with the
   kernel's `SYSCALL_TABLE_HASH`, and wraps it as a `kind = UserSpace`
-  `DriverManifest` requesting `CAP_MMIO_MAP` + `CAP_MEM_DMA` +
-  `CAP_IRQ_BIND` + `CAP_IPC_BIND_PRIVILEGED`, signed with the kernel's
-  driver-signing seed — so
+  `DriverManifest` requesting `lib/vcmailbox::SERVICE_CAPS` (`CAP_MMIO_MAP`
+  + `CAP_MEM_DMA` + `CAP_IRQ_BIND` + `CAP_IPC_BIND_PRIVILEGED` +
+  `CAP_LOG_EMIT`), signed with the kernel's driver-signing seed — so
   the booted kernel admits it through the §8 / §18.6 signed load gate. The
   autoload gate's delegatable superset (`unlock_service::autoload_caps`) carries
   `CAP_IPC_BIND_PRIVILEGED` precisely so a signed bus *service* driver like this

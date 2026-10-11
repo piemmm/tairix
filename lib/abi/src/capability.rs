@@ -252,7 +252,9 @@ impl CapabilityId {
     /// clocks, PCIe firmware), so reaching it is privileged rather than
     /// ambient (no ambient authority; capability
     /// checks before state touches): an ordinary task cannot drive the
-    /// firmware mailbox.
+    /// firmware mailbox. Holding it is not holding the firmware: the service
+    /// forwards only the tags `lib/vcmailbox`'s policy admits for the
+    /// capabilities the kernel attests the caller holds, and refuses the rest.
     pub const MAILBOX: Self = Self(25);
     /// Emit a structured diagnostic record to the system log through the
     /// `log_emit` syscall (`abi-v1` number 36).

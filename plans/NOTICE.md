@@ -55,6 +55,7 @@ filesystem's locks.
 | `DisplayLease` | the boot seat's lease word and its holder's login session (24 B) | the kernel, from its seat registry and capability table | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark; the audio service, to mix only the holder's session into the seat's speakers |
 | `AudioCapture` | the capture streams moving frames (4 B) | the audio service, by its reserved rendezvous | the session's recording indicator, the Settings Sound pane |
 | `AudioDevices` | how many times a device or its controls changed (8 B) | the audio service, by its reserved rendezvous | the session, which remembers its user's controls; the Settings Sound pane |
+| `Network` | how many times an interface's presence, link, addresses or address states changed (8 B) | the network stack, by its reserved rendezvous | the Switchboard, which re-reads the interfaces it reports to the bar's network signal |
 
 Authority carries **no new capability**:
 
@@ -67,6 +68,10 @@ Authority carries **no new capability**:
   reserved `AUDIO_ENDPOINT` — the one principal that holds every stream and
   every device, so no program can understate its own recording or fake a
   change to the devices.
+- `Network` admits only the process bound to `NETSTACK_ENDPOINT`, the one
+  principal that owns every interface, so no program can fake or hide a change
+  to them. The edge says only that something moved; what moved stays behind
+  the gated interface queries.
 - `Mounts`, `MemoryPressure` and `DisplayLease` are kernel-owned: a userland
   publish to any of them is refused outright.
 - *Reading* is ungated for every topic but `DisplayLease`. The others are
@@ -116,6 +121,15 @@ copy:
 - `AudioCapture` — a counter bumped only when the published count differs, as
   `Desktop`'s is.
 - `AudioDevices` — bumped whenever the audio service's change count moves.
+- `Network` — bumped whenever the stack's change count moves. The stack
+  counts a change only when the interface-state records it would answer
+  differ from the last ones it published, so a reconfiguration that changes
+  nothing visible wakes nobody.
+
+A counted topic's publisher resumes its count one past the value on the board
+(`tairix_rt::changenotice::ChangeNotice`), so a restarted audio service or
+stack never re-states its last instance's count — which the kernel would take
+as no change — and its first announcement always wakes the subscribers.
 
 ## The query/edge pairing
 

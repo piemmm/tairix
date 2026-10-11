@@ -20,10 +20,14 @@
 //!   one brought-up boot disk through an independent serialised window onto
 //!   the shared block device, using the same `lib/partition` parser and
 //!   `/System` mount path the rest of the boot uses.
-//! * `mount` runs the **real** [`mount_root_disk_and_load_users`] under the
-//!   typed passphrase and, on success, publishes the users database and
-//!   writable root exactly as the normal unlock does (through the crate's
-//!   `finish_install`) — no oracle, no fail-open.
+//! * `root_lock` and `arxfs_status` read how the root is locked through
+//!   [`probe_root_lock`], the reading the boot path decides on, and audit
+//!   nothing: asking is not a decision.
+//! * `mount` runs the boot path's own root mount — with no key for
+//!   a plaintext root, under the typed passphrase for an encrypted one — and,
+//!   on success, publishes the users database and writable root exactly as
+//!   the normal boot does. A wrong passphrase waits out the boot prompt's own
+//!   delay before it is answered — no faster oracle, no fail-open.
 //!
 //! Every state-changing decision is recorded on the hash-chained audit log
 //! through [`SupervisorHost::audit`] with a stable event id in the `41xx`
@@ -31,18 +35,21 @@
 //! on any input (the charter forbids it): a bad argument, an unreadable disk,
 //! or a missing record is a rendered message, never a panic.
 
+use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{DirVisit, NodeKind};
-use tairix_abi::driver::{block::Block, DriverError};
 use tairix_abi::hwtree::HwDeviceClass;
 use tairix_kernel_core::{boot_log_tail, supervisor_system};
 use tairix_log::{log, Event, EventId, Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionType};
-use tairix_supervisor::{MountOutcome, Report, SupervisorEvent, SupervisorHost, TestOutcome};
+use tairix_supervisor::{
+    MountOutcome, Report, RootLock as SupervisorRootLock, SupervisorEvent, SupervisorHost,
+    TestOutcome,
+};
 
 use crate::block_cache::BlockCache;
 use crate::root_mount::{
-    finish_install, mount_root_disk_and_load_users, with_system_volume, RootMountError,
-    UnlockInstall, UnlockOutcome,
+    probe_root_lock, supervisor_mount, supervisor_root_lock, with_system_volume, RootLock,
+    UnlockInstall,
 };
 use crate::shared_block::DriverStoreService;
 
@@ -65,7 +72,7 @@ const SUPERVISOR_POWEROFF: EventId = EventId(4153);
 /// byte is ever logged.
 const SUPERVISOR_MOUNT_ATTEMPT: EventId = EventId(4154);
 
-/// Audit event: an in-Supervisor `mount` unlocked and mounted the root.
+/// Audit event: an in-Supervisor `mount` mounted the root.
 const SUPERVISOR_MOUNT_OK: EventId = EventId(4155);
 
 /// Audit event: an in-Supervisor `mount` failed (wrong passphrase or a
@@ -113,21 +120,25 @@ pub struct KernelSupervisorHost<'a, B: Block + 'static> {
     /// The boot audit sink every state-changing decision is logged through. No
     /// passphrase, key, or volume byte is ever logged.
     audit: &'a dyn Sink,
+    /// The pause a wrong passphrase waits out, the boot prompt's own.
+    delay: &'a dyn Fn(),
 }
 
 impl<'a, B: Block + 'static> KernelSupervisorHost<'a, B> {
-    /// Build the host over the shared boot disk, the unlock install cells, and
-    /// the boot audit sink.
+    /// Build the host over the shared boot disk, the unlock install cells,
+    /// the boot audit sink, and the wrong-passphrase `delay`.
     #[must_use]
     pub fn new(
         store: &'static DriverStoreService<BlockCache<B>>,
         install: &'a UnlockInstall<'a>,
         audit: &'a dyn Sink,
+        delay: &'a dyn Fn(),
     ) -> Self {
         Self {
             store,
             install,
             audit,
+            delay,
         }
     }
 
@@ -154,7 +165,7 @@ impl<'a, B: Block + 'static> KernelSupervisorHost<'a, B> {
         match ty {
             PartitionType::FatBoot => "fat-boot",
             PartitionType::ARXFSSystem => "arxfs-system",
-            PartitionType::ARXFSRoot => "arxfs-root (encrypted)",
+            PartitionType::ARXFSRoot => "arxfs-root",
             PartitionType::Other => "other",
         }
     }
@@ -272,15 +283,21 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
         out.write_str("arxfs /System partition: ");
         out.line(if system { "present" } else { "absent" });
         out.write_str("arxfs root partition:    ");
-        out.line(if root {
-            "present (encrypted)"
-        } else {
-            "absent"
-        });
-        // Pre-mount status is reported without unlocking: the encrypted root
-        // is never opened to answer a status query (that would need the
-        // secret and is not this command's job).
-        out.line("arxfs root state:        locked (not mounted from the Supervisor)");
+        out.line(if root { "present" } else { "absent" });
+        if !root {
+            return;
+        }
+        out.write_str("arxfs root protection:   ");
+        match probe_root_lock(&mut window) {
+            Ok(RootLock::Plaintext) => out.line("plaintext (mounts with no passphrase)"),
+            Ok(RootLock::Passphrase(_)) => {
+                out.line("encrypted (mounts under the ARXFS passphrase)");
+            }
+            Err(error) => {
+                out.write_str("unmountable: ");
+                out.line(error.cause());
+            }
+        }
     }
 
     fn list(&mut self, _path: Option<&str>, out: &mut dyn Report) {
@@ -421,33 +438,19 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
         TestOutcome::Passed
     }
 
-    fn mount(&mut self, passphrase: &[u8], out: &mut dyn Report) -> MountOutcome {
-        // The real unlock: derive the key from the typed passphrase and mount
-        // the encrypted root. No oracle and no fail-open — a wrong passphrase
-        // is exactly `Mount(PermissionDenied)`, indistinguishable from the
-        // normal path. On success, publish the users database + writable root
-        // through the same install cells the interactive unlock uses.
-        match mount_root_disk_and_load_users(self.store.window(), passphrase, self.audit) {
-            Ok(unlocked) => match finish_install(unlocked, self.install, self.audit) {
-                UnlockOutcome::Installed => {
-                    out.line("root unlocked and mounted");
-                    MountOutcome::Mounted
-                }
-                UnlockOutcome::GaveUp => {
-                    out.line("root unlocked but the users database could not be installed");
-                    MountOutcome::Failed
-                }
-            },
-            Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
-                out.line("incorrect passphrase");
-                MountOutcome::WrongPassphrase
-            }
-            Err(error) => {
-                out.write_str("root cannot be mounted: ");
-                out.line(error.cause());
-                MountOutcome::Failed
-            }
-        }
+    fn root_lock(&mut self) -> Option<SupervisorRootLock> {
+        supervisor_root_lock(&mut self.store.window())
+    }
+
+    fn mount(&mut self, passphrase: Option<&[u8]>, out: &mut dyn Report) -> MountOutcome {
+        supervisor_mount(
+            &mut self.store.window(),
+            passphrase,
+            self.install,
+            self.audit,
+            self.delay,
+            out,
+        )
     }
 
     fn reboot(&mut self) {

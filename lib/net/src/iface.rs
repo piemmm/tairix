@@ -1101,19 +1101,18 @@ impl Iface {
         hasher.finish()
     }
 
-    /// Read-only views of every IPv6 address, tentative included.
+    /// Read-only views of every IPv6 address, tentative included. Borrowed
+    /// rather than collected, because receive and the stack's own
+    /// publication ask on every pass.
     #[must_use]
-    pub fn ipv6_addresses(&self) -> Vec<Ipv6AddrInfo> {
-        self.v6
-            .iter()
-            .map(|entry| Ipv6AddrInfo {
-                addr: entry.addr,
-                prefix_len: entry.prefix_len,
-                origin: entry.origin,
-                tentative: matches!(entry.state, AddrState::Tentative { .. }),
-                deprecated: entry.state == AddrState::Deprecated,
-            })
-            .collect()
+    pub fn ipv6_addresses(&self) -> impl ExactSizeIterator<Item = Ipv6AddrInfo> + '_ {
+        self.v6.iter().map(|entry| Ipv6AddrInfo {
+            addr: entry.addr,
+            prefix_len: entry.prefix_len,
+            origin: entry.origin,
+            tentative: matches!(entry.state, AddrState::Tentative { .. }),
+            deprecated: entry.state == AddrState::Deprecated,
+        })
     }
 
     /// Whether `addr` is assigned here and usable (non-tentative).

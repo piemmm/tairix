@@ -100,18 +100,35 @@ cross axis and clamps.
 A zero-extent anchor is the point case, so a context menu at a press point and
 a slot-anchored icon-bar menu resolve through the same arithmetic. A clearance
 of zero is the edge-adjacency a chain needs: travelling from a parent row into
-its own child crosses no dead space.
+its own child crosses only the parent's rim.
 
-## Opening on arrival, with no timer
+## Opening on arrival, and crossings aimed at a child
 
-A submenu opens when the pointer **arrives on** its parent row — no click, no
-hover delay, no timer. Two rules make that deterministic without one:
+A submenu opens when the pointer **arrives on** its parent row — no click and
+no hover delay. An open child closes only when the pointer has chosen a
+different row of the same parent plate:
 
-- a child plate is edge-adjacent to its parent, so there is no gap to cross;
-- an open child closes when the pointer **settles on a different row of the
-  same parent plate**, never merely because it left the parent row's rectangle.
+- a point on the plate but on no row — the rim, a group break, the strip under
+  the band — chooses nothing, so crossing the parent's edge keeps the child
+  open and the parent row highlighted;
+- a step onto a sibling row that heads into the child waits, so a diagonal
+  path to the child's lower rows may cross the row beneath the parent row.
+  The heading is measured from an apex — where the pointer last stood on the
+  open row, or where it was when the child opened — that stays put while the
+  path crosses the siblings, so a slow or stepped path is judged by where it
+  is going rather than by its last step: the step waits while it lies in the
+  triangle from the apex to the child's near edge, or is still within a few
+  pixels of the apex (`AIM_SLACK`). Reaching the child ends the wait and
+  turning away chooses the sibling at once;
+- a move onto the plate's band, or onto no row, ends a wait without choosing;
+- a wait still standing 300 ms (`SUBMENU_SETTLE_NS`) after its last sample
+  chooses the row under the pointer. It is a deadline in the session's park,
+  resolved by `MenuChain::tick` on whatever wake finds it due, never a poll.
 
-A disabled row opens nothing and closes nothing.
+A disabled row opens nothing and closes nothing. The pointer resting on one
+while a sibling's child is open borrows the open row's highlight, so the
+disabled row's Authority Mark can be read; the open row takes it back once the
+pointer is anywhere else.
 
 ## Why a row cannot be chosen is a tip, not a caption
 
@@ -271,7 +288,9 @@ cross the wire as they always did.
 
 A declared separator becomes the next row's group break rather than a row of
 its own, so a separator inside a submenu draws the divider it draws on the root
-plate and no index the chain reports names a rule.
+plate and no index the chain reports names a rule. A group break costs its rule
+and half a control gap either side; a row is the text-plate height, never
+shorter than the minimum target.
 
 A **submenu is a relationship, not a row kind**: any chooseable row that other
 rows name as their parent draws the chevron and opens their plate, while still

@@ -2,7 +2,7 @@
 
 The pre-boot **Supervisor** console engine: the arch-neutral, `no_std`
 command monitor an operator drops into from the boot screen *before* the
-encrypted root is mounted — a "quick busybox, but different" for inspecting
+root is mounted — a "quick busybox, but different" for inspecting
 and controlling the machine while it is still at the bootstrap floor
 (`plans/NEW-SUPERVISOR.md`).
 
@@ -60,9 +60,10 @@ only** — the physical-attacker class the charter already places out of scope
 (§19.9). That is a reason to audit loudly and fail closed, never to weaken a
 defence:
 
-- `mount` runs the **real** passphrase unlock — no oracle, no fail-open — and
-  the typed passphrase lives in a fixed on-stack buffer wiped the instant the
-  attempt resolves; it never renders and never reaches the output.
+- `mount` runs the **real** mount — no oracle, no fail-open — asking for a
+  passphrase only when the host reports the root encrypted. A typed passphrase
+  lives in a fixed on-stack buffer wiped on every return path; it never
+  renders and never reaches the output.
 - No command reveals key material; every command is read-only unless it is an
   explicit, audited control action.
 - Entering the console and every state-changing command emit a semantic

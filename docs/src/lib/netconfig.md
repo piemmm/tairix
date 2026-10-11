@@ -15,7 +15,7 @@ engine, so producer and consumer can never diverge.
 the read-only `/System` volume at the volume-relative path the ABI's closed
 `SystemConfigFile` set names, because the device manager reads it over the
 pre-unlock store endpoint (see `docs/src/userland/netstack.md`); at runtime
-the view path resolves to the writable sub-mount on the encrypted root,
+the view path resolves to the writable sub-mount on the root volume,
 which no bootstrap client can reach.
 
 ## The store
@@ -30,9 +30,9 @@ meaningful. An **absent** store is not an error: it means "no managed
 interfaces beyond loopback" (`NetworkConfig::default`), which is how a
 fresh installation and a pre-unlock boot behave.
 
-The store lives inside `/System/Settings` on the encrypted root volume, so
-it can only be read after the operator's `ARXFS passphrase:` unlocks the
-root — `netstack` therefore parses it post-unlock by construction. Write
+The store lives inside `/System/Settings` on the root volume, so it can only
+be read once the root is mounted — after its passphrase, when the root is
+encrypted — and `netstack` therefore parses it post-mount by construction. Write
 authority is the existing `/System/Settings` per-inode policy under the
 caller's kernel-attested identity: no new capability exists for the file
 itself; applying a changed store to the live stack is the `CAP_NET_ADMIN`

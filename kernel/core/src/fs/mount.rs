@@ -88,7 +88,7 @@ pub struct MountPoint {
     /// delegated walk prepends these components to the path remainder below
     /// the mount point, so the driver still resolves from its own
     /// [`root`](tairix_abi::driver::filesystem::FilesystemRead::root): e.g.
-    /// `/System/Logs` backed by the encrypted root volume's own
+    /// `/System/Logs` backed by the root volume's own
     /// `/System/Logs` directory carries `["System", "Logs"]` here.
     backing_subtree: Vec<String>,
     /// The permission template the delegated walk applies at and below the

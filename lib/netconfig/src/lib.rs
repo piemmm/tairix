@@ -1,7 +1,7 @@
 //! The network interface-configuration store engine.
 //!
 //! TAIRiX keeps its administrator-settable per-interface network
-//! configuration in one text document on the encrypted root volume,
+//! configuration in one text document on the root volume,
 //! [`CONFIG_PATH`](`/System/Settings/Network/network.conf`). This crate is
 //! the **single definition** of that document: the per-interface line
 //! grammar, the closed key registry, each key's typed value set, the
@@ -11,8 +11,7 @@
 //! `CAP_NET_ADMIN` reload — reads it through the same engine, so the two
 //! can never diverge.
 //!
-//! The store is parsed only **after** the operator's `Root filesystem
-//! passphrase:` unlocks the encrypted root — it lives inside
+//! The store is parsed only **after** the root is mounted — it lives inside
 //! `/System/Settings`, which does not exist before the mount — so an absent
 //! store simply means "no managed interfaces beyond loopback"
 //! ([`NetworkConfig::default`]), never an error.
@@ -68,6 +67,14 @@ pub const CONFIG_DIR: &str = "/System/Settings/Network";
 /// `/System/Settings/` file set so this engine and the pre-unlock reader that
 /// serves it cannot name different files.
 pub const CONFIG_PATH: &str = SystemConfigFile::Network.path();
+
+/// The name of the Settings pane that edits this store's interfaces: what the
+/// bar's network menu hands over as its launch target.
+///
+/// Spelled once because the desktop session names it and the settings
+/// application resolves it against its own pane registry, and neither may
+/// depend on the other. It confers nothing.
+pub const SETTINGS_PANE: &str = "ethernet";
 
 /// Maximum length, in bytes, of a store text [`NetworkConfig::parse`] will
 /// consider. A larger input is refused outright ([`ConfigError::TooLong`])

@@ -83,6 +83,26 @@ fn dialog_renders_title_and_message_in_both_themes() {
 }
 
 #[test]
+fn a_new_message_keeps_the_actions_and_their_focus() {
+    let mut keep = Button::new(
+        ButtonContent::Label(String::from("Keep")),
+        ControlRole::Recommended,
+    );
+    keep.set_state(ControlState::default().with_focus(crate::state::FocusState::FOCUSED));
+    let mut dialog = Dialog::new("Keep this?")
+        .with_message("Reverting in 15 seconds.")
+        .with_actions(vec![Button::labelled("Revert"), keep]);
+    let before = dialog.actions().to_vec();
+    dialog.set_message("Reverting in 14 seconds.");
+    assert_eq!(dialog.message(), Some("Reverting in 14 seconds."));
+    assert_eq!(dialog.actions(), before.as_slice());
+    assert_eq!(
+        dialog.on_key(Key::Named(NamedKey::Enter)),
+        Some(DialogAction::ActionActivated { index: 1 })
+    );
+}
+
+#[test]
 fn dialog_recommended_action_is_warm() {
     let theme = Theme::dark();
     let dialog = Dialog::new("Save?").with_actions(vec![Button::new(

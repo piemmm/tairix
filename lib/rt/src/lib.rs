@@ -83,6 +83,8 @@ mod startup;
 
 pub mod cachereport;
 
+pub mod changenotice;
+
 pub mod io;
 
 pub mod keys;
@@ -2505,8 +2507,10 @@ pub fn notice_read(topic: NoticeTopic, buf: &mut [u8]) -> i64 {
 /// (`SyscallNumber::NOTICE_PUBLISH`, `plans/NOTICE.md`).
 ///
 /// Authority is the topic's own and needs no capability: the desktop topic
-/// admits only the holder of a seat's live display lease, and a kernel-owned
-/// topic admits nobody. Publishing the value already in force moves no
+/// admits only the holder of a seat's live display lease, the audio topics
+/// only the process bound to the audio service's endpoint, the network topic
+/// only the one bound to the network stack's, and a kernel-owned topic
+/// admits nobody. Publishing the value already in force moves no
 /// generation and wakes no subscriber, so a publisher may re-state the
 /// current value freely.
 ///
@@ -3344,7 +3348,7 @@ fn random_get(buf: &mut [u8], flags: RandomFlags) -> Result<usize, i64> {
 /// [`users_db_read`]).
 ///
 /// Under design B `login` is spawned before the in-kernel unlock kthread
-/// mounts the encrypted root, so an early [`users_db_read`] reports
+/// mounts the root, so an early [`users_db_read`] reports
 /// `WouldBlock` — the live-but-not-ready signal. Rather than re-reading in
 /// a yield loop (a busy spin that audited one ERROR per poll), the caller blocks here: the kernel parks it off the run queue and
 /// wakes it the instant the unlock reaches a terminal outcome (a database is
@@ -6471,21 +6475,8 @@ mod tests {
     // The trap seam lives in `tairix-abi-trap` (the single trap home) and is reached here through the `host-seam`
     // dev-dependency feature; production builds never compile it.
     use tairix_abi::elevate::ELEVATE_MAX_REPLY;
-    use tairix_abi::SYSCALL_MAX_ARGS;
     use tairix_abi_trap::seam;
-
-    /// Run `call` with the seam armed to return `ret`, returning the recorded
-    /// `(number, args)`.
-    fn capture(ret: u64, call: impl FnOnce()) -> (u64, [u64; SYSCALL_MAX_ARGS]) {
-        seam::arm(ret);
-        call();
-        seam::last_call().expect("the wrapper must issue exactly one trap")
-    }
-
-    /// The negative register the kernel encodes `errno` as.
-    fn refusal(errno: Errno) -> u64 {
-        u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
-    }
+    use tairix_abi_trap::seam::{capture, refusal};
 
     #[test]
     fn the_runtimes_events_are_distinct_and_inside_its_own_range() {
@@ -7015,9 +7006,7 @@ mod tests {
         assert_ne!(args[0], 0);
         assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
         // A refusal surfaces the negative errno register verbatim.
-        let neg =
-            u64::from_ne_bytes((-i64::from(tairix_abi::Errno::BadAddress.as_i32())).to_ne_bytes());
-        let (_, _) = capture(neg, || {
+        let (_, _) = capture(refusal(tairix_abi::Errno::BadAddress), || {
             assert_eq!(
                 pipe_create(),
                 Err(-i64::from(tairix_abi::Errno::BadAddress.as_i32()))

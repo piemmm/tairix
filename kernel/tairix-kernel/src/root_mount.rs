@@ -1,76 +1,42 @@
-//! Production root-volume unlock + users-database load composition
-//! (`plans/PI.md` §3 P11 root-mount increment, Chunk A).
+//! Production root-volume mount + users-database load composition
+//! (`plans/PI.md` §3 P11 root-mount increment).
 //!
-//! This is the one place that turns the three artefacts a boot path
-//! recovers off the storage device — the plaintext `root.unlock`
-//! key-derivation descriptor (planted on the FAT boot partition by
-//! `tools/mkimage` / the installer), the passphrase the operator
-//! typed at the console, and the encrypted root [`Block`] device — into
-//! the validated `users-v1` database the `users_db_read` syscall serves
-//! (`kernel/core::load_users_db_source`). It adds no policy of its own; it
-//! threads the already-landed building blocks together in the one layer
+//! The one place that turns what a boot path finds on the storage device —
+//! the root volume, plaintext or encrypted, and for an encrypted one the
+//! plaintext `root.unlock` key-derivation descriptor `tools/mkimage` / the
+//! installer plant on the FAT boot partition plus the passphrase the operator
+//! types — into the validated `users-v1` database the `users_db_read` syscall
+//! serves (`kernel/core::load_users_db_source`). It is the one layer
 //! permitted to name both the `arxfs` driver and `kernel/core`
 //! (`tairix-kernel`, `Layer::Tooling`).
 //!
-//! The composition is, in order:
+//! [`read_root_lock`] reads how the root is locked: the root volume's own
+//! protection word, which must agree with the boot partition — a descriptor
+//! beside a plaintext root, or an encrypted root with none, is a disk that is
+//! not what it claims and is refused. [`mount_root_disk_and_load_users`] then
+//! mounts it: a plaintext root with no key, an encrypted one under the key
+//! [`UnlockDescriptor::derive_volume_key`] derives from the passphrase (held
+//! [`Zeroizing`], so it is wiped on drop), where a wrong passphrase never
+//! unwraps the master key and is refused with [`DriverError::PermissionDenied`]
+//! — no oracle. [`load_users_db_source`] then reads and validates
+//! `/System/Security/Users` under the kernel's capability-less `uid 0`
+//! bootstrap identity.
 //!
-//! 1. [`UnlockDescriptor::decode`] parses the on-FAT descriptor
-//!    fail-closed (bad magic, unknown KDF, out-of-range cost, short
-//!    buffer → refused, never trusted).
-//! 2. [`UnlockDescriptor::derive_volume_key`] derives the volume key from
-//!    the typed passphrase via the descriptor's PBKDF2-HMAC-SHA256
-//!    parameters (`lib/crypto`, `docs/src/filesystem/arxfs-spec.md` §7).
-//!    The derived key is held in a [`Zeroizing`] wrapper so it is wiped on
-//!    drop and never lingers on the boot stack (secret
-//!    hygiene; the audited `zeroize` crate, not a hand-rolled primitive).
-//! 3. [`ARXFS::open`] mounts the encrypted root under that key. A wrong
-//!    passphrase never unwraps the master key and the mount is refused
-//!    with [`DriverError::PermissionDenied`] — there is no separate
-//!    "wrong passphrase" oracle and no fallback to a plaintext mount
-//!    (fail closed — encrypted-by-default).
-//! 4. [`load_users_db_source`] reads and validates
-//!    `/System/Security/Users` off the mounted root under the kernel's
-//!    capability-less `uid 0` bootstrap identity (its own permission
-//!    check and fail-closed `users-v1` parse), retaining the canonical
-//!    text in a [`HeldUsersDbSource`] the boot path installs through
-//!    `BootInfo::with_users_db`.
-//!
-//! Every refusal is audited and yields **no** database, so a system whose
-//! root cannot be unlocked or whose database cannot be read serves none
-//! rather than inventing accounts.
-//!
-//! [`read_root_unlock_descriptor`] reads the first of those three inputs —
-//! the plaintext `root.unlock` descriptor — back off the FAT boot
-//! partition through the same real FAT32 driver that authored it, and
-//! [`mount_root_and_load_users`] is the single boot-path entry that
-//! threads it straight into the unlock composition above: given the two
-//! brought-up [`Block`] devices and the typed passphrase it reads the
-//! descriptor, unlocks the root, and returns the served database (so the
-//! boot path neither re-threads the descriptor buffer nor reconciles two
-//! error taxonomies itself).
-//!
-//! [`mount_root_disk_and_load_users`] sits one layer above that seam: it
-//! takes the **single** whole-disk [`Block`] device a board brings up,
-//! parses its partition table (MBR or GPT — scheme- and
-//! architecture-neutral, the same definition `tools/mkimage` writes), locates the FAT boot and `ARXFS` root
-//! partitions by role, and threads bounds-checked windows onto each into
-//! the composition above.
-//!
-//! The remaining board-specific bring-up that *produces* the whole-disk
-//! [`Block`] device and the typed passphrase — the hardware-tree
-//! root-device discovery, the in-kernel block `DriverHost`, and the
-//! console passphrase prompt — sits above this seam in the boot path and
-//! is wired in the following increment (`plans/PI.md` P11 Chunk B-2);
-//! `virtio-blk` proves it on `-M virt`, EMMC2 on metal (§0.4 / P8).
+//! Every refusal is audited and yields **no** database, so a system whose root
+//! cannot be mounted or whose database cannot be read serves none rather than
+//! inventing accounts. The partition table is parsed by role (`FatBoot` /
+//! `ARXFSRoot`, MBR or GPT), so one definition serves every board.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
+use tairix_abi::boot::MAX_ROOT_PASSPHRASE_LEN;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity, NodeKind};
 use tairix_abi::{DriverError, Errno};
 use tairix_drv_fs_arxfs::{
-    UnlockDescriptor, VolumeKey, ARXFS, ROOT_UNLOCK_NAME, SYSTEM_VOLUME_KEY, UNLOCK_DESCRIPTOR_LEN,
+    Keying, UnlockDescriptor, VolumeKey, VolumeProtection, ARXFS, ROOT_UNLOCK_NAME,
+    UNLOCK_DESCRIPTOR_LEN,
 };
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::boot_session::{LateBootSession, LATE_BOOT_SESSION};
@@ -83,7 +49,8 @@ use tairix_kernel_sec::{GroupId, IdentityTable};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
 use tairix_supervisor::{
-    run_supervisor, Report as SupReport, SupInput, SupervisorExit, SupervisorHost,
+    run_supervisor, MountOutcome, Report as SupReport, RootLock as SupervisorRootLock, SupInput,
+    SupervisorExit, SupervisorHost,
 };
 use tairix_users::{GroupsDb, UsersDb};
 
@@ -107,10 +74,10 @@ pub trait RootVolume: FilesystemRead + FilesystemSecurity {}
 
 impl<T: FilesystemRead + FilesystemSecurity + ?Sized> RootVolume for T {}
 
-/// Audit event: the encrypted root volume was unlocked under the
-/// passphrase-derived key and mounted. The
-/// subsequent users-database read is audited separately by
-/// [`load_users_db_source`] (`UsersDbLoaded` / `UsersDbRejected`).
+/// Audit event: the root volume was mounted — with no key, or unlocked under
+/// the passphrase-derived key — naming its `protection`. The subsequent
+/// users-database read is audited separately by [`load_users_db_source`]
+/// (`UsersDbLoaded` / `UsersDbRejected`).
 const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
 
 /// Audit event: the root unlock was refused by a **structural** failure
@@ -126,23 +93,17 @@ const ROOT_MOUNT_UNLOCKED: EventId = EventId(4133);
 /// a system error.
 const ROOT_MOUNT_REJECTED: EventId = EventId(4134);
 
-/// Audit event: the passphrase-derived key did not unlock the encrypted
-/// root volume — a wrong passphrase, *including* the silent blank-passphrase
-/// probe of a non-blank image that [`unlock_root_disk_interactively`] runs
-/// on **every** normal boot. This is an expected
-/// fail-closed authentication non-match, not a system error: the master key
-/// simply never unwrapped and there is no oracle either way. It is recorded at [`Level::Debug`] — below the default
-/// [`Level::Info`] filter — so the per-boot probe and routine interactive
-/// retries cannot flood the boot log, while the record stays available for
-/// brute-force forensics when the level is lowered. No secret (passphrase, key, or volume byte) is ever logged.
+/// Audit event: the passphrase-derived key did not unlock the encrypted root
+/// volume — a wrong passphrase. An expected fail-closed authentication
+/// non-match, not a system error, so it is recorded at [`Level::Debug`],
+/// below the default [`Level::Info`] filter: routine retries cannot flood the
+/// boot log, and the record stays available for brute-force forensics when
+/// the level is lowered. No secret is ever logged.
 const ROOT_UNLOCK_KEY_REJECTED: EventId = EventId(4142);
 
-/// Audit event: the read-only, signed-bundle `/System` volume (the
-/// design-B pre-unlock driver store, `plans/PI.md`) was discovered and
-/// mounted read-only over its `lib/partition` window under the non-secret
-/// well-known [`SYSTEM_VOLUME_KEY`]. The store
-/// itself is consumed in the later design-B increments; B1 proves the
-/// volume is reachable and read-only.
+/// Audit event: the read-only, signed-bundle, plaintext `/System` volume (the
+/// design-B pre-unlock driver store, `plans/PI.md`) was discovered and mounted
+/// read-only over its `lib/partition` window.
 const SYSTEM_VOLUME_MOUNTED: EventId = EventId(4140);
 
 /// The message the `SYSTEM_VOLUME_MOUNTED` audit event carries — the single
@@ -155,11 +116,12 @@ pub const SYSTEM_VOLUME_MOUNTED_MESSAGE: &str = "root-mount: read-only /System v
 
 /// Audit event: no read-only `/System` volume was mounted — the disk
 /// carries no `ARXFSSystem` partition, or the volume's window could not be
-/// built or opened read-only. In B1 this is **not** fatal: the encrypted
-/// root still serves the system, so the boot proceeds. The `cause` field names which check declined, secret-free.
+/// built or opened read-only. Not fatal: the root still serves the system,
+/// so the boot proceeds. The `cause` field names which check declined,
+/// secret-free.
 const SYSTEM_VOLUME_UNAVAILABLE: EventId = EventId(4141);
 
-/// Why [`unlock_root_and_load_users`] produced no users database.
+/// Why the root mount produced no users database.
 ///
 /// Each variant carries the underlying error from the first check that
 /// refused; the composition stops at the first failure and returns it
@@ -179,13 +141,16 @@ pub enum RootMountError {
     /// buffer. The descriptor is plaintext and untrusted, so it is fully
     /// validated before its parameters drive any key derivation.
     Descriptor(DriverError),
-    /// The root volume could not be mounted under the derived key:
-    /// [`DriverError::PermissionDenied`] for a wrong passphrase (the
-    /// master key never unwraps), [`DriverError::BadMagic`] for a volume
-    /// that is not arxfs, or a device fault. There is no plaintext-mount
-    /// fallback (encrypted by default; fail
-    /// closed).
+    /// The root volume could not be probed or mounted:
+    /// [`DriverError::PermissionDenied`] for a wrong passphrase (the master
+    /// key never unwraps), [`DriverError::BadMagic`] for a volume that is not
+    /// arxfs, [`DriverError::Unsupported`] for a protection it does not
+    /// declare, or a device fault.
     Mount(DriverError),
+    /// The boot partition carries an unlock descriptor but the root volume is
+    /// plaintext: a disk that is not what it claims, refused rather than
+    /// mounted without the protection its boot partition promises.
+    DescriptorBesidePlaintextRoot,
     /// The volume mounted but `/System/Security/Users` could not be read
     /// or validated; [`load_users_db_source`] has already audited the
     /// precise cause.
@@ -196,8 +161,8 @@ pub enum RootMountError {
     /// before any partition is trusted.
     PartitionTable(PartitionError),
     /// The disk carries no FAT boot partition (the partition holding the
-    /// `root.unlock` descriptor), so the encrypted root cannot be
-    /// unlocked. No database is served.
+    /// `root.unlock` descriptor), so its encrypted root cannot be unlocked.
+    /// No database is served.
     NoBootPartition,
     /// The disk carries no `ARXFS` root partition to mount.
     NoRootPartition,
@@ -228,7 +193,9 @@ impl RootMountError {
             Self::Descriptor(_) => "descriptor_invalid",
             Self::Mount(DriverError::PermissionDenied) => "unlock_refused",
             Self::Mount(DriverError::BadMagic) => "not_a_arxfs_volume",
+            Self::Mount(DriverError::Unsupported) => "volume_unsupported",
             Self::Mount(_) => "mount_failed",
+            Self::DescriptorBesidePlaintextRoot => "descriptor_beside_plaintext_root",
             Self::Users(err) => err.cause(),
             Self::PartitionTable(_) => "partition_table_invalid",
             Self::NoBootPartition => "no_boot_partition",
@@ -240,13 +207,13 @@ impl RootMountError {
     }
 }
 
-/// The product of a successful root unlock.
+/// The product of a successful root mount.
 ///
-/// Carries both halves the trusted unlock step publishes: the validated
+/// Carries both halves the trusted mount step publishes: the validated
 /// `users-v1` text served to `users_db_read`, and the authoritative
 /// user/group [`IdentityTable`] the userland `fs_*` path resolves a
 /// caller's groups against. They are produced together — from the one
-/// mounted encrypted root that holds both `/System/Security/Users` and
+/// mounted root that holds both `/System/Security/Users` and
 /// `/System/Security/Groups` — so a single trusted step installs both
 /// (`PREREQUISITES.md` P-A).
 pub struct UnlockedRoot {
@@ -263,18 +230,58 @@ pub struct UnlockedRoot {
     pub users_db: UsersDb,
     /// The parsed group registry, retained for the same engine.
     pub groups_db: GroupsDb,
-    /// The passphrase-derived volume key of the just-unlocked root volume,
-    /// held in a zero-on-drop wrapper.
-    ///
-    /// Carried out of the unlock so a [`WritableRootSink`] can open the
-    /// volume's read-write view and publish it as the writable
-    /// `/System/Logs` + `/System/Settings` backing (`PREREQUISITES.md` P-B)
-    /// — the encrypted root is the one writable partition, so its key is
-    /// the only way to mount that backing. It is the most sensitive value
-    /// the unlock produces: it lives no longer than the publish step and is
-    /// wiped the instant this struct drops, and the redacted [`Debug`]
-    /// never prints it.
-    pub volume_key: Zeroizing<VolumeKey>,
+    /// How the root volume opens, carried out of the mount so a
+    /// [`WritableRootSink`] can open its read-write view and publish it as the
+    /// writable `/System/Logs` + `/System/Settings` backing
+    /// (`PREREQUISITES.md` P-B). An encrypted root's key is the most sensitive
+    /// value the mount produces: it lives no longer than the publish step and
+    /// is wiped the instant this struct drops.
+    pub keying: RootKeying,
+}
+
+/// How a mounted root volume opens again: with no key, or under the key its
+/// passphrase derived, zeroed on drop.
+pub enum RootKeying {
+    /// A plaintext root.
+    Plaintext,
+    /// An encrypted root's volume key.
+    Key(Zeroizing<VolumeKey>),
+}
+
+impl RootKeying {
+    /// The keying an open of the root volume takes.
+    #[must_use]
+    pub fn keying(&self) -> Keying<'_> {
+        match self {
+            Self::Plaintext => Keying::Plaintext,
+            Self::Key(key) => Keying::Key(key),
+        }
+    }
+}
+
+/// How a disk's root volume is locked, as [`probe_root_lock`] finds it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RootLock {
+    /// A plaintext root, mounted with no passphrase.
+    Plaintext,
+    /// An encrypted root, unlocked by a passphrase derived through this
+    /// descriptor.
+    Passphrase(UnlockDescriptor),
+}
+
+/// What [`mount_root_disk_and_load_users`] mounts the root with.
+#[derive(Copy, Clone)]
+pub enum RootUnlock<'a> {
+    /// No key: the root is plaintext.
+    Plaintext,
+    /// The passphrase an encrypted root's key is derived from, through its
+    /// descriptor. Used only to derive the key, never logged or retained.
+    Passphrase {
+        /// The root's unlock descriptor.
+        descriptor: &'a UnlockDescriptor,
+        /// The typed passphrase.
+        passphrase: &'a [u8],
+    },
 }
 
 /// A seam the interactive unlock calls, on success, to publish a writable
@@ -290,8 +297,8 @@ pub struct UnlockedRoot {
 /// **fail-soft**: publishing the writable backing is never allowed to abort
 /// an otherwise-successful unlock.
 pub trait WritableRootSink {
-    /// Open a writable view of the just-unlocked root volume under
-    /// `volume_key` and publish it as the writable-state backing.
+    /// Open a writable view of the just-mounted root volume under `keying`
+    /// and publish it as the writable-state backing.
     ///
     /// Additionally returns the **registered driver itself** — the one
     /// `SleepLock`-serialised instance the `fs_*` syscalls run against —
@@ -303,7 +310,7 @@ pub trait WritableRootSink {
     /// the engine persists through this driver directly, below the VFS.
     /// `None` leaves account administration failing closed
     /// (`NotImplemented`).
-    fn publish(&self, volume_key: &VolumeKey) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>>;
+    fn publish(&self, keying: Keying<'_>) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>>;
 }
 
 /// A [`WritableRootSink`] that publishes nothing.
@@ -315,7 +322,7 @@ pub trait WritableRootSink {
 pub struct NoWritableRootSink;
 
 impl WritableRootSink for NoWritableRootSink {
-    fn publish(&self, _volume_key: &VolumeKey) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
+    fn publish(&self, _keying: Keying<'_>) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
         None
     }
 }
@@ -388,60 +395,25 @@ impl core::fmt::Debug for UnlockedRoot {
     }
 }
 
-/// Unlock the encrypted root volume with the passphrase-derived key and
-/// load its `/System/Security/Users` database.
-///
-/// * `descriptor_bytes` — the plaintext `root.unlock` key-derivation
-///   descriptor read from the FAT boot partition.
-/// * `passphrase` — the bytes the operator typed at the console prompt.
-///   They are used only to derive the volume key and are never logged or
-///   retained by this function.
-/// * `block` — the encrypted root [`Block`] device the board brought up.
-/// * `audit` — the sink the unlock/mount decision and (via
-///   [`load_users_db_source`]) the database-read decision are logged
-///   through.
+/// Mount the root volume `block` under `keying` and load its
+/// `/System/Security/Users` database and `/System/Security/Groups` registry,
+/// building the kernel's identity table from the two.
 ///
 /// On success the returned [`UnlockedRoot`] owns the validated `users-v1`
-/// text (zeroed on drop) and the verified user/group identity table; the
-/// boot path installs the former through `BootInfo::with_users_db` /
-/// [`LateUsersDb`] and the latter through [`LateIdentity`].
-///
-/// Both `/System/Security/Users` and `/System/Security/Groups` live on this
-/// one mounted encrypted root, so the identity table is built here, where
-/// the volume is open, rather than re-mounting it later.
+/// text (zeroed on drop), the verified identity table, and `keying`, so the
+/// writable-state sink can open the same volume read-write.
 ///
 /// # Errors
 ///
-/// A [`RootMountError`] naming the first check that refused. Every error
-/// path yields no database and is audited; the derived key is wiped
+/// A [`RootMountError`] naming the first check that refused. Every error path
+/// yields no database and is audited; an encrypted root's key is wiped
 /// regardless of outcome.
-pub fn unlock_root_and_load_users<B: Block>(
-    descriptor_bytes: &[u8],
-    passphrase: &[u8],
+fn load_root<B: Block>(
     block: B,
+    keying: RootKeying,
     audit: &dyn Sink,
 ) -> Result<UnlockedRoot, RootMountError> {
-    // 1. Decode the untrusted on-FAT descriptor fail-closed before its
-    //    parameters drive any key derivation.
-    let descriptor = match UnlockDescriptor::decode(descriptor_bytes) {
-        Ok(descriptor) => descriptor,
-        Err(err) => {
-            let error = RootMountError::Descriptor(err);
-            reject(audit, error);
-            return Err(error);
-        }
-    };
-
-    // 2. Derive the volume key from the typed passphrase. The key is the
-    //    most sensitive transient on the boot stack: hold it in a
-    //    zero-on-drop wrapper so it is wiped the instant it leaves scope,
-    //    whether the mount succeeds or fails.
-    let volume_key: Zeroizing<VolumeKey> = Zeroizing::new(descriptor.derive_volume_key(passphrase));
-
-    // 3. Mount the encrypted root. A wrong passphrase fails to unwrap the
-    //    master key and is refused fail-closed — no plaintext fallback,
-    //    no separate oracle.
-    let mut fs = match ARXFS::open(block, &volume_key) {
+    let mut fs = match ARXFS::open(block, keying.keying()) {
         Ok(fs) => fs,
         Err(err) => {
             let error = RootMountError::Mount(err);
@@ -449,36 +421,30 @@ pub fn unlock_root_and_load_users<B: Block>(
             return Err(error);
         }
     };
+    let protection = match keying {
+        RootKeying::Plaintext => "plaintext",
+        RootKeying::Key(_) => "encrypted",
+    };
     log(
         audit,
         &Event {
             level: Level::Info,
             id: ROOT_MOUNT_UNLOCKED,
-            message: "root-mount: encrypted root volume unlocked and mounted",
-            fields: &[],
+            message: "root-mount: root volume mounted",
+            fields: &[Field {
+                key: "protection",
+                value: tairix_log::FieldValue::Str(protection),
+            }],
         },
     );
 
-    // 4. Read and validate the users database off the mounted root. This
-    //    audits its own outcome (`UsersDbLoaded` / `UsersDbRejected`) and
-    //    retains the canonical text in the returned holder (served to
-    //    `users_db_read`).
     let users = load_users_db_source(&mut fs, audit).map_err(RootMountError::Users)?;
-
-    // 5. Read the group registry off the same root and build the kernel's
-    //    authoritative identity table from the two databases together, so
-    //    the userland `fs_*` path can resolve a caller's groups kernel-side.
-    //    The held users text was just validated, so re-parsing it to feed
-    //    the identity build cannot fail on well-formed input; a parse
-    //    refusal fails the unlock closed rather than installing a partial
-    //    identity (no invented principal).
+    // The group registry lives on the same root, so the identity table is
+    // built here while the volume is open; a refusal installs no partial
+    // identity.
     let groups_db = load_groups_db(&mut fs, audit).map_err(RootMountError::Groups)?;
-
-    // Apply the operator's boot-time system configuration (the caching
-    // switches) off the same unlocked root, into the process-global cache
-    // control every SMARTRAM cache consults. Fail-safe: an absent or
-    // malformed store leaves every cache enabled and never fails the unlock —
-    // the caches are reclaimable accelerators, never the source of truth.
+    // Fail-safe: an absent or malformed store leaves every cache enabled and
+    // never fails the mount — the caches are accelerators, never the truth.
     tairix_kernel_core::load_and_apply_system_config(
         &mut fs,
         &tairix_kernel_core::CACHE_CONTROL,
@@ -494,176 +460,156 @@ pub fn unlock_root_and_load_users<B: Block>(
     let identity =
         build_identity_table(&users_db, &groups_db, audit).map_err(RootMountError::Identity)?;
 
-    // Carry the key out so the writable-state sink can open a second,
-    // read-write view of this same volume, and the parsed databases so the
-    // account-administration engine starts from the verified boot state;
-    // the key is zeroed when the returned struct drops.
     Ok(UnlockedRoot {
         users,
         identity,
         users_db,
         groups_db,
-        volume_key,
+        keying,
     })
 }
 
-/// Recover the `root.unlock` descriptor off the FAT boot partition and
-/// load the encrypted root's users database under the typed passphrase.
-///
-/// This is the single boot-path entry point for the `plans/PI.md` P11
-/// root-mount increment (Chunk B-2): once the board has brought up the
-/// two block devices and the operator has typed a passphrase at the
-/// console, the boot path calls this one function rather than threading
-/// the descriptor buffer and reconciling two error taxonomies itself. It composes the already-landed building blocks in
-/// order:
-///
-/// 1. [`read_root_unlock_descriptor`] reads the fixed-length plaintext
-///    descriptor off `boot_partition` (B-1). A missing, mis-sized, or
-///    unreadable descriptor is audited and returned as
-///    [`RootMountError::DescriptorRead`] — no database is served and the
-///    encrypted root is never touched.
-/// 2. [`unlock_root_and_load_users`] derives the volume key from
-///    `passphrase`, mounts `root_block`, and loads the validated
-///    `users-v1` database (Chunk A), auditing its own unlock/mount/read
-///    decisions.
-///
-/// * `boot_partition` — the FAT boot-partition [`Block`] device (the
-///   GPU-firmware-readable partition holding `root.unlock`).
-/// * `root_block` — the encrypted root [`Block`] device.
-/// * `passphrase` — the bytes the operator typed at the console; used
-///   only to derive the volume key, never logged or retained.
-/// * `audit` — the sink every decision is logged through.
-///
-/// # Errors
-///
-/// A [`RootMountError`] naming the first check that refused. Every error
-/// path yields no database and is audited; no secret is ever logged and
-/// the derived key is wiped regardless of outcome.
-pub fn mount_root_and_load_users<Boot, Root>(
-    boot_partition: Boot,
-    root_block: Root,
-    passphrase: &[u8],
+/// The disk's partition table, parsed fail-closed (MBR or GPT) and audited
+/// when it is refused.
+fn partition_table<Disk: Block>(
+    disk: &mut Disk,
     audit: &dyn Sink,
-) -> Result<UnlockedRoot, RootMountError>
-where
-    Boot: Block,
-    Root: Block,
-{
-    let descriptor = match read_root_unlock_descriptor(boot_partition) {
-        Ok(descriptor) => descriptor,
-        Err(err) => {
-            let error = RootMountError::DescriptorRead(err);
-            reject(audit, error);
-            return Err(error);
-        }
-    };
-    // This two-device entry loads only the users database; driver loading
-    // is the design-B `/System`-volume path the `devmgr` drives over the
-    // driver-store endpoint ([`with_system_volume`] /
-    // [`crate::driver_store_server`]), independent of this read.
-    unlock_root_and_load_users(&descriptor, passphrase, root_block, audit)
+) -> Result<tairix_partition::PartitionTable, RootMountError> {
+    parse_partition_table(disk).map_err(|err| {
+        let error = RootMountError::PartitionTable(err);
+        reject(audit, error);
+        error
+    })
 }
 
-/// Bring up the users database from a single partitioned disk: parse its
-/// partition table, locate the FAT boot and `ARXFS` root partitions, and
-/// run the unlock + load composition over a bounds-checked window onto
-/// each (`plans/PI.md` P11 Chunk B-2).
+/// A bounds-checked window onto `extent` of `disk`, audited when it does not
+/// fit the device.
+fn partition_window<'d, Disk: Block>(
+    disk: &'d mut Disk,
+    extent: &tairix_partition::Partition,
+    audit: &dyn Sink,
+) -> Result<PartitionBlock<&'d mut Disk>, RootMountError> {
+    PartitionBlock::from_partition(disk, extent).map_err(|err| {
+        let error = RootMountError::PartitionWindow(err);
+        reject(audit, error);
+        error
+    })
+}
+
+/// Audit `error` and return it, for a refusal found outside a helper that
+/// audits its own.
+fn refused<T>(audit: &dyn Sink, error: RootMountError) -> Result<T, RootMountError> {
+    reject(audit, error);
+    Err(error)
+}
+
+/// Read how `disk`'s root volume is locked, auditing nothing: its own
+/// protection word, checked against the boot partition's `root.unlock`
+/// descriptor. The two must agree — a descriptor beside a plaintext root, or an
+/// encrypted root with none, is a disk that is not what it claims, and is
+/// refused before anything mounts.
 ///
-/// This is the entry the boot path uses when the board brings up **one**
-/// block device carrying the whole disk — the common case: an SD card, a
-/// USB stick, or a single `virt` virtio-blk image. It is scheme- **and**
-/// architecture-neutral: `disk` may be an MBR or a GPT disk
-/// ([`parse_partition_table`] detects which), so the same code reads a
-/// Raspberry Pi MBR image and a UEFI x86_64 GPT disk without a board
-/// `cfg`. The partitions are located by **role**
-/// (`FatBoot` / `ARXFSRoot`), not by a hard-coded index, and the on-disk
-/// definition is the one `tools/mkimage` writes.
-///
-/// The two partitions are opened **in sequence** over a borrowed `disk`
-/// (one device, never two simultaneous mutable windows, via the
-/// `impl Block for &mut B` forwarding): the FAT boot window is built, the
-/// descriptor read, the window dropped to reclaim the disk, then the
-/// `ARXFS` root window is built for the mount. The untrusted on-disk
-/// table is validated fail-closed before any partition is trusted, and a disk missing either partition serves
-/// no database.
-///
-/// * `disk` — the whole-disk [`Block`] device the board brought up.
-/// * `passphrase` — the bytes the operator typed at the console; used
-///   only to derive the volume key, never logged or retained.
-/// * `audit` — the sink every decision is logged through.
-///
-/// Driver loading is **not** part of this read: it is the design-B
-/// `/System`-volume path the user-space `devmgr` drives over the
-/// driver-store endpoint ([`with_system_volume`] /
-/// [`crate::driver_store_server`]), independent of the users-database load.
+/// The partitions are located by role, not index, and opened in sequence over
+/// the one borrowed `disk`. A plaintext root needs no boot partition.
 ///
 /// # Errors
 ///
-/// A [`RootMountError`] naming the first check that refused
-/// ([`RootMountError::PartitionTable`], [`RootMountError::NoBootPartition`],
-/// [`RootMountError::NoRootPartition`], [`RootMountError::PartitionWindow`],
-/// or the downstream descriptor/mount/users errors). Every error path
-/// yields no database and is audited.
+/// [`RootMountError::PartitionTable`], [`RootMountError::NoRootPartition`],
+/// [`RootMountError::PartitionWindow`], [`RootMountError::Mount`] for a root
+/// that does not probe, [`RootMountError::DescriptorBesidePlaintextRoot`], or —
+/// for an encrypted root — [`RootMountError::NoBootPartition`],
+/// [`RootMountError::DescriptorRead`] and [`RootMountError::Descriptor`].
+pub fn probe_root_lock<Disk: Block>(disk: &mut Disk) -> Result<RootLock, RootMountError> {
+    let table = parse_partition_table(&mut *disk).map_err(RootMountError::PartitionTable)?;
+    let root_extent = table
+        .first_of_type(PartitionType::ARXFSRoot)
+        .ok_or(RootMountError::NoRootPartition)?;
+    let protection = {
+        let mut root = PartitionBlock::from_partition(&mut *disk, &root_extent)
+            .map_err(RootMountError::PartitionWindow)?;
+        ARXFS::probe_protection(&mut root).map_err(RootMountError::Mount)?
+    };
+    let boot_extent = table.first_of_type(PartitionType::FatBoot);
+    let descriptor = match &boot_extent {
+        Some(boot_extent) => {
+            let boot = PartitionBlock::from_partition(&mut *disk, boot_extent)
+                .map_err(RootMountError::PartitionWindow)?;
+            match read_root_unlock_descriptor(boot) {
+                Ok(bytes) => Some(bytes),
+                Err(DriverError::NotFound) => None,
+                Err(err) => return Err(RootMountError::DescriptorRead(err)),
+            }
+        }
+        None => None,
+    };
+    match (protection, descriptor) {
+        (VolumeProtection::Plaintext, None) => Ok(RootLock::Plaintext),
+        (VolumeProtection::Plaintext, Some(_)) => {
+            Err(RootMountError::DescriptorBesidePlaintextRoot)
+        }
+        (VolumeProtection::Encrypted, Some(bytes)) => UnlockDescriptor::decode(&bytes)
+            .map(RootLock::Passphrase)
+            .map_err(RootMountError::Descriptor),
+        (VolumeProtection::Encrypted, None) => Err(match boot_extent {
+            None => RootMountError::NoBootPartition,
+            Some(_) => RootMountError::DescriptorRead(DriverError::NotFound),
+        }),
+    }
+}
+
+/// [`probe_root_lock`] as a mount decides on it: a refusal is audited.
+///
+/// # Errors
+///
+/// As [`probe_root_lock`].
+pub fn read_root_lock<Disk: Block>(
+    disk: &mut Disk,
+    audit: &dyn Sink,
+) -> Result<RootLock, RootMountError> {
+    probe_root_lock(disk).inspect_err(|&error| reject(audit, error))
+}
+
+/// Mount `disk`'s root volume as `unlock` says and load its users database,
+/// group registry and identity table (`plans/PI.md` P11 Chunk B-2).
+///
+/// The entry the boot path and the Supervisor use, over the one whole-disk
+/// [`Block`] device a board brings up — an SD card, a USB stick, a `virt`
+/// virtio-blk image — MBR or GPT alike, with no board `cfg`. Driver loading is
+/// not part of it: that is the design-B `/System`-volume path `devmgr` drives
+/// over the driver-store endpoint ([`with_system_volume`] /
+/// [`crate::driver_store_server`]).
+///
+/// # Errors
+///
+/// A [`RootMountError`] naming the first check that refused: the partition
+/// table, the root partition or its window, or the mount and the load of its
+/// databases — including a root whose protection is not the one `unlock`
+/// expects. Every error path yields no database and is audited.
 pub fn mount_root_disk_and_load_users<Disk: Block>(
     mut disk: Disk,
-    passphrase: &[u8],
+    unlock: RootUnlock<'_>,
     audit: &dyn Sink,
 ) -> Result<UnlockedRoot, RootMountError> {
-    // 1. Parse the untrusted partition table fail-closed (MBR or GPT).
-    let table = match parse_partition_table(&mut disk) {
-        Ok(table) => table,
-        Err(err) => {
-            let error = RootMountError::PartitionTable(err);
-            reject(audit, error);
-            return Err(error);
-        }
-    };
-
-    // 2. Locate the two partitions TAIRiX needs by role, not by index.
-    let Some(boot_extent) = table.first_of_type(PartitionType::FatBoot) else {
-        let error = RootMountError::NoBootPartition;
-        reject(audit, error);
-        return Err(error);
-    };
+    let table = partition_table(&mut disk, audit)?;
     let Some(root_extent) = table.first_of_type(PartitionType::ARXFSRoot) else {
-        let error = RootMountError::NoRootPartition;
-        reject(audit, error);
-        return Err(error);
+        return refused(audit, RootMountError::NoRootPartition);
     };
-
-    // 3. Read the descriptor off a window onto the FAT boot partition,
-    //    then drop the window to reclaim the disk for the root window
-    //    (one device, two sequential windows).
-    let descriptor = {
-        let boot = match PartitionBlock::from_partition(&mut disk, &boot_extent) {
-            Ok(boot) => boot,
-            Err(err) => {
-                let error = RootMountError::PartitionWindow(err);
-                reject(audit, error);
-                return Err(error);
+    let keying = match unlock {
+        RootUnlock::Plaintext => RootKeying::Plaintext,
+        RootUnlock::Passphrase {
+            descriptor,
+            passphrase,
+        } => match descriptor.derive_volume_key(passphrase) {
+            Ok(key) => RootKeying::Key(key),
+            // No root is provisioned under an empty or over-long passphrase,
+            // so one is simply wrong.
+            Err(_) => {
+                return refused(audit, RootMountError::Mount(DriverError::PermissionDenied));
             }
-        };
-        match read_root_unlock_descriptor(boot) {
-            Ok(descriptor) => descriptor,
-            Err(err) => {
-                let error = RootMountError::DescriptorRead(err);
-                reject(audit, error);
-                return Err(error);
-            }
-        }
+        },
     };
-
-    // 4. Open a window onto the ARXFS root partition and run the unlock +
-    //    users-load composition over it.
-    let root = match PartitionBlock::from_partition(&mut disk, &root_extent) {
-        Ok(root) => root,
-        Err(err) => {
-            let error = RootMountError::PartitionWindow(err);
-            reject(audit, error);
-            return Err(error);
-        }
-    };
-    unlock_root_and_load_users(&descriptor, passphrase, root, audit)
+    let root = partition_window(&mut disk, &root_extent, audit)?;
+    load_root(root, keying, audit)
 }
 
 /// Discover and mount the read-only signed-bundle `/System` volume on
@@ -685,10 +631,9 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
 ///
 /// The disk's partition table is parsed fail-closed; if it carries a
 /// [`PartitionType::ARXFSSystem`] partition, a bounds-checked
-/// [`PartitionBlock`] window is opened over it and mounted **read-only**
-/// under the non-secret well-known [`SYSTEM_VOLUME_KEY`]
-/// ([`ARXFS::open_read_only`] — the volume holds no secrets and its
-/// integrity rests on the per-bundle Ed25519 signatures the load gate
+/// [`PartitionBlock`] window is opened over it and mounted **read-only** as
+/// the plaintext volume it is ([`ARXFS::open_read_only`] — it holds no secrets
+/// and its integrity rests on the per-bundle Ed25519 signatures the load gate
 /// verifies). The volume's root is probed for the
 /// `Drivers` store directory to confirm it is a real `/System` volume, the
 /// mount is audited (`SYSTEM_VOLUME_MOUNTED`), and only then is `f` run.
@@ -720,9 +665,7 @@ pub fn with_system_volume<Disk: Block, R>(
         system_volume_unavailable(audit, "system_window_out_of_range");
         return None;
     };
-    // Mount read-only under the public key; the volume carries no secrets,
-    // so the kernel can never mutate it.
-    let Ok(mut system) = ARXFS::open_read_only(window, &SYSTEM_VOLUME_KEY) else {
+    let Ok(mut system) = ARXFS::open_read_only(window, Keying::Plaintext) else {
         system_volume_unavailable(audit, "system_mount_failed");
         return None;
     };
@@ -745,8 +688,9 @@ pub fn with_system_volume<Disk: Block, R>(
     Some(f(&mut system))
 }
 
-/// Audit a declined `/System` mount with a stable, secret-free `cause`. Fail-soft, so this is always informational and the
-/// boot proceeds to the passphrase prompt with no driver autoloaded.
+/// Audit a declined `/System` mount with a stable, secret-free `cause`.
+/// Fail-soft, so this is always informational and the boot proceeds with no
+/// driver autoloaded.
 fn system_volume_unavailable(audit: &dyn Sink, cause: &'static str) {
     log(
         audit,
@@ -780,16 +724,6 @@ const ROOT_UNLOCK_RETRY: EventId = EventId(4137);
 /// The `cause` field names which check refused, secret-free.
 const ROOT_UNLOCK_GAVE_UP: EventId = EventId(4138);
 
-/// Longest passphrase, in bytes, the console prompt accepts.
-///
-/// A line longer than this is refused as the current attempt (treated
-/// exactly like a wrong passphrase — rate-limited and re-prompted) rather
-/// than silently truncated to a shorter — and wrong — secret. It is a fixed input
-/// bound, not a scalable capacity: a passphrase is
-/// operator-typed, so a generous fixed ceiling is correct and the read
-/// buffer is a zeroized on-stack array of exactly this size.
-pub const MAX_PASSPHRASE_LEN: usize = 256;
-
 /// The single source of the encrypted-root filesystem's operator-facing
 /// label. Both the unlock prompt and the post-unlock line are built from
 /// this one token, so renaming the filesystem cannot leave the two
@@ -804,15 +738,18 @@ macro_rules! fs_label {
 /// the line; the trailing space separates the label from the typed secret.
 const FS_UNLOCK_PROMPT: &[u8] = concat!("\r\n", fs_label!(), " passphrase: ").as_bytes();
 
-/// The line a successful unlock leaves behind, followed by one blank line.
+/// The line a mounted root leaves behind, followed by one blank line.
 ///
-/// A carriage return returns the cursor to the start of the prompt line,
-/// the bare label overwrites the `<label> passphrase: ` text, and the
+/// A carriage return returns the cursor to the start of the prompt or
+/// announcement line, the bare label overwrites it, and the
 /// erase-to-end-of-line control clears whatever the operator typed (and the
 /// `[input complete]` feedback marker) off the tail — so the line reads just
 /// the label. The `\r\n\r\n` then ends that line and leaves one blank line
 /// separating the unlock from the login `Username:` prompt that follows.
 const FS_UNLOCKED_LINE: &[u8] = concat!("\r", fs_label!(), "\x1b[K\r\n\r\n").as_bytes();
+
+/// What the same line says when the boot gives the root up, before the cause.
+const FS_GAVE_UP_PREFIX: &[u8] = concat!("\r", fs_label!(), ": root not mounted: ").as_bytes();
 
 /// The interactive unlock prompt drawn **in place** over the boot-screen
 /// announcement line, used for the first prompt after the ESC window has
@@ -859,8 +796,8 @@ const SUPERVISOR_ESC_REPOLL_NS: u64 = 50_000_000;
 /// The one set-once credential cell the production dispatch hook reads
 /// and the in-kernel root-unlock kthread writes.
 ///
-/// The encrypted root is unlocked only *after* the console keyboard is
-/// live — past the point where [`BootInfo::with_users_db`] is consumed
+/// The root is mounted only *after* the console keyboard is live — past the
+/// point where [`BootInfo::with_users_db`] is consumed
 /// (`plans/PI.md` P11 Chunk B-2). The boot path therefore hands the
 /// dispatch hook `&LATE_USERS_DB` at boot through
 /// [`BootInfo::with_users_db`], so `users_db_read` reads
@@ -935,7 +872,7 @@ enum PassphraseReadError {
     /// device error, or no input source at all). The unlock fails closed
     /// rather than treating it as an empty passphrase.
     Console,
-    /// The line exceeded [`MAX_PASSPHRASE_LEN`] before a terminator; the
+    /// The line exceeded [`MAX_ROOT_PASSPHRASE_LEN`] before a terminator; the
     /// remainder was drained to the newline so the next read starts clean.
     /// Treated as a wrong attempt, never a truncated secret.
     TooLong,
@@ -946,10 +883,11 @@ enum PassphraseReadError {
     Escape,
 }
 
-/// Publish a successfully unlocked database into `late_db` and audit it.
+/// Publish a successfully mounted root's database into `late_db` and audit
+/// it.
 ///
-/// Shared by both unlock paths — the silent blank-passphrase attempt and
-/// each interactive attempt — so the set-once install, its fail-closed
+/// Shared by every mount path — a plaintext root, each interactive attempt,
+/// and the Supervisor's `mount` — so the set-once install, its fail-closed
 /// "already installed" guard, and the [`ROOT_UNLOCK_INSTALLED`] audit line
 /// have exactly one definition. The install
 /// ([`LateUsersDb::install`]) is set-once: a refusal means a database was
@@ -965,16 +903,15 @@ pub(crate) fn finish_install(
         identity,
         users_db,
         groups_db,
-        volume_key,
+        keying,
     } = unlocked;
-    // Publish the writable `/System/Logs` + `/System/Settings` backing
-    // while the key is still live — and receive the registered driver
-    // itself, which the account-administration engine shares (one volume,
-    // one writer). Fail-soft: a publish refusal leaves those subtrees (and
-    // account administration) failing closed and never blocks the
-    // users/identity install below. The key is wiped when `volume_key`
-    // drops at the end of this function.
-    let admin_fs = install.writable.publish(&volume_key);
+    // Publish the writable `/System/Logs` + `/System/Settings` backing while
+    // an encrypted root's key is still live — and receive the registered
+    // driver itself, which the account-administration engine shares (one
+    // volume, one writer). Fail-soft: a publish refusal leaves those subtrees
+    // (and account administration) failing closed and never blocks the
+    // users/identity install below. The key is wiped when `keying` drops.
+    let admin_fs = install.writable.publish(keying.keying());
     // Publish the merged identity table first, so the `fs_*` group
     // resolution covers the human accounts before `login` can act on the
     // installed users database. The boot sec phase installed the
@@ -1030,7 +967,7 @@ pub(crate) fn finish_install(
         &Event {
             level: Level::Info,
             id: ROOT_UNLOCK_INSTALLED,
-            message: "root-unlock: root unlocked; users database installed",
+            message: "root-unlock: root mounted; users database installed",
             fields: &[],
         },
     );
@@ -1084,18 +1021,16 @@ enum EscWindow {
     /// already resolved (the users database is installed), so the caller
     /// returns [`UnlockOutcome::Installed`] without prompting.
     Mounted,
-    /// No Supervisor entry; proceed to the normal unlock. `prompt_drawn` is
-    /// `true` when the window already redrew the `ARXFS passphrase: ` prompt
-    /// in place of the announcement (a timed-out / typed / CSI fall-through),
-    /// so the interactive loop must not draw a second, fresh prompt line.
-    /// `initial` carries a byte the window already consumed when the operator
-    /// began typing the passphrase before the window elapsed: it is the first
-    /// character of the passphrase line and MUST be fed to the read rather than
-    /// dropped, or the typed secret would be silently corrupted.
-    Continue {
-        prompt_drawn: bool,
-        initial: Option<u8>,
-    },
+    /// The operator resumed the boot from the Supervisor, which redrew the
+    /// screen: the unlock draws its prompt on a fresh line.
+    Resumed,
+    /// The window elapsed, or the operator began typing: the announcement is
+    /// still on its line, for the unlock to draw over. `initial` carries a
+    /// byte the window already consumed when the operator began typing the
+    /// passphrase before the window elapsed: it is the first character of the
+    /// passphrase line and MUST be fed to the read rather than dropped, or the
+    /// typed secret would be silently corrupted.
+    Elapsed { initial: Option<u8> },
 }
 
 /// Resolve a just-read `ESC` byte into a lone `ESC` (drop to the Supervisor)
@@ -1151,9 +1086,9 @@ fn drain_csi_sequence(input: &dyn ConsoleRead) {
 /// editor sequence is drained and ignored (it is a stray arrow/Delete key, not
 /// passphrase content). **Any other key is the operator starting to type the
 /// passphrase before the window elapsed**: it is carried out as
-/// [`EscWindow::Continue::initial`] and fed to the passphrase read as the
+/// [`EscWindow::Elapsed::initial`] and fed to the passphrase read as the
 /// line's first character — never discarded, which would silently corrupt a
-/// quickly-typed secret (the defect this window must not have).
+/// quickly-typed secret. A root that takes no passphrase sends it nowhere.
 fn esc_boot_window(
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
@@ -1171,34 +1106,20 @@ fn esc_boot_window(
             return match enter_supervisor(console, input, supervisor, boot_session) {
                 // The operator unlocked and mounted the root from the REPL.
                 SupervisorExit::Mounted => EscWindow::Mounted,
-                // The operator asked to resume boot: the REPL redrew the
-                // screen, so the normal unlock draws a fresh prompt. Any
-                // session choice the operator made was already recorded by
-                // `enter_supervisor`.
-                SupervisorExit::ContinueBoot(_) => EscWindow::Continue {
-                    prompt_drawn: false,
-                    initial: None,
-                },
+                // The operator asked to resume boot. Any session choice the
+                // operator made was already recorded by `enter_supervisor`.
+                SupervisorExit::ContinueBoot(_) => EscWindow::Resumed,
             };
         }
         // A CSI editor sequence (arrow/Delete): its bytes were drained by
-        // `esc_is_lone_escape`, so nothing is carried forward. Draw the prompt
-        // in place and fall through to the normal unlock.
-        write_all(console, FS_UNLOCK_PROMPT_INPLACE);
-        return EscWindow::Continue {
-            prompt_drawn: true,
-            initial: None,
-        };
+        // `esc_is_lone_escape`, so nothing is carried forward.
+        return EscWindow::Elapsed { initial: None };
     }
     // Either the window timed out (`got == 0`) or the operator typed a
-    // non-`ESC` key — the first character of the passphrase. Draw the prompt in
-    // place and carry any typed byte forward so it becomes that line's first
-    // character rather than being lost.
-    let initial = (got == 1).then_some(byte[0]);
-    write_all(console, FS_UNLOCK_PROMPT_INPLACE);
-    EscWindow::Continue {
-        prompt_drawn: true,
-        initial,
+    // non-`ESC` key — the first character of the passphrase, carried forward
+    // so it is not lost.
+    EscWindow::Elapsed {
+        initial: (got == 1).then_some(byte[0]),
     }
 }
 
@@ -1229,42 +1150,30 @@ fn enter_supervisor(
     exit
 }
 
-/// Unlock the root disk and publish the loaded database into `late_db`,
-/// prompting for the passphrase only when the root is not unlockable
-/// without one — re-prompting a wrong typed passphrase **indefinitely**,
-/// each wrong attempt rate-limited by `delay` and followed by an
-/// `Incorrect passphrase` notice, until the correct one unlocks
-/// (`plans/PI.md` P11 Chunk B-2).
-///
-/// The **blank** passphrase is tried silently first, before any prompt is
-/// drawn. An installer image is provisioned with a blank root passphrase
-/// (`tairix_mkimage::INSTALLER_PASSPHRASE`) so a fresh
-/// install boots straight into the installer rather than stalling
-/// behind an `ARXFS passphrase:` prompt the operator cannot answer. Only
-/// when the blank passphrase does **not** unlock the root (a debug or
-/// production image with a non-blank passphrase) is the operator prompted
-/// interactively. A non-blank passphrase failing the silent attempt is no
-/// oracle: the master key simply never unwraps, exactly as for any wrong
-/// passphrase.
+/// Mount the root disk and publish the loaded database into `late_db`
+/// (`plans/PI.md` P11 Chunk B-2). A plaintext root ([`read_root_lock`]) mounts
+/// with no prompt at all. An encrypted root is prompted for, re-prompting a
+/// wrong typed passphrase **indefinitely**, each wrong attempt rate-limited by
+/// `delay` and followed by an `Incorrect passphrase` notice, until the correct
+/// one unlocks. An empty passphrase is simply a wrong one.
 ///
 /// This is the device-independent unlock *policy* the in-kernel unlock
 /// kthread runs once the board has brought up the root block device and
 /// the console keyboard is live. It is generic over the [`Block`] disk and
 /// takes the console write/read halves as object-safe seams
 /// ([`ConsoleWrite`] / [`ConsoleRead`]), so it names no architecture or
-/// device type and is host-tested with a mock console
-/// over the same MBR + encrypted-`ARXFS` disk fixture `tools/mkimage`
-/// writes. The kthread passes the **blocking** console
+/// device type and is host-tested with a mock console over the same MBR +
+/// `ARXFS` disk fixtures `tools/mkimage` writes. The kthread passes the **blocking** console
 /// read ([`BlockingConsoleRead`](tairix_kernel_core::BlockingConsoleRead))
 /// so an empty poll parks the task on the scheduler rather than
 /// busy-spinning; this function only moves bytes.
 ///
-/// Each attempt:
+/// Each attempt on an encrypted root:
 ///
 /// 1. Writes the `ARXFS passphrase:` prompt to `console` (best
 ///    effort — a write error does not by itself abort the attempt).
 /// 2. Reads one line into a zeroized, fixed-length on-stack buffer
-///    ([`MAX_PASSPHRASE_LEN`]); the passphrase is never heap-allocated,
+///    ([`MAX_ROOT_PASSPHRASE_LEN`]); the passphrase is never heap-allocated,
 ///    logged, or retained past the attempt.
 /// 3. Runs [`mount_root_disk_and_load_users`] under the typed bytes.
 ///
@@ -1277,10 +1186,10 @@ fn enter_supervisor(
 /// user data and login is refused until it mounts, so there is nothing to
 /// advance to without the correct passphrase and no bounded "give up" that
 /// would help. Any other error is structural (no partition table, no
-/// boot/root partition, an unreadable or invalid descriptor, a corrupt
-/// database): retrying cannot help, so the unlock gives up immediately. A
-/// console read error also gives up. Every give-up path leaves `late_db`
-/// empty — login stays fail-closed.
+/// boot/root partition, an unreadable, invalid or contradicted descriptor, a
+/// corrupt database): retrying cannot help, so the unlock gives up. A console
+/// read error also gives up. Every give-up path leaves `late_db` empty — login
+/// stays fail-closed.
 ///
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
 /// * `console` — the primary console's byte sink for the prompt.
@@ -1299,18 +1208,17 @@ fn enter_supervisor(
 ///   the UART receive interrupt, resolve the `LateUsersDb` pending wait);
 ///   coupling it here makes forgetting it impossible.
 /// * `supervisor` — the optional pre-boot Supervisor host. When present, a
-///   bounded ESC boot-screen window is drawn *before* the blank-passphrase
-///   probe; a lone `ESC` drops into the Supervisor REPL, and if the operator
-///   mounts the root from there the unlock returns
-///   [`UnlockOutcome::Installed`] with no further prompt. [`None`] (host
-///   tests) skips the window entirely, leaving behaviour unchanged.
+///   bounded ESC boot-screen window is drawn before anything mounts — even on
+///   a disk that cannot be read, so the Supervisor can diagnose it; a lone
+///   `ESC` drops into the Supervisor REPL, and if the operator mounts the root
+///   from there the unlock returns [`UnlockOutcome::Installed`] with no
+///   further prompt. [`None`] (host tests) skips the window entirely.
 ///
 /// Driver loading is **not** part of this policy: under design B the
 /// user-space `devmgr` loads drivers over the driver-store endpoint served
 /// off the read-only `/System` volume ([`with_system_volume`] /
-/// [`crate::driver_store_server`]), independent of this encrypted-root
-/// (user-data) prompt — the store volume is reachable without this
-/// passphrase.
+/// [`crate::driver_store_server`]), independent of the root (user-data) mount
+/// — the store volume is reachable without any passphrase.
 // Each parameter is a distinct, irreducible boot seam the unlock threads
 // through — the disk, the console write/read halves, the install cells, the
 // audit sink, the anti-brute-force delay, the console-release callback, and
@@ -1365,19 +1273,6 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // `impl Block for &mut B` forwarding, so one device is reused across
     // retries without re-acquiring it.
     let mut disk = disk;
-
-    // The pre-unlock boot screen: give the operator a bounded window to drop
-    // into the Supervisor before the passphrase prompt. Shown on **every**
-    // image (including the blank-passphrase installer image, which otherwise
-    // auto-unlocks with no prompt). When no host is threaded (host tests),
-    // the window is skipped and behaviour is exactly as before. If the
-    // operator mounts from inside the Supervisor, the unlock is already
-    // resolved and this returns installed.
-    let mut prompt_drawn = false;
-    // A byte the ESC window consumed when the operator began typing the
-    // passphrase before it elapsed: the first character of the first
-    // passphrase line, fed to that read below rather than dropped.
-    let mut initial_byte: Option<u8> = None;
     // Kept reusable (reborrowed via `as_deref_mut`) so the *same* host serves
     // both entry points: the boot-screen window here and a lone `ESC` at the
     // live passphrase prompt in the loop below.
@@ -1385,43 +1280,39 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     // The production cell the operator's one-boot login choice is recorded in;
     // `enter_supervisor` installs into it from either entry point.
     let boot_session = &LATE_BOOT_SESSION;
-    if let Some(host) = supervisor.as_deref_mut() {
-        match esc_boot_window(console, input, host, boot_session) {
+    // The window opens before the disk is read, so a disk slow to answer
+    // cannot hold off the Supervisor that would diagnose it.
+    let window = match supervisor.as_deref_mut() {
+        Some(host) => match esc_boot_window(console, input, host, boot_session) {
             EscWindow::Mounted => return UnlockOutcome::Installed,
-            EscWindow::Continue {
-                prompt_drawn: drawn,
-                initial,
-            } => {
-                prompt_drawn = drawn;
-                initial_byte = initial;
-            }
-        }
-    }
+            window => Some(window),
+        },
+        None => None,
+    };
 
-    // Try the blank passphrase silently first, before drawing any prompt.
-    // An installer image is provisioned with a **blank** root passphrase
-    // (`tairix_mkimage::INSTALLER_PASSPHRASE`): a fresh
-    // install must boot straight into the installer, never stall behind
-    // an `ARXFS passphrase:` prompt the operator has no value to
-    // answer. So if the blank passphrase unlocks the root we install and
-    // return with no prompt at all. A debug or production image whose
-    // passphrase is non-blank simply fails this attempt — the master key
-    // never unwraps, exactly like any wrong passphrase, so it is no oracle —
-    // and falls through to the interactive prompt below.
-    match mount_root_disk_and_load_users(&mut disk, b"", audit) {
-        Ok(unlocked) => return finish_install(unlocked, install, audit),
-        Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
-            // Non-blank passphrase: prompt the operator interactively.
+    let descriptor = match read_root_lock(&mut disk, audit) {
+        Ok(RootLock::Passphrase(descriptor)) => descriptor,
+        Ok(RootLock::Plaintext) => {
+            return match mount_root_disk_and_load_users(&mut disk, RootUnlock::Plaintext, audit) {
+                Ok(unlocked) => {
+                    write_all(console, FS_UNLOCKED_LINE);
+                    finish_install(unlocked, install, audit)
+                }
+                Err(error) => give_up(console, audit, error.cause()),
+            };
         }
-        Err(error) => {
-            // A structural failure (no table/partition, unreadable or
-            // invalid descriptor, corrupt database): re-prompting cannot
-            // fix the disk, so give up now (`4134` already named the
-            // cause).
-            gave_up(audit, error.cause());
-            return UnlockOutcome::GaveUp;
+        // `read_root_lock` already audited the precise cause.
+        Err(error) => return give_up(console, audit, error.cause()),
+    };
+    // A window that elapsed ends with the prompt drawn over its announcement,
+    // and a byte it took is the first character of the first passphrase.
+    let (mut prompt_drawn, mut initial_byte) = match window {
+        Some(EscWindow::Elapsed { initial }) => {
+            write_all(console, FS_UNLOCK_PROMPT_INPLACE);
+            (true, initial)
         }
-    }
+        _ => (false, None),
+    };
 
     // A wrong typed passphrase is asked again, forever: the encrypted root
     // holds the only copy of the user data and login is refused until it
@@ -1444,7 +1335,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
 
         // A zeroized, fixed-length buffer: the typed secret never reaches
         // the heap and is wiped when this attempt's buffer drops.
-        let mut passphrase = Zeroizing::new([0u8; MAX_PASSPHRASE_LEN]);
+        let mut passphrase = Zeroizing::new([0u8; MAX_ROOT_PASSPHRASE_LEN]);
         // Only the *first* prompt inherits a byte the ESC window pre-read;
         // every re-prompt starts empty.
         let len = match read_passphrase_line(input, &mut passphrase[..], initial_byte.take()) {
@@ -1459,8 +1350,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
             Err(PassphraseReadError::Console) => {
                 // The console could not deliver a line: fail closed rather
                 // than retry against a dead input.
-                gave_up(audit, "console_unreadable");
-                return UnlockOutcome::GaveUp;
+                return give_up(console, audit, "console_unreadable");
             }
             Err(PassphraseReadError::Escape) => {
                 // A lone `ESC` at the live prompt drops into the Supervisor
@@ -1481,7 +1371,11 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
             }
         };
 
-        match mount_root_disk_and_load_users(&mut disk, &passphrase[..len], audit) {
+        let unlock = RootUnlock::Passphrase {
+            descriptor: &descriptor,
+            passphrase: &passphrase[..len],
+        };
+        match mount_root_disk_and_load_users(&mut disk, unlock, audit) {
             Ok(unlocked) => {
                 // The passphrase was accepted: collapse the prompt line to
                 // just the filesystem label (overwriting the typed line and
@@ -1502,8 +1396,7 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
                 // re-prompting cannot fix the disk, so give up now. The
                 // mount step already audited the precise cause (`4134`);
                 // record the give-up with the same secret-free cause.
-                gave_up(audit, error.cause());
-                return UnlockOutcome::GaveUp;
+                return give_up(console, audit, error.cause());
             }
         }
     }
@@ -1683,6 +1576,16 @@ fn retry(audit: &dyn Sink) {
     );
 }
 
+/// Give the root up for `cause`: say so on the line the boot screen left, so
+/// the operator is told why login stays refused, and record it.
+fn give_up(console: &dyn ConsoleWrite, audit: &dyn Sink, cause: &'static str) -> UnlockOutcome {
+    write_all(console, FS_GAVE_UP_PREFIX);
+    write_all(console, cause.as_bytes());
+    write_all(console, b"\x1b[K\r\n");
+    gave_up(audit, cause);
+    UnlockOutcome::GaveUp
+}
+
 /// Audit a fail-closed give-up of the interactive unlock, naming the
 /// secret-free `cause`. No database is installed.
 fn gave_up(audit: &dyn Sink, cause: &'static str) {
@@ -1700,19 +1603,83 @@ fn gave_up(audit: &dyn Sink, cause: &'static str) {
     );
 }
 
-/// Classify a refused unlock into the audit record it is logged as.
+/// How the root on `disk` is locked, as the Supervisor's `mount` reads it
+/// before asking for anything: asking is not a decision, so nothing is
+/// audited. `None` when the disk cannot answer.
+pub(crate) fn supervisor_root_lock<Disk: Block>(disk: &mut Disk) -> Option<SupervisorRootLock> {
+    match probe_root_lock(disk) {
+        Ok(RootLock::Plaintext) => Some(SupervisorRootLock::Plaintext),
+        Ok(RootLock::Passphrase(_)) => Some(SupervisorRootLock::Passphrase),
+        Err(_) => None,
+    }
+}
+
+/// The Supervisor's `mount`: the root on `disk` mounted as the normal boot
+/// mounts it, with no key when plaintext and under `passphrase` when
+/// encrypted, and published through the same `install` cells. A wrong
+/// passphrase waits out `delay` before it is answered, as the boot prompt's
+/// does, so the Supervisor is no faster an oracle.
+pub(crate) fn supervisor_mount<Disk: Block>(
+    disk: &mut Disk,
+    passphrase: Option<&[u8]>,
+    install: &UnlockInstall<'_>,
+    audit: &dyn Sink,
+    delay: &dyn Fn(),
+    out: &mut dyn SupReport,
+) -> MountOutcome {
+    let lock = match read_root_lock(disk, audit) {
+        Ok(lock) => lock,
+        Err(error) => return cannot_mount(error, out),
+    };
+    let unlock = match (&lock, passphrase) {
+        (RootLock::Plaintext, None) => RootUnlock::Plaintext,
+        (RootLock::Passphrase(descriptor), Some(passphrase)) => RootUnlock::Passphrase {
+            descriptor,
+            passphrase,
+        },
+        // The disk is no longer locked the way the engine was told, so what
+        // the operator was asked for no longer fits it.
+        _ => {
+            out.line("root cannot be mounted: its protection changed; run mount again");
+            return MountOutcome::Failed;
+        }
+    };
+    match mount_root_disk_and_load_users(disk, unlock, audit) {
+        Ok(unlocked) => match finish_install(unlocked, install, audit) {
+            UnlockOutcome::Installed => {
+                out.line("root mounted");
+                MountOutcome::Mounted
+            }
+            UnlockOutcome::GaveUp => {
+                out.line("root mounted but the users database could not be installed");
+                MountOutcome::Failed
+            }
+        },
+        Err(RootMountError::Mount(DriverError::PermissionDenied)) => {
+            delay();
+            out.line("incorrect passphrase");
+            MountOutcome::WrongPassphrase
+        }
+        Err(error) => cannot_mount(error, out),
+    }
+}
+
+/// Render a refused Supervisor mount by its secret-free cause.
+fn cannot_mount(error: RootMountError, out: &mut dyn SupReport) -> MountOutcome {
+    out.write_str("root cannot be mounted: ");
+    out.line(error.cause());
+    MountOutcome::Failed
+}
+
+/// Classify a refused mount into the audit record it is logged as.
 ///
-/// A *wrong passphrase* — `Mount(PermissionDenied)`, the case the silent
-/// blank-passphrase probe of a non-blank image hits on **every** normal
-/// boot and the case a mistyped interactive passphrase hits — is an
-/// expected fail-closed authentication non-match, not a system error: the
-/// derived key simply never unwrapped the master key and there is no oracle
-/// either way. It maps to the below-`Info`
-/// [`ROOT_UNLOCK_KEY_REJECTED`] so the per-boot probe and routine retries
-/// cannot flood the boot log, while the record stays available for
-/// brute-force forensics when the level is lowered. Every other refusal is a genuine structural failure (a
-/// corrupt/missing descriptor, a missing/malformed partition table or
-/// partition, a non-arxfs volume, a device fault) and maps to the
+/// A *wrong passphrase* — `Mount(PermissionDenied)` — is an expected
+/// fail-closed authentication non-match, not a system error: the derived key
+/// never unwrapped the master key and there is no oracle either way. It maps to
+/// the below-`Info` [`ROOT_UNLOCK_KEY_REJECTED`] so routine retries cannot
+/// flood the boot log. Every other refusal is a genuine structural failure (a
+/// corrupt, missing or contradicted descriptor, a missing/malformed partition
+/// table or partition, a non-arxfs volume, a device fault) and maps to the
 /// `Error`-level [`ROOT_MOUNT_REJECTED`].
 ///
 /// A pure mapping so the audit level/event a refusal earns can be asserted
@@ -1727,7 +1694,7 @@ fn rejection_record(error: RootMountError) -> (EventId, Level, &'static str) {
         _ => (
             ROOT_MOUNT_REJECTED,
             Level::Error,
-            "root-mount: root volume unlock refused; no users database served",
+            "root-mount: root volume mount refused; no users database served",
         ),
     }
 }
@@ -1758,8 +1725,8 @@ fn reject(audit: &dyn Sink, error: RootMountError) {
 /// boot partition.
 ///
 /// The boot path recovers this descriptor *before* anything is decrypted
-/// and hands its bytes — together with the passphrase the operator types
-/// at the console — to [`unlock_root_and_load_users`]. Reading it through
+/// ([`read_root_lock`]), and an encrypted root's key is derived through it
+/// from the passphrase the operator types. Reading it through
 /// the same real FAT32 driver that `tools/mkimage` / the installer
 /// authored it with keeps one on-disk definition for both ends; the file name is the shared
 /// [`ROOT_UNLOCK_NAME`] constant.
@@ -1769,8 +1736,8 @@ fn reject(audit: &dyn Sink, error: RootMountError) {
 /// length *before* a byte is read — rejecting both a truncated and an
 /// over-long file — and the bytes are read into a fixed on-stack buffer.
 /// The returned bytes are still untrusted: [`UnlockDescriptor::decode`]
-/// (inside [`unlock_root_and_load_users`]) validates every field before
-/// they drive any key derivation.
+/// (inside [`read_root_lock`]) validates every field before they drive any
+/// key derivation.
 ///
 /// * `boot_partition` — the FAT boot-partition [`Block`] device the board
 ///   brought up (the GPU-firmware-readable partition on a Pi SD card).
@@ -1874,153 +1841,25 @@ mod tests {
     /// type one passphrase.
     const PASSPHRASE: &[u8] = disk_image::PASSPHRASE;
 
-    /// Provision a descriptor (low cost so the test stays fast under
-    /// `cargo test`) and return its encoded bytes plus the volume key it
-    /// derives from [`PASSPHRASE`].
-    fn provision() -> ([u8; UNLOCK_DESCRIPTOR_LEN], VolumeKey) {
-        // The policy floor (100k) is the cheapest a descriptor may carry,
-        // keeping the per-test PBKDF2 derivations bounded while still
-        // exercising the real key-derivation path.
+    /// An encoded descriptor at the policy floor (100k iterations), the
+    /// cheapest a descriptor may carry, so the per-test PBKDF2 derivations
+    /// stay bounded while still running the real key derivation.
+    fn descriptor_bytes() -> [u8; UNLOCK_DESCRIPTOR_LEN] {
         let descriptor =
             UnlockDescriptor::provision(UNLOCK_MIN_ITERATIONS, &mut SeqEntropy { next: 7 })
                 .expect("descriptor provisions");
-        let key = descriptor.derive_volume_key(PASSPHRASE);
         let mut bytes = [0u8; UNLOCK_DESCRIPTOR_LEN];
         descriptor.encode(&mut bytes).expect("descriptor encodes");
-        (bytes, key)
-    }
-
-    #[test]
-    fn the_correct_passphrase_unlocks_the_root_and_loads_a_usable_database() {
-        // The end-to-end Chunk A path: a descriptor + the matching
-        // passphrase derive the key the volume was provisioned under, the
-        // volume mounts, and the served text is the exact, usable
-        // `users-v1` database that authenticates the planted account.
-        let (descriptor_bytes, key) = provision();
-        let bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let block = image::VecBlock::from_bytes(bytes);
-        let sink = RecordingSink::new();
-
-        let source = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect("the correct passphrase unlocks the root and loads the database")
-            .users;
-
-        let text = source.text().expect("a loaded holder serves its text");
-        let serialised = image::users_db_text().expect("fixture text serialises");
-        assert_eq!(
-            text,
-            serialised.as_bytes(),
-            "the served text is the exact canonical users-v1 database"
-        );
-
-        // The served database is usable: it parses and authenticates the
-        // planted account but refuses a wrong password (`plans/PI.md` P11).
-        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
-            .expect("the served database parses");
-        let record = db
-            .authenticate(
-                image::USERS_FIXTURE_USERNAME,
-                image::USERS_FIXTURE_PASSWORD.as_bytes(),
-            )
-            .expect("the planted account authenticates");
-        assert_eq!(record.username(), image::USERS_FIXTURE_USERNAME);
-        assert!(
-            db.authenticate(image::USERS_FIXTURE_USERNAME, b"wrong")
-                .is_err(),
-            "a wrong account password is refused"
-        );
-
-        // The unlock and the database load are both audited.
-        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
-    }
-
-    #[test]
-    fn a_wrong_passphrase_is_refused_fail_closed_with_no_oracle() {
-        // the volume is provisioned under the key derived from
-        // PASSPHRASE; a *different* passphrase derives a different key that
-        // never unwraps the master key, so the mount is refused with
-        // PermissionDenied and no database is served.
-        let (descriptor_bytes, key) = provision();
-        let bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let block = image::VecBlock::from_bytes(bytes);
-        let sink = RecordingSink::new();
-
-        let err = unlock_root_and_load_users(&descriptor_bytes, b"wrong passphrase", block, &sink)
-            .expect_err("a wrong passphrase must be refused");
-
-        assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
-        assert_eq!(err.cause(), "unlock_refused");
-        // A wrong passphrase is an expected fail-closed authentication
-        // non-match, not a system error, so it must NOT surface as the
-        // ERROR-level `ROOT_MOUNT_REJECTED` (4134) a structural refusal
-        // gets — otherwise the silent blank-passphrase probe floods the
-        // boot log on every non-blank boot. It
-        // maps to the below-`Info` `ROOT_UNLOCK_KEY_REJECTED` (4142),
-        // dropped at the default threshold (so absent from this sink) and
-        // available for brute-force forensics when the level is lowered.
-        assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
-        assert_eq!(
-            rejection_record(err),
-            (
-                ROOT_UNLOCK_KEY_REJECTED,
-                Level::Debug,
-                "root-mount: derived key did not unlock the volume (wrong passphrase)"
-            )
-        );
-        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
-    }
-
-    #[test]
-    fn a_tampered_descriptor_is_refused_before_any_key_derivation() {
-        // a corrupt descriptor (bad magic) is rejected outright;
-        // the passphrase is never even consulted and no mount is attempted.
-        let (mut descriptor_bytes, key) = provision();
-        descriptor_bytes[0] ^= 0xFF; // corrupt the magic
-        let bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let block = image::VecBlock::from_bytes(bytes);
-        let sink = RecordingSink::new();
-
-        let err = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect_err("a tampered descriptor must be refused");
-
-        assert!(matches!(err, RootMountError::Descriptor(_)), "{err:?}");
-        assert_eq!(err.cause(), "descriptor_invalid");
-        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
-        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
-    }
-
-    #[test]
-    fn a_non_arxfs_volume_is_refused() {
-        // a device that is not a arxfs volume (here a zeroed
-        // image of the right geometry) fails the mount closed rather than
-        // being misread; no database is served.
-        let (descriptor_bytes, _key) = provision();
-        let sectors = usize::try_from(image::TOTAL_SECTORS).expect("sector count fits usize");
-        let blank = alloc::vec![0u8; sectors * image::SECTOR_BYTES];
-        let block = image::VecBlock::from_bytes(blank);
-        let sink = RecordingSink::new();
-
-        let err = unlock_root_and_load_users(&descriptor_bytes, PASSPHRASE, block, &sink)
-            .expect_err("a non-arxfs volume must be refused");
-
-        assert!(matches!(err, RootMountError::Mount(_)), "{err:?}");
-        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
-        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+        bytes
     }
 
     #[test]
     fn a_wrong_passphrase_is_classified_below_error_every_structural_refusal_is_an_error() {
-        // The pure audit classification: a wrong
-        // passphrase is an expected fail-closed authentication non-match —
-        // recorded below the default `Info` filter so the silent
-        // blank-passphrase probe and routine retries cannot flood the boot
-        // log — while every genuine structural refusal stays an ERROR a
-        // boot operator sees. Asserting the mapping directly is independent
-        // of the global log threshold (so it cannot be perturbed by another
-        // test lowering it).
+        // A wrong passphrase is an expected fail-closed authentication
+        // non-match, recorded below the default `Info` filter so routine
+        // retries cannot flood the boot log, while every structural refusal
+        // stays an ERROR the operator sees. Asserting the mapping directly is
+        // independent of the global log threshold another test may lower.
         assert_eq!(
             rejection_record(RootMountError::Mount(DriverError::PermissionDenied)),
             (
@@ -2029,19 +1868,18 @@ mod tests {
                 "root-mount: derived key did not unlock the volume (wrong passphrase)"
             )
         );
-        assert!(
-            Level::Debug < Level::Info,
-            "the probe outcome is below the default filter"
-        );
+        assert!(Level::Debug < Level::Info);
 
-        // Every other refusal — including a non-arxfs volume or a device
-        // fault, which are *also* `Mount(_)` but not a wrong passphrase — is
-        // the ERROR-level structural rejection.
+        // Every other refusal — including a non-arxfs volume, a protection the
+        // mount did not expect, or a device fault, which are *also* `Mount(_)`
+        // but not a wrong passphrase — is the ERROR-level structural rejection.
         for error in [
             RootMountError::Mount(DriverError::BadMagic),
+            RootMountError::Mount(DriverError::Unsupported),
             RootMountError::Mount(DriverError::DeviceFault),
             RootMountError::DescriptorRead(DriverError::NotFound),
             RootMountError::Descriptor(DriverError::BadMagic),
+            RootMountError::DescriptorBesidePlaintextRoot,
             RootMountError::NoBootPartition,
             RootMountError::NoRootPartition,
             RootMountError::PartitionWindow(DriverError::OutOfRange),
@@ -2157,32 +1995,13 @@ mod tests {
         // The on-FAT descriptor round-trips byte-for-byte through the real
         // driver and decodes to the same descriptor it was provisioned as
         // (author and reader share one definition).
-        let (descriptor_bytes, _key) = provision();
+        let descriptor_bytes = descriptor_bytes();
         let block = author_boot_partition(&descriptor_bytes);
 
         let read = read_root_unlock_descriptor(block).expect("the planted descriptor reads back");
         assert_eq!(read, descriptor_bytes);
         // The bytes are a genuinely well-formed descriptor.
         UnlockDescriptor::decode(&read).expect("the read descriptor decodes");
-    }
-
-    #[test]
-    fn the_reader_feeds_the_unlock_composition_end_to_end() {
-        // The reader's output is exactly what `unlock_root_and_load_users`
-        // consumes: read the descriptor off FAT, then unlock the encrypted
-        // root with the matching passphrase and load the database.
-        let (descriptor_bytes, key) = provision();
-        let boot = author_boot_partition(&descriptor_bytes);
-        let read = read_root_unlock_descriptor(boot).expect("descriptor reads back");
-
-        let root_bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let root = image::VecBlock::from_bytes(root_bytes);
-        let sink = RecordingSink::new();
-        let source = unlock_root_and_load_users(&read, PASSPHRASE, root, &sink)
-            .expect("the FAT-read descriptor unlocks the root")
-            .users;
-        assert!(source.text().is_ok(), "a database is served");
     }
 
     #[test]
@@ -2200,8 +2019,7 @@ mod tests {
     fn a_truncated_descriptor_is_refused() {
         // a short file is rejected on its size *before* any
         // read, never zero-padded up to the record length.
-        let (descriptor_bytes, _key) = provision();
-        let block = author_boot_partition(&descriptor_bytes[..UNLOCK_DESCRIPTOR_LEN - 1]);
+        let block = author_boot_partition(&descriptor_bytes()[..UNLOCK_DESCRIPTOR_LEN - 1]);
         assert_eq!(
             read_root_unlock_descriptor(block),
             Err(DriverError::OutOfRange)
@@ -2213,8 +2031,7 @@ mod tests {
         // a file longer than the fixed record — extra bytes a
         // tampered partition might append — is refused, not truncated to
         // the prefix.
-        let (descriptor_bytes, _key) = provision();
-        let mut padded = descriptor_bytes.to_vec();
+        let mut padded = descriptor_bytes().to_vec();
         padded.push(0);
         let block = author_boot_partition(&padded);
         assert_eq!(
@@ -2234,25 +2051,63 @@ mod tests {
         );
     }
 
-    // --- mount_root_and_load_users (the Chunk B-2 boot-path entry) -----
+    // --- read_root_lock + mount_root_disk_and_load_users -----------------
 
-    #[test]
-    fn the_boot_partition_and_passphrase_unlock_the_root_end_to_end() {
-        // The single boot-path entry: a FAT boot partition carrying the
-        // descriptor + the encrypted root + the matching passphrase yields
-        // the usable users database, with the unlock audited.
-        let (descriptor_bytes, key) = provision();
-        let boot = author_boot_partition(&descriptor_bytes);
-        let root_bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let root = image::VecBlock::from_bytes(root_bytes);
-        let sink = RecordingSink::new();
+    /// The whole-disk fixture with an encrypted root, provisioned under
+    /// [`PASSPHRASE`] — the image the `-M virt` root-mount->login QEMU vertical
+    /// plants on its virtio-blk backing.
+    fn success_disk() -> FatVecBlock {
+        let bytes = disk_image::build_image().expect("the whole-disk image assembles");
+        FatVecBlock { store: bytes }
+    }
 
-        let source = mount_root_and_load_users(boot, root, PASSPHRASE, &sink)
-            .expect("the descriptor + passphrase unlock the root and load the database")
-            .users;
+    /// The whole-disk fixture with a plaintext root, as a shipped image has.
+    fn plaintext_disk() -> FatVecBlock {
+        let bytes = disk_image::build_plaintext_image().expect("the plaintext image assembles");
+        FatVecBlock { store: bytes }
+    }
 
-        let text = source.text().expect("a loaded holder serves its text");
+    /// The bytes `ty`'s partition occupies on `disk`.
+    fn partition_range(disk: &mut FatVecBlock, ty: PartitionType) -> core::ops::Range<usize> {
+        let extent = parse_partition_table(disk)
+            .expect("the fixture's table parses")
+            .first_of_type(ty)
+            .expect("the fixture carries the partition");
+        let byte = |lba: u64| usize::try_from(lba).expect("fits") * FAT_SECTOR_BYTES;
+        byte(extent.start_lba)..byte(extent.start_lba + extent.block_count)
+    }
+
+    /// `disk` with its boot partition replaced by `boot`.
+    fn with_boot_partition(mut disk: FatVecBlock, boot: &FatVecBlock) -> FatVecBlock {
+        let range = partition_range(&mut disk, PartitionType::FatBoot);
+        disk.store[range].copy_from_slice(&boot.store);
+        disk
+    }
+
+    /// Mount `disk` as the boot path does: read how its root is locked, then
+    /// mount it — under `passphrase` when it takes one.
+    fn mount_disk(
+        disk: &mut FatVecBlock,
+        passphrase: &[u8],
+        sink: &RecordingSink,
+    ) -> Result<UnlockedRoot, RootMountError> {
+        let lock = read_root_lock(disk, sink)?;
+        let unlock = match &lock {
+            RootLock::Plaintext => RootUnlock::Plaintext,
+            RootLock::Passphrase(descriptor) => RootUnlock::Passphrase {
+                descriptor,
+                passphrase,
+            },
+        };
+        mount_root_disk_and_load_users(disk, unlock, sink)
+    }
+
+    /// The served database is the fixture's exact canonical `users-v1` text,
+    /// authenticating its planted account and refusing a wrong password.
+    fn assert_usable_database(root: &UnlockedRoot) {
+        let text = root.users.text().expect("a loaded holder serves its text");
+        let serialised = image::users_db_text().expect("fixture text serialises");
+        assert_eq!(text, serialised.as_bytes());
         let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
         db.authenticate(
@@ -2260,23 +2115,123 @@ mod tests {
             image::USERS_FIXTURE_PASSWORD.as_bytes(),
         )
         .expect("the planted account authenticates");
-        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
+        assert!(db
+            .authenticate(image::USERS_FIXTURE_USERNAME, b"wrong")
+            .is_err());
     }
 
     #[test]
-    fn a_missing_descriptor_on_the_boot_partition_serves_no_database() {
-        // no `root.unlock` on the boot partition is a
-        // fail-closed DescriptorRead(NotFound). The encrypted root is
-        // never touched (no unlock audit) and no database is served.
-        let (_descriptor_bytes, key) = provision();
-        let boot = empty_boot_partition();
-        let root_bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let root = image::VecBlock::from_bytes(root_bytes);
+    fn the_correct_passphrase_unlocks_an_encrypted_root_and_loads_a_usable_database() {
+        // One whole-disk device split by role into bounds-checked windows:
+        // the descriptor is read off the FAT boot window and the encrypted
+        // root window mounts under the passphrase (`plans/PI.md` P11 Chunk
+        // B-2).
+        let sink = RecordingSink::new();
+        let root = mount_disk(&mut success_disk(), PASSPHRASE, &sink)
+            .expect("the correct passphrase unlocks the root");
+        assert_usable_database(&root);
+        assert!(matches!(root.keying, RootKeying::Key(_)));
+        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
+        // The `/System` mount is the separate `with_system_volume` seam.
+        assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_plaintext_root_mounts_with_no_key_and_loads_a_usable_database() {
+        let sink = RecordingSink::new();
+        let mut disk = plaintext_disk();
+        assert_eq!(read_root_lock(&mut disk, &sink), Ok(RootLock::Plaintext));
+        let root = mount_root_disk_and_load_users(&mut disk, RootUnlock::Plaintext, &sink)
+            .expect("a plaintext root mounts with no key");
+        assert_usable_database(&root);
+        assert!(matches!(root.keying, RootKeying::Plaintext));
+        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_wrong_passphrase_is_refused_fail_closed_with_no_oracle() {
+        // A different passphrase derives a key that never unwraps the master
+        // key, so the mount is refused and no database is served. It is an
+        // authentication non-match, not a system error: never the ERROR-level
+        // structural rejection (4134), but the below-`Info` 4142, dropped at
+        // the default threshold and kept for forensics when it is lowered.
+        let sink = RecordingSink::new();
+        let err = mount_disk(&mut success_disk(), b"wrong passphrase", &sink)
+            .expect_err("a wrong passphrase must be refused");
+        assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
+        assert_eq!(err.cause(), "unlock_refused");
+        assert_eq!(rejection_record(err).0, ROOT_UNLOCK_KEY_REJECTED);
+        assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn an_empty_or_over_long_passphrase_is_refused_as_a_wrong_one() {
+        // No root is provisioned under either, so neither is a passphrase
+        // that could be right; both are refused exactly as a wrong one is.
+        let mut disk = success_disk();
+        let over_long = [b'a'; MAX_ROOT_PASSPHRASE_LEN + 1];
+        for passphrase in [b"" as &[u8], &over_long] {
+            let sink = RecordingSink::new();
+            let err = mount_disk(&mut disk, passphrase, &sink).expect_err("refused");
+            assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
+            assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
+            assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+        }
+    }
+
+    #[test]
+    fn a_tampered_descriptor_is_refused_before_any_key_derivation() {
+        // The descriptor is plaintext and untrusted: a corrupt one is refused
+        // outright, before the passphrase is consulted.
+        let mut disk = success_disk();
+        let boot = partition_range(&mut disk, PartitionType::FatBoot);
+        let planted = read_root_unlock_descriptor(FatVecBlock {
+            store: disk.store[boot.clone()].to_vec(),
+        })
+        .expect("the descriptor reads");
+        let at = disk.store[boot.clone()]
+            .windows(planted.len())
+            .position(|window| window == planted)
+            .expect("the descriptor lies on the boot partition");
+        disk.store[boot.start + at] ^= 0xFF;
         let sink = RecordingSink::new();
 
-        let err = mount_root_and_load_users(boot, root, PASSPHRASE, &sink)
-            .expect_err("a missing descriptor must be refused");
+        let err = mount_disk(&mut disk, PASSPHRASE, &sink)
+            .expect_err("a tampered descriptor must be refused");
+
+        assert!(matches!(err, RootMountError::Descriptor(_)), "{err:?}");
+        assert_eq!(err.cause(), "descriptor_invalid");
+        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_non_arxfs_root_is_refused() {
+        let mut disk = success_disk();
+        let root = partition_range(&mut disk, PartitionType::ARXFSRoot);
+        disk.store[root].fill(0);
+        let sink = RecordingSink::new();
+
+        let err =
+            mount_disk(&mut disk, PASSPHRASE, &sink).expect_err("a non-arxfs root must be refused");
+
+        assert_eq!(err, RootMountError::Mount(DriverError::BadMagic));
+        assert_eq!(err.cause(), "not_a_arxfs_volume");
+        assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn an_encrypted_root_with_no_descriptor_is_refused() {
+        // Without its descriptor an encrypted root cannot be unlocked, so the
+        // disk is refused rather than prompted for.
+        let mut disk = with_boot_partition(success_disk(), &empty_boot_partition());
+        let sink = RecordingSink::new();
+
+        let err = mount_disk(&mut disk, PASSPHRASE, &sink)
+            .expect_err("an encrypted root with no descriptor must be refused");
 
         assert_eq!(err, RootMountError::DescriptorRead(DriverError::NotFound));
         assert_eq!(err.cause(), "descriptor_unreadable");
@@ -2285,85 +2240,67 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_passphrase_through_the_full_composition_is_refused() {
-        // a readable descriptor but the wrong passphrase derives
-        // a key that never unwraps the master key, so the mount is refused
-        // and no database is served — no separate oracle.
-        let (descriptor_bytes, key) = provision();
-        let boot = author_boot_partition(&descriptor_bytes);
-        let root_bytes =
-            image::build_users_root_image_with_key(&key, &[]).expect("users-root volume builds");
-        let root = image::VecBlock::from_bytes(root_bytes);
+    fn a_descriptor_beside_a_plaintext_root_is_refused() {
+        // The boot partition promises a protection the root does not have:
+        // refused, never mounted without the protection it claims.
+        let mut disk = with_boot_partition(
+            plaintext_disk(),
+            &author_boot_partition(&descriptor_bytes()),
+        );
         let sink = RecordingSink::new();
 
-        let err = mount_root_and_load_users(boot, root, b"wrong passphrase", &sink)
-            .expect_err("a wrong passphrase must be refused");
+        let err = mount_disk(&mut disk, PASSPHRASE, &sink)
+            .expect_err("a descriptor beside a plaintext root must be refused");
 
-        assert_eq!(err, RootMountError::Mount(DriverError::PermissionDenied));
-        // Through the full composition too, a wrong passphrase is the
-        // below-`Info` authentication non-match, never the ERROR-level
-        // structural rejection.
-        assert!(!sink.ids().contains(&4134), "{:?}", sink.ids());
-        assert_eq!(rejection_record(err).0, ROOT_UNLOCK_KEY_REJECTED);
-        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
-    }
-
-    // --- mount_root_disk_and_load_users (the single-disk split) --------
-
-    #[test]
-    fn a_partitioned_disk_splits_unlocks_and_loads_end_to_end() {
-        // The single-disk boot entry: one whole-disk device carrying an
-        // MBR boot+root layout is split by role into bounds-checked
-        // windows, the descriptor is read off the FAT boot window, and the
-        // encrypted root window mounts under the passphrase to yield the
-        // usable users database (`plans/PI.md` P11 Chunk B-2). The disk is
-        // the *same* whole-disk image the `-M virt` root-mount->login QEMU
-        // vertical plants on its virtio-blk backing, so the in-memory split
-        // test and the live (emulated) board exercise one on-disk layout.
-        let bytes = disk_image::build_image().expect("the whole-disk image assembles");
-        let disk = FatVecBlock { store: bytes };
-        let sink = RecordingSink::new();
-
-        let source = mount_root_disk_and_load_users(disk, disk_image::PASSPHRASE, &sink)
-            .expect("the disk splits and the root unlocks end to end")
-            .users;
-
-        let text = source.text().expect("a loaded holder serves its text");
-        let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
-            .expect("the served database parses");
-        db.authenticate(disk_image::USERNAME, disk_image::PASSWORD.as_bytes())
-            .expect("the planted account authenticates");
-        assert!(sink.ids().contains(&4133), "{:?}", sink.ids());
-        // The `/System`-volume mount is no longer part of this users-load
-        // path; it is the separate `with_system_volume` mount seam (design
-        // B), exercised by its own tests below.
-        assert!(!sink.ids().contains(&4140), "{:?}", sink.ids());
-    }
-
-    #[test]
-    fn a_disk_with_no_partition_table_serves_no_database() {
-        // a device with no recognised partition scheme (a
-        // blank disk, no MBR signature, no GPT header) is refused whole;
-        // the encrypted root is never touched and no database is served.
-        let disk = FatVecBlock::new(64);
-        let sink = RecordingSink::new();
-
-        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
-            .expect_err("a disk with no table must be refused");
-
-        assert!(matches!(err, RootMountError::PartitionTable(_)), "{err:?}");
-        assert_eq!(err.cause(), "partition_table_invalid");
+        assert_eq!(err, RootMountError::DescriptorBesidePlaintextRoot);
+        assert_eq!(err.cause(), "descriptor_beside_plaintext_root");
         assert!(sink.ids().contains(&4134), "{:?}", sink.ids());
         assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
     }
 
     #[test]
+    fn a_root_mounted_as_the_other_protection_is_refused() {
+        // The mount is held to the protection the volume has, whatever its
+        // caller expected.
+        let sink = RecordingSink::new();
+        let descriptor = UnlockDescriptor::decode(&descriptor_bytes()).expect("decodes");
+        let as_encrypted = RootUnlock::Passphrase {
+            descriptor: &descriptor,
+            passphrase: PASSPHRASE,
+        };
+        assert_eq!(
+            mount_root_disk_and_load_users(&mut plaintext_disk(), as_encrypted, &sink).err(),
+            Some(RootMountError::Mount(DriverError::Unsupported))
+        );
+        assert_eq!(
+            mount_root_disk_and_load_users(&mut success_disk(), RootUnlock::Plaintext, &sink).err(),
+            Some(RootMountError::Mount(DriverError::PermissionDenied))
+        );
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
+    fn a_disk_with_no_partition_table_serves_no_database() {
+        // A device with no recognised partition scheme is refused whole by
+        // both entries, and nothing is mounted.
+        let sink = RecordingSink::new();
+        let err = read_root_lock(&mut FatVecBlock::new(64), &sink)
+            .expect_err("a disk with no table has no lock to read");
+        assert!(matches!(err, RootMountError::PartitionTable(_)), "{err:?}");
+        assert_eq!(err.cause(), "partition_table_invalid");
+        let err =
+            mount_root_disk_and_load_users(FatVecBlock::new(64), RootUnlock::Plaintext, &sink)
+                .expect_err("a disk with no table must be refused");
+        assert!(matches!(err, RootMountError::PartitionTable(_)), "{err:?}");
+        assert_eq!(sink.ids().iter().filter(|&&id| id == 4134).count(), 2);
+        assert!(!sink.ids().contains(&4133), "{:?}", sink.ids());
+    }
+
+    #[test]
     fn a_disk_without_a_root_partition_serves_no_database() {
-        // a valid table that carries a FAT boot partition but no
-        // ARXFS root partition is fail-closed NoRootPartition — the
-        // encrypted root cannot be located, so none is mounted.
-        let (descriptor_bytes, _key) = provision();
-        let boot = author_boot_partition(&descriptor_bytes);
+        // A valid table that carries a FAT boot partition but no ARXFS root
+        // partition is fail-closed NoRootPartition: there is no root to mount.
+        let boot = author_boot_partition(&descriptor_bytes());
         let total_sectors = disk_image::BOOT_PART_LBA + FAT_BOOT_SECTORS;
         let mut store =
             alloc::vec![0u8; usize::try_from(total_sectors).expect("fits") * FAT_SECTOR_BYTES];
@@ -2376,10 +2313,10 @@ mod tests {
         store[..FAT_SECTOR_BYTES].copy_from_slice(&table);
         let boot_at = usize::try_from(disk_image::BOOT_PART_LBA).expect("fits") * FAT_SECTOR_BYTES;
         store[boot_at..boot_at + boot.store.len()].copy_from_slice(&boot.store);
-        let disk = FatVecBlock { store };
+        let mut disk = FatVecBlock { store };
         let sink = RecordingSink::new();
 
-        let err = mount_root_disk_and_load_users(disk, PASSPHRASE, &sink)
+        let err = mount_disk(&mut disk, PASSPHRASE, &sink)
             .expect_err("a disk with no root partition must be refused");
 
         assert_eq!(err, RootMountError::NoRootPartition);
@@ -2543,15 +2480,6 @@ mod tests {
         cell
     }
 
-    /// Build the success whole-disk fixture the interactive tests unlock —
-    /// the *same* MBR boot+root image (the root encrypted under
-    /// [`PASSPHRASE`]'s derived key) the `-M virt` root-mount->login QEMU
-    /// vertical plants on its virtio-blk backing.
-    fn success_disk() -> FatVecBlock {
-        let bytes = disk_image::build_image().expect("the whole-disk image assembles");
-        FatVecBlock { store: bytes }
-    }
-
     #[test]
     fn the_esc_announcement_opens_a_fresh_line_for_the_blank_line_gap() {
         // The boot screen must show one blank line between the machine-summary
@@ -2579,7 +2507,7 @@ mod tests {
         // inherits the marker. A regression that armed the marker for the whole
         // unlock window (or forgot to clear it) leaves `secret` set here.
         let input = ScriptInput::new(script(&[PASSPHRASE]));
-        let mut buf = [0u8; MAX_PASSPHRASE_LEN];
+        let mut buf = [0u8; MAX_ROOT_PASSPHRASE_LEN];
         let len =
             read_passphrase_line(&input, &mut buf[..], None).expect("the scripted line reads");
         assert_eq!(len, PASSPHRASE.len(), "the whole passphrase was read");
@@ -2602,7 +2530,7 @@ mod tests {
         // unlock to endless wrong-passphrase retries (the boot-hang defect).
         let first = PASSPHRASE[0];
         let rest = ScriptInput::new(script(&[&PASSPHRASE[1..]]));
-        let mut buf = [0u8; MAX_PASSPHRASE_LEN];
+        let mut buf = [0u8; MAX_ROOT_PASSPHRASE_LEN];
         let len = read_passphrase_line(&rest, &mut buf[..], Some(first))
             .expect("the remainder of the line reads");
         assert_eq!(
@@ -2619,7 +2547,7 @@ mod tests {
         // over the REPL's own echo — the drop-guard clears it on this early
         // return exactly as on a completed line.
         let input = ScriptInput::new(alloc::vec![0x1b]);
-        let mut buf = [0u8; MAX_PASSPHRASE_LEN];
+        let mut buf = [0u8; MAX_ROOT_PASSPHRASE_LEN];
         let outcome = read_passphrase_line(&input, &mut buf[..], None);
         assert!(
             matches!(outcome, Err(PassphraseReadError::Escape)),
@@ -2694,24 +2622,18 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_passphrase_volume_auto_unlocks_with_no_prompt() {
-        // The installer image is provisioned with a **blank** root
-        // passphrase: the unlock must mount it silently,
-        // with no console read at all, so a fresh install boots straight
-        // into the installer rather than stalling behind a prompt the
-        // operator cannot answer (`plans/PI.md` P11). The console input is
-        // wired to *fail* on every read, so a successful unlock proves the
-        // interactive prompt path was never entered.
-        let bytes = disk_image::build_image_with_passphrase(b"")
-            .expect("the blank-passphrase image assembles");
-        let disk = FatVecBlock { store: bytes };
+    fn a_plaintext_root_mounts_with_no_prompt() {
+        // A shipped image's root is plaintext: it mounts with no console read
+        // and no prompt drawn. Every read fails, so a mount proves none was
+        // attempted.
         let late = LateUsersDb::new();
         let late_identity = boot_identity();
         let sink = RecordingSink::new();
+        let console = RecordingConsole::new();
 
         let outcome = unlock_root_disk_interactively(
-            disk,
-            &AcceptConsole,
+            plaintext_disk(),
+            &console,
             &ScriptInput::failing(),
             &UnlockInstall {
                 users: &late,
@@ -2728,7 +2650,6 @@ mod tests {
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
-        assert!(late.is_installed(), "the database is published");
         let text = late.text().expect("the cell serves the loaded database");
         let db = UsersDb::parse(core::str::from_utf8(&text).expect("utf-8"))
             .expect("the served database parses");
@@ -2737,18 +2658,271 @@ mod tests {
             image::USERS_FIXTURE_PASSWORD.as_bytes(),
         )
         .expect("the planted account authenticates through the installed cell");
-        assert!(
-            sink.ids().contains(&4136),
-            "install audited: {:?}",
-            sink.ids()
+        assert!(sink.ids().contains(&4136), "{:?}", sink.ids());
+        assert!(!sink.ids().contains(&4137), "{:?}", sink.ids());
+        assert_eq!(count_occurrences(&console.bytes(), b"passphrase"), 0);
+    }
+
+    #[test]
+    fn the_boot_screen_over_a_plaintext_root_closes_on_the_label_with_no_prompt() {
+        // With the Supervisor wired the ESC window still opens, so the root
+        // can be diagnosed; when it elapses, a root that takes no passphrase
+        // leaves the bare label on that line and mounts.
+        let late = LateUsersDb::new();
+        let late_identity = boot_identity();
+        let console = RecordingConsole::new();
+
+        let outcome = unlock_root_disk_interactively(
+            plaintext_disk(),
+            &console,
+            &ScriptInput::new(Vec::new()),
+            &UnlockInstall {
+                users: &late,
+                identity: &late_identity,
+                groups: &LateGroupsDb::new(),
+                writable: &NoWritableRootSink,
+                admin: None,
+                storage_gid: &LateStorageGid::new(),
+            },
+            &RecordingSink::new(),
+            &|| {},
+            &|| {},
+            Some(&mut SilentSupervisor),
         );
-        // No prompt was drawn and no console read was attempted, so there
-        // is no retry: the silent blank attempt unlocked it outright.
-        assert!(
-            !sink.ids().contains(&4137),
-            "no retry on a silent auto-unlock: {:?}",
-            sink.ids()
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(late.is_installed());
+        let out = console.bytes();
+        assert_eq!(count_occurrences(&out, SUPERVISOR_ANNOUNCE), 1);
+        assert_eq!(count_occurrences(&out, FS_UNLOCKED_LINE), 1);
+        assert_eq!(count_occurrences(&out, b"passphrase"), 0);
+    }
+
+    /// A disk that records whether it was read before the boot screen's
+    /// announcement reached `console`.
+    struct ReadAfterAnnounce<'a> {
+        inner: FatVecBlock,
+        console: &'a RecordingConsole,
+        read_early: &'a AtomicBool,
+    }
+
+    impl Block for ReadAfterAnnounce<'_> {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            self.inner.geometry()
+        }
+
+        fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            if count_occurrences(&self.console.bytes(), SUPERVISOR_ANNOUNCE) == 0 {
+                self.read_early.store(true, Ordering::Relaxed);
+            }
+            self.inner.read_blocks(lba, buf)
+        }
+
+        fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+            self.inner.write_blocks(lba, buf)
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            self.inner.flush()
+        }
+    }
+
+    fn plaintext_install<'a>(
+        late: &'a LateUsersDb,
+        identity: &'a LateIdentity,
+        groups: &'a LateGroupsDb,
+        storage_gid: &'a LateStorageGid,
+    ) -> UnlockInstall<'a> {
+        UnlockInstall {
+            users: late,
+            identity,
+            groups,
+            writable: &NoWritableRootSink,
+            admin: None,
+            storage_gid,
+        }
+    }
+
+    #[test]
+    fn the_boot_screen_opens_before_the_disk_is_read() {
+        // A disk slow to answer must not hold off the Supervisor that would
+        // diagnose it.
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
         );
+        let console = RecordingConsole::new();
+        let read_early = AtomicBool::new(false);
+        let disk = ReadAfterAnnounce {
+            inner: plaintext_disk(),
+            console: &console,
+            read_early: &read_early,
+        };
+
+        let outcome = unlock_root_disk_interactively(
+            disk,
+            &console,
+            &ScriptInput::new(Vec::new()),
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &RecordingSink::new(),
+            &|| {},
+            &|| {},
+            Some(&mut SilentSupervisor),
+        );
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(!read_early.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_mounted_says_why_and_never_draws_the_mounted_line() {
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let console = RecordingConsole::new();
+        let sink = RecordingSink::new();
+
+        let outcome = unlock_root_disk_interactively(
+            FatVecBlock::new(FAT_BOOT_SECTORS),
+            &console,
+            &ScriptInput::new(Vec::new()),
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &sink,
+            &|| {},
+            &|| {},
+            Some(&mut SilentSupervisor),
+        );
+
+        assert_eq!(outcome, UnlockOutcome::GaveUp);
+        assert!(!late.is_installed());
+        let out = console.bytes();
+        assert_eq!(count_occurrences(&out, FS_UNLOCKED_LINE), 0);
+        let mut said = FS_GAVE_UP_PREFIX.to_vec();
+        said.extend_from_slice(b"partition_table_invalid");
+        assert_eq!(count_occurrences(&out, &said), 1, "{out:?}");
+    }
+
+    #[test]
+    fn the_supervisor_reads_how_the_root_is_locked() {
+        assert_eq!(
+            supervisor_root_lock(&mut plaintext_disk()),
+            Some(SupervisorRootLock::Plaintext)
+        );
+        assert_eq!(
+            supervisor_root_lock(&mut success_disk()),
+            Some(SupervisorRootLock::Passphrase)
+        );
+        assert_eq!(
+            supervisor_root_lock(&mut FatVecBlock::new(FAT_BOOT_SECTORS)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_supervisor_mounts_a_plaintext_root_with_no_passphrase() {
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let console = RecordingConsole::new();
+        let outcome = supervisor_mount(
+            &mut plaintext_disk(),
+            None,
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &RecordingSink::new(),
+            &|| {},
+            &mut ConsoleReport { console: &console },
+        );
+        assert_eq!(outcome, MountOutcome::Mounted);
+        assert!(late.is_installed());
+        assert_eq!(count_occurrences(&console.bytes(), b"root mounted"), 1);
+    }
+
+    #[test]
+    fn the_supervisor_refuses_a_root_locked_otherwise_than_it_asked_for() {
+        // The engine read the lock, asked the operator, and the disk then
+        // answered differently: what was gathered no longer fits it.
+        for (mut disk, passphrase) in [(plaintext_disk(), Some(PASSPHRASE)), (success_disk(), None)]
+        {
+            let (late, identity, groups, gid) = (
+                LateUsersDb::new(),
+                boot_identity(),
+                LateGroupsDb::new(),
+                LateStorageGid::new(),
+            );
+            let console = RecordingConsole::new();
+            let outcome = supervisor_mount(
+                &mut disk,
+                passphrase,
+                &plaintext_install(&late, &identity, &groups, &gid),
+                &RecordingSink::new(),
+                &|| {},
+                &mut ConsoleReport { console: &console },
+            );
+            assert_eq!(outcome, MountOutcome::Failed);
+            assert!(!late.is_installed());
+            assert_eq!(
+                count_occurrences(&console.bytes(), b"its protection changed"),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_supervisor_passphrase_waits_out_the_boot_delay_before_it_is_answered() {
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let install = plaintext_install(&late, &identity, &groups, &gid);
+        let console = RecordingConsole::new();
+        let sink = RecordingSink::new();
+        let delays = AtomicUsize::new(0);
+        let mut disk = success_disk();
+        let delay = || {
+            assert_eq!(
+                count_occurrences(&console.bytes(), b"incorrect passphrase"),
+                0,
+                "the pause is paid before any answer"
+            );
+            delays.fetch_add(1, Ordering::Relaxed);
+        };
+
+        let wrong = supervisor_mount(
+            &mut disk,
+            Some(b"nope"),
+            &install,
+            &sink,
+            &delay,
+            &mut ConsoleReport { console: &console },
+        );
+        assert_eq!(wrong, MountOutcome::WrongPassphrase);
+        assert_eq!(delays.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            count_occurrences(&console.bytes(), b"incorrect passphrase"),
+            1
+        );
+        assert!(!late.is_installed());
+
+        let right = supervisor_mount(
+            &mut disk,
+            Some(PASSPHRASE),
+            &install,
+            &sink,
+            &|| {},
+            &mut ConsoleReport { console: &console },
+        );
+        assert_eq!(right, MountOutcome::Mounted);
+        assert!(late.is_installed());
     }
 
     #[test]
@@ -3017,10 +3191,10 @@ mod tests {
 
     #[test]
     fn an_over_long_line_is_a_wrong_attempt_not_a_truncated_secret() {
-        // a line longer than MAX_PASSPHRASE_LEN is drained and
+        // a line longer than MAX_ROOT_PASSPHRASE_LEN is drained and
         // counted as a wrong attempt (audited `4137`), never silently
         // truncated to a shorter secret; the next, correct line unlocks.
-        let over_long = alloc::vec![b'a'; MAX_PASSPHRASE_LEN + 16];
+        let over_long = alloc::vec![b'a'; MAX_ROOT_PASSPHRASE_LEN + 16];
         let input = ScriptInput::new(script(&[&over_long, PASSPHRASE]));
         let late = LateUsersDb::new();
         let late_identity = boot_identity();
@@ -3127,7 +3301,10 @@ mod tests {
         ) -> TestOutcome {
             TestOutcome::Passed
         }
-        fn mount(&mut self, _passphrase: &[u8], _out: &mut dyn SupReport) -> MountOutcome {
+        fn root_lock(&mut self) -> Option<tairix_supervisor::RootLock> {
+            None
+        }
+        fn mount(&mut self, _passphrase: Option<&[u8]>, _out: &mut dyn SupReport) -> MountOutcome {
             MountOutcome::Failed
         }
         fn reboot(&mut self) {}
@@ -3165,13 +3342,7 @@ mod tests {
 
         let window = esc_boot_window(&AcceptConsole, &input, &mut SilentSupervisor, &cell);
 
-        assert!(matches!(
-            window,
-            EscWindow::Continue {
-                prompt_drawn: false,
-                initial: None
-            }
-        ));
+        assert!(matches!(window, EscWindow::Resumed));
         assert_eq!(cell.get(), BootSession::Graphical);
     }
 

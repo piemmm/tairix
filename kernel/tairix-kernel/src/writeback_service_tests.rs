@@ -29,7 +29,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity, WritebackHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
-use tairix_drv_fs_arxfs::{EntropySource, ARXFS, SYSTEM_VOLUME_KEY};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 use tairix_kernel_core::fs::writeback;
 use tairix_kernel_core::fs::LateFilesystem;
 use tairix_kernel_core::test_sink::TestSink;
@@ -138,7 +138,7 @@ impl Fixture {
     /// Format, register, and return a volume under mount handle `raw`.
     fn attach(&self, raw: u64, entropy: u8) -> Volume {
         let (device, medium) = SharedRamBlock::new(SECTORS_8MIB);
-        let mut fs = ARXFS::format(device, 64, &SYSTEM_VOLUME_KEY, &mut FixtureEntropy(entropy))
+        let mut fs = ARXFS::format(device, 64, Keying::Plaintext, &mut FixtureEntropy(entropy))
             .expect("format the fixture volume");
         let root = fs.root();
         // ARXFS carries its own per-inode records rather than taking a mount
@@ -177,7 +177,7 @@ impl Volume {
     fn published(&self, name: &[u8]) -> bool {
         let image = self.medium.lock().data.clone();
         let device = RamBlock { data: image };
-        let mut disk = ARXFS::open(device, &SYSTEM_VOLUME_KEY).expect("the published image mounts");
+        let mut disk = ARXFS::open(device, Keying::Plaintext).expect("the published image mounts");
         let root = disk.root();
         disk.lookup(root, name).is_ok()
     }

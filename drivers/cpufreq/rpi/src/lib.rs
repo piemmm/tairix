@@ -45,10 +45,10 @@
 
 use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::driver::mailbox::MailboxChannel;
-use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost};
 use tairix_vcmailbox::{
     decode_clock_rate_response, decode_clock_rate_write_response, encode_clock_rate_query,
-    encode_clock_rate_write, ClockRateQuery, FirmwareClock, MailboxError,
+    encode_clock_rate_write, ClockRateQuery, FirmwareClock, MailboxError, FIRMWARE_CLOCKS_KEY,
 };
 
 #[cfg(test)]
@@ -60,29 +60,16 @@ mod tests;
 /// signal that the load-time gate cleared. The bytes spell `"RPCF"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x5250_4346_0000_0001;
 
-/// Device-tree `compatible` string this driver binds to — the Raspberry Pi
-/// binding name for the node through which the firmware exposes its clocks,
-/// so a discovery source that already speaks that vocabulary needs no
-/// translation.
-pub const FIRMWARE_CLOCKS_COMPATIBLE: &[u8] = b"raspberrypi,firmware-clocks";
-
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from, so the
-/// match data can never drift from the driver.
-pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
-    BIND_PRIORITY,
-    match HwMatchKey::compatible(FIRMWARE_CLOCKS_COMPATIBLE) {
-        Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    },
-)];
+/// match data can never drift from the driver. The device is the mailbox
+/// service's own definition of it, so this driver binds exactly the device
+/// its requests are admitted for.
+pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(BIND_PRIORITY, FIRMWARE_CLOCKS_KEY)];
 
 /// The capabilities the driver needs, and the single definition of them.
 ///

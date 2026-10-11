@@ -72,16 +72,13 @@ pub enum PartitionType {
     /// FAT32-LBA partition, or a GPT EFI System Partition.
     FatBoot,
     /// The read-only, signed-bundle `ARXFS` `/System` partition the
-    /// kernel mounts read-only **before** unlocking the encrypted data
-    /// root (the design-B pre-unlock driver store, `plans/PI.md`). It
-    /// carries no secrets, so it is keyed by a non-secret well-known
-    /// volume key; tamper-evidence comes from the per-bundle Ed25519
-    /// signatures the load gate verifies, not from
-    /// encryption.
+    /// kernel mounts read-only **before** the data root (the design-B
+    /// pre-unlock driver store, `plans/PI.md`). It carries no secrets, so
+    /// it is plaintext; tamper-evidence comes from the per-bundle Ed25519
+    /// signatures the load gate verifies, not from encryption.
     ARXFSSystem,
-    /// The encrypted `ARXFS` data-root partition the kernel mounts after
-    /// the operator unlocks it; carries `/Users`, `/Apps`, `/Storage`, and
-    /// `/System/Security`.
+    /// The `ARXFS` data-root partition, plaintext or encrypted; carries
+    /// `/Users`, `/Apps`, `/Storage`, and `/System/Security`.
     ARXFSRoot,
     /// Any other partition; TAIRiX's boot path does not consume it.
     Other,

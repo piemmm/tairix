@@ -305,7 +305,7 @@ Key facts for the next worker:
   pre-unlock store read resolves. Planting it on the writable root through
   the `/System/Settings` view path instead is the defect that kept DHCP from
   ever starting on a flashed board: at runtime that path is the writable
-  sub-mount backed by the encrypted root, which no bootstrap client can
+  sub-mount backed by the root volume, which no bootstrap client can
   reach, so the shipped default was read by nothing and the machine ran with
   no managed interface. Reader and writer now derive the path from the one
   ABI definition, and `tools/mkimage` proves the plant lands there.

@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -493,10 +493,6 @@ fn equal_boxes_draw_the_same_pixels_and_a_moved_viewport_is_a_difference() {
     );
     assert_ne!(a, scrolled, "a moved caret and viewport is a repaint");
     assert!(!damage.is_empty(), "the change was reported");
-}
-
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// The validation state is the field family's; this only pins that a box

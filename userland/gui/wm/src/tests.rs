@@ -5547,6 +5547,151 @@ fn a_restated_ceiling_re_maximizes_a_maximized_window_and_binds_its_restore() {
 }
 
 #[test]
+fn a_smaller_desktop_refits_a_maximized_and_a_fullscreen_window_to_itself() {
+    let (mut c, id) = decorated_compositor();
+    let full = c.add_window(Point::new(0, 0), opaque(240, 150, GREEN));
+    assert!(c.set_window_frame(full, WindowFrame::new(decorated())));
+    let work_area = c.screen_rect();
+    c.toggle_window_size(id, work_area).expect("maximizable");
+    c.set_window_size_state(full, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+
+    assert!(c.set_desktop_size(256, 192));
+    let smaller = c.screen_rect();
+    let refit = c.refit_windows(smaller);
+
+    assert_eq!(refit.len(), 2, "both windows changed size: {refit:?}");
+    assert_eq!(c.window(full).expect("window").bounds(), smaller);
+    let maximized = c.window(id).expect("window").bounds();
+    assert!(smaller.contains(maximized.origin));
+    assert!(maximized.right() <= smaller.right() && maximized.bottom() <= smaller.bottom());
+    for (window, state, client) in refit {
+        assert_eq!(c.window_client_rect(window), Some(client));
+        assert_eq!(c.window(window).expect("window").size_state(), state);
+    }
+    assert!(
+        c.refit_windows(smaller).is_empty(),
+        "a second refit changes nothing"
+    );
+}
+
+#[test]
+fn a_restored_window_past_a_smaller_desktop_is_brought_back_within_it() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.move_window(id, Point::new(200, 150)));
+    assert!(c.set_desktop_size(256, 192));
+    let smaller = c.screen_rect();
+
+    let refit = c.refit_windows(smaller);
+
+    let bounds = c.window(id).expect("window").bounds();
+    assert!(
+        bounds.left() >= 0
+            && bounds.top() >= 0
+            && bounds.right() <= smaller.right()
+            && bounds.bottom() <= smaller.bottom(),
+        "{bounds:?} is not within {smaller:?}"
+    );
+    assert!(
+        refit.is_empty(),
+        "it fits, so it moved and its client is owed nothing"
+    );
+
+    // Narrower than the window, so it shrinks, and its client is told.
+    assert!(c.set_desktop_size(160, 120));
+    let narrow = c.screen_rect();
+    let refit = c.refit_windows(narrow);
+    let bounds = c.window(id).expect("window").bounds();
+    assert!(
+        bounds.right() <= narrow.right() && bounds.bottom() <= narrow.bottom(),
+        "{bounds:?}"
+    );
+    assert_eq!(
+        refit
+            .iter()
+            .map(|(window, ..)| *window)
+            .collect::<alloc::vec::Vec<_>>(),
+        [id]
+    );
+}
+
+#[test]
+fn a_maximized_windows_restore_geometry_is_held_within_a_smaller_desktop() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.move_window(id, Point::new(60, 60)));
+    let work_area = c.screen_rect();
+    c.toggle_window_size(id, work_area).expect("maximizable");
+    assert!(c.set_desktop_size(256, 192));
+    let smaller = c.screen_rect();
+    let _ = c.refit_windows(smaller);
+
+    c.toggle_window_size(id, smaller).expect("restorable");
+
+    let restored = c.window(id).expect("window").bounds();
+    assert!(
+        restored.right() <= smaller.right() && restored.bottom() <= smaller.bottom(),
+        "{restored:?} restored past {smaller:?}"
+    );
+}
+
+#[test]
+fn a_transient_left_off_a_smaller_desktop_is_brought_back_within_it_unresized() {
+    let (mut c, id) = decorated_compositor();
+    let dialog = c
+        .add_transient_window(id, Point::new(240, 180), opaque(60, 40, GREEN))
+        .expect("a transient of a live window");
+    assert!(c.set_desktop_size(160, 120));
+    let smaller = c.screen_rect();
+    let _ = c.refit_windows(smaller);
+
+    let bounds = c.window(dialog).expect("window").bounds();
+    assert_eq!((bounds.width, bounds.height), (60, 40), "never resized");
+    assert!(
+        smaller.contains(bounds.origin)
+            && bounds.right() <= smaller.right()
+            && bounds.bottom() <= smaller.bottom(),
+        "{bounds:?} is out of reach on {smaller:?}"
+    );
+}
+
+/// A trial of a smaller desktop that is reverted puts back what its refit
+/// moved, and only that: a window the user moved meanwhile stays put.
+#[test]
+fn restoring_placements_undoes_a_refit_and_nothing_the_user_did_since() {
+    let (mut c, shrunk) = decorated_compositor();
+    let moved = c.add_window(Point::new(150, 100), opaque(120, 80, GREEN));
+    let maximized = c.add_window(Point::new(10, 10), opaque(240, 150, BLUE));
+    assert!(c.set_window_frame(maximized, WindowFrame::new(decorated())));
+    let maximized_was = c.window(maximized).expect("window").bounds();
+    let full = c.screen_rect();
+    c.toggle_window_size(maximized, full).expect("maximizable");
+    let before = c.placements();
+    let shrunk_was = c.window(shrunk).expect("window").bounds();
+
+    assert!(c.set_desktop_size(160, 120));
+    let _ = c.refit_windows(c.screen_rect());
+    let after = c.placements();
+    assert!(c.move_window(moved, Point::new(5, 5)), "the user moves one");
+
+    assert!(c.set_desktop_size(full.width, full.height));
+    let _ = c.refit_windows(full);
+    let _ = c.restore_placements(&before, &after, full);
+
+    assert_eq!(c.window(shrunk).expect("window").bounds(), shrunk_was);
+    assert_eq!(
+        c.window(moved).expect("window").origin(),
+        Point::new(5, 5),
+        "what the user did stands"
+    );
+    c.toggle_window_size(maximized, full).expect("restorable");
+    assert_eq!(
+        c.window(maximized).expect("window").bounds(),
+        maximized_was,
+        "it restores to where it was before the trial, not the shrunk rectangle"
+    );
+}
+
+#[test]
 fn a_held_maximized_window_takes_exactly_what_a_fresh_maximize_would() {
     let (mut c, id) = decorated_compositor();
     let work_area = c.screen_rect();
@@ -9539,6 +9684,140 @@ fn a_mode_that_cannot_be_drawn_is_refused_and_leaves_the_compositor_intact() {
     assert_eq!(c.mode(), mode(16, 16));
     assert_eq!(c.frame().len(), 16 * 4 * 16);
     assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+}
+
+// ---- a desktop smaller than its output ---------------------------------
+
+#[test]
+fn a_smaller_desktop_is_composed_at_its_size_and_fills_the_output() {
+    let mut c = new_compositor(mode(32, 24), BLUE).expect("compositor");
+    c.add_window(Point::new(0, 0), opaque(8, 6, RED));
+    c.composite();
+
+    assert!(c.set_desktop_size(16, 12));
+
+    assert_eq!(c.screen_rect(), Rect::new(0, 0, 16, 12));
+    assert_eq!(c.mode(), mode(32, 24), "the output keeps its own mode");
+    assert_eq!(c.frame().len(), 32 * 4 * 24);
+    let presented = c.composite();
+    assert_eq!(
+        presented.bounds(),
+        Rect::new(0, 0, 32, 24),
+        "the output, whole"
+    );
+    // The window is the desktop's top-left quarter, and so the output's.
+    assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 28, 20), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_change_on_a_smaller_desktop_reaches_only_the_output_pixels_it_moves() {
+    let mut c = new_compositor(mode(64, 48), BLUE).expect("compositor");
+    assert!(c.set_desktop_size(32, 24));
+    let win = c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    c.composite();
+
+    assert!(c.set_surface(win, opaque(4, 4, GREEN)));
+    let presented = c.composite().bounds();
+
+    // The window's 4x4 desktop pixels are 8x8 of the output, and the filter
+    // reaches a little past them, never across the screen.
+    assert!(
+        presented.width <= 16 && presented.height <= 16,
+        "{presented:?} is wider than what the change reaches"
+    );
+    assert!(presented.contains(Point::new(4, 4)) && presented.contains(Point::new(11, 11)));
+    assert_eq!(frame_pixel(&c, 8, 8), [0, 255, 0, 255]);
+}
+
+#[test]
+fn a_desktop_rectangle_reaches_its_scaled_image_and_the_filters_reach_on_the_output() {
+    let reached = crate::output_reach(Rect::new(100, 100, 200, 100), (800, 600), (1024, 768));
+    let scaled = Rect::new(128, 128, 256, 128);
+    assert!(
+        reached.left() < scaled.left()
+            && reached.top() < scaled.top()
+            && reached.right() > scaled.right()
+            && reached.bottom() > scaled.bottom(),
+        "{reached:?} must cover {scaled:?} and the filter's reach past it"
+    );
+    assert_eq!(
+        crate::output_reach(Rect::new(-50, -50, 2000, 2000), (800, 600), (1024, 768)),
+        Rect::new(0, 0, 1024, 768),
+        "a rectangle overhanging the desktop reaches only what the desktop does"
+    );
+    assert!(crate::output_reach(Rect::new(900, 0, 40, 40), (800, 600), (1024, 768)).is_empty());
+}
+
+#[test]
+fn a_fade_on_a_smaller_desktop_dims_the_resampled_picture() {
+    let mut c = new_compositor(mode(32, 24), WHITE).expect("compositor");
+    assert!(c.set_desktop_size(16, 12));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 10, 10), [255, 255, 255, 255]);
+
+    assert!(c.set_reveal(0));
+    assert_eq!(c.composite().bounds(), Rect::new(0, 0, 32, 24));
+    assert_eq!(frame_pixel(&c, 10, 10), [0, 0, 0, 255]);
+    assert!(c.set_reveal(u8::MAX));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 10, 10), [255, 255, 255, 255]);
+}
+
+#[test]
+fn a_desktop_larger_than_its_output_or_without_pixels_is_refused() {
+    let mut c = new_compositor(mode(32, 24), BLUE).expect("compositor");
+    c.composite();
+    assert!(!c.set_desktop_size(33, 24));
+    assert!(!c.set_desktop_size(32, 25));
+    assert!(!c.set_desktop_size(0, 12));
+    assert_eq!(c.screen_rect(), Rect::new(0, 0, 32, 24));
+    assert!(c.composite().bounds().is_empty(), "a refusal marks nothing");
+}
+
+#[test]
+fn the_outputs_own_size_composes_straight_into_the_frame_again() {
+    let mut c = new_compositor(mode(32, 24), BLUE).expect("compositor");
+    c.add_window(Point::new(3, 3), opaque(5, 5, RED));
+    assert!(c.set_desktop_size(16, 12));
+    c.composite();
+    assert!(c.set_desktop_size(32, 24));
+    c.composite();
+    let composed: alloc::vec::Vec<[u8; 4]> = c
+        .back_buffer()
+        .pixels()
+        .iter()
+        .map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
+        .collect();
+    assert_eq!(
+        frame_pixels(&c),
+        composed,
+        "the frame is the composite again"
+    );
+    assert!(c.set_desktop_size(16, 12));
+    assert!(c.set_mode(mode(24, 20)));
+    assert_eq!(
+        c.screen_rect(),
+        Rect::new(0, 0, 24, 20),
+        "a new mode is its own size"
+    );
+}
+
+#[test]
+fn a_smaller_desktop_is_never_handed_to_the_layer_engine() {
+    let mut c = new_compositor(mode(32, 24), BLUE).expect("compositor");
+    c.add_window(Point::new(2, 2), opaque(4, 4, RED));
+    assert!(c.set_desktop_size(16, 12));
+    let mut display = MockAccel::new(mode(32, 24), generous_caps());
+
+    c.present_accelerated(&mut display).expect("presents");
+
+    assert!(
+        display.layers.is_empty(),
+        "no layer was placed in desktop pixels"
+    );
+    assert_eq!(display.software_frame.len(), 32 * 4 * 24);
+    assert_eq!(c.presentation(), Some(Presentation::Composited));
 }
 
 // ---- screen reveal ---------------------------------------------------

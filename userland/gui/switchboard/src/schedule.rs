@@ -121,7 +121,7 @@ pub(crate) const fn periodic_due(sample_index: u64, divider: u64) -> bool {
 pub enum Cadence {
     /// The reading changes moment to moment, so it is issued on every
     /// sample: the process list, CPU time, per-CPU scheduler load, uptime,
-    /// the load average, and live network interface state and throughput.
+    /// the load average, and network throughput.
     EverySample,
     /// The existing audited memory-pressure cadence
     /// ([`MEMORY_SAMPLE_DIVIDER`]), also covering the other
@@ -135,9 +135,12 @@ pub enum Cadence {
     /// Fetched once and cached for the sampler's life, re-fetched only
     /// when the previous attempt left the fact unavailable — the
     /// underlying fact (system identity, per-CPU model/class, installed
-    /// RAM, and the set of network interfaces) cannot change while the
-    /// sampling process runs.
+    /// RAM) cannot change while the sampling process runs.
     Static,
+    /// Fetched when nothing is held, and held until the notice announcing a
+    /// change drops it: the network interfaces and their link and addresses,
+    /// which the network stack announces rather than a sample discovering.
+    OnNotice,
 }
 
 impl Cadence {
@@ -145,16 +148,16 @@ impl Cadence {
     /// `sample_index`.
     ///
     /// `cached` is whether a value is already held for a
-    /// [`Cadence::Static`] reading; it is ignored by every other tier; a
-    /// tier value is always due exactly when a fresh reading offers new
-    /// information.
+    /// [`Cadence::Static`] or [`Cadence::OnNotice`] reading; it is ignored by
+    /// every other tier; a tier value is always due exactly when a fresh
+    /// reading offers new information.
     #[must_use]
     pub const fn due(self, sample_index: u64, cached: bool) -> bool {
         match self {
             Self::EverySample => true,
             Self::Memory => periodic_due(sample_index, MEMORY_SAMPLE_DIVIDER),
             Self::Inventory => periodic_due(sample_index, INVENTORY_SAMPLE_DIVIDER),
-            Self::Static => !cached,
+            Self::Static | Self::OnNotice => !cached,
         }
     }
 }

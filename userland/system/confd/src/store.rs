@@ -139,8 +139,8 @@ pub enum StoreError {
     /// The document on the volume is outside the format's bounds, or the
     /// change would put it outside them.
     DocumentRefused,
-    /// The volume could not be reached — the encrypted root is not yet
-    /// unlocked, or an I/O error.
+    /// The volume could not be reached — the root is not yet mounted, or an
+    /// I/O error.
     Unavailable,
     /// A sealed-scope operation was refused. Carried as the sealed scope's own
     /// vocabulary rather than flattened in here, so the key hierarchy's

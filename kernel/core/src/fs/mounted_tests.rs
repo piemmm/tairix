@@ -377,7 +377,7 @@ fn an_unknown_principal_is_denied() {
 #[test]
 fn the_system_principal_resolves_before_the_identity_table_installs() {
     // The volume is mounted but the identity table is not installed (the
-    // encrypted root is still locked): the kernel-defined system principal
+    // root's unlock has not finished): the kernel-defined system principal
     // (uid 0) resolves to the capability-less bootstrap identity, so its
     // operation reaches the volume and reports the path's real state
     // (`NotFound` here) instead of the pre-fix `NotImplemented` that killed

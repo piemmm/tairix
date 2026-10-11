@@ -393,9 +393,10 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
 - A `flush()` that faults is a failed barrier: the slot is not written, so the
   transaction did not happen.
 - Released buffers are volatilely wiped, like every other buffer in the driver.
-  Entries hold sealed (encrypted) bytes, so no plaintext is ever retained, and
-  the driver declares no `BufferClass` on any write: every block it sends is
-  ciphertext or authenticated metadata. A `Sensitive`-class bypass therefore has
+  Entries hold sealed bytes — ciphertext on an encrypted volume, checksummed
+  as written on a plaintext one, whose bytes are what that volume keeps at rest
+  anyway — and the driver declares no `BufferClass` on any write. A
+  `Sensitive`-class bypass therefore has
   no producer, and implementing one would be speculative surface — the seal path
   is what keeps the set free of secrets, not a class flag.
 - A read-only handle can never stage a block: `stage_block` refuses one, as do

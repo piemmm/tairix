@@ -79,6 +79,20 @@ per-client narrowing lives in that audited broker (`sysinfod` gates
 facts on `CAP_SYSINFO_HW` — the record carries the MAC, stable
 hardware identity — and state on `CAP_SYSINFO_GLOBAL`).
 
+So that no reader has to poll those queries to learn the network moved, the
+stack publishes the `Network` system notice (`docs/src/abi/notice.md`) as the
+process bound to `NETSTACK_ENDPOINT`. After each pass of its loop it renders
+the interface-state records it would answer and compares them with the ones
+it last published; only a difference — an interface appearing or going, a link
+moving, an address added, removed or changing state — counts a change and
+publishes the new count. A pass that changed nothing visible publishes
+nothing, and the comparison buffer is reused, so a quiet stack allocates
+nothing for it. A refused publish is logged (`NOTICE_UNAVAILABLE`, 16029) and
+retried with the next change. The count resumes one past the value already on
+the board (`tairix_rt::changenotice`) and the stack announces it once at start,
+so a restarted stack never re-states its last instance's count — which the
+kernel would take as no change — and its readers always re-read its table.
+
 ## Stack-wide network policy (`net.*`)
 
 `netstack` is the network-parsing sandbox and holds no filesystem
@@ -188,7 +202,7 @@ endpoint. A managed interface carrying neither selector cannot be bound to
 hardware by identity and is surfaced loud (`devmgr` event `13_016`), never
 silently ignored.
 
-The read happens **before the encrypted root is unlocked**, over the
+The read happens **before the root is mounted**, over the
 always-mounted read-only `/System` store endpoint
 (`StoreRequest::ReadConfig`), because NIC drivers autoload from that same
 volume and their interfaces must be addressed as they come up — headless,
@@ -198,7 +212,7 @@ with nobody at a passphrase prompt. So the document lives on the read-only
 also where the image builder plants it: writer and reader derive that path
 from the one definition, so they cannot land on different volumes. It is
 **not** planted through the `/System/Settings` view path — at runtime that
-is the writable sub-mount backed by the encrypted root, which no bootstrap
+is the writable sub-mount backed by the root volume, which no bootstrap
 client can reach, so a document written there is read by nothing.
 
 `netstack` locates the interface by its **stable hardware identity** — the
@@ -231,7 +245,7 @@ loopback").
 
 The store is read as two layers, neither copied into the other: the device
 manager reads the administrator's document at the canonical
-`/System/Settings/` path once the encrypted root is mounted, and the shipped
+`/System/Settings/` path once the root is mounted, and the shipped
 default off the read-only `/System` volume before that (and on every system
 where nobody has overridden anything). `network.conf` itself has no runtime
 writer — `configure` grows no interface sub-grammar — so the per-interface

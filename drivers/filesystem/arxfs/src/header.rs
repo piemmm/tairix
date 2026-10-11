@@ -7,7 +7,7 @@
 //! [`HEADER_LEN`] bytes. The header makes a block self-describing: it records
 //! what the block *is* (`magic`, [`BlockType`], format version), which volume
 //! and object it belongs to (filesystem UUID, owner object, generation),
-//! where it is meant to live (its logical and physical address), and a keyed
+//! where it is meant to live (its logical and physical address), and an
 //! authenticator over the identity plus the payload.
 //!
 //! Decoding verifies all of that against the address the reader *expected*,
@@ -17,20 +17,19 @@
 //!
 //! # Authenticator
 //!
-//! The block is sealed with an HMAC-SHA256 keyed authenticator
-//! ([`mac_tag`]) computed through `lib/crypto` (crypto is
-//! the standing "don't roll your own" exception). The tag covers every byte
-//! of the block except the tag slot itself, so it authenticates the identity
-//! (type, UUID, owner, generation, logical and physical address, payload
-//! length) *and* the payload (`docs/src/filesystem/arxfs-spec.md` §8). A
-//! block that fails the keyed check — because it is stale, misdirected, torn,
-//! bit-rotted, or sealed under a different key — does not decode, and the
-//! caller falls back to the block's redundant copy
-//! ([`crate::ARXFS::read_meta`]).
+//! The block is sealed by the volume's [`MetaSeal`]: an HMAC-SHA256 on an
+//! encrypted volume, a CRC-32C on a plaintext one. The tag covers every byte
+//! of the block except the tag slot itself, so it covers the identity (type,
+//! UUID, owner, generation, logical and physical address, payload length)
+//! *and* the payload (`docs/src/filesystem/arxfs-spec.md` §8). A block that
+//! fails it — because it is stale, misdirected, torn, bit-rotted, or sealed
+//! under a different key — does not decode, and the caller falls back to the
+//! block's redundant copy ([`crate::ARXFS::read_meta`]).
 
 use tairix_abi::DriverError;
-use tairix_crypto::{ct_eq, hmac_sha256, HmacSha256Key, HmacSha256Tag, HMAC_SHA256_TAG_LEN};
+use tairix_crypto::{ct_eq, HmacSha256Tag, HMAC_SHA256_TAG_LEN};
 
+use crate::crypto::MetaSeal;
 use crate::{rd_u128, rd_u32, rd_u64, wr_u128, wr_u32, wr_u64};
 
 /// Magic in a metadata block header's first eight bytes: `"ARXFSB\3"`. The
@@ -41,20 +40,15 @@ use crate::{rd_u128, rd_u32, rd_u64, wr_u128, wr_u32, wr_u64};
 pub use tairix_fsprobe::ARXFS_HEADER_MAGIC as HEADER_MAGIC;
 
 /// On-disk format version understood by this build. A volume written by a
-/// different version is refused rather than misread. Version 3 gave every
-/// inode a content generation and the transaction root the volume's next one
-/// (`docs/src/filesystem/arxfs-spec.md` §13, §14).
-pub const FORMAT_VERSION: u32 = 3;
+/// different version is refused rather than misread. Version 4 declares the
+/// volume's protection in its superblock (`docs/src/filesystem/arxfs-spec.md`
+/// §5, §7).
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Fixed size of a metadata-block header, in bytes. The payload of a block
-/// begins at this offset. It is large enough to hold the 32-byte keyed
+/// begins at this offset. It is large enough to hold the 32-byte
 /// authenticator alongside the identity fields.
 pub const HEADER_LEN: usize = 128;
-
-/// Largest device block the authenticator stages through its on-stack
-/// scratch buffer. Matches `crate::MAX_BLOCK_SIZE`; no Tier-1 block device
-/// exceeds it.
-const MAX_META_BLOCK: usize = 4096;
 
 /// The kind of object a metadata block holds. Decoding a block with a
 /// `block_type` other than the one the reader expects is a misdirected or
@@ -83,11 +77,11 @@ pub enum BlockType {
     /// is never required for ordinary crash recovery.
     HealthBaseline = 6,
     /// An inode's extended-attribute set: the encoded `tairix_fsmeta`
-    /// attribute store, reached from the owning inode. Its payload is
-    /// encrypted at rest under the metadata (filename) key exactly like a
-    /// directory block's entry names, so no plaintext attribute key or value
-    /// leaks on a raw-device read
-    /// (`docs/src/filesystem/arxfs-spec.md` §21).
+    /// attribute store, reached from the owning inode. Its payload is sealed
+    /// exactly like a directory block's entry names: on an encrypted volume
+    /// under the metadata (filename) key, so no plaintext attribute key or
+    /// value leaks on a raw-device read (`docs/src/filesystem/arxfs-spec.md`
+    /// §21).
     Attr = 7,
     /// A block of the allocation-map region: its header, one of its summary
     /// blocks, or one of its bitmap pages (`allocmap`). Free space is
@@ -208,37 +202,32 @@ const H_GENERATION: usize = 40;
 const H_LOGICAL: usize = 48;
 const H_PHYSICAL: usize = 56;
 const H_PAYLOAD_LEN: usize = 64;
-// Bytes 68..72 are reserved (zeroed). The keyed authenticator occupies
-// 72..104; bytes 104..HEADER_LEN are reserved (zeroed).
+// Bytes 68..72 are reserved (zeroed). The authenticator occupies 72..104;
+// bytes 104..HEADER_LEN are reserved (zeroed).
 const H_RESERVED: usize = 68;
 const H_MAC: usize = 72;
 const H_MAC_END: usize = H_MAC + HMAC_SHA256_TAG_LEN;
 
-/// The HMAC-SHA256 keyed authenticator over every byte of `block` *except*
-/// the tag slot, computed through `lib/crypto`. Covers the identity *and* the
-/// payload, so any stale, misdirected, torn, or bit-rotted write — or a write
-/// sealed under a different key — changes the result and is rejected
-/// (`docs/src/filesystem/arxfs-spec.md` §5, §8).
+/// `seal`'s authenticator over every byte of `block` *except* the tag slot.
+/// Covers the identity *and* the payload, so any stale, misdirected, torn, or
+/// bit-rotted write — or a write sealed under a different key — changes the
+/// result and is rejected (`docs/src/filesystem/arxfs-spec.md` §5, §8).
 ///
 /// The tag slot (`H_MAC..H_MAC_END`) is treated as zero so that the value is
 /// independent of whatever tag the block currently carries; [`BlockHeader::seal`]
 /// zeroes it before sealing and decoding recomputes against the same zeroed
 /// view.
 #[must_use]
-fn mac_tag(key: &HmacSha256Key, block: &[u8]) -> HmacSha256Tag {
-    let len = block.len().min(MAX_META_BLOCK);
-    let mut scratch = [0u8; MAX_META_BLOCK];
-    scratch[..len].copy_from_slice(&block[..len]);
-    for byte in &mut scratch[H_MAC..H_MAC_END] {
-        *byte = 0;
-    }
-    hmac_sha256(key, &scratch[..len])
+fn mac_tag(seal: &MetaSeal, block: &[u8]) -> HmacSha256Tag {
+    let head = &block[..block.len().min(H_MAC)];
+    let tail = block.get(H_MAC_END..).unwrap_or(&[]);
+    seal.tag(&[head, &[0u8; HMAC_SHA256_TAG_LEN], tail])
 }
 
 impl BlockHeader {
     /// Write `self` into the first [`HEADER_LEN`] bytes of `block` and seal
-    /// the block with a fresh keyed authenticator ([`mac_tag`]) over the
-    /// whole block under `key`.
+    /// the block with a fresh authenticator ([`mac_tag`]) over the whole
+    /// block.
     ///
     /// `block.len()` is the device block size and must be at least
     /// [`HEADER_LEN`]; the caller always passes a full block buffer.
@@ -247,7 +236,7 @@ impl BlockHeader {
     ///
     /// [`DriverError::DeviceFault`] if `block` is shorter than
     /// [`HEADER_LEN`] (a programming error, surfaced rather than panicked).
-    pub fn seal(&self, block: &mut [u8], key: &HmacSha256Key) -> Result<(), DriverError> {
+    pub fn seal(&self, block: &mut [u8], seal: &MetaSeal) -> Result<(), DriverError> {
         if block.len() < HEADER_LEN {
             return Err(DriverError::DeviceFault);
         }
@@ -271,17 +260,16 @@ impl BlockHeader {
         for byte in &mut block[H_MAC_END..HEADER_LEN] {
             *byte = 0;
         }
-        let tag = mac_tag(key, block);
+        let tag = mac_tag(seal, block);
         block[H_MAC..H_MAC_END].copy_from_slice(&tag);
         Ok(())
     }
 
     /// Decode and fully validate the header of `block`, confirming the
-    /// block is the one the reader expected and that it authenticates under
-    /// `key`.
+    /// block is the one the reader expected and that `seal` accepts it.
     ///
     /// Verifies, in order: the block is large enough; the magic and format
-    /// version match; the keyed authenticator is intact (rejecting a torn,
+    /// version match; the authenticator is intact (rejecting a torn,
     /// bit-rotted, or wrong-key block); the `block_type`, filesystem UUID, and
     /// physical address match what the caller expected (rejecting a
     /// wrong-type, foreign-volume, stale, or misdirected block). Every failure
@@ -295,17 +283,12 @@ impl BlockHeader {
         expect_type: BlockType,
         expect_uuid: u128,
         expect_physical: u64,
-        key: &HmacSha256Key,
+        seal: &MetaSeal,
     ) -> Result<Self, DriverError> {
-        if block.len() < HEADER_LEN {
-            return Err(DriverError::DeviceFault);
-        }
-        if rd_u64(block, H_MAGIC) != HEADER_MAGIC || rd_u32(block, H_VERSION) != FORMAT_VERSION {
-            return Err(DriverError::DeviceFault);
-        }
+        let fs_uuid = claimed_uuid(block).ok_or(DriverError::DeviceFault)?;
         let mut stored = [0u8; HMAC_SHA256_TAG_LEN];
         stored.copy_from_slice(&block[H_MAC..H_MAC_END]);
-        let expected = mac_tag(key, block);
+        let expected = mac_tag(seal, block);
         if !ct_eq(&expected, &stored) {
             return Err(DriverError::DeviceFault);
         }
@@ -314,7 +297,6 @@ impl BlockHeader {
         if block_type != expect_type {
             return Err(DriverError::DeviceFault);
         }
-        let fs_uuid = rd_u128(block, H_UUID);
         if fs_uuid != expect_uuid {
             return Err(DriverError::DeviceFault);
         }
@@ -345,10 +327,20 @@ impl BlockHeader {
         expect_type: BlockType,
         expect_uuid: u128,
         expect_physical: u64,
-        key: &HmacSha256Key,
+        seal: &MetaSeal,
     ) -> Option<Self> {
-        Self::decode_verify(block, expect_type, expect_uuid, expect_physical, key).ok()
+        Self::decode_verify(block, expect_type, expect_uuid, expect_physical, seal).ok()
     }
+}
+
+/// The volume UUID `block`'s header claims, before anything vouches for it:
+/// `None` unless the block carries arxfs's magic at this format version.
+#[must_use]
+pub fn claimed_uuid(block: &[u8]) -> Option<u128> {
+    let claims = block.len() >= HEADER_LEN
+        && rd_u64(block, H_MAGIC) == HEADER_MAGIC
+        && rd_u32(block, H_VERSION) == FORMAT_VERSION;
+    claims.then(|| rd_u128(block, H_UUID))
 }
 
 #[cfg(test)]
@@ -356,9 +348,13 @@ mod tests {
     use super::*;
 
     const UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
-    const KEY: HmacSha256Key = [0x5au8; HMAC_SHA256_TAG_LEN];
+    const KEY: MetaSeal = MetaSeal::Keyed([0x5au8; HMAC_SHA256_TAG_LEN]);
 
     fn sealed() -> [u8; 512] {
+        sealed_under(&KEY)
+    }
+
+    fn sealed_under(seal: &MetaSeal) -> [u8; 512] {
         let mut block = [0u8; 512];
         let header = BlockHeader {
             block_type: BlockType::TxnRoot,
@@ -370,7 +366,7 @@ mod tests {
             payload_len: 16,
         };
         block[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&[1, 2, 3, 4]);
-        header.seal(&mut block, &KEY).expect("seal");
+        header.seal(&mut block, seal).expect("seal");
         block
     }
 
@@ -435,7 +431,7 @@ mod tests {
     #[test]
     fn wrong_key_is_rejected() {
         let block = sealed();
-        let other: HmacSha256Key = [0x17u8; HMAC_SHA256_TAG_LEN];
+        let other = MetaSeal::Keyed([0x17u8; HMAC_SHA256_TAG_LEN]);
         assert_eq!(
             BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &other),
             Err(DriverError::DeviceFault)
@@ -464,6 +460,37 @@ mod tests {
         assert_eq!(
             BlockHeader::try_decode(&block, BlockType::TxnRoot, UUID, 100, &KEY),
             None
+        );
+    }
+
+    #[test]
+    fn a_plaintext_block_decodes_under_its_checksum_and_only_under_it() {
+        let block = sealed_under(&MetaSeal::Checksum);
+        let header =
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &MetaSeal::Checksum)
+                .expect("a plaintext block decodes under its checksum");
+        assert_eq!(header.generation, 42);
+        assert_eq!(
+            BlockHeader::decode_verify(&block, BlockType::TxnRoot, UUID, 100, &KEY),
+            Err(DriverError::DeviceFault),
+            "a checksummed block never passes for a keyed one"
+        );
+        assert_eq!(
+            BlockHeader::decode_verify(
+                &sealed(),
+                BlockType::TxnRoot,
+                UUID,
+                100,
+                &MetaSeal::Checksum
+            ),
+            Err(DriverError::DeviceFault),
+            "nor a keyed block for a checksummed one"
+        );
+        let mut rotted = block;
+        rotted[HEADER_LEN + 2] ^= 0x04;
+        assert_eq!(
+            BlockHeader::decode_verify(&rotted, BlockType::TxnRoot, UUID, 100, &MetaSeal::Checksum),
+            Err(DriverError::DeviceFault)
         );
     }
 }

@@ -131,8 +131,9 @@ three things on the `BootInfo` hand-off:
   visible hang rather than becoming a silent latency bug.
 
   Console 0's read half is wrapped in the shared `GatedConsoleRead`, as on
-  the sibling ports: `login` is withheld until the unlock kthread has read
-  the root passphrase off the same console and opened the gate, so the two
+  the sibling ports: `login` is withheld until the unlock kthread has
+  resolved the root — reading an encrypted root's passphrase off the same
+  console — and opened the gate, so the two
   cannot split a typed line between them.
 - **PID 1 spawn seam (`with_init`).** `riscv64::init_spawn::RiscvInitSpawn`
   builds the embedded `init` (`Run`) program's image in its own Sv39

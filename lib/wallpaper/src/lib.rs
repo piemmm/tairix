@@ -62,6 +62,7 @@ pub mod fit;
 pub mod idle;
 pub mod input;
 pub mod notify;
+pub mod resolution;
 pub mod saver;
 pub mod settings;
 pub mod sound;
@@ -83,6 +84,7 @@ pub use input::{
     REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
 };
 pub use notify::{NotifyLevel, NotifyPolicy, PolicyFull};
+pub use resolution::Resolution;
 pub use saver::{
     preview_file, preview_kind, preview_path, CellSize, ClockOptions, CpuUse, LifeOptions, Pace,
     RaytraceOptions, RetroGamesOptions, RibbonOptions, SceneDetail, ScreensaverOptions, SlideOrder,

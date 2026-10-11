@@ -685,6 +685,7 @@ mod tests {
     use super::*;
     use core::fmt;
     use tairix_abi_trap::seam;
+    use tairix_abi_trap::seam::refusal;
 
     /// A [`Write`] that records everything written but accepts at most `max`
     /// bytes per call, so the short-write loop in [`Write::write_all`] is
@@ -908,7 +909,7 @@ mod tests {
         // is really "you were not allowed to write at all", and the raw
         // negative register must never become a huge count that slices out
         // of bounds — which once turned a panic report into a panic storm.
-        let neg = u64::from_ne_bytes((-i64::from(Errno::PermissionDenied.as_i32())).to_ne_bytes());
+        let neg = refusal(Errno::PermissionDenied);
         seam::arm(neg);
         assert_eq!(
             Stderr.write_all(b"report"),
@@ -935,7 +936,7 @@ mod tests {
         // `read` until it returns zero would treat a revoked capability or a
         // faulted buffer as a complete, clean input and silently truncate
         // what it processed.
-        let neg = u64::from_ne_bytes((-i64::from(Errno::NotFound.as_i32())).to_ne_bytes());
+        let neg = refusal(Errno::NotFound);
         seam::arm(neg);
         let mut buf = [0u8; 8];
         assert_eq!(Stdin.read(&mut buf), Err(Error::Os(Errno::NotFound)));
@@ -979,7 +980,7 @@ mod tests {
         assert_eq!(args[3], 1_000);
 
         // An elapsed bound is distinguishable from a dead console.
-        let neg = u64::from_ne_bytes((-i64::from(Errno::TimedOut.as_i32())).to_ne_bytes());
+        let neg = refusal(Errno::TimedOut);
         seam::arm(neg);
         assert_eq!(
             Stdin.read_timeout(&mut buf, 1_000),

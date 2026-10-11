@@ -20,32 +20,36 @@ workspace = true
 # arithmetic rather than two of each.
 
 # --- Hashes and keyed authenticators -------------------------------------
+# `zeroize` on each wipes its state on drop: an HMAC's keyed midstate, and a
+# hash's buffer of the secret it was fed.
+#
 # SHA-2, the `abi-v1` manifest hash and the SSH exchange hash for every key
 # exchange but the SHA-1 ones this tree refuses.
-sha2 = { version = "=0.11.0", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 # HMAC over the above. It is the keyed metadata authenticator ARXFS seals
 # every metadata block with (`docs/src/filesystem/arxfs-spec.md` §5, §8) and
 # the SSH transport's `hmac-sha2-{256,512}`.
-hmac = { version = "=0.13.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 # SHA-1, for exactly one caller: the hashed `known_hosts` index, a fixed
 # OpenSSH format. It is an obfuscation over a hostname, never a signature.
 # Rolling it would be hand-rolling a primitive; it reuses the `digest` stack
 # above, so it adds one crate.
-sha1 = { version = "=0.11.0", default-features = false }
+sha1 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 # Poly1305 standalone, for `chacha20-poly1305@openssh.com`, which keys the
 # authenticator from a separate ChaCha20 block and authenticates a length
 # field encrypted under a second key — a composition the packaged AEAD below
 # cannot express. Already in the tree beneath `chacha20poly1305`, so naming
 # it directly adds no crate.
-poly1305 = { version = "=0.9.1", default-features = false }
+poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 
 # --- Ciphers --------------------------------------------------------------
 # ChaCha20-Poly1305 (RFC 8439). The kernel's encrypted-swap layer pages
 # secrets out only through an authenticated cipher. `default-features =
 # false` keeps this `no_std` and pulls in neither `alloc`, `getrandom`, nor
 # `rand_core`: the wrapper uses only the detached in-out trait, so nonces and
-# keys are supplied by the caller and never sourced here.
-chacha20poly1305 = { version = "=0.11.0", default-features = false }
+# keys are supplied by the caller and never sourced here. `zeroize` wipes
+# the key it holds on drop.
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 # The ChaCha stream cipher, already beneath `chacha20poly1305` above.
 # `legacy` exposes djb's original 64-bit-nonce construction, which
 # `chacha20-poly1305@openssh.com` uses and RFC 8439's layout cannot express;

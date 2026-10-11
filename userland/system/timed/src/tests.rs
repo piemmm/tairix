@@ -793,7 +793,7 @@ fn the_event_ids_are_frozen_inside_the_reserved_range() {
     assert_eq!(events::TIMED_RANGE_END, 24_000);
 }
 
-/// A boot-floor service starts before the encrypted root holding its store is
+/// A boot-floor service starts before the root holding its store is
 /// mounted, so its first read finds nothing. The ladder must arm on that, or
 /// the service never re-reads and the clock is never set — which is exactly
 /// what stranded it when a failed open was mistaken for a volume-less boot.
@@ -829,7 +829,7 @@ fn the_reread_ladder_doubles_and_is_spent_after_its_attempts() {
     }
     assert_eq!(climbed, CONFIG_RETRY_ATTEMPTS);
     // Rungs on time sum to (2^attempts - 1) base waits: ~17 minutes, against
-    // an encrypted-root unlock measured in seconds.
+    // a root mount measured in seconds once any passphrase is in.
     let window = u64::from(2u32.pow(CONFIG_RETRY_ATTEMPTS) - 1) * CONFIG_RETRY_BASE_NANOS;
     assert_eq!(at, window);
     assert!(

@@ -68,10 +68,10 @@ and any retention *policy engine* (the spec provides mechanism, not schedule).
   rules: TRIM/discard and block reuse must treat every block reachable from a
   snapshot root as live (arxfs-spec §11, §14). This is the rule already
   alluded to in the spec's TRIM reachability list — this brief makes it real.
-- Snapshot metadata is held to the **same integrity, redundancy, encryption,
-  and authentication** rules as all other authoritative metadata (arxfs-spec
-  §5, §7, §8): self-identifying, checksummed/authenticated, two physical
-  copies, encrypted, no plaintext.
+- Snapshot metadata is held to the **same integrity, redundancy, and
+  protection** rules as all other authoritative metadata (arxfs-spec §5, §7,
+  §8): self-identifying, checksummed/authenticated, two physical copies, and
+  sealed as the volume is.
 - All snapshot operations are **capability-checked and fail closed** (charter
   §5.4): no ambient authority, caller identity is kernel-attested, every input
   validated, security decisions logged with a stable event ID (charter §19.4).
@@ -243,9 +243,9 @@ one. Whichever survive, the rules are fixed:
   snapshot root, or an `Err` denies and never widens authority.
 - Every create/delete/rollback/hold decision emits a stable event ID on the
   hash-chained audit log (charter §19.4).
-- Snapshot names and contents stay in the encrypted-metadata domain; reading a
-  snapshot requires the same volume key as the live volume (no plaintext
-  snapshot bypass, arxfs-spec §7).
+- Snapshot names and contents are sealed as the live volume's are; reading an
+  encrypted volume's snapshot requires the same volume key as the live volume
+  (no plaintext snapshot bypass, arxfs-spec §7).
 
 ---
 

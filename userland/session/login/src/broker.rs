@@ -106,8 +106,8 @@ pub struct DbAccounts<'a> {
 impl<'a> DbAccounts<'a> {
     /// Build the directory over `db` and the authority's session table.
     ///
-    /// `db` is [`None`] before the encrypted root that carries the
-    /// database is unlocked, and on an installer image. The login screen
+    /// `db` is [`None`] before the root that carries the database is
+    /// mounted, and on an installer image. The login screen
     /// then offers no accounts at all, which is the honest answer: nothing
     /// can authenticate either.
     ///

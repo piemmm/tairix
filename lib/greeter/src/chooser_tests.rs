@@ -57,7 +57,9 @@ fn an_account_tile_holds_a_two_word_name_at_every_density() {
 #[test]
 fn an_account_tile_seats_its_disc_at_every_density() {
     let theme = theme();
-    for (percent, side) in [(100, 80), (200, 160)] {
+    // The tile halves an odd inset, which rounds down at 100% but not at
+    // 200%, so the doubled density seats a disc two pixels short of double.
+    for (percent, side) in [(100, 80), (200, 158)] {
         let scale = Scale::from_percent(percent).expect("a supported density");
         let tile = grid(&["ann"]).tile_rect(0, SCREEN, scale).expect("a tile");
         assert_eq!(

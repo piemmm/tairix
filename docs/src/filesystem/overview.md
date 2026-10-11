@@ -22,8 +22,9 @@ TAIRiX separates **filesystem policy** from **filesystem I/O**:
 This page describes the VFS. The on-disk layout it enforces is in
 [Layout](./layout.md); the permission model is in
 [Permissions](./permissions.md). The native [arxfs](./arxfs.md) format —
-copy-on-write today, growing always-encrypted, checksummed, compressed, and
-deduplicating storage in stages behind these same traits — is the one
+copy-on-write, checksummed, compressed and deduplicating, encrypted or
+plaintext as chosen when a volume is formatted, grown in stages behind these
+same traits — is the one
 native format; there is no separate `v1`.
 
 ## The VFS tree

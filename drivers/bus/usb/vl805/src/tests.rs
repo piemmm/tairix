@@ -12,10 +12,10 @@ use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey};
 
 use tairix_vcmailbox::mock::MockFirmware;
+use tairix_vcmailbox::VL805_FIRMWARE_DEV_ADDR;
 
 use super::{
-    probe_firmware_revision, register, reload_firmware, FirmwareResetFailure, FirmwareResetOutcome,
-    BIND_KEYS, BIND_PRIORITY, VL805_FIRMWARE_DEV_ADDR, VL805_PCI_DEVICE, VL805_PCI_VENDOR,
+    register, reload_firmware, FirmwareResetFailure, FirmwareResetOutcome, BIND_KEYS, BIND_PRIORITY,
 };
 
 /// Mock driver host modelling the load-time `CAP_DRV_LOAD` grant.
@@ -82,7 +82,7 @@ fn bind_table_matches_the_vl805_by_exact_vendor_device() {
     assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
     // The discovered VL805 node (class is the xHCI prog-if), matched by
     // the exact vendor:device id with a class wildcard.
-    let vl805 = HwMatchKey::pci(VL805_PCI_VENDOR, VL805_PCI_DEVICE, 0x0C_03_30);
+    let vl805 = HwMatchKey::pci(0x1106, 0x3483, 0x0C_03_30);
     assert!(BIND_KEYS[0].key.matches(&vl805));
     // A different vendor's xHCI controller must not match this
     // device-specific driver (it binds the generic xHCI driver instead).
@@ -104,15 +104,6 @@ fn reload_firmware_succeeds_over_a_healthy_mailbox() {
 }
 
 #[test]
-fn probe_firmware_revision_reads_the_revision_word() {
-    let channel = MockChannel(RefCell::new(MockFirmware::healthy()));
-    assert_eq!(
-        probe_firmware_revision(&channel),
-        Ok(MockFirmware::healthy().firmware_revision)
-    );
-}
-
-#[test]
 fn reload_firmware_fails_closed_on_a_transport_fault() {
     // A dead doorbell surfaces as `DeviceFault`, re-derived to a timeout.
     let channel = FailingChannel(DriverError::DeviceFault);
@@ -122,14 +113,11 @@ fn reload_firmware_fails_closed_on_a_transport_fault() {
             reason: FirmwareResetFailure::Timeout
         }
     );
-}
-
-#[test]
-fn probe_fails_closed_on_a_transport_fault() {
-    let channel = FailingChannel(DriverError::OutOfRange);
     assert_eq!(
-        probe_firmware_revision(&channel),
-        Err(FirmwareResetFailure::Window)
+        reload_firmware(&FailingChannel(DriverError::OutOfRange)),
+        FirmwareResetOutcome::Failed {
+            reason: FirmwareResetFailure::Window
+        }
     );
 }
 

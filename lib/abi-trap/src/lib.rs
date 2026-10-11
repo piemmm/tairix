@@ -223,7 +223,7 @@ pub unsafe fn raw_syscall(number: u64, args: [u64; SYSCALL_MAX_ARGS]) -> u64 {
 #[cfg(all(not(abi_trap_native), feature = "host-seam"))]
 pub mod seam {
     use std::cell::Cell;
-    use tairix_abi::SYSCALL_MAX_ARGS;
+    use tairix_abi::{Errno, SYSCALL_MAX_ARGS};
 
     std::thread_local! {
         static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -244,6 +244,35 @@ pub mod seam {
     #[must_use]
     pub fn last_call() -> Option<(u64, [u64; SYSCALL_MAX_ARGS])> {
         LAST_CALL.with(Cell::get)
+    }
+
+    /// Run `call` with the seam armed to return `ret`, answering the
+    /// `(number, args)` of the trap it issued.
+    ///
+    /// # Panics
+    ///
+    /// If `call` issued no trap.
+    pub fn capture(ret: u64, call: impl FnOnce()) -> (u64, [u64; SYSCALL_MAX_ARGS]) {
+        arm(ret);
+        call();
+        last_call().expect("the wrapper must issue a trap")
+    }
+
+    /// Run `call` with the seam armed.
+    ///
+    /// # Panics
+    ///
+    /// If `call` issued a trap.
+    pub fn no_trap(call: impl FnOnce()) {
+        arm(0);
+        call();
+        assert!(last_call().is_none(), "no trap may be issued");
+    }
+
+    /// The register the kernel answers a refusal of `errno` with: `-errno`.
+    #[must_use]
+    pub fn refusal(errno: Errno) -> u64 {
+        u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
     }
 
     /// Called by `raw_syscall` on the host. Records the call and returns the

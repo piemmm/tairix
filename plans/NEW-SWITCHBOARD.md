@@ -864,8 +864,13 @@ show a real population collapsing to zero and back.
 ## S5 — What the service samples — planned
 
 The staged cadence (`Cadence::EverySample` / `Memory` / `Inventory` /
-`Static`) is the existing design and stays: a reading is issued on the tier
-its subject actually moves at. Each reading is its own sampled field,
+`OnNotice` / `Static`) is the existing design and stays: a reading is issued on
+the tier its subject actually moves at. `OnNotice` is a reading whose subject
+publishes a system notice when it moves: `NET_INTERFACE_FACTS` and
+`NET_INTERFACE_STATE` are read once at start and again on each `Network`
+notice, retried at each sample only while unanswered, and the state reading
+feeds the bar's network signal
+(`plans/NEW-TASKBAR.md` T8). Each reading is its own sampled field,
 capability-gated at the query, degrading exactly the field it backs and
 nothing else. A field the sampler could not read carries an `Absence` saying
 *which* — a scope the caller does not hold reads `not permitted`, a query that

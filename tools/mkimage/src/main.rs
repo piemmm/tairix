@@ -6,15 +6,15 @@
 //!     --firmware <dir with the pinned blobs> \
 //!     [--manifest <firmware.lock>] \
 //!     [--profile debug|installer] \
+//!     [--encrypt-root] \
 //!     [--out images/tairix-aarch64-rpi-<profile>.img] \
 //!     [--root-key-out <key file>]
 //! ```
 //!
-//! The root volume is encrypted under a key **derived** from the
-//! profile's passphrase (`tairix_mkimage::passphrase_for`) — `root` for the debug image, blank for the installer; the
-//! unlock descriptor travels on the boot partition. `--root-key-out`
-//! names where the derived key is written for host-side mounting (default
-//! `<out>.rootkey`).
+//! The root volume is plaintext. `--encrypt-root`, a debug image's only,
+//! encrypts it under a key **derived** from `tairix_mkimage::DEBUG_PASSPHRASE`,
+//! with the unlock descriptor on the boot partition, and writes the derived
+//! key for host-side mounting to `--root-key-out` (default `<out>.rootkey`).
 //!
 //! The normal entry point is `cargo xtask image --target aarch64-rpi`
 //! (or `cargo xtask build --target aarch64-rpi`), which builds the kernel
@@ -27,7 +27,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tairix_mkimage::firmware::FirmwareManifest;
-use tairix_mkimage::{build_rpi_image, volume_key_to_hex, HostEntropy, ImageProfile};
+use tairix_mkimage::{
+    build_rpi_image, remove_stale_root_key, write_root_key, HostEntropy, ImageKind, ImageProfile,
+    VolumeProtection,
+};
 
 fn main() -> ExitCode {
     let argv: Vec<OsString> = env::args_os().skip(1).collect();
@@ -45,7 +48,7 @@ struct RpiArgs {
     kernel: PathBuf,
     firmware_dir: PathBuf,
     manifest: PathBuf,
-    profile: ImageProfile,
+    kind: ImageKind,
     out: PathBuf,
     root_key_out: Option<PathBuf>,
 }
@@ -83,7 +86,7 @@ fn run(argv: &[OsString]) -> Result<(), String> {
         &kernel_elf,
         &firmware,
         &mut HostEntropy,
-        rpi.profile,
+        rpi.kind,
         &[],
         &[],
         &network_conf,
@@ -102,31 +105,33 @@ fn run(argv: &[OsString]) -> Result<(), String> {
     let key_out = rpi
         .root_key_out
         .unwrap_or_else(|| rpi.out.with_extension("rootkey"));
-    write_key_file(&key_out, &volume_key_to_hex(&built.root_key))?;
-
+    let Some(unlock) = &built.unlock else {
+        let stale = remove_stale_root_key(&key_out).map_err(|e| {
+            format!(
+                "cannot remove stale root-key file {}: {e}",
+                key_out.display()
+            )
+        })?;
+        println!(
+            "wrote {} ({} bytes), root volume plaintext{}",
+            rpi.out.display(),
+            built.image.len(),
+            if stale {
+                "; removed the earlier build's root-key file"
+            } else {
+                ""
+            }
+        );
+        return Ok(());
+    };
+    write_root_key(&key_out, unlock)
+        .map_err(|e| format!("cannot write root-key file {}: {e}", key_out.display()))?;
     println!(
         "wrote {} ({} bytes) and root volume key {}",
         rpi.out.display(),
         built.image.len(),
         key_out.display()
     );
-    Ok(())
-}
-
-/// Write the derived root-key file with owner-only permissions: it is the
-/// mount key for the image's root volume (secret
-/// hygiene). It can also be re-derived from the on-image unlock
-/// descriptor and the profile's passphrase; the file is an operator
-/// convenience for mounting the volume on a host.
-fn write_key_file(path: &std::path::Path, body: &str) -> Result<(), String> {
-    std::fs::write(path, body)
-        .map_err(|e| format!("cannot write root-key file {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("cannot restrict root-key file {}: {e}", path.display()))?;
-    }
     Ok(())
 }
 
@@ -137,6 +142,7 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
     let mut profile = None;
     let mut out = None;
     let mut root_key_out = None;
+    let mut encrypt_root = false;
 
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
@@ -162,19 +168,30 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
                 })?);
             }
             "--out" => out = Some(value("--out")?),
+            "--encrypt-root" => encrypt_root = true,
             "--root-key-out" => root_key_out = Some(value("--root-key-out")?),
             other => return Err(format!("unknown argument {other}\n{}", usage())),
         }
     }
 
     let profile = profile.unwrap_or(ImageProfile::Debug);
+    let root = if encrypt_root {
+        VolumeProtection::Encrypted
+    } else {
+        VolumeProtection::Plaintext
+    };
+    let kind =
+        ImageKind::new(profile, root).map_err(|refused| format!("--encrypt-root: {refused}"))?;
+    if root_key_out.is_some() && !encrypt_root {
+        return Err("--root-key-out needs --encrypt-root: a plaintext root has no key".into());
+    }
     Ok(RpiArgs {
         kernel: kernel.ok_or_else(|| format!("--kernel is required\n{}", usage()))?,
         firmware_dir: firmware_dir.ok_or_else(|| format!("--firmware is required\n{}", usage()))?,
         manifest: manifest.unwrap_or_else(|| {
             PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/firmware.lock"))
         }),
-        profile,
+        kind,
         out: out.unwrap_or_else(|| {
             PathBuf::from(format!("images/tairix-aarch64-rpi-{}.img", profile.label()))
         }),
@@ -184,7 +201,38 @@ fn parse_rpi_args(rest: &[OsString]) -> Result<RpiArgs, String> {
 
 fn usage() -> String {
     "usage: tairix-mkimage rpi --kernel <elf> --firmware <dir> \
-     [--manifest <firmware.lock>] [--profile debug|installer] [--out <img>] \
-     [--root-key-out <file>]"
+     [--manifest <firmware.lock>] [--profile debug|installer] [--encrypt-root] \
+     [--out <img>] [--root-key-out <file>]"
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_rpi_args, VolumeProtection};
+    use std::ffi::OsString;
+
+    fn parse(args: &[&str]) -> Result<super::RpiArgs, String> {
+        let args: Vec<OsString> = ["--kernel", "k.elf", "--firmware", "fw"]
+            .iter()
+            .chain(args)
+            .map(OsString::from)
+            .collect();
+        parse_rpi_args(&args)
+    }
+
+    #[test]
+    fn the_root_is_plaintext_unless_a_debug_image_asks_for_encryption() {
+        let plain = parse(&[]).expect("parses");
+        assert_eq!(plain.kind.root(), VolumeProtection::Plaintext);
+        assert_eq!(plain.root_key_out, None);
+        let encrypted = parse(&["--encrypt-root", "--root-key-out", "k"]).expect("parses");
+        assert_eq!(encrypted.kind.root(), VolumeProtection::Encrypted);
+        assert!(parse(&["--profile", "installer", "--encrypt-root"])
+            .is_err_and(|why| why.contains("--encrypt-root")));
+    }
+
+    #[test]
+    fn a_root_key_file_is_refused_for_a_root_that_has_no_key() {
+        assert!(parse(&["--root-key-out", "k"]).is_err_and(|why| why.contains("--encrypt-root")));
+    }
 }

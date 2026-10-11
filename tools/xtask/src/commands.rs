@@ -1515,7 +1515,7 @@ struct ImageArgs {
     /// Operator-staged firmware directory (`--firmware` /
     /// `$TAIRIX_PI_FIRMWARE`); `None` means fetch into the build cache.
     firmware_dir: Option<PathBuf>,
-    profile: tairix_mkimage::ImageProfile,
+    kind: tairix_mkimage::ImageKind,
     out: Option<PathBuf>,
 }
 
@@ -1524,15 +1524,14 @@ struct ImageArgs {
 /// `$TAIRIX_PI_FIRMWARE`; optional — missing blobs are fetched from the
 /// manifest's pinned source otherwise), `--profile debug|installer`
 /// (default `debug` — the development image seeds the test `root` account;
-/// the installer image seeds none), `--out <path>`, and `--headless`. The
-/// root volume key is derived from the profile's passphrase
-/// (`tairix_mkimage::passphrase_for` — `root` for the
-/// debug image, blank for the installer); there is no operator-supplied
-/// key.
+/// the installer image seeds none), `--encrypt-root` (a debug image's only:
+/// its root encrypted under `tairix_mkimage::DEBUG_PASSPHRASE`, the root
+/// otherwise plaintext), `--out <path>`, and `--headless`.
 fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
     let mut target: Option<String> = None;
     let mut firmware_dir: Option<PathBuf> = None;
     let mut profile: Option<tairix_mkimage::ImageProfile> = None;
+    let mut root = tairix_mkimage::VolumeProtection::Plaintext;
     let mut out: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -1566,6 +1565,7 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
                     it.next().ok_or("image: --out requires a value")?,
                 ));
             }
+            "--encrypt-root" => root = tairix_mkimage::VolumeProtection::Encrypted,
             // The image carries the kernel and the root skeleton only; the
             // desktop ships as installable userland later, so the headless
             // image is byte-identical today. Accepted so the headless
@@ -1583,9 +1583,12 @@ fn parse_image_args(args: &[OsString]) -> Result<ImageArgs, String> {
     }
     let firmware_dir =
         firmware_dir.or_else(|| std::env::var_os(PI_FIRMWARE_ENV).map(PathBuf::from));
+    let profile = profile.unwrap_or(tairix_mkimage::ImageProfile::Debug);
+    let kind = tairix_mkimage::ImageKind::new(profile, root)
+        .map_err(|refused| format!("image: --encrypt-root: {refused}"))?;
     Ok(ImageArgs {
         firmware_dir,
-        profile: profile.unwrap_or(tairix_mkimage::ImageProfile::Debug),
+        kind,
         out,
     })
 }
@@ -1889,12 +1892,35 @@ fn build_image_driver_bundles(
 
 /// Build the platform image and return the written whole-disk image's
 /// path (consumed by `run` to boot the image it just built).
+/// Write an encrypted root's volume key beside the image at `out`, or take an
+/// earlier build's away from a plaintext one, answering what the build
+/// reports of its root.
+fn place_root_key(
+    out: &Path,
+    unlock: Option<&tairix_mkimage::RootUnlock>,
+) -> Result<String, String> {
+    let key_out = out.with_extension("rootkey");
+    if let Some(unlock) = unlock {
+        tairix_mkimage::write_root_key(&key_out, unlock)
+            .map_err(|e| format!("image: cannot write {}: {e}", key_out.display()))?;
+        return Ok(format!("root volume key: {}", key_out.display()));
+    }
+    let stale = tairix_mkimage::remove_stale_root_key(&key_out)
+        .map_err(|e| format!("image: cannot remove {}: {e}", key_out.display()))?;
+    Ok(if stale {
+        "root volume plaintext; removed the earlier build's root-key file".to_owned()
+    } else {
+        "root volume plaintext".to_owned()
+    })
+}
+
 fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, String> {
     let ImageArgs {
         firmware_dir,
-        profile,
+        kind,
         out,
     } = args;
+    let profile = kind.profile();
 
     // Reclaim the superseded build-script output an earlier kernel build left
     // behind before rebuilding it; the kernel build script's embedded-program
@@ -1983,7 +2009,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
             &kernel_elf,
             &firmware,
             &mut tairix_mkimage::HostEntropy,
-            profile,
+            kind,
             &drivers,
             app_files,
             &image_drivers::platform_network_conf(),
@@ -1991,7 +2017,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     })
     .map_err(|e| format!("image: {e}"))?;
 
-    // 3. Write the image and its root volume key (owner-only) under
+    // 3. Write the image, and an encrypted root's volume key, under
     //    `images/` (built images are output, never committed).
     let out = out.unwrap_or_else(|| {
         ctx.workspace_root
@@ -2004,22 +2030,12 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
     }
     std::fs::write(&out, &built.image)
         .map_err(|e| format!("image: cannot write {}: {e}", out.display()))?;
-    let key_out = out.with_extension("rootkey");
-    std::fs::write(&key_out, tairix_mkimage::volume_key_to_hex(&built.root_key))
-        .map_err(|e| format!("image: cannot write {}: {e}", key_out.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_out, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("image: cannot restrict {}: {e}", key_out.display()))?;
-    }
-
+    let root = place_root_key(&out, built.unlock.as_ref())?;
     eprintln!(
-        "xtask: [image] wrote {} profile {} ({} bytes); root volume key: {}",
+        "xtask: [image] wrote {} profile {} ({} bytes); {root}",
         out.display(),
         profile.label(),
         built.image.len(),
-        key_out.display()
     );
     Ok(out)
 }
@@ -2132,7 +2148,7 @@ fn run_session_spec(kernel: &Path, disk_image: &Path, cpus: u32) -> tairix_qemu:
 /// the kernel's ramfb boot console, virtio keyboard + mouse devices for
 /// input from the window, a virtio-net NIC on QEMU's user-mode network,
 /// and the image attached as the virtio-blk root disk (the same
-/// encrypted-root unlock → store-scan → driver-autoload chain the
+/// root mount → store-scan → driver-autoload chain the
 /// `-M virt` verticals prove). The kernel itself boots as the
 /// `virt`-board build of the same production crate
 /// ([`build_virt_run_kernel`]), so QEMU hands it the real runtime
@@ -2146,28 +2162,31 @@ fn run_session_spec(kernel: &Path, disk_image: &Path, cpus: u32) -> tairix_qemu:
 /// through its NAT. The board's GENET interface in that same document
 /// stays unbound here, as this NIC does on real hardware.
 ///
-/// The invoking terminal is the guest's serial console: the encrypted
-/// root's unlock passphrase is typed there (`root` for the `debug`
-/// profile, empty for `installer`). The session runs in the foreground
+/// The invoking terminal is the guest's serial console, where an
+/// `--encrypt-root` image's passphrase is typed. The session runs in the foreground
 /// with no deadline and ends when the user closes the QEMU window or
 /// the guest powers off.
 fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let (cpus, image_args) = parse_run_args(args)?;
     let parsed = parse_image_args(&image_args)?;
-    let profile = parsed.profile;
+    let kind = parsed.kind;
     let disk_image = build_platform_image(ctx, parsed)?;
-    let virt_kernel = build_virt_run_kernel(ctx, profile)?;
+    let virt_kernel = build_virt_run_kernel(ctx, kind.profile())?;
     let spec = run_session_spec(&virt_kernel, &disk_image, cpus);
-    let passphrase_hint = match profile {
-        tairix_mkimage::ImageProfile::Debug => "`root`",
-        tairix_mkimage::ImageProfile::Installer => "empty — press Enter",
+    let unlock = match kind.root() {
+        tairix_mkimage::VolumeProtection::Plaintext => {
+            "the root mounts with no passphrase".to_owned()
+        }
+        tairix_mkimage::VolumeProtection::Encrypted => format!(
+            "the root's passphrase is `{}`",
+            String::from_utf8_lossy(tairix_mkimage::DEBUG_PASSPHRASE)
+        ),
     };
     eprintln!(
         "xtask: [run] booting {} ({}) on qemu-system-aarch64 -M virt; this \
-         terminal is the guest serial console (root-unlock passphrase: {})",
+         terminal is the guest serial console ({unlock})",
         disk_image.display(),
-        profile.label(),
-        passphrase_hint,
+        kind.profile().label(),
     );
     let status = tairix_qemu::Runner::run_interactive(&spec).map_err(|e| format!("run: {e}"))?;
     if status != 0 {
@@ -2213,13 +2232,40 @@ fn relative(base: &Path, path: &Path) -> String {
 mod tests {
     use super::{
         cargo_subcommand_available, dir_size, host_order_args, image_drivers, kernel_build_profile,
-        kernel_diag_feature_args, parse_run_args, parse_test_options, run_session_spec, Command,
-        Path, RunBudget, CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
+        kernel_diag_feature_args, parse_image_args, parse_run_args, parse_test_options,
+        run_session_spec, Command, Path, RunBudget, CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
         PLATFORM_IMAGE_DRIVER_STORE, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
     use std::time::Duration;
+
+    fn image_args(args: &[&str]) -> Result<tairix_mkimage::ImageKind, String> {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        parse_image_args(&args).map(|parsed| parsed.kind)
+    }
+
+    #[test]
+    fn an_image_root_is_plaintext_unless_a_debug_image_asks_for_encryption() {
+        let plain = image_args(&["--target", "aarch64-rpi"]).expect("parses");
+        assert_eq!(plain.root(), tairix_mkimage::VolumeProtection::Plaintext);
+        let encrypted = image_args(&["--target", "aarch64-rpi", "--encrypt-root"]).expect("parses");
+        assert_eq!(
+            encrypted.root(),
+            tairix_mkimage::VolumeProtection::Encrypted
+        );
+        let refused = image_args(&[
+            "--target",
+            "aarch64-rpi",
+            "--profile",
+            "installer",
+            "--encrypt-root",
+        ]);
+        assert!(
+            refused.is_err_and(|why| why.contains("--encrypt-root")),
+            "an encrypted installer image is never authored"
+        );
+    }
 
     /// Both oracles must be in the pipeline, and each stage named once.
     ///

@@ -33,7 +33,7 @@ pub(crate) const TILE_WIDTH: u32 = 132;
 
 /// One tile's height in pixels at the reference density: the monogram disc
 /// and the [`ACCOUNT_TILE`] band under it, which seats an 80-pixel disc.
-pub(crate) const TILE_HEIGHT: u32 = 148;
+pub(crate) const TILE_HEIGHT: u32 = 145;
 
 /// How an account tile divides itself: three whole name lines under the disc.
 ///

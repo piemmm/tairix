@@ -134,7 +134,7 @@ listing operation at all.
 ## No service, or no store: read the defaults, refuse the writes
 
 `open` never fails. A store the service cannot serve — early boot before the
-encrypted root is unlocked, a crashed service, a caller the kernel admitted from
+root is mounted, a crashed service, a caller the kernel admitted from
 no signed bundle — leaves the bundle's shipped defaults standing and records the
 reason in `store_refusal`. The application therefore starts and behaves, can say
 why its settings are the shipped ones, and is never told a change was saved that

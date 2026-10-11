@@ -146,6 +146,23 @@ impl FactList {
         text_row_height(scale, theme, font)
     }
 
+    /// The width, in physical pixels, this list needs at `scale` to draw
+    /// every fact's label and value side by side without eliding either.
+    #[must_use]
+    pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        self.facts
+            .iter()
+            .map(|fact| {
+                font.text_width(fact.label())
+                    .saturating_add(gap)
+                    .saturating_add(font.text_width(fact.value()))
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The height, in physical pixels, this list needs at `scale` to draw
     /// every fact without clipping.
     #[must_use]

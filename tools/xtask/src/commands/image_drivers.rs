@@ -246,10 +246,11 @@ fn build_bundle(
 /// reads them back. The driver requests only the capabilities it needs — a
 /// mapped doorbell window (`CAP_MMIO_MAP`), a coherent DMA property buffer
 /// (`CAP_MEM_DMA`), the inbox interrupt every reply wait parks on instead of
-/// polling the doorbell (`CAP_IRQ_BIND`), and the privilege to create the
-/// restricted-sender mailbox endpoint (`CAP_IPC_BIND_PRIVILEGED`) — and
-/// carries the driver crate's own canonical bind table, so the autoload
-/// match data never drifts from the driver.
+/// polling the doorbell (`CAP_IRQ_BIND`), the privilege to create the
+/// restricted-sender mailbox endpoint (`CAP_IPC_BIND_PRIVILEGED`), and the
+/// log a refused firmware request is recorded on (`CAP_LOG_EMIT`). The set
+/// and the bind table are `lib/vcmailbox`'s own, so neither drifts from the
+/// service.
 ///
 /// # Errors
 ///
@@ -264,12 +265,7 @@ pub fn build_vcmailbox_bundle(
         ctx,
         arch,
         "tairix-drv-bus-mailbox-vcmailbox",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-        ],
+        tairix_vcmailbox::SERVICE_CAPS,
         tairix_vcmailbox::BIND_KEYS,
         profile,
     )

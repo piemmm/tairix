@@ -816,6 +816,54 @@ A desktop the record cannot describe is reported on `stderr` and nothing is
 sent; each application keeps the last state it was given. See
 [Variable DPI and UI scale](./dpi.md) and [Theming](./theming.md).
 
+## The desktop's resolution
+
+The desktop is drawn at the size the user's `resolution` setting names on the
+output — the output's own by default — and the compositor resamples it onto
+the output's unchanged mode (`plans/DISPLAY.md` D11). Outside a trial the size
+converges on that setting: at bring-up, whenever an adopted settings change
+moves it, and on resume, which then publishes the desktop record (one already
+in force wakes nobody). Convergence waits while a settings publish is still on
+its way to the store, and while the screen is locked or a screensaver is up:
+their surfaces cover the size they were drawn at, so nothing is resized under
+them. A resize re-lays the bar, the backdrop and its icons; refits every
+window — fullscreen covers the desktop, maximised fills the work area,
+restored is held inside the work area, shrunk only where it does not fit, and
+a transient is moved back within reach at its own size, each application owed
+the size it was given; takes down any menu chain or tooltip; holds the pointer
+on the desktop; and publishes the desktop record, which carries the output's
+size beside the desktop's.
+
+A pinboard apply asking for a size other than the one the setting in force
+draws is a **trial**; behind a lock or a screensaver, where the user could not
+see it to keep it, it is answered `Busy` instead.
+The session holds the call, draws the new size at once, and asks in a prompt
+of its own, *Keep this resolution?*, counting fifteen seconds down on a park
+deadline with *Keep Changes* focused: `Enter` keeps, and `Escape`, *Revert*,
+the countdown, or a trial the session must abandon — switching user, logging
+out, locking — revert. Keep merges the held request over the settings in force
+by then and persists it under the held call, and the size stays drawn until
+the store answers. A reverted trial answers the call `Errno::Declined`, and
+convergence draws the settings' size again, then puts back every window the
+trial's refit moved and nothing has moved since. While a trial or its kept
+write is open, every other pinboard apply is answered `Busy` rather than
+queued behind a question the user has not answered.
+
+A key held when the keyboard moves to another window stops repeating there,
+so the `Enter` that chose a resolution cannot answer its prompt.
+
+Every change the session writes to the settings — an apply, a kept trial, the
+backdrop menu's sort and arrangement, the remembered sound controls — is made
+over the newest settings it has asked to publish, not the last ones adopted,
+so one change never undoes another still on its way to the store.
+
+Every session prompt — this one, the confirmation and the credential prompt —
+opens at `shell::prompt_origin`: centred across the screen, a third of the way
+down, and wholly on any screen it fits. The two-button prompts, this one and
+the confirmation, are one `choice::ChoicePrompt`, drawn no wider than the
+screen with their message wrapped to fit, so a small desktop at a large scale
+strands neither button. The credential prompt keeps its fixed layout.
+
 ## The clipboard
 
 The session holds the desktop's one clipboard (`clipboard::SessionClipboard`):
@@ -923,9 +971,11 @@ honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
   instead enforced where it belongs, at the spawn: bring-up answers with the
   instance already recorded rather than starting a second.
   The decoded `TraySummary` reaches the capsule through
-  `DesktopShell::set_tray_summary`; when the service exits, the reap path
-  clears the feed (`set_tray_summary(None)`) so the capsule falls back to
-  calm rather than freezing a dead service's last summary.
+  `DesktopShell::set_tray_summary`, and a `NetworkReport` reaches the bar's
+  network signal through `DesktopShell::set_network_report` under the same
+  attestation. When the service exits, the reap path clears both feeds so the
+  capsule falls back to calm and the network signal goes, rather than freezing
+  a dead service's last reading.
 - **The session's own delivery evidence.** The desktop is the one component
   that observes whether an app drains its window events: every app-ward
   event is a non-blocking mailbox send. To avoid flooding an app with a dense
@@ -1242,10 +1292,11 @@ panel, and presents each as a compositor window:
 - while the popup is open its panel is placed above the bar at
   `LibraryLayout::panel`'s origin, rounding itself at its `corner_radius` and
   casting a shadow; closing the popup removes the popup window;
-- the hover window picker, the notification popover, and the Switchboard
-  capsule's instrument readout are presented the same way while each is
-  open (`PickerLayout` / `NotificationsLayout` / `TrayReadoutLayout`), and
-  each window is removed the moment its surface closes.
+- the hover window picker, the notification popover, the Switchboard
+  capsule's instrument readout, the volume panel and the network readout are
+  presented the same way while each is open (`PickerLayout` /
+  `NotificationsLayout` / `ReadoutLayout` / `SoundPanelLayout`), and each
+  window is removed the moment its surface closes.
 
 Every one of them is placed asking for the theme's `chrome_backdrop_blur`,
 because each is drawn on the session's floating ground — as is every surface of
@@ -1452,9 +1503,10 @@ per-pane dump on it.
 ### And a size state's: the window on screen at the state it was given
 
 `WINDOW_SIZED` ("served window on screen at its new size") is emitted after a
-frame reached the display showing a served window at the size state it was last
-given, whether the application asked for the state or the user chose it from the
-title bar. It names the `window`, the `state` (`restored`, `maximized`,
+frame reached the display showing a served window at the size it was last
+given, whether the application asked for the state, the user chose it from the
+title bar, the user settled a drag of its edge, or a desktop resize refitted it.
+It names the `window`, the `state` (`restored`, `maximized`,
 `fullscreen`), the client `width` and `height` the state gave, and the `path`
 the frame reached the display by: `composited` in software, `layered` as a
 stack of hardware layers, or `promoted`, the fullscreen window handed to the
@@ -1486,6 +1538,25 @@ The look is also a generation the shell keeps (`style_generation`), which is
 how a surface that retains its pixels follows a change: the serve loop
 repaints a standing confirmation or credential prompt once per change, before
 the frame is presented, whichever path the change came in by.
+
+### And a resolution trial's three
+
+A trial of a new desktop resolution (below) has a witness at each step a host
+must wait on rather than race:
+
+- `TRIAL_SHOWN` ("resolution trial shown") when the prompt is up and holds
+  the keyboard, so a key answering it never waits on anything slower than the
+  prompt — the countdown is the user's;
+- `DESKTOP_RESIZED` ("desktop on screen at its new size"), with the desktop's
+  `width` and `height` (`ResizedRecord`), after the first frame showing the
+  desktop whole at a new size reached the display: the wallpaper fitted to it
+  has arrived and finished dissolving in, where until then the old picture is
+  still on screen, cropped or uncovered. A resize before the reveal is
+  absorbed, as a restyle is;
+- `TRIAL_CONCLUDED` ("resolution trial concluded") once the trial's call is
+  answered, naming its `outcome` (`TrialOutcome`): `reverted` at once,
+  `kept` once the store holds the new size, or `refused` when the store would
+  not. From then on the desktop takes settings calls again.
 
 ### And the icon bar's two: a slot on screen, and the strip settled
 
