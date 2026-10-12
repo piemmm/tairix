@@ -45,7 +45,8 @@ plan's ledger. A `blocked` row names its blocker.
 | L1–L5 | §24 resource limits and derived capacities | done |
 | H1 | §19 item 1 — the hash-chained journal core and `journald` | done |
 | H2 | §19 item 2 — signed log anchors and per-service `CAP_LOG_WRITE` | planned |
-| H3–H9, H11, H13 | §19 items 3–9, 11 and 13 | done |
+| H3–H7, H9, H11, H13 | §19 items 3–7, 9, 11 and 13 | done |
+| H8 | §19 item 8 — honest side-channel profiles and the constant-time test; open: the barriers each profile declares `Applied` run on no production path (`plans/OPEN-DEFECTS.md` D953) | in progress |
 | H10 | §19 item 10 — KPTI and branch-predictor barriers, stack canaries and the shadow stack | planned |
 | H10-REPRO | §19 item 10's supply-chain half — bit-reproducible images and no-post-install-fetch enforcement | planned |
 | H12 | §19 item 12 — Gold (Verus) contracts and the CHERI Tier-2 port | planned |

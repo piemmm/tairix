@@ -26,6 +26,7 @@ in all of them applies here without exception.
 | A7 | ACPI power-off | planned |
 | A8 | x86_64 hardening unblock | planned |
 | A9 | Hard-float kernel and user space, FP state switched per task | done |
+| A10 | Production SMP: the boot brings up every processor the MADT lists, as aarch64's does | planned |
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -105,8 +106,8 @@ in all of them applies here without exception.
   autoload → `audiod`).
 - **Production boot gap:** `kernel/tairix-kernel/src/x86_64/boot.rs` composes
   the whole storage/store/users/volume pipeline, but has no boot display and
-  no `with_seat_registry` (A5, `plans/FINISH-x86_64.md`), and it still spawns
-  from the embedded registry (A2).
+  no `with_seat_registry` (A5, `plans/FINISH-x86_64.md`), it still spawns
+  from the embedded registry (A2), and it runs on one CPU (A10).
 
 ## 2. Increments (dependency order; each fully gated per §7)
 
@@ -277,6 +278,19 @@ and loaded on the ring-3 exit; first entry leaves no kernel register state
 (`docs/src/architecture/multitasking.md`, `plans/OPEN-DEFECTS.md` D359/D360).
 Witness: `fp_isolation_qemu_x86_64` under the FXSAVE, XSAVE and XSAVEOPT
 flavours.
+
+### A10 — Production SMP
+
+The production boot runs one CPU: `BOOT_CPUS` is 1 and `cpu_to_lapic` holds
+the BSP alone, so the `SecondaryBringup` handshake the QEMU verticals prove
+never runs in the shipped kernel, where aarch64's boot starts every secondary
+its firmware tree lists. A10 sizes the per-CPU state from the MADT's enabled
+processors and starts each through the HAL. `plans/OPEN-DEFECTS.md` D378 is
+fixed first: the switch-in hooks repoint `BOOT_CPU`'s entry stacks rather
+than the resuming CPU's. On a part without an invariant TSC the boot's
+existing check fails the boot once more than one CPU is active
+(`BootError::TscNotInvariant`). Vertical: the production boot reaching login
+on `-smp 4` with every processor online.
 
 ## 3. Invariants (hold across every increment)
 
